@@ -267,15 +267,15 @@ where
                     },
                     Some(config),
                 ) => {
-                    if read_write.outgoing_buffer.is_none() {
+                    if read_write.write_bytes_queueable.is_none() {
                         return Err(Error::WriteClosed);
                     }
 
                     let message = MessageOut::Handshake::<&'static str>;
 
-                    let written_before = read_write.written_bytes;
+                    let written_before = read_write.write_bytes_queued;
                     let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.written_bytes - written_before;
+                    num_bytes_written += read_write.write_bytes_queued - written_before;
 
                     match (done, config) {
                         (false, _) => {
@@ -299,15 +299,15 @@ where
                     },
                     Some(Config::Dialer { requested_protocol }),
                 ) => {
-                    if read_write.outgoing_buffer.is_none() {
+                    if read_write.write_bytes_queueable.is_none() {
                         return Err(Error::WriteClosed);
                     }
 
                     let message = MessageOut::ProtocolRequest(requested_protocol.as_ref());
 
-                    let written_before = read_write.written_bytes;
+                    let written_before = read_write.write_bytes_queued;
                     let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.written_bytes - written_before;
+                    num_bytes_written += read_write.write_bytes_queued - written_before;
 
                     if done {
                         self.state = InProgressState::HandshakeExpected;
@@ -323,15 +323,15 @@ where
                     },
                     _,
                 ) => {
-                    if read_write.outgoing_buffer.is_none() {
+                    if read_write.write_bytes_queueable.is_none() {
                         return Err(Error::WriteClosed);
                     }
 
                     let message = MessageOut::ProtocolNa::<&'static str>;
 
-                    let written_before = read_write.written_bytes;
+                    let written_before = read_write.write_bytes_queued;
                     let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.written_bytes - written_before;
+                    num_bytes_written += read_write.write_bytes_queued - written_before;
 
                     if done {
                         self.state = InProgressState::CommandExpected;
@@ -348,15 +348,15 @@ where
                     },
                     _,
                 ) => {
-                    if read_write.outgoing_buffer.is_none() {
+                    if read_write.write_bytes_queueable.is_none() {
                         return Err(Error::WriteClosed);
                     }
 
                     let message = MessageOut::ProtocolOk(&protocol);
 
-                    let written_before = read_write.written_bytes;
+                    let written_before = read_write.write_bytes_queued;
                     let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.written_bytes - written_before;
+                    num_bytes_written += read_write.write_bytes_queued - written_before;
 
                     if done {
                         return Ok(Negotiation::Success);
@@ -638,9 +638,9 @@ where
             let buf = &buf[message_offset..];
             debug_assert!(!buf.is_empty());
 
-            let to_write = cmp::min(buf.len(), read_write.outgoing_buffer_available());
+            let to_write = cmp::min(buf.len(), read_write.write_bytes_queueable.unwrap_or(0));
 
-            read_write.write_out(&buf[..to_write]);
+            read_write.write_out(buf[..to_write].to_vec()); // TODO: extra copy
             message_offset = 0;
 
             if to_write < buf.len() {
@@ -703,8 +703,8 @@ mod tests {
                 max_protocol_name_len: 4,
             });
 
-            let mut buf_1_to_2 = Vec::new();
-            let mut buf_2_to_1 = Vec::new();
+            let mut buf_1_to_2 = Vec::<Vec<u8>>::new();
+            let mut buf_2_to_1 = Vec::<Vec<u8>>::new();
 
             while !matches!(
                 (&negotiation1, &negotiation2),
@@ -712,36 +712,26 @@ mod tests {
             ) {
                 match negotiation1 {
                     Negotiation::InProgress(nego) => {
-                        if buf_1_to_2.is_empty() {
-                            buf_1_to_2.resize(size1, 0);
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_2_to_1),
-                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-                            negotiation1 = nego.read_write(&mut read_write).unwrap();
-                            let (read_bytes, written_bytes) =
-                                (read_write.read_bytes, read_write.written_bytes);
-                            for _ in 0..read_bytes {
-                                buf_2_to_1.remove(0);
-                            }
-                            buf_1_to_2.truncate(written_bytes);
-                        } else {
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_2_to_1),
-                                outgoing_buffer: Some((&mut [], &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-                            negotiation1 = nego.read_write(&mut read_write).unwrap();
-                            for _ in 0..read_write.read_bytes {
-                                buf_2_to_1.remove(0);
-                            }
+                        let mut read_write = ReadWrite {
+                            now: 0,
+                            incoming_buffer: Some(
+                                buf_2_to_1.first().map(|b| &b[..]).unwrap_or(&[]),
+                            ),
+                            read_bytes: 0,
+                            write_buffers: Vec::new(),
+                            write_bytes_queued: 0,
+                            write_bytes_queueable: Some(
+                                size1 - buf_1_to_2.iter().fold(0, |c, b| c + b.len()),
+                            ),
+                            wake_up_after: None,
+                        };
+                        negotiation1 = nego.read_write(&mut read_write).unwrap();
+                        buf_1_to_2.extend(read_write.write_buffers.drain(..));
+                        for _ in 0..read_write.read_bytes {
+                            buf_2_to_1.first_mut().unwrap().remove(0);
+                        }
+                        if buf_2_to_1.first().map_or(false, |b| b.is_empty()) {
+                            buf_2_to_1.remove(0);
                         }
                     }
                     Negotiation::Success => {}
@@ -751,36 +741,26 @@ mod tests {
 
                 match negotiation2 {
                     Negotiation::InProgress(nego) => {
-                        if buf_2_to_1.is_empty() {
-                            buf_2_to_1.resize(size2, 0);
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_1_to_2),
-                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-                            negotiation2 = nego.read_write(&mut read_write).unwrap();
-                            let (read_bytes, written_bytes) =
-                                (read_write.read_bytes, read_write.written_bytes);
-                            for _ in 0..read_bytes {
-                                buf_1_to_2.remove(0);
-                            }
-                            buf_2_to_1.truncate(written_bytes);
-                        } else {
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_1_to_2),
-                                outgoing_buffer: Some((&mut [], &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-                            negotiation2 = nego.read_write(&mut read_write).unwrap();
-                            for _ in 0..read_write.read_bytes {
-                                buf_1_to_2.remove(0);
-                            }
+                        let mut read_write = ReadWrite {
+                            now: 0,
+                            incoming_buffer: Some(
+                                buf_1_to_2.first().map(|b| &b[..]).unwrap_or(&[]),
+                            ),
+                            read_bytes: 0,
+                            write_buffers: Vec::new(),
+                            write_bytes_queued: 0,
+                            write_bytes_queueable: Some(
+                                size2 - buf_2_to_1.iter().fold(0, |c, b| c + b.len()),
+                            ),
+                            wake_up_after: None,
+                        };
+                        negotiation2 = nego.read_write(&mut read_write).unwrap();
+                        buf_2_to_1.extend(read_write.write_buffers.drain(..));
+                        for _ in 0..read_write.read_bytes {
+                            buf_1_to_2.first_mut().unwrap().remove(0);
+                        }
+                        if buf_1_to_2.first().map_or(false, |b| b.is_empty()) {
+                            buf_1_to_2.remove(0);
                         }
                     }
                     Negotiation::ListenerAcceptOrDeny(accept_reject)

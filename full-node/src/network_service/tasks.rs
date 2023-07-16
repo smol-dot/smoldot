@@ -33,7 +33,7 @@ use smoldot::{
     network::service,
 };
 use std::{
-    io,
+    cmp, io, mem,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Arc,
@@ -126,39 +126,58 @@ pub(super) async fn established_connection_task(
             let mut read_write = service::ReadWrite {
                 now,
                 incoming_buffer: read_buffer.map(|b| b.0),
-                outgoing_buffer: write_buffer,
                 read_bytes: 0,
-                written_bytes: 0,
+                write_buffers: Vec::new(),
+                write_bytes_queued: 0,
+                write_closed: write_buffer.is_none(),
+                write_bytes_queueable: write_buffer.as_ref().map_or(0, |(a, b)| a.len() + b.len()),
                 wake_up_after: None,
             };
 
             connection_task.read_write(&mut read_write);
 
             if read_write.read_bytes != 0
-                || read_write.written_bytes != 0
-                || read_write.outgoing_buffer.is_none()
+                || read_write.write_bytes_queued != 0
+                || read_write.write_closed
             {
                 log_callback.log(
                     LogLevel::Trace,
                     format!(
                         "connection-activity; read={}; written={}; wake_up={:?}; write_close={:?}",
                         read_write.read_bytes,
-                        read_write.written_bytes,
+                        read_write.write_bytes_queued,
                         read_write
                             .wake_up_after
                             .map(|w| w.checked_duration_since(now).unwrap_or(Duration::new(0, 0))),
-                        read_write.outgoing_buffer.is_none(),
+                        read_write.write_closed,
                     ),
                 );
             }
 
             // We need to destroy `read_write` in order to un-borrow `socket`.
             let read_bytes = read_write.read_bytes;
-            let written_bytes = read_write.written_bytes;
+            let write_buffers = mem::take(&mut read_write.write_buffers);
+            let written_bytes = read_write.write_bytes_queued;
             let wake_up_after = read_write.wake_up_after.take();
-            let outgoing_buffer_now_closed = read_write.outgoing_buffer.is_none();
+            let outgoing_buffer_now_closed = read_write.write_closed;
 
-            socket.advance(read_bytes, written_bytes);
+            socket.advance(read_bytes, 0);
+
+            // TODO: refactor of WithBuffers needed to not copy the data
+            for buffer in write_buffers {
+                let mut offset = 0;
+                loop {
+                    if offset == buffer.len() {
+                        break;
+                    }
+                    let out = socket.buffers().unwrap().write_buffer.unwrap().0;
+                    let to_copy = cmp::min(out.len(), buffer.len() - offset);
+                    debug_assert_ne!(to_copy, 0);
+                    out[..to_copy].copy_from_slice(&buffer[offset..][..to_copy]);
+                    offset += to_copy;
+                    socket.advance(0, to_copy);
+                }
+            }
 
             if outgoing_buffer_now_closed && !outgoing_buffer_was_closed {
                 socket.close();

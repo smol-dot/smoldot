@@ -70,7 +70,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             incoming_buffer: Some(data),
             outgoing_buffer: Some((&mut out_buffer, &mut [])),
             read_bytes: 0,
-            written_bytes: 0,
+            write_bytes_queued: 0,
             wake_up_after: None,
         };
         task.read_write(&mut read_write);

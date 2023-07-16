@@ -88,7 +88,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                         &mut [],
                     )),
                     read_bytes: 0,
-                    written_bytes: 0,
+                    write_bytes_queued: 0,
                     wake_up_after: None,
                 };
 
@@ -117,7 +117,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                         &mut [],
                     )),
                     read_bytes: 0,
-                    written_bytes: 0,
+                    write_bytes_queued: 0,
                     wake_up_after: None,
                 };
 
@@ -183,7 +183,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             incoming_buffer: Some(&remote_to_local_buffer),
             outgoing_buffer: Some((&mut local_to_remote_buffer, &mut [])),
             read_bytes: 0,
-            written_bytes: 0,
+            write_bytes_queued: 0,
             wake_up_after: None,
         };
 

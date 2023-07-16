@@ -41,8 +41,8 @@ use super::{
     yamux,
 };
 
-use alloc::{boxed::Box, collections::VecDeque};
-use core::fmt;
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use core::{cmp, fmt};
 
 mod tests;
 
@@ -239,7 +239,7 @@ impl HealthyHandshake {
                             multistream_select::Error::ReadClosed,
                         ));
                     }
-                    if read_write.outgoing_buffer.is_none() {
+                    if read_write.write_bytes_queueable.is_none() {
                         return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::WriteClosed,
                         ));
@@ -254,43 +254,39 @@ impl HealthyHandshake {
                         .map_err(HandshakeError::Noise)?;
                     read_write.advance_read(num_read);
 
-                    let outgoing_buffer = read_write.outgoing_buffer.as_mut().unwrap();
-                    let mut encrypt = encryption
-                        .encrypt((&mut outgoing_buffer.0, &mut outgoing_buffer.1))
-                        .unwrap();
-                    let mut unencrypted_data_written = 0;
-                    let mut negotiation_update =
-                        multistream_select::Negotiation::InProgress(negotiation);
-                    for unencrypted_dest in encrypt.unencrypted_write_buffers() {
-                        let multistream_select::Negotiation::InProgress(in_progress) =
-                            negotiation_update
-                        else {
-                            break;
-                        };
+                    // Continue the multistream-select negotiation.
+                    let mut interm_read_write = ReadWrite {
+                        now: 0,
+                        incoming_buffer: Some(decrypted_data_buffer.as_slices().0),
+                        read_bytes: 0,
+                        write_buffers: Vec::new(),
+                        write_bytes_queued: 0,
+                        write_bytes_queueable: Some(cmp::min(
+                            read_write
+                                .write_bytes_queueable
+                                .unwrap()
+                                .saturating_sub(16 + 2),
+                            65535 - 16,
+                        )), // TODO: Noise implementation detail
+                        wake_up_after: None,
+                    };
 
-                        // Continue the multistream-select negotiation.
-                        let mut interm_read_write = ReadWrite {
-                            now: 0,
-                            incoming_buffer: Some(decrypted_data_buffer.as_slices().0),
-                            outgoing_buffer: Some((unencrypted_dest, &mut [])),
-                            read_bytes: 0,
-                            written_bytes: 0,
-                            wake_up_after: None,
-                        };
-                        let updated = in_progress
-                            .read_write(&mut interm_read_write)
-                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
-                        negotiation_update = updated;
-                        let decrypted_read_num = interm_read_write.read_bytes;
-                        unencrypted_data_written += interm_read_write.written_bytes;
+                    let negotiation_update = negotiation
+                        .read_write(&mut interm_read_write)
+                        .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
 
-                        // TODO: can the logic get stuck because the user stops calling this function if the negotiation only consumes from decrypted_data_buffer?
-                        for _ in 0..decrypted_read_num {
-                            let _ = decrypted_data_buffer.pop_front();
+                    if interm_read_write.write_bytes_queued >= 1 {
+                        for encrypted_buffer in
+                            encryption.encrypt(interm_read_write.write_buffers.into_iter())
+                        {
+                            read_write.write_out(encrypted_buffer);
                         }
                     }
-                    let advance_write = encrypt.encrypt(unencrypted_data_written);
-                    read_write.advance_write(advance_write);
+
+                    // TODO: can the logic get stuck because the user stops calling this function if the negotiation only consumes from decrypted_data_buffer?
+                    for _ in 0..interm_read_write.read_bytes {
+                        let _ = decrypted_data_buffer.pop_front();
+                    }
 
                     return match negotiation_update {
                         multistream_select::Negotiation::InProgress(updated) => {

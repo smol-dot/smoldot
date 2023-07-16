@@ -928,7 +928,7 @@ where
                 // The ping protocol consists in sending 32 bytes of data, which the remote has
                 // to send back. The `payload` field contains these 32 bytes being received.
                 while read_write.incoming_buffer_available() != 0
-                    && read_write.outgoing_buffer_available() != 0
+                    && read_write.write_bytes_queueable.unwrap_or(0) != 0
                 {
                     let available = payload_in.remaining_capacity();
                     payload_in.extend(read_write.incoming_bytes_iter().take(available));
