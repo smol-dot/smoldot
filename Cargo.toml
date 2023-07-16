@@ -16,7 +16,7 @@ repository = "https://github.com/smol-dot/smoldot"
 include = ["**/*.rs"]  # Only Rust files are included, as anything else might be a test fixture.
 
 [profile.dev]
-debug = "line-tables-only"
+debug = "limited"
 opt-level = 2
 panic = "abort"
 [profile.dev.package."*"]
