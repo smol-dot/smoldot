@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Fix regression introduced in version 1.0.12 where only WebSocket secure and WebRTC connections were ever opened, regardless of the `forbid*` configuration flags.
+- Fix regression introduced in version 1.0.12 where only WebSocket secure and WebRTC connections were ever opened, regardless of the `forbid*` configuration flags. ([#923](https://github.com/smol-dot/smoldot/pull/923))
 
 ## 1.0.12 - 2023-07-10
 
