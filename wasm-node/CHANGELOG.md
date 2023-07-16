@@ -5,6 +5,7 @@
 ### Added
 
 - Add support for the `ext_trie_keccak_256_root_version_1`, `ext_trie_keccak_256_root_version_2`, `ext_trie_keccak_256_ordered_root_version_1`, and `ext_trie_keccak_256_ordered_root_version_2` host functions. ([#906](https://github.com/smol-dot/smoldot/pull/906))
+- Add support for the `ext_crypto_ed25519_batch_verify_version_1`, `ext_crypto_sr25519_batch_verify_version_1`, `ext_crypto_ecdsa_batch_verify_version_1`, `ext_crypto_start_batch_verify_version_1`, and `ext_crypto_finish_batch_verify_version_1` host functions. ([#920](https://github.com/smol-dot/smoldot/pull/920))
 
 ### Changed
 
