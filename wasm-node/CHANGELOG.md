@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.13 - 2023-07-16
+
 ### Added
 
 - Add support for the `ext_trie_keccak_256_root_version_1`, `ext_trie_keccak_256_root_version_2`, `ext_trie_keccak_256_ordered_root_version_1`, and `ext_trie_keccak_256_ordered_root_version_2` host functions. ([#906](https://github.com/smol-dot/smoldot/pull/906))
