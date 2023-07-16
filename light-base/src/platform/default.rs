@@ -100,7 +100,12 @@ impl PlatformRef for Arc<DefaultPlatform> {
         // TODO: support WebSocket secure
         matches!(
             connection_type,
-            ConnectionType::Tcp | ConnectionType::WebSocket { secure: false, .. }
+            ConnectionType::TcpIpv4
+                | ConnectionType::TcpIpv6
+                | ConnectionType::TcpDns
+                | ConnectionType::WebSocketIpv4 { .. }
+                | ConnectionType::WebSocketIpv6 { .. }
+                | ConnectionType::WebSocketDns { secure: false, .. }
         )
     }
 
