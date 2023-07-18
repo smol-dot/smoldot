@@ -29,11 +29,11 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use async_lock::Mutex;
-use core::{fmt, mem, num::NonZeroU32, time::Duration};
-use futures_channel::{mpsc, oneshot};
-use futures_util::{stream, SinkExt as _};
+use core::{fmt, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use futures_channel::oneshot;
+use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
+use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     chain,
     executor::host,
@@ -68,7 +68,7 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
+    pub network_events_receiver: Pin<Box<dyn stream::Stream<Item = network_service::Event> + Send>>,
 
     /// Extra fields depending on whether the chain is a relay chain or a parachain.
     pub chain_type: ConfigChainType<TPlat>,
@@ -128,7 +128,10 @@ pub struct BlocksRequestId(usize);
 
 pub struct SyncService<TPlat: PlatformRef> {
     /// Sender of messages towards the background task.
-    to_background: Mutex<mpsc::Sender<ToBackground>>,
+    to_background: async_channel::Sender<ToBackground>,
+
+    /// See [`Config::platform`].
+    platform: TPlat,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService<TPlat>>,
@@ -140,7 +143,7 @@ pub struct SyncService<TPlat: PlatformRef> {
 
 impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn new(config: Config<TPlat>) -> Self {
-        let (to_background, from_foreground) = mpsc::channel(16);
+        let (to_background, from_foreground) = async_channel::bounded(16);
 
         let log_target = format!("sync-service-{}", config.log_name);
 
@@ -181,7 +184,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         }
 
         SyncService {
-            to_background: Mutex::new(to_background),
+            to_background,
+            platform: config.platform,
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
             block_number_bytes: config.block_number_bytes,
@@ -204,8 +208,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SerializeChainInformation { send_back })
             .await
             .unwrap();
@@ -234,8 +236,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SubscribeAll {
                 send_back,
                 buffer_size,
@@ -255,8 +255,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::IsNearHeadOfChainHeuristic { send_back })
             .await
             .unwrap();
@@ -278,8 +276,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SyncingPeers { send_back })
             .await
             .unwrap();
@@ -306,8 +302,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::PeersAssumedKnowBlock {
                 send_back,
                 block_number,
@@ -485,6 +479,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut final_results =
             Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
 
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
+            let mut seed = [0; 32];
+            self.platform.fill_random_bytes(&mut seed);
+            seed
+        });
+
         loop {
             // Check if we're done.
             if requests_remaining.is_empty() {
@@ -502,7 +502,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let Some(target) = self
                 .peers_assumed_know_blocks(block_number, block_hash)
                 .await
-                .choose(&mut rand::thread_rng())
+                .choose(&mut randomness)
             else {
                 // No peer knows this block. Returning with a failure.
                 return Err(StorageQueryError {
@@ -694,7 +694,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
 
                         let closest_descendant_merkle_value = match decoded_proof
-                            .closest_descendant_merkle_value(main_trie_root_hash, &key_nibbles)
+                            .closest_descendant_merkle_value(main_trie_root_hash, key_nibbles)
                         {
                             Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
                             Ok(None) => None,
@@ -705,7 +705,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         };
 
                         let found_closest_ancestor_excluding = match decoded_proof
-                            .closest_ancestor_in_proof(main_trie_root_hash, &key_nibbles)
+                            .closest_ancestor_in_proof(main_trie_root_hash, key_nibbles)
                         {
                             Ok(Some(ancestor)) => Some(ancestor.to_vec()),
                             Ok(None) => None,
@@ -993,7 +993,7 @@ pub struct SubscribeAll {
 
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
-    pub new_blocks: mpsc::Receiver<Notification>,
+    pub new_blocks: async_channel::Receiver<Notification>,
 }
 
 /// See [`SubscribeAll::finalized_block_runtime`].

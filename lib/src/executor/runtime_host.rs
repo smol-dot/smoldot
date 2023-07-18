@@ -81,6 +81,10 @@ pub struct Config<'a, TParams> {
     /// >           "off", `1` for "error", `2` for "warn", `3` for "info", `4` for "debug",
     /// >           and `5` for "trace".
     pub max_log_level: u32,
+
+    /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
+    /// Passing `None` requires fewer calculation and fewer storage accesses.
+    pub calculate_trie_changes: bool,
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -118,6 +122,7 @@ pub fn run(
         root_calculation: None,
         logs: String::new(),
         max_log_level: config.max_log_level,
+        calculate_trie_changes: config.calculate_trie_changes,
     }
     .run())
 }
@@ -142,6 +147,9 @@ pub struct StorageChanges {
     /// The [`PendingStorageChanges`] that was built by the state machine. The changes are no
     /// longer pending.
     inner: PendingStorageChanges,
+
+    /// See [`Config::calculate_trie_changes`].
+    calculate_trie_changes: bool,
 }
 
 impl StorageChanges {
@@ -173,59 +181,68 @@ impl StorageChanges {
 
     /// Returns an iterator over the list of all changes performed to the tries (main trie and
     /// child tries included).
+    ///
+    /// Returns `Some` if and only if [`Config::calculate_trie_changes`] was `true`.
     pub fn trie_changes_iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)> {
-        self.inner
-            .tries_changes
-            .iter()
-            .map(|((child_trie, key), change)| {
-                let change = match change {
-                    PendingStorageChangesTrieNode::Removed => TrieChange::Remove,
-                    PendingStorageChangesTrieNode::InsertUpdate {
-                        new_merkle_value,
-                        partial_key,
-                        children_merkle_values,
-                    } => {
-                        debug_assert!(key.ends_with(partial_key));
+    ) -> Option<impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)>> {
+        if !self.calculate_trie_changes {
+            return None;
+        }
 
-                        let new_storage_value = if key.len() % 2 == 0 {
-                            let key_bytes = trie::nibbles_to_bytes_truncate(key.iter().copied())
-                                .collect::<Vec<_>>();
-                            match self
-                                .inner
-                                .trie_diffs
-                                .get(child_trie)
-                                .and_then(|diff| diff.diff_get(&key_bytes))
-                            {
-                                None => TrieChangeStorageValue::Unmodified,
-                                Some((new_value, ())) => {
-                                    TrieChangeStorageValue::Modified { new_value }
-                                }
-                            }
-                        } else {
-                            TrieChangeStorageValue::Unmodified
-                        };
-
-                        let children_merkle_values = <Box<[_; 16]>>::try_from(
-                            children_merkle_values
-                                .iter()
-                                .map(|child| child.as_ref().map(|mv| &mv[..]))
-                                .collect::<Box<[_]>>(),
-                        )
-                        .unwrap();
-
-                        TrieChange::InsertUpdate {
+        Some(
+            self.inner
+                .tries_changes
+                .iter()
+                .map(|((child_trie, key), change)| {
+                    let change = match change {
+                        PendingStorageChangesTrieNode::Removed => TrieChange::Remove,
+                        PendingStorageChangesTrieNode::InsertUpdate {
                             new_merkle_value,
                             partial_key,
                             children_merkle_values,
-                            new_storage_value,
-                        }
-                    }
-                };
+                        } => {
+                            debug_assert!(key.ends_with(partial_key));
 
-                (child_trie.as_deref(), &key[..], change)
-            })
+                            let new_storage_value = if key.len() % 2 == 0 {
+                                let key_bytes =
+                                    trie::nibbles_to_bytes_truncate(key.iter().copied())
+                                        .collect::<Vec<_>>();
+                                match self
+                                    .inner
+                                    .trie_diffs
+                                    .get(child_trie)
+                                    .and_then(|diff| diff.diff_get(&key_bytes))
+                                {
+                                    None => TrieChangeStorageValue::Unmodified,
+                                    Some((new_value, ())) => {
+                                        TrieChangeStorageValue::Modified { new_value }
+                                    }
+                                }
+                            } else {
+                                TrieChangeStorageValue::Unmodified
+                            };
+
+                            let children_merkle_values = <Box<[_; 16]>>::try_from(
+                                children_merkle_values
+                                    .iter()
+                                    .map(|child| child.as_ref().map(|mv| &mv[..]))
+                                    .collect::<Box<[_]>>(),
+                            )
+                            .unwrap();
+
+                            TrieChange::InsertUpdate {
+                                new_merkle_value,
+                                partial_key,
+                                children_merkle_values,
+                                new_storage_value,
+                            }
+                        }
+                    };
+
+                    (child_trie.as_deref(), &key[..], change)
+                }),
+        )
     }
 
     /// Returns a diff of the main trie.
@@ -240,10 +257,38 @@ impl StorageChanges {
 
 impl fmt::Debug for StorageChanges {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map()
-            .entries(
-                self.trie_changes_iter_ordered()
-                    .map(|(child_trie, key, change)| {
+        if let Some(trie_changes) = self.trie_changes_iter_ordered() {
+            f.debug_map()
+                .entries(trie_changes.map(|(child_trie, key, change)| {
+                    let mut key_str = key
+                        .iter()
+                        .copied()
+                        .map(|n| format!("{:x}", n))
+                        .collect::<String>();
+                    if key_str.is_empty() {
+                        key_str = "∅".to_owned();
+                    }
+
+                    let key = match child_trie {
+                        Some(ct) => format!(
+                            "<{}>:{}",
+                            if ct.is_empty() {
+                                "∅".to_string()
+                            } else {
+                                hex::encode(ct)
+                            },
+                            key_str
+                        ),
+                        None => format!("<main>:{}", key_str),
+                    };
+
+                    (key, change)
+                }))
+                .finish()
+        } else {
+            f.debug_map()
+                .entries(self.inner.trie_diffs.iter().flat_map(|(child_trie, diff)| {
+                    diff.diff_iter_unordered().map(move |(key, value, _)| {
                         let mut key_str = key
                             .iter()
                             .copied()
@@ -266,10 +311,17 @@ impl fmt::Debug for StorageChanges {
                             None => format!("<main>:{}", key_str),
                         };
 
+                        let change = if let Some(value) = value {
+                            hex::encode(value)
+                        } else {
+                            "<deleted>".into()
+                        };
+
                         (key, change)
-                    }),
-            )
-            .finish()
+                    })
+                }))
+                .finish()
+        }
     }
 }
 
@@ -1180,6 +1232,9 @@ struct Inner {
 
     /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
+
+    /// See [`Config::calculate_trie_changes`].
+    calculate_trie_changes: bool,
 }
 
 /// See [`Inner::pending_storage_changes`].
@@ -1306,7 +1361,7 @@ impl Inner {
                         main_trie_key.extend_from_slice(DEFAULT_CHILD_STORAGE_SPECIAL_PREFIX);
                         main_trie_key.extend_from_slice(child_trie);
 
-                        if trie_root_hash != trie::EMPTY_TRIE_MERKLE_VALUE {
+                        if trie_root_hash != trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE {
                             self.pending_storage_changes
                                 .trie_diffs
                                 .entry(None)
@@ -1352,27 +1407,41 @@ impl Inner {
             // output to be accurate.
             {
                 let trie_to_flush: Option<Option<either::Either<_, &[u8]>>> = match &self.vm {
-                    host::HostVm::Finished(_) => self
-                        .pending_storage_changes
-                        .stale_child_tries_root_hashes
-                        .iter()
-                        .next()
-                        .as_ref()
-                        .map(|t| t.as_ref().map(|t| either::Right(&t[..]))),
-                    host::HostVm::ExternalStorageRoot(req) => Some({
+                    host::HostVm::Finished(_) => {
+                        if let Some(child_trie) = self
+                            .pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .iter()
+                            .find_map(|ct| ct.as_ref())
+                        {
+                            Some(Some(either::Right(child_trie)))
+                        } else if self
+                            .pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .contains(&None)
+                            && self.calculate_trie_changes
+                        {
+                            Some(None)
+                        } else {
+                            None
+                        }
+                    }
+                    host::HostVm::ExternalStorageRoot(req) => {
                         if let Some(child_trie) = req.child_trie() {
-                            Some(either::Left(child_trie))
+                            Some(Some(either::Left(child_trie)))
                         } else {
                             // Find any child trie in `pending_storage_changes`. If `None` is
                             // found, calculate the main trie.
                             // It is important to calculate the child tries before the main tries.
-                            self.pending_storage_changes
-                                .stale_child_tries_root_hashes
-                                .iter()
-                                .find_map(|ct| ct.as_ref())
-                                .map(|t| either::Right(&t[..]))
+                            Some(
+                                self.pending_storage_changes
+                                    .stale_child_tries_root_hashes
+                                    .iter()
+                                    .find_map(|ct| ct.as_ref())
+                                    .map(|t| either::Right(&t[..])),
+                            )
                         }
-                    }),
+                    }
                     _ => None,
                 };
 
@@ -1449,16 +1518,28 @@ impl Inner {
 
                 host::HostVm::Finished(finished) => {
                     debug_assert!(self.transactions_stack.is_empty()); // Guaranteed by `host`.
-                    debug_assert!(self
-                        .pending_storage_changes
-                        .stale_child_tries_root_hashes
-                        .is_empty());
+                    debug_assert!(
+                        self.pending_storage_changes
+                            .stale_child_tries_root_hashes
+                            .is_empty()
+                            || (!self.calculate_trie_changes
+                                && self
+                                    .pending_storage_changes
+                                    .stale_child_tries_root_hashes
+                                    .len()
+                                    == 1
+                                && self
+                                    .pending_storage_changes
+                                    .stale_child_tries_root_hashes
+                                    .contains(&None))
+                    );
                     debug_assert!(self.offchain_storage_changes.is_empty());
 
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_changes: StorageChanges {
                             inner: self.pending_storage_changes,
+                            calculate_trie_changes: self.calculate_trie_changes,
                         },
                         state_trie_version: self.state_trie_version,
                         logs: self.logs,

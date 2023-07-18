@@ -52,8 +52,11 @@ use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
 };
-use rand::{seq::IteratorRandom as _, Rng as _};
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+use rand::seq::IteratorRandom as _;
+use rand_chacha::{
+    rand_core::{RngCore as _, SeedableRng as _},
+    ChaCha20Rng,
+};
 
 pub use header::GoAwayErrorCode;
 
@@ -328,15 +331,27 @@ impl<T> Yamux<T> {
             inner: Box::new(YamuxInner {
                 substreams: hashbrown::HashMap::with_capacity_and_hasher(
                     config.capacity,
-                    SipHasherBuild::new(randomness.gen()),
+                    SipHasherBuild::new({
+                        let mut seed = [0; 16];
+                        randomness.fill_bytes(&mut seed);
+                        seed
+                    }),
                 ),
                 dead_substreams: hashbrown::HashSet::with_capacity_and_hasher(
                     config.capacity,
-                    SipHasherBuild::new(randomness.gen()),
+                    SipHasherBuild::new({
+                        let mut seed = [0; 16];
+                        randomness.fill_bytes(&mut seed);
+                        seed
+                    }),
                 ),
                 outgoing_req_substreams: hashbrown::HashSet::with_capacity_and_hasher(
                     config.capacity,
-                    SipHasherBuild::new(randomness.gen()),
+                    SipHasherBuild::new({
+                        let mut seed = [0; 16];
+                        randomness.fill_bytes(&mut seed);
+                        seed
+                    }),
                 ),
                 num_inbound: 0,
                 received_goaway: None,
@@ -1645,7 +1660,7 @@ impl<T> Yamux<T> {
                     // Send outgoing pings.
                     if self.inner.pings_to_send > 0 {
                         self.inner.pings_to_send -= 1;
-                        let opaque_value: u32 = self.inner.randomness.gen();
+                        let opaque_value: u32 = self.inner.randomness.next_u32();
                         self.inner.pings_waiting_reply.push_back(opaque_value);
                         self.inner.outgoing = Outgoing::Header {
                             header: header::DecodedYamuxHeader::PingRequest { opaque_value },
@@ -1667,6 +1682,7 @@ impl<T> Yamux<T> {
                     }
 
                     // Send either window update frames or data frames.
+                    // TODO: replace this `choose` with something else?
                     if let Some(substream_id) = self
                         .inner
                         .outgoing_req_substreams

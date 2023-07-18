@@ -170,7 +170,11 @@ pub(super) fn start_task<TPlat: PlatformRef>(
             ),
             storage_subscriptions_by_key: hashbrown::HashMap::with_capacity_and_hasher(
                 16,
-                crate::util::SipHasherBuild::new(rand::random()),
+                crate::util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    config.platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
             ),
             stale_storage_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
                 16,
@@ -399,7 +403,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     .unwrap()
                     .scale_encoded_header;
                 let best_block_json_rpc_header = match methods::Header::from_scale_encoded_header(
-                    &best_block_header,
+                    best_block_header,
                     task.runtime_service.block_number_bytes(),
                 ) {
                     Ok(h) => h,
@@ -479,9 +483,11 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                 // Build the list of keys that must be requested by aggregating the keys requested
                 // by all stale storage subscriptions.
-                let mut keys = hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new(
-                    rand::random(),
-                ));
+                let mut keys = hashbrown::HashSet::with_hasher(crate::util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    task.platform.fill_random_bytes(&mut seed);
+                    seed
+                }));
                 keys.extend(
                     task.stale_storage_subscriptions
                         .iter()
@@ -503,12 +509,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.platform.spawn_task(
                     format!("{}-storage-subscriptions-fetch", task.log_target).into(),
                     Box::pin({
-                        let block_hash = current_best_block.clone();
+                        let block_hash = *current_best_block;
                         let sync_service = task.sync_service.clone();
-                        // TODO: a bit overcomplicated because `WeakSender` doesn't implement `Clone`: https://github.com/smol-rs/async-channel/pull/62
-                        let requests_tx = async_channel::Sender::downgrade(
-                            &task.requests_tx.upgrade().unwrap().clone(),
-                        );
+                        let requests_tx = task.requests_tx.clone();
                         async move {
                             let result = sync_service
                                 .clone()

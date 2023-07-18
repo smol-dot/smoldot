@@ -62,7 +62,6 @@
 //! Responses can be pulled by calling the [`AddChainSuccess::json_rpc_responses`] that is returned
 //! after a chain has been added.
 //!
-// TODO: talk about the fact that a randomness environment is assumed?
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![forbid(unsafe_code)]
@@ -318,7 +317,7 @@ impl JsonRpcResponses {
     /// Returns the next response or notification, or `None` if the chain has been removed.
     pub async fn next(&mut self) -> Option<String> {
         if let Some(frontend) = self.inner.as_mut() {
-            match futures_lite::future::or(
+            if let Some(response) = futures_lite::future::or(
                 async { Some(frontend.next_json_rpc_response().await) },
                 async {
                     (&mut self.public_api_chain_destroyed).await;
@@ -327,8 +326,7 @@ impl JsonRpcResponses {
             )
             .await
             {
-                Some(response) => return Some(response),
-                None => {}
+                return Some(response);
             }
         }
 
@@ -355,9 +353,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> Result<AddChainSuccess, AddChainError> {
         // `chains_by_key` is created lazily whenever needed.
-        let chains_by_key = self
-            .chains_by_key
-            .get_or_insert_with(|| HashMap::with_hasher(util::SipHasherBuild::new(rand::random())));
+        let chains_by_key = self.chains_by_key.get_or_insert_with(|| {
+            HashMap::with_hasher(util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                self.platform.fill_random_bytes(&mut seed);
+                seed
+            }))
+        });
 
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(config.specification) {
@@ -431,7 +433,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         parent_hash: [0; 32],
                         number: 0,
                         state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
-                        extrinsics_root: smoldot::trie::EMPTY_TRIE_MERKLE_VALUE,
+                        extrinsics_root: smoldot::trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty().into(),
                     };
 
@@ -474,7 +476,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         parent_hash: [0; 32],
                         number: 0,
                         state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
-                        extrinsics_root: smoldot::trie::EMPTY_TRIE_MERKLE_VALUE,
+                        extrinsics_root: smoldot::trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty().into(),
                     };
 
@@ -668,7 +670,13 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             Entry::Vacant(entry) => {
                 // Key used by the networking. Represents the identity of the node on the
                 // peer-to-peer network.
-                let network_noise_key = connection::NoiseKey::new(&rand::random());
+                let network_noise_key = {
+                    let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
+                    self.platform.fill_random_bytes(&mut *noise_static_key);
+                    let mut libp2p_key = zeroize::Zeroizing::new([0u8; 32]);
+                    self.platform.fill_random_bytes(&mut *libp2p_key);
+                    connection::NoiseKey::new(&libp2p_key, &noise_static_key)
+                };
 
                 // Version of the client when requested through the networking.
                 let network_identify_agent_version = format!(

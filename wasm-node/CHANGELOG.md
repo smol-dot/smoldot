@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.0.13 - 2023-07-16
+
+### Added
+
+- Add support for the `ext_trie_keccak_256_root_version_1`, `ext_trie_keccak_256_root_version_2`, `ext_trie_keccak_256_ordered_root_version_1`, and `ext_trie_keccak_256_ordered_root_version_2` host functions. ([#906](https://github.com/smol-dot/smoldot/pull/906))
+- Add support for the `ext_crypto_ed25519_batch_verify_version_1`, `ext_crypto_sr25519_batch_verify_version_1`, `ext_crypto_ecdsa_batch_verify_version_1`, `ext_crypto_start_batch_verify_version_1`, and `ext_crypto_finish_batch_verify_version_1` host functions. ([#920](https://github.com/smol-dot/smoldot/pull/920))
+
+### Changed
+
+- The smoldot binary now longer has SIMD enabled, in order to make it work on a greater range of hardware. It was previously assumed that SIMD instructions were emulated on hardware that doesn't natively support them, but this doesn't seem to be the case for some browser engines. ([#903](https://github.com/smol-dot/smoldot/pull/903))
+
+### Fixed
+
+- Fix regression introduced in version 1.0.12 where only WebSocket secure and WebRTC connections were ever opened, regardless of the `forbid*` configuration flags. ([#923](https://github.com/smol-dot/smoldot/pull/923))
+
+## 1.0.12 - 2023-07-10
+
 ### Changed
 
 - The runtime code of the finalized block is now stored in the database. At initialization, smoldot now only downloads the hash of the runtime and compares it with the one in cache. If the hashes match (which is the case if no runtime update has happened on the chain since the database has been created), smoldot doesn't download the runtime code but uses the value in the cache. This saves a relatively heavy download (typically around 1 MiB to 1.5 MiB depending on the chain) and speeds up the loading time. ([#863](https://github.com/smol-dot/smoldot/pull/863))
@@ -14,6 +31,7 @@
 ### Fixed
 
 - Fix downloading the runtime code twice during the warp syncing process. ([#863](https://github.com/smol-dot/smoldot/pull/863))
+- Fix a "One or more entries are missing from the call proof" error when validating some transactions. ([#879](https://github.com/smol-dot/smoldot/pull/879))
 
 ## 1.0.11 - 2023-06-25
 

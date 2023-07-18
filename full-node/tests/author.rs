@@ -39,7 +39,6 @@ fn basic_block_generated() {
             tasks_executor: Arc::new(|task| smol::spawn(task).detach()),
             log_callback: Arc::new(move |_, _| {}),
             jaeger_agent: None,
-            show_informant: false,
         })
         .await;
 

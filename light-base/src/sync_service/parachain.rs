@@ -18,19 +18,19 @@
 use super::ToBackground;
 use crate::{network_service, platform::PlatformRef, runtime_service, util};
 
-use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::{self, async_tree},
-    executor::{host, read_only_runtime_host},
+    executor::{host, runtime_host},
     header,
     informant::HashDisplay,
     libp2p::PeerId,
@@ -47,7 +47,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
-    from_foreground: mpsc::Receiver<ToBackground>,
+    from_foreground: async_channel::Receiver<ToBackground>,
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
@@ -59,7 +59,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
 
         ParachainBackgroundTask {
             log_target,
-            platform,
             from_foreground,
             block_number_bytes,
             relay_chain_block_number_bytes,
@@ -75,13 +74,17 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
             obsolete_finalized_parahead,
             sync_sources_map: HashMap::with_capacity_and_hasher(
                 0,
-                util::SipHasherBuild::new(rand::random()),
+                util::SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
             ),
             subscription_state: ParachainBackgroundState::NotSubscribed {
                 all_subscriptions: Vec::new(),
                 subscribe_future: {
                     let relay_chain_sync = relay_chain_sync.clone();
-                    async move {
+                    Box::pin(async move {
                         relay_chain_sync
                             .subscribe_all(
                                 "parachain-sync",
@@ -89,12 +92,11 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                                 NonZeroUsize::new(usize::max_value()).unwrap(),
                             )
                             .await
-                    }
-                    .boxed()
-                    .fuse()
+                    })
                 },
             },
             relay_chain_sync,
+            platform,
         }
     };
 
@@ -110,7 +112,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     platform: TPlat,
 
     /// Channel receiving message from the sync service frontend.
-    from_foreground: mpsc::Receiver<ToBackground>,
+    from_foreground: async_channel::Receiver<ToBackground>,
 
     /// Number of bytes to use to encode the parachain block numbers in headers.
     block_number_bytes: usize,
@@ -156,11 +158,10 @@ enum ParachainBackgroundState<TPlat: PlatformRef> {
         ///
         /// These subscriptions are pending and no notification should be sent to them until the
         /// subscription to the relay chain runtime service is finished.
-        all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
+        all_subscriptions: Vec<async_channel::Sender<super::Notification>>,
 
         /// Future when the subscription has finished.
-        subscribe_future:
-            future::Fuse<future::BoxFuture<'static, runtime_service::SubscribeAll<TPlat>>>,
+        subscribe_future: future::BoxFuture<'static, runtime_service::SubscribeAll<TPlat>>,
     },
 
     /// Subscribed to the relay chain runtime service.
@@ -169,7 +170,7 @@ enum ParachainBackgroundState<TPlat: PlatformRef> {
 
 struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     /// List of senders that get notified when the tree of blocks is modified.
-    all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
+    all_subscriptions: Vec<async_channel::Sender<super::Notification>>,
 
     /// Stream of blocks of the relay chain this parachain is registered on.
     /// The buffer size should be large enough so that, if the CPU is busy, it doesn't become full
@@ -226,90 +227,170 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             // Report to the outside any block in the `async_tree` that is now ready.
             self.advance_and_report_notifications().await;
 
-            match self.subscription_state {
-                ParachainBackgroundState::NotSubscribed {
-                    ref mut subscribe_future,
-                    ..
-                } => {
-                    // While we wait for the `subscribe_future` future to be ready, we still need
-                    // to process messages coming from the public API of the syncing service.
-                    futures_util::select! {
-                        relay_chain_subscribe_all = &mut *subscribe_future => {
-                            self.set_new_subscription(relay_chain_subscribe_all);
-                        },
+            // Now wait until something interesting happens.
+            enum WhatHappened<TPlat: PlatformRef> {
+                ForegroundClosed,
+                ForegroundMessage(ToBackground),
+                NewSubscription(runtime_service::SubscribeAll<TPlat>),
+                StartParaheadFetch,
+                ParaheadFetchFinished {
+                    async_op_id: async_tree::AsyncOpId,
+                    parahead_result: Result<Vec<u8>, ParaheadError>,
+                },
+                Notification(runtime_service::Notification),
+                SubscriptionDead,
+                NetworkEvent(network_service::Event),
+            }
 
-                        foreground_message = self.from_foreground.next().fuse() => {
-                            // Message from the public API of the syncing service.
+            let what_happened: WhatHappened<_> = {
+                let (
+                    subscribe_future,
+                    next_start_parahead_fetch,
+                    relay_chain_subscribe_all,
+                    in_progress_paraheads,
+                    is_subscribed,
+                ) = match &mut self.subscription_state {
+                    ParachainBackgroundState::NotSubscribed {
+                        subscribe_future, ..
+                    } => (Some(subscribe_future), None, None, None, false),
+                    ParachainBackgroundState::Subscribed(runtime_subscription) => (
+                        None,
+                        Some(&mut runtime_subscription.next_start_parahead_fetch),
+                        Some(&mut runtime_subscription.relay_chain_subscribe_all),
+                        Some(&mut runtime_subscription.in_progress_paraheads),
+                        true,
+                    ),
+                };
 
-                            // Terminating the parachain sync task if the foreground has closed.
-                            let foreground_message = match foreground_message {
-                                Some(m) => m,
-                                None => return,
-                            };
-
-                            self.process_foreground_message(foreground_message).await;
-                        },
+                let new_subscription = async {
+                    if let Some(subscribe_future) = subscribe_future {
+                        WhatHappened::NewSubscription(subscribe_future.await)
+                    } else {
+                        future::pending().await
                     }
+                };
+
+                let start_parahead_fetch = async {
+                    if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
+                        next_start_parahead_fetch.await;
+                        WhatHappened::StartParaheadFetch
+                    } else {
+                        future::pending().await
+                    }
+                };
+
+                let parahead_fetch_finished = async {
+                    if let Some(in_progress_paraheads) = in_progress_paraheads {
+                        if !in_progress_paraheads.is_empty() {
+                            let (async_op_id, parahead_result) =
+                                in_progress_paraheads.next().await.unwrap();
+                            WhatHappened::ParaheadFetchFinished {
+                                async_op_id,
+                                parahead_result,
+                            }
+                        } else {
+                            future::pending().await
+                        }
+                    } else {
+                        future::pending().await
+                    }
+                };
+
+                let subscription_notification = async {
+                    if let Some(relay_chain_subscribe_all) = relay_chain_subscribe_all {
+                        match relay_chain_subscribe_all.next().await {
+                            Some(notif) => WhatHappened::Notification(notif),
+                            None => WhatHappened::SubscriptionDead,
+                        }
+                    } else {
+                        future::pending().await
+                    }
+                };
+
+                let on_foreground_message = async {
+                    match self.from_foreground.next().await {
+                        Some(msg) => WhatHappened::ForegroundMessage(msg),
+                        None => WhatHappened::ForegroundClosed,
+                    }
+                };
+
+                let network_event = async {
+                    if is_subscribed {
+                        // We expect the networking channel to never close, so the event is
+                        // unwrapped.
+                        WhatHappened::NetworkEvent(self.from_network_service.next().await.unwrap())
+                    } else {
+                        future::pending().await
+                    }
+                };
+
+                on_foreground_message
+                    .or(new_subscription)
+                    .or(start_parahead_fetch)
+                    .or(parahead_fetch_finished)
+                    .or(subscription_notification)
+                    .or(network_event)
+                    .await
+            };
+
+            match what_happened {
+                WhatHappened::ForegroundClosed => {
+                    // Terminate the parachain syncing.
+                    return;
                 }
 
-                ParachainBackgroundState::Subscribed(ref mut runtime_subscription) => {
-                    futures_util::select! {
-                        () = &mut runtime_subscription.next_start_parahead_fetch => {
-                            // Do nothing. This is simply to wake up and loop again.
+                WhatHappened::NewSubscription(subscription) => {
+                    self.set_new_subscription(subscription);
+                }
+
+                WhatHappened::StartParaheadFetch => {
+                    // Do nothing. This is simply to wake up and loop again.
+                }
+
+                WhatHappened::Notification(relay_chain_notif) => {
+                    // Update the local tree of blocks to match the update sent by the
+                    // relay chain syncing service.
+                    self.process_relay_chain_notification(relay_chain_notif);
+                }
+
+                WhatHappened::SubscriptionDead => {
+                    // Recreate the channel.
+                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
+                    self.subscription_state = ParachainBackgroundState::NotSubscribed {
+                        all_subscriptions: Vec::new(),
+                        subscribe_future: {
+                            let relay_chain_sync = self.relay_chain_sync.clone();
+                            Box::pin(async move {
+                                relay_chain_sync
+                                    .subscribe_all(
+                                        "parachain-sync",
+                                        32,
+                                        NonZeroUsize::new(usize::max_value()).unwrap(),
+                                    )
+                                    .await
+                            })
                         },
+                    };
+                    continue;
+                }
 
-                        relay_chain_notif = runtime_subscription.relay_chain_subscribe_all.next().fuse() => { // TODO: remove fuse()?
-                            let relay_chain_notif = match relay_chain_notif {
-                                Some(n) => n,
-                                None => {
-                                    // Recreate the channel.
-                                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
-                                    self.subscription_state = ParachainBackgroundState::NotSubscribed {
-                                        all_subscriptions: Vec::new(),
-                                        subscribe_future: {
-                                            let relay_chain_sync = self.relay_chain_sync.clone();
-                                            async move {
-                                                relay_chain_sync.subscribe_all(
-                                                    "parachain-sync",
-                                                    32,
-                                                    NonZeroUsize::new(usize::max_value()).unwrap(),
-                                                ).await
-                                            }.boxed().fuse()
-                                        }
-                                    };
-                                    continue;
-                                },
-                            };
+                WhatHappened::ParaheadFetchFinished {
+                    async_op_id,
+                    parahead_result,
+                } => {
+                    // A parahead fetching operation is finished.
+                    self.process_parahead_fetch_result(async_op_id, parahead_result)
+                        .await;
+                }
 
-                            // Update the local tree of blocks to match the update sent by the
-                            // relay chain syncing service.
-                            self.process_relay_chain_notification(relay_chain_notif);
-                        },
+                WhatHappened::ForegroundMessage(foreground_message) => {
+                    // Message from the public API of the syncing service.
+                    self.process_foreground_message(foreground_message).await;
+                }
 
-                        (async_op_id, parahead_result) = runtime_subscription.in_progress_paraheads.select_next_some() => {
-                            // A parahead fetching operation is finished.
-                            self.process_parahead_fetch_result(async_op_id, parahead_result).await;
-                        }
-
-                        foreground_message = self.from_foreground.next().fuse() => {
-                            // Message from the public API of the syncing service.
-
-                            // Terminating the parachain sync task if the foreground has closed.
-                            let foreground_message = match foreground_message {
-                                Some(m) => m,
-                                None => return,
-                            };
-
-                            self.process_foreground_message(foreground_message).await;
-                        },
-
-                        network_event = self.from_network_service.next() => {
-                            // Something happened on the network.
-                            // We expect the networking channel to never close, so the event is
-                            // unwrapped.
-                            self.process_network_event(network_event.unwrap())
-                        }
-                    }
+                WhatHappened::NetworkEvent(event) => {
+                    // Something happened on the networking.
+                    self.process_network_event(event)
                 }
             }
         }
@@ -348,7 +429,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     all_subscriptions, ..
                 },
             ) => {
-                let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                 // No known finalized parahead.
                 let _ = send_back.send(super::SubscribeAll {
@@ -368,7 +449,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 },
                 ParachainBackgroundState::Subscribed(runtime_subscription),
             ) => {
-                let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                 // There are two possibilities here: either we know of any recent finalized
                 // parahead, or we don't. In case where we don't know of any finalized parahead
@@ -635,7 +716,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         let async_op_id = op.id;
                         let relay_chain_block_number_bytes = self.relay_chain_block_number_bytes;
                         let parachain_id = self.parachain_id;
-                        async move {
+                        Box::pin(async move {
                             (
                                 async_op_id,
                                 parahead(
@@ -647,8 +728,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 )
                                 .await,
                             )
-                        }
-                        .boxed()
+                        })
                     });
                 }
             }
@@ -695,7 +775,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     all_subscriptions: Vec::new(),
                     subscribe_future: {
                         let relay_chain_sync = self.relay_chain_sync.clone();
-                        async move {
+                        Box::pin(async move {
                             relay_chain_sync
                                 .subscribe_all(
                                     "parachain-sync",
@@ -703,9 +783,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     NonZeroUsize::new(usize::max_value()).unwrap(),
                                 )
                                 .await
-                        }
-                        .boxed()
-                        .fuse()
+                        })
                     },
                 };
             }
@@ -815,7 +893,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Elements in `all_subscriptions` are removed one by one and
                     // inserted back if the channel is still open.
                     for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                        let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                        let sender = runtime_subscription.all_subscriptions.swap_remove(index);
                         let notif = super::Notification::Finalized {
                             hash,
                             best_block_hash,
@@ -860,8 +938,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         // Elements in `all_subscriptions` are removed one by one and
                         // inserted back if the channel is still open.
                         for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                            let mut sender =
-                                runtime_subscription.all_subscriptions.swap_remove(index);
+                            let sender = runtime_subscription.all_subscriptions.swap_remove(index);
                             let notif = super::Notification::BestBlockChanged { hash: parahash };
                             if sender.try_send(notif).is_ok() {
                                 runtime_subscription.all_subscriptions.push(sender);
@@ -917,7 +994,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             // Elements in `all_subscriptions` are removed one by one and
                             // inserted back if the channel is still open.
                             for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                                let mut sender =
+                                let sender =
                                     runtime_subscription.all_subscriptions.swap_remove(index);
                                 let notif =
                                     super::Notification::BestBlockChanged { hash: parahash };
@@ -958,7 +1035,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Elements in `all_subscriptions` are removed one by one and
                     // inserted back if the channel is still open.
                     for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                        let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                        let sender = runtime_subscription.all_subscriptions.swap_remove(index);
                         let notif = super::Notification::Block(super::BlockNotification {
                             is_new_best,
                             parent_hash,
@@ -1143,7 +1220,7 @@ async fn parahead<TPlat: PlatformRef>(
 
     // TODO: move the logic below in the `para` module
 
-    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+    let mut runtime_call = match runtime_host::run(runtime_host::Config {
         virtual_machine,
         function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
         parameter: para::persisted_validation_data_parameters(
@@ -1151,6 +1228,8 @@ async fn parahead<TPlat: PlatformRef>(
             para::OccupiedCoreAssumption::TimedOut,
         ),
         max_log_level: 0,
+        storage_main_trie_changes: Default::default(),
+        calculate_trie_changes: false,
     }) {
         Ok(vm) => vm,
         Err((err, prototype)) => {
@@ -1161,43 +1240,84 @@ async fn parahead<TPlat: PlatformRef>(
 
     let output = loop {
         match runtime_call {
-            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let output = success.virtual_machine.value().as_ref().to_owned();
                 runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                 break output;
             }
-            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+            runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                 runtime_call_lock.unlock(error.prototype);
-                return Err(ParaheadError::ReadOnlyRuntime(error.detail));
+                return Err(ParaheadError::Runtime(error.detail));
             }
-            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+            runtime_host::RuntimeHostVm::StorageGet(get) => {
                 let storage_value = {
                     let child_trie = get.child_trie();
                     runtime_call_lock
                         .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
                 };
                 let storage_value = match storage_value {
-                    Ok(v) => v.map(|(v, _)| v),
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock
+                            .unlock(runtime_host::RuntimeHostVm::StorageGet(get).into_prototype());
+                        return Err(ParaheadError::Call(err));
+                    }
+                };
+                runtime_call =
+                    get.inject_value(storage_value.map(|(val, ver)| (iter::once(val), ver)));
+            }
+            runtime_host::RuntimeHostVm::NextKey(nk) => {
+                let next_key = {
+                    let child_trie = nk.child_trie();
+                    runtime_call_lock.next_key(
+                        child_trie.as_ref().map(|c| c.as_ref()),
+                        &nk.key().collect::<Vec<_>>(),
+                        nk.or_equal(),
+                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.branch_nodes(),
+                    )
+                };
+                let next_key = match next_key {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock
+                            .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                        return Err(ParaheadError::Call(err));
+                    }
+                };
+                runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
+            }
+            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+                let merkle_value = {
+                    let child_trie = mv.child_trie();
+                    runtime_call_lock.closest_descendant_merkle_value(
+                        child_trie.as_ref().map(|c| c.as_ref()),
+                        &mv.key().collect::<Vec<_>>(),
+                    )
+                };
+                let merkle_value = match merkle_value {
+                    Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(
-                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
+                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                .into_prototype(),
                         );
                         return Err(ParaheadError::Call(err));
                     }
                 };
-                runtime_call = get.inject_value(storage_value.map(iter::once));
+                runtime_call = mv.inject_merkle_value(merkle_value);
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
-                // TODO:
-                runtime_call_lock
-                    .unlock(read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                return Err(ParaheadError::NextKeyForbidden);
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
-            }
-            read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+            runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                 runtime_call = sig.verify_and_resume();
+            }
+            runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                // Do nothing.
+                runtime_call = req.resume();
+            }
+            runtime_host::RuntimeHostVm::Offchain(req) => {
+                runtime_call_lock
+                    .unlock(runtime_host::RuntimeHostVm::Offchain(req).into_prototype());
+                return Err(ParaheadError::OffchainWorkerHostFunction);
             }
         }
     };
@@ -1225,7 +1345,7 @@ enum ParaheadError {
     StartError(host::StartErr),
     /// Error during the execution of the virtual machine to verify call proof.
     #[display(fmt = "Error during the call proof verification: {_0}")]
-    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    Runtime(runtime_host::ErrorDetail),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.
@@ -1233,8 +1353,8 @@ enum ParaheadError {
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
     #[display(fmt = "Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
-    /// Fetching following keys is not supported by call proofs.
-    NextKeyForbidden,
+    /// Runtime has called an offchain worker host function.
+    OffchainWorkerHostFunction,
     /// Runtime service subscription is no longer valid.
     ObsoleteSubscription,
 }
@@ -1246,10 +1366,10 @@ impl ParaheadError {
         match self {
             ParaheadError::Call(err) => err.is_network_problem(),
             ParaheadError::StartError(_) => false,
-            ParaheadError::ReadOnlyRuntime(_) => false,
+            ParaheadError::Runtime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::NextKeyForbidden => false,
+            ParaheadError::OffchainWorkerHostFunction => false,
             ParaheadError::ObsoleteSubscription => false,
         }
     }

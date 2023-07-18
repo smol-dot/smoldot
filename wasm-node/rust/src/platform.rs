@@ -17,13 +17,13 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot::libp2p::multihash;
-use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
+use smoldot_light::platform::{ConnectError, SubstreamDirection};
 
 use core::{future, mem, pin, str, task, time::Duration};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
+    iter,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -49,14 +49,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Instant = Instant;
     type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
-    type ConnectFuture = pin::Pin<
+    type StreamConnectFuture =
+        pin::Pin<Box<dyn future::Future<Output = Result<Self::Stream, ConnectError>> + Send>>;
+    type MultiStreamConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
                     Output = Result<
-                        smoldot_light::platform::PlatformConnection<
-                            Self::Stream,
-                            Self::MultiStream,
-                        >,
+                        smoldot_light::platform::MultiStreamWebRtcConnection<Self::MultiStream>,
                         ConnectError,
                     >,
                 > + Send,
@@ -66,10 +65,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type NextSubstreamFuture<'a> = pin::Pin<
         Box<
             dyn future::Future<
-                    Output = Option<(
-                        Self::Stream,
-                        smoldot_light::platform::PlatformSubstreamDirection,
-                    )>,
+                    Output = Option<(Self::Stream, smoldot_light::platform::SubstreamDirection)>,
                 > + Send
                 + 'a,
         >,
@@ -85,6 +81,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
     fn now(&self) -> Self::Instant {
         Instant::now()
+    }
+
+    fn fill_random_bytes(&self, buffer: &mut [u8]) {
+        use rand::RngCore as _;
+        rand::thread_rng().fill_bytes(buffer);
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
@@ -161,47 +162,122 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         env!("CARGO_PKG_VERSION").into()
     }
 
-    fn connect(&self, url: &str) -> Self::ConnectFuture {
+    fn supports_connection_type(
+        &self,
+        connection_type: smoldot_light::platform::ConnectionType,
+    ) -> bool {
+        let ty = match connection_type {
+            smoldot_light::platform::ConnectionType::TcpIpv4 => 0,
+            smoldot_light::platform::ConnectionType::TcpIpv6 => 1,
+            smoldot_light::platform::ConnectionType::TcpDns => 2,
+            smoldot_light::platform::ConnectionType::WebSocketIpv4 {
+                remote_is_localhost: true,
+                ..
+            }
+            | smoldot_light::platform::ConnectionType::WebSocketIpv6 {
+                remote_is_localhost: true,
+                ..
+            }
+            | smoldot_light::platform::ConnectionType::WebSocketDns {
+                secure: false,
+                remote_is_localhost: true,
+            } => 7,
+            smoldot_light::platform::ConnectionType::WebSocketIpv4 { .. } => 4,
+            smoldot_light::platform::ConnectionType::WebSocketIpv6 { .. } => 5,
+            smoldot_light::platform::ConnectionType::WebSocketDns { secure: false, .. } => 6,
+            smoldot_light::platform::ConnectionType::WebSocketDns { secure: true, .. } => 14,
+            smoldot_light::platform::ConnectionType::WebRtcIpv4 => 16,
+            smoldot_light::platform::ConnectionType::WebRtcIpv6 => 17,
+        };
+
+        unsafe { bindings::connection_type_supported(ty) != 0 }
+    }
+
+    fn connect_stream(
+        &self,
+        address: smoldot_light::platform::Address,
+    ) -> Self::StreamConnectFuture {
         let mut lock = STATE.try_lock().unwrap();
 
         let connection_id = lock.next_connection_id;
         lock.next_connection_id += 1;
 
-        let mut error_buffer_index = [0u8; 4];
+        let encoded_address: Vec<u8> = match address {
+            smoldot_light::platform::Address::TcpIp {
+                ip: smoldot_light::platform::IpAddr::V4(ip),
+                port,
+            } => iter::once(0u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::TcpIp {
+                ip: smoldot_light::platform::IpAddr::V6(ip),
+                port,
+            } => iter::once(1u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::TcpDns { hostname, port } => iter::once(2u8)
+                .chain(port.to_be_bytes())
+                .chain(hostname.as_bytes().iter().copied())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketIp {
+                ip: smoldot_light::platform::IpAddr::V4(ip),
+                port,
+            } => iter::once(4u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketIp {
+                ip: smoldot_light::platform::IpAddr::V6(ip),
+                port,
+            } => iter::once(5u8)
+                .chain(port.to_be_bytes())
+                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketDns {
+                hostname,
+                port,
+                secure: false,
+            } => iter::once(6u8)
+                .chain(port.to_be_bytes())
+                .chain(hostname.as_bytes().iter().copied())
+                .collect(),
+            smoldot_light::platform::Address::WebSocketDns {
+                hostname,
+                port,
+                secure: true,
+            } => iter::once(14u8)
+                .chain(port.to_be_bytes())
+                .chain(hostname.as_bytes().iter().copied())
+                .collect(),
+        };
 
-        let ret_code = unsafe {
+        let write_closable = match address {
+            smoldot_light::platform::Address::TcpIp { .. }
+            | smoldot_light::platform::Address::TcpDns { .. } => true,
+            smoldot_light::platform::Address::WebSocketIp { .. }
+            | smoldot_light::platform::Address::WebSocketDns { .. } => false,
+        };
+
+        unsafe {
             bindings::connection_new(
                 connection_id,
-                u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
-                u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_buffer_index as *mut [u8; 4] as usize).unwrap(),
+                u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
+                u32::try_from(encoded_address.len()).unwrap(),
             )
-        };
+        }
 
-        let result = if ret_code != 0 {
-            let error_message = bindings::get_buffer(u32::from_le_bytes(
-                <[u8; 4]>::try_from(&error_buffer_index[0..4]).unwrap(),
-            ));
-            Err(ConnectError {
-                message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: true,
-            })
-        } else {
-            let _prev_value = lock.connections.insert(
-                connection_id,
-                Connection {
-                    inner: ConnectionInner::NotOpen,
-                    something_happened: event_listener::Event::new(),
-                },
-            );
-            debug_assert!(_prev_value.is_none());
-
-            Ok(())
-        };
+        let _prev_value = lock.connections.insert(
+            connection_id,
+            Connection {
+                inner: ConnectionInner::NotOpen,
+                something_happened: event_listener::Event::new(),
+            },
+        );
+        debug_assert!(_prev_value.is_none());
 
         Box::pin(async move {
-            result?;
-
             // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
             let mut lock = loop {
                 let something_happened = {
@@ -222,8 +298,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             let connection = lock.connections.get_mut(&connection_id).unwrap();
 
             match &mut connection.inner {
-                ConnectionInner::NotOpen => unreachable!(),
-                ConnectionInner::SingleStreamMsNoiseYamux { write_closable } => {
+                ConnectionInner::NotOpen | ConnectionInner::MultiStreamWebRtc { .. } => {
+                    unreachable!()
+                }
+                ConnectionInner::SingleStreamMsNoiseYamux => {
                     debug_assert!(lock.streams.contains_key(&(connection_id, None)));
 
                     let read_buffer = ReadBuffer {
@@ -231,26 +309,15 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         buffer_first_offset: 0,
                     };
 
-                    Ok(smoldot_light::platform::PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
-                        StreamWrapper { connection_id, stream_id: None, read_buffer, is_reset: false, writable_bytes: 0, write_closable: *write_closable, write_closed: false },
-                    ))
-                }
-                ConnectionInner::MultiStreamWebRtc {
-                    connection_handles_alive,
-                    local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash,
-                    ..
-                } => {
-                    *connection_handles_alive += 1;
-                    Ok(
-                        smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
-                            connection: MultiStreamWrapper(connection_id),
-                            local_tls_certificate_multihash: local_tls_certificate_multihash
-                                .clone(),
-                            remote_tls_certificate_multihash: remote_tls_certificate_multihash
-                                .clone(),
-                        },
-                    )
+                    Ok(StreamWrapper {
+                        connection_id,
+                        stream_id: None,
+                        read_buffer,
+                        is_reset: false,
+                        writable_bytes: 0,
+                        write_closable,
+                        write_closed: false,
+                    })
                 }
                 ConnectionInner::Reset {
                     message,
@@ -262,10 +329,107 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     debug_assert_eq!(*connection_handles_alive, 0);
                     let message = mem::take(message);
                     lock.connections.remove(&connection_id).unwrap();
-                    Err(ConnectError {
-                        message,
-                        is_bad_addr: false,
+                    Err(ConnectError { message })
+                }
+            }
+        })
+    }
+
+    fn connect_multistream(
+        &self,
+        address: smoldot_light::platform::MultiStreamAddress,
+    ) -> Self::MultiStreamConnectFuture {
+        let mut lock = STATE.try_lock().unwrap();
+
+        let connection_id = lock.next_connection_id;
+        lock.next_connection_id += 1;
+
+        let encoded_address: Vec<u8> = match address {
+            smoldot_light::platform::MultiStreamAddress::WebRtc {
+                ip: smoldot_light::platform::IpAddr::V4(ip),
+                port,
+                remote_certificate_sha256,
+            } => iter::once(16u8)
+                .chain(port.to_be_bytes())
+                .chain(remote_certificate_sha256.iter().copied())
+                .chain(no_std_net::Ipv4Addr::from(ip).to_string().bytes())
+                .collect(),
+            smoldot_light::platform::MultiStreamAddress::WebRtc {
+                ip: smoldot_light::platform::IpAddr::V6(ip),
+                port,
+                remote_certificate_sha256,
+            } => iter::once(17u8)
+                .chain(port.to_be_bytes())
+                .chain(remote_certificate_sha256.iter().copied())
+                .chain(no_std_net::Ipv6Addr::from(ip).to_string().bytes())
+                .collect(),
+        };
+
+        unsafe {
+            bindings::connection_new(
+                connection_id,
+                u32::try_from(encoded_address.as_ptr() as usize).unwrap(),
+                u32::try_from(encoded_address.len()).unwrap(),
+            )
+        }
+
+        let _prev_value = lock.connections.insert(
+            connection_id,
+            Connection {
+                inner: ConnectionInner::NotOpen,
+                something_happened: event_listener::Event::new(),
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+
+        Box::pin(async move {
+            // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
+            let mut lock = loop {
+                let something_happened = {
+                    let mut lock = STATE.try_lock().unwrap();
+                    let connection = lock.connections.get_mut(&connection_id).unwrap();
+
+                    if !matches!(connection.inner, ConnectionInner::NotOpen) {
+                        break lock;
+                    }
+
+                    connection.something_happened.listen()
+                };
+
+                something_happened.await
+            };
+            let lock = &mut *lock;
+
+            let connection = lock.connections.get_mut(&connection_id).unwrap();
+
+            match &mut connection.inner {
+                ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+                    unreachable!()
+                }
+                ConnectionInner::MultiStreamWebRtc {
+                    connection_handles_alive,
+                    local_tls_certificate_sha256,
+                    remote_tls_certificate_sha256,
+                    ..
+                } => {
+                    *connection_handles_alive += 1;
+                    Ok(smoldot_light::platform::MultiStreamWebRtcConnection {
+                        connection: MultiStreamWrapper(connection_id),
+                        local_tls_certificate_sha256: *local_tls_certificate_sha256,
+                        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
                     })
+                }
+                ConnectionInner::Reset {
+                    message,
+                    connection_handles_alive,
+                } => {
+                    // Note that it is possible for the state to have transitionned to (for
+                    // example) `ConnectionInner::SingleStreamMsNoiseYamux` and then immediately
+                    // to `Reset`, but we don't really care about that corner case.
+                    debug_assert_eq!(*connection_handles_alive, 0);
+                    let message = mem::take(message);
+                    lock.connections.remove(&connection_id).unwrap();
+                    Err(ConnectError { message })
                 }
             }
         })
@@ -658,22 +822,19 @@ struct Connection {
 
 enum ConnectionInner {
     NotOpen,
-    SingleStreamMsNoiseYamux {
-        /// True if the stream can be closed.
-        write_closable: bool,
-    },
+    SingleStreamMsNoiseYamux,
     MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
         /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
-        opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection, u32)>,
+        opened_substreams_to_pick_up: VecDeque<(u32, SubstreamDirection, u32)>,
         /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
-        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
-        local_tls_certificate_multihash: Vec<u8>,
-        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_multihash: Vec<u8>,
+        /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_sha256: [u8; 32],
+        /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_sha256: [u8; 32],
     },
     /// [`bindings::connection_reset`] has been called
     Reset {
@@ -711,23 +872,14 @@ struct ReadBuffer {
     buffer_first_offset: usize,
 }
 
-pub(crate) fn connection_open_single_stream(
-    connection_id: u32,
-    handshake_ty: u32,
-    initial_writable_bytes: u32,
-    write_closable: u32,
-) {
-    assert_eq!(handshake_ty, 0);
-
+pub(crate) fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
     debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
-    connection.inner = ConnectionInner::SingleStreamMsNoiseYamux {
-        write_closable: write_closable != 0,
-    };
+    connection.inner = ConnectionInner::SingleStreamMsNoiseYamux;
 
     let _prev_value = lock.streams.insert(
         (connection_id, None),
@@ -745,30 +897,16 @@ pub(crate) fn connection_open_single_stream(
 }
 
 pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
-    let (_, (local_tls_certificate_multihash, remote_tls_certificate_multihash)) =
+    let (_, (local_tls_certificate_sha256, remote_tls_certificate_sha256)) =
         nom::sequence::preceded(
             nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
             nom::sequence::tuple((
-                move |b| {
-                    multihash::MultihashRef::from_bytes_partial(b)
-                        .map(|(a, b)| (b, a))
-                        .map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                b,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
-                },
-                move |b| {
-                    multihash::MultihashRef::from_bytes_partial(b)
-                        .map(|(a, b)| (b, a))
-                        .map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                b,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
-                },
+                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                    <&[u8; 32]>::try_from(b).unwrap()
+                }),
+                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                    <&[u8; 32]>::try_from(b).unwrap()
+                }),
             )),
         )(&handshake_ty[..])
         .expect("invalid handshake type provided to connection_open_multi_stream");
@@ -781,8 +919,8 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec
     connection.inner = ConnectionInner::MultiStreamWebRtc {
         opened_substreams_to_pick_up: VecDeque::with_capacity(8),
         connection_handles_alive: 0,
-        local_tls_certificate_multihash: local_tls_certificate_multihash.to_vec(),
-        remote_tls_certificate_multihash: remote_tls_certificate_multihash.to_vec(),
+        local_tls_certificate_sha256: *local_tls_certificate_sha256,
+        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
     };
     connection.something_happened.notify(usize::max_value());
 }
@@ -896,9 +1034,9 @@ pub(crate) fn connection_stream_opened(
         opened_substreams_to_pick_up.push_back((
             stream_id,
             if outbound != 0 {
-                PlatformSubstreamDirection::Outbound
+                SubstreamDirection::Outbound
             } else {
-                PlatformSubstreamDirection::Inbound
+                SubstreamDirection::Inbound
             },
             initial_writable_bytes,
         ));

@@ -17,7 +17,7 @@
 
 use crate::util::protobuf;
 
-use alloc::vec::Vec;
+use alloc::{borrow::Cow, vec::Vec};
 
 /// Description of a storage proof request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +54,7 @@ pub struct CallProofRequestConfig<'a, I> {
     /// Hash of the block to request the storage of.
     pub block_hash: [u8; 32],
     /// Name of the runtime function to call.
-    pub method: &'a str,
+    pub method: Cow<'a, str>,
     /// Iterator to buffers of bytes to be concatenated then passed as input to the call. The
     /// semantics of these bytes depend on which method is being called.
     pub parameter_vectored: I,

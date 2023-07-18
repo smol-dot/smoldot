@@ -114,19 +114,20 @@ impl ChainSpec {
         })
         .map_err(FromGenesisStorageError::VmInitialization)?;
 
+        let state_version = vm_prototype
+            .runtime_version()
+            .decode()
+            .state_version
+            .unwrap_or(trie::TrieEntryVersion::V0);
+
         let mut chain_information_build = build::ChainInformationBuild::new(build::Config {
             finalized_block_header: build::ConfigFinalizedBlockHeader::Genesis {
                 state_trie_root_hash: {
-                    let state_version = vm_prototype
-                        .runtime_version()
-                        .decode()
-                        .state_version
-                        .unwrap_or(trie::TrieEntryVersion::V0);
-
                     match self.genesis_storage() {
                         GenesisStorage::TrieRootHash(hash) => *hash,
                         GenesisStorage::Items(genesis_storage) => {
-                            let mut calculation = trie::calculate_root::root_merkle_value();
+                            let mut calculation =
+                                trie::calculate_root::root_merkle_value(trie::HashFunction::Blake2);
 
                             loop {
                                 match calculation {
@@ -161,9 +162,15 @@ impl ChainSpec {
                 build::ChainInformationBuild::InProgress(build::InProgress::StorageGet(get)) => {
                     // TODO: child tries not supported
                     let value = genesis_storage.value(get.key().as_ref());
-                    chain_information_build = get.inject_value(value.map(iter::once));
+                    chain_information_build =
+                        get.inject_value(value.map(|v| (iter::once(v), state_version)));
                 }
                 build::ChainInformationBuild::InProgress(build::InProgress::NextKey(_nk)) => {
+                    todo!() // TODO:
+                }
+                build::ChainInformationBuild::InProgress(
+                    build::InProgress::ClosestDescendantMerkleValue(_mv),
+                ) => {
                     todo!() // TODO:
                 }
                 build::ChainInformationBuild::Finished {

@@ -111,7 +111,7 @@ pub const PROTOCOL_NAME: &str = "/noise";
 /// device.
 ///
 pub struct NoiseKey {
-    private_key: x25519_dalek::ReusableSecret,
+    private_key: zeroize::Zeroizing<x25519_dalek::StaticSecret>,
     public_key: x25519_dalek::PublicKey,
     /// Handshake to encrypt then send on the wire.
     handshake_message: Vec<u8>,
@@ -120,9 +120,9 @@ pub struct NoiseKey {
 }
 
 impl NoiseKey {
-    /// Generates a new private and public key pair signed with the given libp2p Ed25519 key.
-    pub fn new(libp2p_ed25519_private_key: &[u8; 32]) -> Self {
-        let unsigned = UnsignedNoiseKey::random();
+    /// Turns a libp2p private key and a Noise static private key into a [`NoiseKey`].
+    pub fn new(libp2p_ed25519_private_key: &[u8; 32], noise_static_private_key: &[u8; 32]) -> Self {
+        let unsigned = UnsignedNoiseKey::from_private_key(noise_static_private_key);
 
         let (libp2p_public_key, signature) = {
             // Creating a `SecretKey` can fail only if the length isn't 32 bytes.
@@ -142,12 +142,6 @@ impl NoiseKey {
     }
 }
 
-impl Drop for NoiseKey {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.private_key);
-    }
-}
-
 /// Prototype for a [`NoiseKey`].
 ///
 /// This type is provided for situations where the user has access to some signing mechanism,
@@ -155,16 +149,15 @@ impl Drop for NoiseKey {
 ///
 /// For simple cases, prefer using [`NoiseKey::new`].
 pub struct UnsignedNoiseKey {
-    private_key: Option<x25519_dalek::ReusableSecret>,
+    private_key: Option<zeroize::Zeroizing<x25519_dalek::StaticSecret>>,
     public_key: x25519_dalek::PublicKey,
 }
 
 impl UnsignedNoiseKey {
-    /// Generates a new private and public key pair.
-    pub fn random() -> Self {
-        // TODO: let the API user pass the key
-        let private_key = x25519_dalek::ReusableSecret::random_from_rng(&mut rand::thread_rng());
-        let public_key = x25519_dalek::PublicKey::from(&private_key);
+    /// Turns a private key into an [`UnsignedNoiseKey`].
+    pub fn from_private_key(private_key: &[u8; 32]) -> Self {
+        let private_key = zeroize::Zeroizing::new(x25519_dalek::StaticSecret::from(*private_key));
+        let public_key = x25519_dalek::PublicKey::from(&*private_key);
         UnsignedNoiseKey {
             private_key: Some(private_key),
             public_key,
@@ -224,16 +217,14 @@ impl UnsignedNoiseKey {
     }
 }
 
-impl Drop for UnsignedNoiseKey {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.private_key);
-    }
-}
-
 /// Configuration for a Noise handshake.
 pub struct Config<'a> {
     /// Key to use during the handshake.
     pub key: &'a NoiseKey,
+
+    /// Secret key to use for that specific handshake. Must be randomly generated. Must never be
+    /// re-used between multiple handshakes.
+    pub ephemeral_secret_key: &'a [u8; 32],
 
     /// `true` if this side of the handshake has initiated the connection or substream onto which
     /// the handshake is performed.
@@ -344,9 +335,7 @@ impl Noise {
             // continue receiving messages if it is desired.
             self.rx_buffer_encrypted.clear();
 
-            if let Err(err) = result {
-                return Err(err);
-            }
+            result?;
         }
     }
 
@@ -385,13 +374,6 @@ impl fmt::Debug for Noise {
     }
 }
 
-impl Drop for Noise {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.out_cipher_state.key);
-        zeroize::Zeroize::zeroize(&mut self.in_cipher_state.key);
-    }
-}
-
 #[must_use]
 pub struct Encrypt<'a> {
     out_cipher_state: &'a mut CipherState,
@@ -424,7 +406,7 @@ impl<'a> Encrypt<'a> {
                 if len_avail < 19 {
                     return None;
                 }
-                return Some(&mut buffer[2..cmp::min(len, len_avail - 16)]);
+                Some(&mut buffer[2..cmp::min(len, len_avail - 16)])
             });
 
         let (dest1_first, dest1_rest) = self.destination.1.split_at_mut(cmp::min(
@@ -449,7 +431,7 @@ impl<'a> Encrypt<'a> {
                 if len < 19 {
                     return None;
                 }
-                return Some(&mut buffer[2..len - 16]);
+                Some(&mut buffer[2..len - 16])
             });
 
         dest0
@@ -489,14 +471,14 @@ impl<'a> Encrypt<'a> {
             // Write the libp2p length prefix and advance `self.destination`.
             {
                 let message_length_prefix = u16::try_from(next_message_size).unwrap().to_be_bytes();
-                if self.destination.0.len() >= 1 {
+                if !self.destination.0.is_empty() {
                     self.destination.0[0] = message_length_prefix[0];
                     self.destination.0 = &mut self.destination.0[1..];
                 } else {
                     self.destination.1[0] = message_length_prefix[0];
                     self.destination.1 = &mut self.destination.1[1..];
                 }
-                if self.destination.0.len() >= 1 {
+                if !self.destination.0.is_empty() {
                     self.destination.0[0] = message_length_prefix[1];
                     self.destination.0 = &mut self.destination.0[1..];
                 } else {
@@ -579,26 +561,26 @@ struct HandshakeInProgressInner {
     ///
     /// Corresponds to the `ck` field of the `SymmetricState` in the Noise specification.
     /// See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
-    chaining_key: [u8; 32],
+    chaining_key: zeroize::Zeroizing<[u8; 32]>,
 
     /// Hash that maintains the state of the data that we've sent out or received. Used as the
     /// associated data whenever we produce or verify a frame during the handshake.
     ///
     /// Corresponds to the `h` field of the `SymmetricState` in the Noise specification.
     /// See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
-    hash: [u8; 32],
+    hash: zeroize::Zeroizing<[u8; 32]>,
 
     /// Local ephemeral key. Generate for this handshake specifically.
     ///
     /// Corresponds to the `e` field of the `HandshakeState` in the Noise specification.
     /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
-    local_ephemeral_private_key: x25519_dalek::ReusableSecret,
+    local_ephemeral_private_key: zeroize::Zeroizing<x25519_dalek::StaticSecret>,
 
     /// Local static key. Corresponds to a [`NoiseKey`].
     ///
     /// Corresponds to the `s` field of the `HandshakeState` in the Noise specification.
     /// See <https://noiseprotocol.org/noise.html#the-handshakestate-object>.
-    local_static_private_key: x25519_dalek::ReusableSecret,
+    local_static_private_key: zeroize::Zeroizing<x25519_dalek::StaticSecret>,
 
     /// Public key corresponding to [`HandshakeInProgressInner::local_static_private_key`].
     local_static_public_key: x25519_dalek::PublicKey,
@@ -637,12 +619,13 @@ impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(config: Config) -> Self {
         // Generate a new ephemeral key for this handshake.
-        // TODO: get key from API user?
-        let local_ephemeral_private_key =
-            x25519_dalek::ReusableSecret::random_from_rng(&mut rand::thread_rng());
+        // TODO: is it zeroize-safe to call `from([u8; 32])`?
+        let local_ephemeral_private_key = zeroize::Zeroizing::new(
+            x25519_dalek::StaticSecret::from(*config.ephemeral_secret_key),
+        );
 
         // Initialize the hash.
-        let mut hash = [0u8; 32];
+        let mut hash = zeroize::Zeroizing::new([0u8; 32]);
 
         // InitializeSymmetric(protocol_name).
         {
@@ -652,21 +635,21 @@ impl HandshakeInProgress {
                 hash[PROTOCOL_NAME.len()..].fill(0);
             } else {
                 let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-                sha2::Digest::update(&mut hasher, &PROTOCOL_NAME);
+                sha2::Digest::update(&mut hasher, PROTOCOL_NAME);
                 sha2::Digest::finalize_into(
                     hasher,
-                    &mut sha2::digest::generic_array::GenericArray::from_mut_slice(&mut hash),
+                    sha2::digest::generic_array::GenericArray::from_mut_slice(&mut *hash),
                 );
             }
         }
-        let chaining_key = hash;
+        let chaining_key = hash.clone();
 
         // Perform MixHash(prologue).
         mix_hash(&mut hash, config.prologue);
 
         HandshakeInProgress(Box::new(HandshakeInProgressInner {
             cipher_state: CipherState {
-                key: [0; 32],
+                key: zeroize::Zeroizing::new([0; 32]),
                 nonce: 0,
                 nonce_has_overflowed: false,
             },
@@ -674,7 +657,7 @@ impl HandshakeInProgress {
             hash,
             local_ephemeral_private_key,
             local_static_private_key: config.key.private_key.clone(),
-            local_static_public_key: config.key.public_key.clone(),
+            local_static_public_key: config.key.public_key,
             remote_ephemeral_public_key: x25519_dalek::PublicKey::from([0; 32]),
             remote_static_public_key: x25519_dalek::PublicKey::from([0; 32]),
             remote_public_key: None,
@@ -702,6 +685,9 @@ impl HandshakeInProgress {
             // Don't even read the data from the remote.
             read_write.write_from_vec_deque(&mut self.0.pending_out_data);
             if !self.0.pending_out_data.is_empty() {
+                if read_write.outgoing_buffer.is_none() {
+                    return Err(HandshakeError::WriteClosed);
+                }
                 return Ok(NoiseHandshake::InProgress(self));
             }
 
@@ -711,7 +697,10 @@ impl HandshakeInProgress {
                 debug_assert!(self.0.receive_buffer.is_empty());
 
                 // Perform the `Split()`.
-                let (init_to_resp, resp_to_init, _) = hkdf(&self.0.chaining_key, &[]);
+                let HkdfOutput {
+                    output1: init_to_resp,
+                    output2: resp_to_init,
+                } = hkdf(&self.0.chaining_key, &[]);
                 let (out_key, in_key) = match self.0.is_initiator {
                     true => (init_to_resp, resp_to_init),
                     false => (resp_to_init, init_to_resp),
@@ -755,7 +744,7 @@ impl HandshakeInProgress {
 
                     // Process `e`.
                     let local_ephemeral_public_key =
-                        x25519_dalek::PublicKey::from(&self.0.local_ephemeral_private_key);
+                        x25519_dalek::PublicKey::from(&*self.0.local_ephemeral_private_key);
                     self.0
                         .pending_out_data
                         .extend(local_ephemeral_public_key.as_bytes());
@@ -780,14 +769,17 @@ impl HandshakeInProgress {
 
                     // Process `e`.
                     let local_ephemeral_public_key =
-                        x25519_dalek::PublicKey::from(&self.0.local_ephemeral_private_key);
+                        x25519_dalek::PublicKey::from(&*self.0.local_ephemeral_private_key);
                     self.0
                         .pending_out_data
                         .extend(local_ephemeral_public_key.as_bytes());
                     mix_hash(&mut self.0.hash, local_ephemeral_public_key.as_bytes());
 
                     // Process `ee`. Call MixKey(DH(e, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -803,7 +795,7 @@ impl HandshakeInProgress {
                         .0
                         .cipher_state
                         .write_chachapoly_message_to_vec(
-                            &self.0.hash,
+                            &*self.0.hash,
                             self.0.local_static_public_key.as_bytes(),
                         )
                         .unwrap();
@@ -813,7 +805,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, &encrypted_static_public_key);
 
                     // Process `es`. Call MixKey(DH(s, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_static_private_key
@@ -829,7 +824,7 @@ impl HandshakeInProgress {
                         .0
                         .cipher_state
                         .write_chachapoly_message_to_vec(
-                            &self.0.hash,
+                            &*self.0.hash,
                             &self.0.libp2p_handshake_message,
                         )
                         .unwrap();
@@ -857,7 +852,7 @@ impl HandshakeInProgress {
                         .0
                         .cipher_state
                         .write_chachapoly_message_to_vec(
-                            &self.0.hash,
+                            &*self.0.hash,
                             self.0.local_static_public_key.as_bytes(),
                         )
                         .unwrap();
@@ -867,7 +862,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, &encrypted_static_public_key);
 
                     // Process `se`. Call MixKey(DH(s, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_static_private_key
@@ -883,7 +881,7 @@ impl HandshakeInProgress {
                         .0
                         .cipher_state
                         .write_chachapoly_message_to_vec(
-                            &self.0.hash,
+                            &*self.0.hash,
                             &self.0.libp2p_handshake_message,
                         )
                         .unwrap();
@@ -1045,7 +1043,10 @@ impl HandshakeInProgress {
                     );
 
                     // Process `ee`. Call MixKey(DH(e, re)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -1061,7 +1062,7 @@ impl HandshakeInProgress {
                         self.0
                             .cipher_state
                             .read_chachapoly_message_to_array(
-                                &self.0.hash,
+                                &*self.0.hash,
                                 remote_static_public_key_encrypted,
                             )
                             .map_err(HandshakeError::Cipher)?,
@@ -1069,7 +1070,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, remote_static_public_key_encrypted);
 
                     // Process `es`. Call MixKey(DH(e, rs)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -1086,7 +1090,7 @@ impl HandshakeInProgress {
                             .0
                             .cipher_state
                             .read_chachapoly_message_to_vec(
-                                &self.0.hash,
+                                &*self.0.hash,
                                 libp2p_handshake_encrypted,
                             )
                             .map_err(HandshakeError::Cipher)?;
@@ -1160,7 +1164,7 @@ impl HandshakeInProgress {
                         self.0
                             .cipher_state
                             .read_chachapoly_message_to_array(
-                                &self.0.hash,
+                                &*self.0.hash,
                                 remote_static_public_key_encrypted,
                             )
                             .map_err(HandshakeError::Cipher)?,
@@ -1168,7 +1172,10 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, remote_static_public_key_encrypted);
 
                     // Process `se`. Call MixKey(DH(e, rs)).
-                    let (chaining_key_update, key_update, _) = hkdf(
+                    let HkdfOutput {
+                        output1: chaining_key_update,
+                        output2: key_update,
+                    } = hkdf(
                         &self.0.chaining_key,
                         self.0
                             .local_ephemeral_private_key
@@ -1186,7 +1193,7 @@ impl HandshakeInProgress {
                             .0
                             .cipher_state
                             .read_chachapoly_message_to_vec(
-                                &self.0.hash,
+                                &*self.0.hash,
                                 libp2p_handshake_encrypted,
                             )
                             .map_err(HandshakeError::Cipher)?;
@@ -1244,16 +1251,6 @@ impl fmt::Debug for HandshakeInProgress {
     }
 }
 
-impl Drop for HandshakeInProgress {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0.local_ephemeral_private_key);
-        zeroize::Zeroize::zeroize(&mut self.0.local_static_private_key);
-        zeroize::Zeroize::zeroize(&mut self.0.cipher_state.key);
-        zeroize::Zeroize::zeroize(&mut self.0.hash);
-        zeroize::Zeroize::zeroize(&mut self.0.chaining_key);
-    }
-}
-
 /// Potential error during the noise handshake.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
@@ -1269,8 +1266,6 @@ pub enum HandshakeError {
     PayloadDecode(PayloadDecodeError),
     /// Key passed as part of the payload failed to decode into a libp2p public key.
     InvalidKey,
-    /// Received a payload as part of a handshake message when none was expected.
-    UnexpectedPayload,
     /// Signature of the noise public key by the libp2p key failed.
     #[display(fmt = "Signature of the noise public key by the libp2p key failed.")]
     SignatureVerificationFailed(SignatureVerifyFailed),
@@ -1304,7 +1299,7 @@ pub enum CipherError {
 pub struct PayloadDecodeError;
 
 struct CipherState {
-    key: [u8; 32],
+    key: zeroize::Zeroizing<[u8; 32]>,
     nonce: u64,
     nonce_has_overflowed: bool,
 }
@@ -1373,10 +1368,7 @@ impl CipherState {
                     [..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)],
             );
             chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, &mut intermediary_buffer);
-            poly1305::universal_hash::UniversalHash::update_padded(
-                &mut mac,
-                &mut intermediary_buffer,
-            );
+            poly1305::universal_hash::UniversalHash::update_padded(&mut mac, &intermediary_buffer);
             destination.0[first_chunk_end_offset..payload0_length]
                 .copy_from_slice(&intermediary_buffer[..payload0_length - first_chunk_end_offset]);
             destination.1[..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)]
@@ -1520,7 +1512,7 @@ impl CipherState {
         let obtained_mac_bytes = &message_data[message_data.len() - 16..];
         if poly1305::universal_hash::UniversalHash::verify(
             mac,
-            &poly1305::universal_hash::generic_array::GenericArray::from_slice(obtained_mac_bytes),
+            poly1305::universal_hash::generic_array::GenericArray::from_slice(obtained_mac_bytes),
         )
         .is_err()
         {
@@ -1559,14 +1551,12 @@ impl CipherState {
         };
 
         let mut mac = {
-            let mut mac_key = Box::new([0u8; 32]);
+            let mut mac_key = zeroize::Zeroizing::new([0u8; 32]);
             chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, &mut *mac_key);
             chacha20::cipher::StreamCipherSeek::seek(&mut cipher, 64);
-            let mac = <poly1305::Poly1305 as poly1305::universal_hash::KeyInit>::new(
+            <poly1305::Poly1305 as poly1305::universal_hash::KeyInit>::new(
                 poly1305::universal_hash::generic_array::GenericArray::from_slice(&*mac_key),
-            );
-            zeroize::Zeroize::zeroize(&mut *mac_key);
-            mac
+            )
         };
 
         poly1305::universal_hash::UniversalHash::update_padded(&mut mac, associated_data);
@@ -1578,20 +1568,23 @@ impl CipherState {
 // Implementation of `MixHash`. See <https://noiseprotocol.org/noise.html#the-symmetricstate-object>.
 fn mix_hash(hash: &mut [u8; 32], data: &[u8]) {
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-    sha2::Digest::update(&mut hasher, &*hash);
+    sha2::Digest::update(&mut hasher, *hash);
     sha2::Digest::update(&mut hasher, data);
     sha2::Digest::finalize_into(
         hasher,
-        &mut sha2::digest::generic_array::GenericArray::from_mut_slice(hash),
+        sha2::digest::generic_array::GenericArray::from_mut_slice(hash),
     );
 }
 
 // Implementation of `HKDF`. See <https://noiseprotocol.org/noise.html#hash-functions>.
 //
-// Contrary to the version in the Noise specification, this always returns 3 outputs. We trust the
-// compiler to optimize out the calculation of the third output.
-fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> ([u8; 32], [u8; 32], [u8; 32]) {
-    fn hmac_hash<'a>(key: &[u8; 32], data: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
+// Contrary to the version in the Noise specification, this always returns 2 outputs. The third
+// output version is never used in this module.
+fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> HkdfOutput {
+    fn hmac_hash<'a>(
+        key: &[u8; 32],
+        data: impl IntoIterator<Item = &'a [u8]>,
+    ) -> zeroize::Zeroizing<[u8; 32]> {
         // Formula is: `H(K XOR opad, H(K XOR ipad, text))`
         // See <https://www.ietf.org/rfc/rfc2104.txt>.
         let mut ipad = [0x36u8; 64];
@@ -1607,7 +1600,7 @@ fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> ([u8; 32], [u8; 3
 
         let intermediary_result = {
             let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-            sha2::Digest::update(&mut hasher, &ipad);
+            sha2::Digest::update(&mut hasher, ipad);
             for data in data {
                 sha2::Digest::update(&mut hasher, data);
             }
@@ -1615,16 +1608,27 @@ fn hkdf(chaining_key: &[u8; 32], input_key_material: &[u8]) -> ([u8; 32], [u8; 3
         };
 
         let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-        sha2::Digest::update(&mut hasher, &opad);
-        sha2::Digest::update(&mut hasher, &intermediary_result);
-        sha2::Digest::finalize(hasher).into()
+        sha2::Digest::update(&mut hasher, opad);
+        sha2::Digest::update(&mut hasher, intermediary_result);
+
+        let mut output = zeroize::Zeroizing::new([0; 32]);
+        sha2::Digest::finalize_into(
+            hasher,
+            sha2::digest::generic_array::GenericArray::from_mut_slice(&mut *output),
+        );
+        output
     }
 
     let temp_key = hmac_hash(chaining_key, [input_key_material]);
     let output1 = hmac_hash(&temp_key, [&[0x01][..]]);
-    let output2 = hmac_hash(&temp_key, [&output1, &[0x02][..]]);
-    let output3 = hmac_hash(&temp_key, [&output2, &[0x03][..]]);
-    (output1, output2, output3)
+    let output2 = hmac_hash(&temp_key, [&*output1, &[0x02][..]]);
+    HkdfOutput { output1, output2 }
+}
+
+/// Output of the [`hkdf`] function.
+struct HkdfOutput {
+    output1: zeroize::Zeroizing<[u8; 32]>,
+    output2: zeroize::Zeroizing<[u8; 32]>,
 }
 
 #[cfg(test)]
@@ -1634,18 +1638,20 @@ mod tests {
     #[test]
     fn handshake_basic_works() {
         fn test_with_buffer_sizes(size1: usize, size2: usize) {
-            let key1 = NoiseKey::new(&rand::random());
-            let key2 = NoiseKey::new(&rand::random());
+            let key1 = NoiseKey::new(&rand::random(), &rand::random());
+            let key2 = NoiseKey::new(&rand::random(), &rand::random());
 
             let mut handshake1 = NoiseHandshake::new(Config {
                 key: &key1,
                 is_initiator: true,
                 prologue: &[],
+                ephemeral_secret_key: &rand::random(),
             });
             let mut handshake2 = NoiseHandshake::new(Config {
                 key: &key2,
                 is_initiator: false,
                 prologue: &[],
+                ephemeral_secret_key: &rand::random(),
             });
 
             let mut buf_1_to_2 = Vec::new();

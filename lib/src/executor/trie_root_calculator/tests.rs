@@ -34,7 +34,7 @@ fn empty_trie_works() {
     loop {
         match calculation {
             InProgress::Finished { trie_root_hash } => {
-                assert_eq!(trie_root_hash, trie::EMPTY_TRIE_MERKLE_VALUE);
+                assert_eq!(trie_root_hash, trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE);
                 return;
             }
             InProgress::ClosestDescendant(req) => {
@@ -72,6 +72,7 @@ fn one_inserted_node_in_diff() {
                         partial_key: trie::bytes_to_nibbles(vec![0xaa, 0xaa].into_iter()),
                         storage_value: trie::trie_node::StorageValue::Unhashed(b"foo"),
                     },
+                    trie::HashFunction::Blake2,
                     true,
                 )
                 .unwrap();
@@ -263,6 +264,7 @@ fn fuzzing() {
                         partial_key,
                         storage_value,
                     },
+                    trie::HashFunction::Blake2,
                     is_root_node,
                 )
                 .unwrap();
@@ -410,7 +412,7 @@ fn fuzzing() {
         let expected_hash = trie_after_diff
             .root_user_data()
             .map(|n| *<&[u8; 32]>::try_from(n.1.as_ref().unwrap().as_ref()).unwrap())
-            .unwrap_or(trie::EMPTY_TRIE_MERKLE_VALUE);
+            .unwrap_or(trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE);
         if obtained_hash != expected_hash {
             panic!(
                 "\nexpected = {:?}\ncalculated = {:?}\ntrie_before = {:?}\ndiff = {:?}",

@@ -140,7 +140,6 @@ pub(super) fn start<TPlat: PlatformRef>(
 
     let me = Arc::new(Background {
         log_target,
-        platform: config.platform,
         chain_name: config.chain_spec.name().to_owned(),
         chain_ty: config.chain_spec.chain_type().to_owned(),
         chain_is_live: config.chain_spec.has_live_network(),
@@ -152,14 +151,19 @@ pub(super) fn start<TPlat: PlatformRef>(
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
-        to_legacy: Mutex::new(to_legacy_tx.clone()),
+        to_legacy: Mutex::new(to_legacy_tx),
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
-            util::SipHasherBuild::new(rand::random()),
+            util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                config.platform.fill_random_bytes(&mut seed);
+                seed
+            }),
         )),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
+        platform: config.platform,
     });
 
     let (tx, rx) = async_channel::bounded(
@@ -1055,6 +1059,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             parameter: call_parameters,
             storage_main_trie_changes: Default::default(),
             max_log_level: 0,
+            calculate_trie_changes: false,
         }) {
             Ok(vm) => vm,
             Err((err, prototype)) => {

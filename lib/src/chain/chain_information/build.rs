@@ -25,9 +25,11 @@ use core::{fmt, iter, num::NonZeroU64};
 
 use crate::{
     chain::chain_information,
-    executor::{host, read_only_runtime_host},
+    executor::{host, runtime_host},
     header, trie,
 };
+
+pub use runtime_host::{Nibble, TrieEntryVersion};
 
 /// Configuration to provide to [`ChainInformationBuild::new`].
 pub struct Config {
@@ -82,6 +84,9 @@ pub enum ChainInformationBuild {
 pub enum InProgress {
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
+    /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+    /// to continue.
+    ClosestDescendantMerkleValue(ClosestDescendantMerkleValue),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
 }
@@ -99,8 +104,10 @@ pub enum Error {
     #[display(fmt = "While calling {call:?}: {error}")]
     WasmVm {
         call: RuntimeCall,
-        error: read_only_runtime_host::ErrorDetail,
+        error: runtime_host::ErrorDetail,
     },
+    /// Runtime has called an offchain worker host function.
+    OffchainWorkerHostFunction,
     /// Failed to decode the output of the `AuraApi_slot_duration` runtime call.
     AuraSlotDurationOutputDecode,
     /// Failed to decode the output of the `AuraApi_authorities` runtime call.
@@ -250,6 +257,9 @@ impl InProgress {
     pub fn remaining_calls(&self) -> impl Iterator<Item = RuntimeCall> {
         let inner = match self {
             InProgress::StorageGet(StorageGet(_, shared)) => shared,
+            InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(_, shared)) => {
+                shared
+            }
             InProgress::NextKey(NextKey(_, shared)) => shared,
         };
 
@@ -260,6 +270,9 @@ impl InProgress {
     pub fn call_in_progress(&self) -> RuntimeCall {
         let inner = match self {
             InProgress::StorageGet(StorageGet(_, shared)) => shared,
+            InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(_, shared)) => {
+                shared
+            }
             InProgress::NextKey(NextKey(_, shared)) => shared,
         };
 
@@ -269,10 +282,7 @@ impl InProgress {
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(
-    read_only_runtime_host::StorageGet,
-    ChainInformationBuildInner,
-);
+pub struct StorageGet(runtime_host::StorageGet, ChainInformationBuildInner);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -288,7 +298,7 @@ impl StorageGet {
     /// Injects the corresponding storage value.
     pub fn inject_value(
         self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>>, TrieEntryVersion)>,
     ) -> ChainInformationBuild {
         ChainInformationBuild::from_call_in_progress(self.0.inject_value(value), self.1)
     }
@@ -299,13 +309,58 @@ impl StorageGet {
     }
 }
 
+/// Obtaining the Merkle value of the closest descendant of a trie node is required in order
+/// to continue.
+#[must_use]
+pub struct ClosestDescendantMerkleValue(
+    runtime_host::ClosestDescendantMerkleValue,
+    ChainInformationBuildInner,
+);
+
+impl ClosestDescendantMerkleValue {
+    /// Returns the key whose closest descendant Merkle value must be passed to
+    /// [`ClosestDescendantMerkleValue::inject_merkle_value`].
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
+        self.0.key()
+    }
+
+    /// If `Some`, read from the given child trie. If `None`, read from the main trie.
+    pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
+        self.0.child_trie()
+    }
+
+    /// Indicate that the value is unknown and resume the calculation.
+    ///
+    /// This function be used if you are unaware of the Merkle value. The algorithm will perform
+    /// the calculation of this Merkle value manually, which takes more time.
+    pub fn resume_unknown(self) -> ChainInformationBuild {
+        ChainInformationBuild::from_call_in_progress(self.0.resume_unknown(), self.1)
+    }
+
+    /// Injects the corresponding Merkle value.
+    ///
+    /// `None` can be passed if there is no descendant or, in the case of a child trie read, in
+    /// order to indicate that the child trie does not exist.
+    pub fn inject_merkle_value(self, merkle_value: Option<&[u8]>) -> ChainInformationBuild {
+        ChainInformationBuild::from_call_in_progress(
+            self.0.inject_merkle_value(merkle_value),
+            self.1,
+        )
+    }
+
+    /// Returns the runtime call currently being made.
+    pub fn call_in_progress(&self) -> RuntimeCall {
+        self.1.call_in_progress.unwrap()
+    }
+}
+
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(read_only_runtime_host::NextKey, ChainInformationBuildInner);
+pub struct NextKey(runtime_host::NextKey, ChainInformationBuildInner);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.key()
     }
 
@@ -328,7 +383,7 @@ impl NextKey {
 
     /// Returns the prefix the next key must start with. If the next key doesn't start with the
     /// given prefix, then `None` should be provided.
-    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+    pub fn prefix(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.0.prefix()
     }
 
@@ -337,8 +392,9 @@ impl NextKey {
     /// # Panic
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    /// Panics if the key passed as parameter doesn't start with the requested prefix.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> ChainInformationBuild {
+    pub fn inject_key(self, key: Option<impl Iterator<Item = Nibble>>) -> ChainInformationBuild {
         ChainInformationBuild::from_call_in_progress(self.0.inject_key(key), self.1)
     }
 
@@ -444,11 +500,13 @@ impl ChainInformationBuild {
         debug_assert!(inner.virtual_machine.is_some());
 
         if let Some(call) = ChainInformationBuild::necessary_calls(&inner).next() {
-            let vm_start_result = read_only_runtime_host::run(read_only_runtime_host::Config {
+            let vm_start_result = runtime_host::run(runtime_host::Config {
                 function_to_call: call.function_name(),
                 parameter: call.parameter_vectored(),
                 virtual_machine: inner.virtual_machine.take().unwrap(),
                 max_log_level: 0,
+                storage_main_trie_changes: Default::default(),
+                calculate_trie_changes: false,
             });
 
             let vm = match vm_start_result {
@@ -527,7 +585,7 @@ impl ChainInformationBuild {
                         parent_hash: &[0; 32],
                         number: 0,
                         state_root: &state_trie_root_hash,
-                        extrinsics_root: &trie::EMPTY_TRIE_MERKLE_VALUE,
+                        extrinsics_root: &trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty(),
                     }
                     .scale_encoding_vec(inner.block_number_bytes);
@@ -615,14 +673,14 @@ impl ChainInformationBuild {
     }
 
     fn from_call_in_progress(
-        mut call: read_only_runtime_host::RuntimeHostVm,
+        mut call: runtime_host::RuntimeHostVm,
         mut inner: ChainInformationBuildInner,
     ) -> Self {
         loop {
             debug_assert!(inner.call_in_progress.is_some());
 
             match call {
-                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                     inner.virtual_machine = Some(match inner.call_in_progress.take() {
                         None => unreachable!(),
                         Some(RuntimeCall::AuraApiSlotDuration) => {
@@ -746,7 +804,7 @@ impl ChainInformationBuild {
 
                     break ChainInformationBuild::start_next_call(inner);
                 }
-                read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                runtime_host::RuntimeHostVm::Finished(Err(err)) => {
                     break ChainInformationBuild::Finished {
                         result: Err(Error::WasmVm {
                             call: inner.call_in_progress.unwrap(),
@@ -755,33 +813,37 @@ impl ChainInformationBuild {
                         virtual_machine: err.prototype,
                     }
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageGet(call) => {
+                runtime_host::RuntimeHostVm::StorageGet(call) => {
                     break ChainInformationBuild::InProgress(InProgress::StorageGet(StorageGet(
                         call, inner,
                     )))
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageRoot(get_root) => {
-                    call = get_root.resume(match &inner.finalized_block_header {
-                        ConfigFinalizedBlockHeader::Genesis {
-                            state_trie_root_hash,
-                        } => state_trie_root_hash,
-                        ConfigFinalizedBlockHeader::NonGenesis {
-                            scale_encoded_header: header,
-                            ..
-                        } => {
-                            header::decode(header, inner.block_number_bytes)
-                                .unwrap()
-                                .state_root
-                        }
-                    })
-                }
-                read_only_runtime_host::RuntimeHostVm::NextKey(call) => {
+                runtime_host::RuntimeHostVm::NextKey(call) => {
                     break ChainInformationBuild::InProgress(InProgress::NextKey(NextKey(
                         call, inner,
                     )))
                 }
-                read_only_runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(call) => {
+                    break ChainInformationBuild::InProgress(
+                        InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
+                            call, inner,
+                        )),
+                    )
+                }
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();
+                }
+                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                    // Do nothing.
+                    call = req.resume();
+                }
+                runtime_host::RuntimeHostVm::Offchain(req) => {
+                    let virtual_machine =
+                        runtime_host::RuntimeHostVm::Offchain(req).into_prototype();
+                    break ChainInformationBuild::Finished {
+                        result: Err(Error::OffchainWorkerHostFunction),
+                        virtual_machine,
+                    };
                 }
             }
         }

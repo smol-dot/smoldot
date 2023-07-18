@@ -46,7 +46,7 @@
 use crate::{identity::seed_phrase, util::SipHasherBuild};
 
 use async_lock::Mutex;
-use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 use std::{borrow::Cow, fs, io, path, str};
 
 /// Namespace of the key.
@@ -123,7 +123,11 @@ impl Keystore {
         let mut gen_rng = rand_chacha::ChaCha20Rng::from_seed(randomness_seed);
 
         let mut keys = hashbrown::HashMap::with_capacity_and_hasher(32, {
-            SipHasherBuild::new(gen_rng.sample(rand::distributions::Standard))
+            SipHasherBuild::new({
+                let mut seed = [0; 16];
+                gen_rng.fill_bytes(&mut seed);
+                seed
+            })
         });
 
         // Load the keys from the disk.
@@ -531,7 +535,7 @@ impl Keystore {
         // TODO: `to_bytes` isn't zeroize-friendly
         let bytes = key.to_bytes();
         let mut phrase = zeroize::Zeroizing::new(vec![0; bytes.len() * 2]);
-        hex::encode_to_slice(&bytes, &mut phrase).unwrap();
+        hex::encode_to_slice(bytes, &mut phrase).unwrap();
         Self::write_to_file(path, &phrase).await
     }
 

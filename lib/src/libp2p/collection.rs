@@ -62,8 +62,10 @@ use core::{
     ops::{self, Add, Sub},
     time::Duration,
 };
-use rand::Rng as _;
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+use rand_chacha::{
+    rand_core::{RngCore as _, SeedableRng as _},
+    ChaCha20Rng,
+};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
@@ -416,11 +418,20 @@ where
             self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
 
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
-            randomness_seed: self.randomness_seeds.gen(),
-            handshake: single_stream_handshake::HealthyHandshake::noise_yamux(
-                noise_key,
-                is_initiator,
-            ),
+            randomness_seed: {
+                let mut seed = [0; 32];
+                self.randomness_seeds.fill_bytes(&mut seed);
+                seed
+            },
+            handshake: {
+                let mut ephemeral_secret_key = zeroize::Zeroizing::new([0; 32]);
+                self.randomness_seeds.fill_bytes(&mut *ephemeral_secret_key);
+                single_stream_handshake::HealthyHandshake::noise_yamux(
+                    noise_key,
+                    &ephemeral_secret_key,
+                    is_initiator,
+                )
+            },
             handshake_timeout: when_connected + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
             substreams_capacity,
@@ -504,15 +515,24 @@ where
         let substreams_capacity =
             self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
 
-        let handshake = noise::HandshakeInProgress::new(noise::Config {
-            key: noise_key,
-            // It's the "server" that initiates the Noise handshake.
-            is_initiator: !is_initiator,
-            prologue: &noise_prologue,
-        });
+        let handshake = {
+            let mut noise_ephemeral_key = zeroize::Zeroizing::new([0; 32]);
+            self.randomness_seeds.fill_bytes(&mut *noise_ephemeral_key);
+            noise::HandshakeInProgress::new(noise::Config {
+                key: noise_key,
+                // It's the "server" that initiates the Noise handshake.
+                is_initiator: !is_initiator,
+                prologue: &noise_prologue,
+                ephemeral_secret_key: &noise_ephemeral_key,
+            })
+        };
 
         let connection_task = MultiStreamConnectionTask::new(
-            self.randomness_seeds.gen(),
+            {
+                let mut seed = [0; 32];
+                self.randomness_seeds.fill_bytes(&mut seed);
+                seed
+            },
             now,
             handshake,
             self.max_inbound_substreams,

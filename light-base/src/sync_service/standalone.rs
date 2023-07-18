@@ -27,7 +27,6 @@ use core::{
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
@@ -45,7 +44,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
-    mut from_foreground: mpsc::Receiver<ToBackground>,
+    mut from_foreground: async_channel::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
@@ -100,13 +99,17 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             platform.sleep(Duration::from_secs(10)),
         )
         .fuse(),
-        all_notifications: Vec::<mpsc::Sender<Notification>>::new(),
+        all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
         network_service,
         network_chain_index,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
             0,
-            util::SipHasherBuild::new(rand::random()),
+            util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                platform.fill_random_bytes(&mut seed);
+                seed
+            }),
         ),
         platform,
     };
@@ -365,7 +368,7 @@ struct Task<TPlat: PlatformRef> {
     network_up_to_date_finalized: bool,
 
     /// All event subscribers that are interested in events about the chain.
-    all_notifications: Vec<mpsc::Sender<Notification>>,
+    all_notifications: Vec<async_channel::Sender<Notification>>,
 
     /// Contains a `Delay` after which we print a warning about GrandPa warp sync taking a long
     /// time. Set to `Pending` after the warp sync has finished, so that future remains pending
@@ -564,7 +567,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         peer_id,
                         network::protocol::CallProofRequestConfig {
                             block_hash,
-                            method: &function_name,
+                            method: function_name,
                             parameter_vectored: iter::once(parameter_vectored),
                         },
                         Duration::from_secs(16),
@@ -687,7 +690,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Grandpa warp sync fragment to verify.
                 let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
-                let (sync, result) = verify.perform(rand::random());
+                let (sync, result) = verify.perform({
+                    let mut seed = [0; 32];
+                    self.platform.fill_random_bytes(&mut seed);
+                    seed
+                });
                 self.sync = sync;
 
                 if let Err(err) = result {
@@ -861,7 +868,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
                 // Finality proof to verify.
-                match verify.perform(rand::random()) {
+                match verify.perform({
+                    let mut seed = [0; 32];
+                    self.platform.fill_random_bytes(&mut seed);
+                    seed
+                }) {
                     (
                         sync,
                         all::FinalityProofVerifyOutcome::NewFinalized {
@@ -959,7 +970,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 buffer_size,
                 runtime_interest,
             } => {
-                let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
                 self.all_notifications.push(tx);
 
                 let non_finalized_blocks_ancestry_order = {
@@ -1221,7 +1232,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
         // Elements in `all_notifications` are removed one by one and inserted back if the
         // channel is still open.
         for index in (0..self.all_notifications.len()).rev() {
-            let mut subscription = self.all_notifications.swap_remove(index);
+            let subscription = self.all_notifications.swap_remove(index);
             if subscription.try_send(notification.clone()).is_err() {
                 continue;
             }

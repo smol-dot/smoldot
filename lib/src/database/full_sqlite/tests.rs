@@ -106,6 +106,7 @@ fn empty_database_fill_then_query() {
                     partial_key,
                     storage_value,
                 },
+                trie::HashFunction::Blake2,
                 is_root_node,
             )
             .unwrap();
@@ -118,7 +119,7 @@ fn empty_database_fill_then_query() {
             let state_root = &trie
                 .root_user_data()
                 .map(|n| *<&[u8; 32]>::try_from(n.1.as_ref().unwrap().as_ref()).unwrap())
-                .unwrap_or(trie::EMPTY_TRIE_MERKLE_VALUE);
+                .unwrap_or(trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE);
 
             let trie_entries_linear =
                 trie.iter_unordered()
