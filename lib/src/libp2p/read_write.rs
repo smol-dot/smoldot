@@ -127,7 +127,10 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
 
         let to_copy1 = cmp::min(slice1.len(), self.write_bytes_queueable.unwrap_or(0));
         let to_copy2 = if to_copy1 == slice1.len() {
-            cmp::min(slice2.len(), self.write_bytes_queueable.unwrap_or(0) - to_copy1)
+            cmp::min(
+                slice2.len(),
+                self.write_bytes_queueable.unwrap_or(0) - to_copy1,
+            )
         } else {
             0
         };
