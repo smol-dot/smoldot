@@ -89,6 +89,7 @@ pub(crate) fn init(max_log_level: u32) {
         Box::pin(async move {
             let mut previous_read_bytes = 0;
             let mut previous_sent_bytes = 0;
+            let mut previous_cpu_usage_us = 0;
             let interval = 60;
 
             loop {
@@ -100,10 +101,11 @@ pub(crate) fn init(max_log_level: u32) {
 
                 // Due to the way the calculation below is performed, sending or receiving
                 // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`
-                // bytes within an interval will lead to an erroneous value being shown to the
-                // user. At the time of writing of this comment, they are 64bits, so we just
-                // assume that this can't happen. If it does happen, the fix would consist in
-                // increasing the size of `TOTAL_BYTES_RECEIVED` or `TOTAL_BYTES_SENT`.
+                // bytes or spending more than `type_of(TOTAL_CPU_USAGE_US)::max_value` µs of CPU
+                // within an interval will lead to an erroneous value being shown to the user. At
+                // the time of writing of this comment, they are 64bits, so we just assume that
+                // this can't happen. If it does happen, the fix would consist in increasing their
+                // size.
 
                 let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
                 let avg_dl = bytes_rx.wrapping_sub(previous_read_bytes) / interval;
@@ -113,15 +115,22 @@ pub(crate) fn init(max_log_level: u32) {
                 let avg_up = bytes_tx.wrapping_sub(previous_sent_bytes) / interval;
                 previous_sent_bytes = bytes_tx;
 
+                let cpu_us = platform::TOTAL_CPU_USAGE_US.load(Ordering::Relaxed);
+                let avg_cpu_percent =
+                    (cpu_us.wrapping_sub(previous_cpu_usage_us) / interval) as f64 / 1_000_000.;
+                previous_cpu_usage_us = cpu_us;
+
                 // Note that we also print the version at every interval, in order to increase
                 // the chance of being able to know the version in case of truncated logs.
                 log::info!(
                     target: "smoldot",
-                    "Smoldot v{}. Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                    "Smoldot v{}. Current memory usage: {}. Average download: {}/s. Average \
+                    upload: {}/s. Average CPU cores: {:.2}.",
                     env!("CARGO_PKG_VERSION"),
                     BytesDisplay(mem),
                     BytesDisplay(avg_dl),
-                    BytesDisplay(avg_up)
+                    BytesDisplay(avg_up),
+                    avg_cpu_percent
                 );
             }
         }),
