@@ -129,8 +129,11 @@ pub(super) async fn established_connection_task(
                 read_bytes: 0,
                 write_buffers: Vec::new(),
                 write_bytes_queued: 0,
-                write_closed: write_buffer.is_none(),
-                write_bytes_queueable: write_buffer.as_ref().map_or(0, |(a, b)| a.len() + b.len()),
+                write_bytes_queueable: if let Some(write_buffer) = write_buffer {
+                    Some(write_buffer.0.len() + write_buffer.1.len())
+                } else {
+                    None
+                },
                 wake_up_after: None,
             };
 
@@ -138,7 +141,7 @@ pub(super) async fn established_connection_task(
 
             if read_write.read_bytes != 0
                 || read_write.write_bytes_queued != 0
-                || read_write.write_closed
+                || read_write.write_bytes_queueable.is_none()
             {
                 log_callback.log(
                     LogLevel::Trace,
@@ -149,7 +152,7 @@ pub(super) async fn established_connection_task(
                         read_write
                             .wake_up_after
                             .map(|w| w.checked_duration_since(now).unwrap_or(Duration::new(0, 0))),
-                        read_write.write_closed,
+                        read_write.write_bytes_queueable.is_none(),
                     ),
                 );
             }
@@ -159,7 +162,7 @@ pub(super) async fn established_connection_task(
             let write_buffers = mem::take(&mut read_write.write_buffers);
             let written_bytes = read_write.write_bytes_queued;
             let wake_up_after = read_write.wake_up_after.take();
-            let outgoing_buffer_now_closed = read_write.write_closed;
+            let outgoing_buffer_now_closed = read_write.write_bytes_queueable.is_none();
 
             socket.advance(read_bytes, 0);
 

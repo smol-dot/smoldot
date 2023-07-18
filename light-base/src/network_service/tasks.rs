@@ -219,7 +219,11 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         let now = platform.now();
 
         let (read_bytes, written_bytes, wake_up_after) = if !connection_task.is_reset_called() {
-            let write_bytes_queueable = platform.writable_bytes(&mut connection);
+            let write_bytes_queueable = if !write_closed {
+                Some(platform.writable_bytes(&mut connection))
+            } else {
+                None
+            };
 
             let incoming_buffer = match platform.read_buffer(&mut connection) {
                 ReadBuffer::Reset => {
@@ -236,7 +240,6 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 incoming_buffer,
                 read_bytes: 0,
                 write_buffers: Vec::new(),
-                write_closed,
                 write_bytes_queued: 0,
                 write_bytes_queueable,
                 wake_up_after: None,
@@ -248,10 +251,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // information from it.
             let read_bytes = read_write.read_bytes;
             debug_assert!(read_bytes <= incoming_buffer.as_ref().map_or(0, |b| b.len()));
-            let write_size_closed = !write_closed && read_write.write_closed;
+            let write_size_closed = !write_closed && read_write.write_bytes_queueable.is_none();
             let write_bytes_queued = read_write.write_bytes_queued;
             let write_buffers = mem::take(&mut read_write.write_buffers);
-            debug_assert!(write_bytes_queued <= write_bytes_queueable);
+            debug_assert!(write_bytes_queued <= write_bytes_queueable.unwrap_or(0));
             let wake_up_after = read_write.wake_up_after.clone();
             drop(read_write);
 
@@ -438,7 +441,11 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             loop {
                 let (substream, write_side_was_open) = &mut open_substreams[substream_id];
 
-                let write_bytes_queueable = platform.writable_bytes(substream);
+                let write_bytes_queueable = if !*write_side_was_open {
+                    Some(platform.writable_bytes(substream))
+                } else {
+                    None
+                };
 
                 let incoming_buffer = match platform.read_buffer(substream) {
                     ReadBuffer::Open(buf) => buf,
@@ -457,12 +464,11 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     read_bytes: 0,
                     write_buffers: Vec::new(),
                     write_bytes_queued: 0,
-                    write_closed: *write_side_was_open,
                     write_bytes_queueable,
                     wake_up_after,
                 };
 
-                debug_assert!(!read_write.write_closed);
+                debug_assert!(read_write.write_bytes_queueable.is_some());
 
                 let substream_fate =
                     connection_task.substream_read_write(&substream_id, &mut read_write);
@@ -474,7 +480,8 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 debug_assert!(read_bytes <= incoming_buffer.len());
                 let written_bytes = read_write.write_bytes_queued;
                 let write_buffers = mem::take(&mut read_write.write_buffers);
-                let must_close_writing_side = *write_side_was_open && read_write.write_closed;
+                let must_close_writing_side =
+                    *write_side_was_open && read_write.write_bytes_queueable.is_none();
                 wake_up_after = read_write.wake_up_after.take();
                 drop(read_write);
 
