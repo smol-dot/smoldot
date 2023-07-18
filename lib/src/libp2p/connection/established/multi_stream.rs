@@ -275,7 +275,7 @@ where
     /// [`MultiStream::pull_event`] to empty the queue of events between calls to this method.
     ///
     /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
-    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    /// [`ReadWrite::write_bytes_queueable`] must always be `Some`.
     ///
     /// # Panic
     ///

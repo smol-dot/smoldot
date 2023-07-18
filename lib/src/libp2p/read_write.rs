@@ -119,9 +119,9 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         out
     }
 
-    /// Copies as much as possible from the content of `data` to [`ReadWrite::outgoing_buffer`]
-    /// and increases [`ReadWrite::written_bytes`]. The bytes that have been written are removed
-    /// from `data`.
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::write_buffers`]
+    /// and updates [`ReadWrite::write_bytes_queued`] and [`ReadWrite::write_bytes_queueable`].
+    /// The bytes that have been written are removed from `data`.
     pub fn write_from_vec_deque(&mut self, data: &mut VecDeque<u8>) {
         let (slice1, slice2) = data.as_slices();
 

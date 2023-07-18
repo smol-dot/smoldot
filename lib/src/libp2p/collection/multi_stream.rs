@@ -839,7 +839,7 @@ where
     /// writing side of the substream was still open, then the user should reset that substream.
     ///
     /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
-    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    /// [`ReadWrite::write_bytes_queueable`] must always be `Some`.
     ///
     /// # Panic
     ///
