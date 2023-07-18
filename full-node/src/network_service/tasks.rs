@@ -125,7 +125,16 @@ pub(super) async fn established_connection_task(
 
             let mut read_write = service::ReadWrite {
                 now,
-                incoming_buffer: read_buffer.map(|b| b.0),
+                expected_incoming_bytes: if read_buffer.is_some() { Some(0) } else { None },
+                incoming_buffer: if let Some(read_buffer) = read_buffer {
+                    // TODO: overhead
+                    let mut buf = Vec::with_capacity(read_buffer.0.len() + read_buffer.1.len());
+                    buf.extend_from_slice(read_buffer.0);
+                    buf.extend_from_slice(read_buffer.1);
+                    buf
+                } else {
+                    Vec::new()
+                },
                 read_bytes: 0,
                 write_buffers: Vec::new(),
                 write_bytes_queued: 0,

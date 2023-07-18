@@ -26,8 +26,8 @@ use std::time::Duration;
 struct TwoEstablished {
     alice: SingleStream<Duration, ()>,
     bob: SingleStream<Duration, ()>,
-    alice_to_bob_buffer: Vec<Vec<u8>>,
-    bob_to_alice_buffer: Vec<Vec<u8>>,
+    alice_to_bob_buffer: Vec<u8>,
+    bob_to_alice_buffer: Vec<u8>,
 
     alice_to_bob_buffer_size: usize,
     bob_to_alice_buffer_size: usize,
@@ -58,8 +58,8 @@ fn perform_handshake(
         single_stream_handshake::Handshake::noise_yamux(&alice_key, &rand::random(), true);
     let mut bob = single_stream_handshake::Handshake::noise_yamux(&bob_key, &rand::random(), false);
 
-    let mut alice_to_bob_buffer = Vec::<Vec<u8>>::new();
-    let mut bob_to_alice_buffer = Vec::<Vec<u8>>::new();
+    let mut alice_to_bob_buffer = Vec::new();
+    let mut bob_to_alice_buffer = Vec::new();
 
     while !matches!(
         (&alice, &bob),
@@ -73,25 +73,26 @@ fn perform_handshake(
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let mut read_write = ReadWrite {
                     now: Duration::new(0, 0),
-                    incoming_buffer: Some(
-                        bob_to_alice_buffer.first().map(|b| &b[..]).unwrap_or(&[]),
-                    ),
+                    incoming_buffer: bob_to_alice_buffer,
+                    expected_incoming_bytes: Some(0),
                     read_bytes: 0,
                     write_buffers: Vec::new(),
                     write_bytes_queued: 0,
                     write_bytes_queueable: Some(
-                        alice_to_bob_buffer_size
-                            - alice_to_bob_buffer.iter().fold(0, |a, b| a + b.len()),
+                        alice_to_bob_buffer_size - alice_to_bob_buffer.len(),
                     ),
                     wake_up_after: None,
                 };
 
                 alice = nego.read_write(&mut read_write).unwrap();
-                alice_to_bob_buffer.extend(read_write.write_buffers.drain(..));
+                bob_to_alice_buffer = read_write.incoming_buffer;
+                alice_to_bob_buffer.extend(
+                    read_write
+                        .write_buffers
+                        .drain(..)
+                        .flat_map(|b| b.into_iter()),
+                );
                 for _ in 0..read_write.read_bytes {
-                    bob_to_alice_buffer.first_mut().unwrap().remove(0);
-                }
-                if bob_to_alice_buffer.first().map_or(false, |b| b.is_empty()) {
                     bob_to_alice_buffer.remove(0);
                 }
             }
@@ -102,25 +103,26 @@ fn perform_handshake(
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let mut read_write = ReadWrite {
                     now: Duration::new(0, 0),
-                    incoming_buffer: Some(
-                        alice_to_bob_buffer.first().map(|b| &b[..]).unwrap_or(&[]),
-                    ),
+                    incoming_buffer: alice_to_bob_buffer,
+                    expected_incoming_bytes: Some(0),
                     read_bytes: 0,
                     write_buffers: Vec::new(),
                     write_bytes_queued: 0,
                     write_bytes_queueable: Some(
-                        bob_to_alice_buffer_size
-                            - bob_to_alice_buffer.iter().fold(0, |a, b| a + b.len()),
+                        bob_to_alice_buffer_size - bob_to_alice_buffer.len(),
                     ),
                     wake_up_after: None,
                 };
 
                 bob = nego.read_write(&mut read_write).unwrap();
-                bob_to_alice_buffer.extend(read_write.write_buffers.drain(..));
+                alice_to_bob_buffer = read_write.incoming_buffer;
+                bob_to_alice_buffer.extend(
+                    read_write
+                        .write_buffers
+                        .drain(..)
+                        .flat_map(|b| b.into_iter()),
+                );
                 for _ in 0..read_write.read_bytes {
-                    alice_to_bob_buffer.first_mut().unwrap().remove(0);
-                }
-                if alice_to_bob_buffer.first().map_or(false, |b| b.is_empty()) {
                     alice_to_bob_buffer.remove(0);
                 }
             }
@@ -174,38 +176,28 @@ impl TwoEstablished {
         loop {
             let mut alice_read_write = ReadWrite {
                 now: self.now,
-                incoming_buffer: Some(
-                    self.bob_to_alice_buffer
-                        .first()
-                        .map(|b| &b[..])
-                        .unwrap_or(&[]),
-                ),
+                incoming_buffer: self.bob_to_alice_buffer,
+                expected_incoming_bytes: Some(0),
                 read_bytes: 0,
                 write_buffers: Vec::new(),
                 write_bytes_queued: 0,
                 write_bytes_queueable: Some(
-                    self.alice_to_bob_buffer_size
-                        - self.alice_to_bob_buffer.iter().fold(0, |a, b| a + b.len()),
+                    self.alice_to_bob_buffer_size - self.alice_to_bob_buffer.len(),
                 ),
                 wake_up_after: self.wake_up_after,
             };
 
             let (new_alice, alice_event) = self.alice.read_write(&mut alice_read_write).unwrap();
+            self.bob_to_alice_buffer = alice_read_write.incoming_buffer;
             self.alice = new_alice;
             let alice_read_bytes = alice_read_write.read_bytes;
             let alice_written_bytes = alice_read_write.write_bytes_queued;
-            self.alice_to_bob_buffer
-                .extend(alice_read_write.write_buffers.drain(..));
-            for _ in 0..alice_read_write.read_bytes {
-                self.bob_to_alice_buffer.first_mut().unwrap().remove(0);
-            }
-            if self
-                .bob_to_alice_buffer
-                .first()
-                .map_or(false, |b| b.is_empty())
-            {
-                self.bob_to_alice_buffer.remove(0);
-            }
+            self.alice_to_bob_buffer.extend(
+                alice_read_write
+                    .write_buffers
+                    .drain(..)
+                    .flat_map(|b| b.into_iter()),
+            );
 
             if let Some(event) = alice_event {
                 return (self, either::Left(event));
@@ -213,38 +205,28 @@ impl TwoEstablished {
 
             let mut bob_read_write = ReadWrite {
                 now: self.now,
-                incoming_buffer: Some(
-                    self.alice_to_bob_buffer
-                        .first()
-                        .map(|b| &b[..])
-                        .unwrap_or(&[]),
-                ),
+                incoming_buffer: self.alice_to_bob_buffer,
+                expected_incoming_bytes: Some(0),
                 read_bytes: 0,
                 write_buffers: Vec::new(),
                 write_bytes_queued: 0,
                 write_bytes_queueable: Some(
-                    self.bob_to_alice_buffer_size
-                        - self.bob_to_alice_buffer.iter().fold(0, |a, b| a + b.len()),
+                    self.bob_to_alice_buffer_size - self.bob_to_alice_buffer.len(),
                 ),
                 wake_up_after: self.wake_up_after,
             };
 
             let (new_bob, bob_event) = self.bob.read_write(&mut bob_read_write).unwrap();
+            self.alice_to_bob_buffer = bob_read_write.incoming_buffer;
             self.bob = new_bob;
             let bob_read_bytes = bob_read_write.read_bytes;
             let bob_written_bytes = bob_read_write.write_bytes_queued;
-            self.bob_to_alice_buffer
-                .extend(bob_read_write.write_buffers.drain(..));
-            for _ in 0..bob_read_write.read_bytes {
-                self.alice_to_bob_buffer.first_mut().unwrap().remove(0);
-            }
-            if self
-                .alice_to_bob_buffer
-                .first()
-                .map_or(false, |b| b.is_empty())
-            {
-                self.alice_to_bob_buffer.remove(0);
-            }
+            self.bob_to_alice_buffer.extend(
+                bob_read_write
+                    .write_buffers
+                    .drain(..)
+                    .flat_map(|b| b.into_iter()),
+            );
 
             if let Some(event) = bob_event {
                 return (self, either::Right(event));

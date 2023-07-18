@@ -41,7 +41,7 @@ use super::{
     yamux,
 };
 
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{cmp, fmt};
 
 mod tests;
@@ -89,7 +89,7 @@ enum NegotiationState {
     Multiplexing {
         peer_id: PeerId,
         encryption: Box<noise::Noise>,
-        decrypted_data_buffer: VecDeque<u8>,
+        decrypted_data_buffer: Vec<u8>,
         negotiation: multistream_select::InProgress<&'static str>,
     },
 }
@@ -137,7 +137,7 @@ impl HealthyHandshake {
     /// the connection should be closed altogether.
     pub fn read_write<TNow>(
         mut self,
-        read_write: &mut ReadWrite<'_, TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> Result<Handshake, HandshakeError> {
         loop {
             match self.state {
@@ -211,7 +211,7 @@ impl HealthyHandshake {
                             self.state = NegotiationState::Multiplexing {
                                 peer_id: remote_peer_id,
                                 encryption: Box::new(cipher),
-                                decrypted_data_buffer: VecDeque::with_capacity(65536),
+                                decrypted_data_buffer: Vec::with_capacity(65536),
                                 negotiation,
                             };
 
@@ -234,7 +234,7 @@ impl HealthyHandshake {
                     // During the multiplexing protocol negotiation, all exchanges have to go
                     // through the Noise cipher.
 
-                    if read_write.incoming_buffer.is_none() {
+                    if read_write.expected_incoming_bytes.is_none() {
                         return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::ReadClosed,
                         ));
@@ -247,17 +247,15 @@ impl HealthyHandshake {
 
                     // TODO: explain
                     let num_read = encryption
-                        .decrypt_to_vecdeque(
-                            read_write.incoming_buffer.unwrap(),
-                            &mut decrypted_data_buffer,
-                        )
+                        .decrypt_to_vec(&read_write.incoming_buffer, &mut decrypted_data_buffer)
                         .map_err(HandshakeError::Noise)?;
-                    read_write.advance_read(num_read);
+                    let _ = read_write.incoming_bytes_take(num_read);
 
                     // Continue the multistream-select negotiation.
                     let mut interm_read_write = ReadWrite {
                         now: 0,
-                        incoming_buffer: Some(decrypted_data_buffer.as_slices().0),
+                        incoming_buffer: decrypted_data_buffer,
+                        expected_incoming_bytes: Some(0),
                         read_bytes: 0,
                         write_buffers: Vec::new(),
                         write_bytes_queued: 0,
@@ -275,17 +273,14 @@ impl HealthyHandshake {
                         .read_write(&mut interm_read_write)
                         .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
 
+                    decrypted_data_buffer = interm_read_write.incoming_buffer;
+
                     if interm_read_write.write_bytes_queued >= 1 {
                         for encrypted_buffer in
                             encryption.encrypt(interm_read_write.write_buffers.into_iter())
                         {
                             read_write.write_out(encrypted_buffer);
                         }
-                    }
-
-                    // TODO: can the logic get stuck because the user stops calling this function if the negotiation only consumes from decrypted_data_buffer?
-                    for _ in 0..interm_read_write.read_bytes {
-                        let _ = decrypted_data_buffer.pop_front();
                     }
 
                     return match negotiation_update {

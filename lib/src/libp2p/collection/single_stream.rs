@@ -554,7 +554,7 @@ where
     ///
     /// Panics if [`SingleStreamConnectionTask::reset`] has been called in the past.
     ///
-    pub fn read_write(&mut self, read_write: &'_ mut ReadWrite<'_, TNow>) {
+    pub fn read_write(&mut self, read_write: &'_ mut ReadWrite<TNow>) {
         // There is already at least one pending message. We back-pressure the connection by not
         // performing any reading or writing, as this might generate more messages and open the
         // door for a DoS attack by the remote. As documented, the API user is supposed to pull
