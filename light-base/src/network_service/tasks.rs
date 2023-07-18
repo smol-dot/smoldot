@@ -21,8 +21,8 @@ use crate::platform::{
     SubstreamDirection,
 };
 
-use alloc::{vec, vec::Vec};
-use core::{cmp, iter, pin};
+use alloc::vec::Vec;
+use core::{iter, mem, pin};
 use futures_lite::FutureExt as _;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use smoldot::{
@@ -199,12 +199,8 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
 
-    // In order to write data on a stream, we simply pass a slice, and the platform will copy
-    // from this slice the data to send. Consequently, the write buffer is held locally. This is
-    // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
-    // to implement it this way.
-    // Switched to `None` after the connection closes its writing side.
-    let mut write_buffer = Some(vec![0; 4096]);
+    // `false` as long as the writing side of the connection is open.
+    let mut write_closed = false;
 
     // The main loop is as follows:
     // - Update the state machine.
@@ -223,11 +219,11 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         let now = platform.now();
 
         let (read_bytes, written_bytes, wake_up_after) = if !connection_task.is_reset_called() {
-            let write_side_was_open = write_buffer.is_some();
-            let writable_bytes = cmp::min(
-                platform.writable_bytes(&mut connection),
-                write_buffer.as_ref().map_or(0, |b| b.len()),
-            );
+            let write_bytes_queueable = if !write_closed {
+                Some(platform.writable_bytes(&mut connection))
+            } else {
+                None
+            };
 
             let incoming_buffer = match platform.read_buffer(&mut connection) {
                 ReadBuffer::Reset => {
@@ -242,11 +238,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             let mut read_write = ReadWrite {
                 now: now.clone(),
                 incoming_buffer,
-                outgoing_buffer: write_buffer
-                    .as_mut()
-                    .map(|b| (&mut b[..writable_bytes], &mut [][..])),
                 read_bytes: 0,
-                written_bytes: 0,
+                write_buffers: Vec::new(),
+                write_bytes_queued: 0,
+                write_bytes_queueable,
                 wake_up_after: None,
             };
             connection_task.read_write(&mut read_write);
@@ -256,29 +251,25 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // information from it.
             let read_bytes = read_write.read_bytes;
             debug_assert!(read_bytes <= incoming_buffer.as_ref().map_or(0, |b| b.len()));
-            let write_size_closed = write_side_was_open && read_write.outgoing_buffer.is_none();
-            let written_bytes = read_write.written_bytes;
-            debug_assert!(written_bytes <= writable_bytes);
+            let write_size_closed = !write_closed && read_write.write_bytes_queueable.is_none();
+            let write_bytes_queued = read_write.write_bytes_queued;
+            let write_buffers = mem::take(&mut read_write.write_buffers);
+            debug_assert!(write_bytes_queued <= write_bytes_queueable.unwrap_or(0));
             let wake_up_after = read_write.wake_up_after.clone();
             drop(read_write);
 
             // Now update the connection.
-            if written_bytes != 0 {
-                // `written_bytes`non-zero when the writing side has been closed before
-                // doesn't make sense and would indicate a bug in the networking code
-                platform.send(
-                    &mut connection,
-                    &write_buffer.as_mut().unwrap()[..written_bytes],
-                );
+            for buffer in write_buffers {
+                platform.send(&mut connection, &buffer);
             }
             if write_size_closed {
                 platform.close_send(&mut connection);
-                debug_assert!(write_buffer.is_some());
-                write_buffer = None;
+                debug_assert!(!write_closed);
+                write_closed = true;
             }
             platform.advance_read_cursor(&mut connection, read_bytes);
 
-            (read_bytes, written_bytes, wake_up_after)
+            (read_bytes, write_bytes_queued, wake_up_after)
         } else {
             (0, 0, None)
         };
@@ -405,14 +396,6 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     // For each stream, a boolean indicates whether the local writing side is closed.
     let mut open_substreams = slab::Slab::<(TPlat::Stream, bool)>::with_capacity(16);
 
-    // In order to write data on a stream, we simply pass a slice, and the platform will copy
-    // from this slice the data to send. Consequently, the write buffer is held locally. This is
-    // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
-    // to implement it this way.
-    // The write buffer is limited to 16kiB, as this is the maximum amount of data a single
-    // WebRTC frame can have.
-    let mut write_buffer = vec![0; 16384];
-
     loop {
         // Start opening new outbound substreams, if needed.
         for _ in 0..connection_task
@@ -458,8 +441,11 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             loop {
                 let (substream, write_side_was_open) = &mut open_substreams[substream_id];
 
-                let writable_bytes =
-                    cmp::min(platform.writable_bytes(substream), write_buffer.len());
+                let write_bytes_queueable = if !*write_side_was_open {
+                    Some(platform.writable_bytes(substream))
+                } else {
+                    None
+                };
 
                 let incoming_buffer = match platform.read_buffer(substream) {
                     ReadBuffer::Open(buf) => buf,
@@ -475,17 +461,14 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 let mut read_write = ReadWrite {
                     now: now.clone(),
                     incoming_buffer: Some(incoming_buffer),
-                    outgoing_buffer: if *write_side_was_open {
-                        Some((&mut write_buffer[..writable_bytes], &mut []))
-                    } else {
-                        None
-                    },
                     read_bytes: 0,
-                    written_bytes: 0,
+                    write_buffers: Vec::new(),
+                    write_bytes_queued: 0,
+                    write_bytes_queueable,
                     wake_up_after,
                 };
 
-                debug_assert!(read_write.outgoing_buffer.is_some());
+                debug_assert!(read_write.write_bytes_queueable.is_some());
 
                 let substream_fate =
                     connection_task.substream_read_write(&substream_id, &mut read_write);
@@ -495,15 +478,16 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 // information from it.
                 let read_bytes = read_write.read_bytes;
                 debug_assert!(read_bytes <= incoming_buffer.len());
-                let written_bytes = read_write.written_bytes;
+                let written_bytes = read_write.write_bytes_queued;
+                let write_buffers = mem::take(&mut read_write.write_buffers);
                 let must_close_writing_side =
-                    *write_side_was_open && read_write.outgoing_buffer.is_none();
+                    *write_side_was_open && read_write.write_bytes_queueable.is_none();
                 wake_up_after = read_write.wake_up_after.take();
                 drop(read_write);
 
                 // Now update the connection.
-                if written_bytes != 0 {
-                    platform.send(substream, &write_buffer[..written_bytes]);
+                for buffer in write_buffers {
+                    platform.send(substream, &buffer);
                 }
                 if must_close_writing_side {
                     platform.close_send(substream);

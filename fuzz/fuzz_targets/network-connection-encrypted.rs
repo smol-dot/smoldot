@@ -25,7 +25,7 @@ use smoldot::libp2p::{
     read_write::ReadWrite,
 };
 
-use core::{cmp, time::Duration};
+use core::{iter, time::Duration};
 
 // This fuzzing target simulates an incoming or outgoing connection whose handshake has succeeded.
 // The remote endpoint of that connection sends the fuzzing data to smoldot after it has been
@@ -61,8 +61,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     // Store the data that the local has emitted but the remote hasn't received yet, and vice
     // versa.
-    let mut local_to_remote_buffer = Vec::with_capacity(8192);
-    let mut remote_to_local_buffer = Vec::with_capacity(8192);
+    let mut local_to_remote_buffer = Vec::<Vec<u8>>::new();
+    let mut remote_to_local_buffer = Vec::<Vec<u8>>::new();
 
     // Perform handshake.
     while !matches!(
@@ -75,58 +75,68 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         match local {
             single_stream_handshake::Handshake::Success { .. } => {}
             single_stream_handshake::Handshake::Healthy(nego) => {
-                let local_to_remote_buffer_len = local_to_remote_buffer.len();
-                if local_to_remote_buffer_len < local_to_remote_buffer.capacity() {
-                    let cap = local_to_remote_buffer.capacity();
-                    local_to_remote_buffer.resize(cap, 0);
-                }
                 let mut read_write = ReadWrite {
                     now: Duration::new(0, 0),
-                    incoming_buffer: Some(&remote_to_local_buffer),
-                    outgoing_buffer: Some((
-                        &mut local_to_remote_buffer[local_to_remote_buffer_len..],
-                        &mut [],
-                    )),
+                    incoming_buffer: Some(
+                        remote_to_local_buffer
+                            .first()
+                            .map(|b| &b[..])
+                            .unwrap_or(&[]),
+                    ),
                     read_bytes: 0,
-                    written_bytes: 0,
+                    write_buffers: Vec::new(),
+                    write_bytes_queued: 0,
+                    write_bytes_queueable: Some(
+                        8162 - local_to_remote_buffer.iter().fold(0, |c, b| c + b.len()),
+                    ),
                     wake_up_after: None,
                 };
 
                 local = nego.read_write(&mut read_write).unwrap();
-                let (read_bytes, written_bytes) = (read_write.read_bytes, read_write.written_bytes);
-                for _ in 0..read_bytes {
+                local_to_remote_buffer.extend(read_write.write_buffers.drain(..));
+                for _ in 0..read_write.read_bytes {
+                    remote_to_local_buffer.first_mut().unwrap().remove(0);
+                }
+                if remote_to_local_buffer
+                    .first()
+                    .map_or(false, |b| b.is_empty())
+                {
                     remote_to_local_buffer.remove(0);
                 }
-                local_to_remote_buffer.truncate(local_to_remote_buffer_len + written_bytes);
             }
         }
 
         match remote {
             single_stream_handshake::Handshake::Success { .. } => {}
             single_stream_handshake::Handshake::Healthy(nego) => {
-                let remote_to_local_buffer_len = remote_to_local_buffer.len();
-                if remote_to_local_buffer_len < remote_to_local_buffer.capacity() {
-                    let cap = remote_to_local_buffer.capacity();
-                    remote_to_local_buffer.resize(cap, 0);
-                }
                 let mut read_write = ReadWrite {
                     now: Duration::new(0, 0),
-                    incoming_buffer: Some(&local_to_remote_buffer),
-                    outgoing_buffer: Some((
-                        &mut remote_to_local_buffer[remote_to_local_buffer_len..],
-                        &mut [],
-                    )),
+                    incoming_buffer: Some(
+                        local_to_remote_buffer
+                            .first()
+                            .map(|b| &b[..])
+                            .unwrap_or(&[]),
+                    ),
                     read_bytes: 0,
-                    written_bytes: 0,
+                    write_buffers: Vec::new(),
+                    write_bytes_queued: 0,
+                    write_bytes_queueable: Some(
+                        8162 - remote_to_local_buffer.iter().fold(0, |c, b| c + b.len()),
+                    ),
                     wake_up_after: None,
                 };
 
                 remote = nego.read_write(&mut read_write).unwrap();
-                let (read_bytes, written_bytes) = (read_write.read_bytes, read_write.written_bytes);
-                for _ in 0..read_bytes {
+                remote_to_local_buffer.extend(read_write.write_buffers.drain(..));
+                for _ in 0..read_write.read_bytes {
+                    local_to_remote_buffer.first_mut().unwrap().remove(0);
+                }
+                if local_to_remote_buffer
+                    .first()
+                    .map_or(false, |b| b.is_empty())
+                {
                     local_to_remote_buffer.remove(0);
                 }
-                remote_to_local_buffer.truncate(remote_to_local_buffer_len + written_bytes);
             }
         }
     }
@@ -155,35 +165,27 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     };
 
     // From this point on we will just discard the data sent by `local`.
-    // Reset the buffer and fill it with zeroes.
-    local_to_remote_buffer = vec![0; 8192];
 
     // We now encrypt the fuzzing data and add it to the buffer to send to the remote. This is
     // done all in one go.
-    {
-        let mut encrypted = vec![0; 65536];
-        let mut encrypt = remote.encrypt((&mut encrypted, &mut [])).unwrap();
-        let mut num_written = 0;
-        for buffer in encrypt.unencrypted_write_buffers() {
-            let to_copy = cmp::min(data.len(), buffer.len());
-            if to_copy == 0 {
-                break;
-            }
-            buffer[..to_copy].copy_from_slice(&data[..to_copy]);
-            num_written += to_copy;
-        }
-        let written = encrypt.encrypt(num_written);
-        remote_to_local_buffer.extend_from_slice(&encrypted[..written]);
+    for buffer in remote.encrypt(iter::once(data.to_vec())) {
+        remote_to_local_buffer.push(buffer);
     }
 
     // Now send the data to the connection.
     loop {
         let mut local_read_write = ReadWrite {
             now: Duration::new(0, 0),
-            incoming_buffer: Some(&remote_to_local_buffer),
-            outgoing_buffer: Some((&mut local_to_remote_buffer, &mut [])),
+            incoming_buffer: Some(
+                remote_to_local_buffer
+                    .first()
+                    .map(|b| &b[..])
+                    .unwrap_or(&[]),
+            ),
             read_bytes: 0,
-            written_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: Some(8192),
             wake_up_after: None,
         };
 
@@ -195,10 +197,18 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             Err(_) => return, // Invalid data. Counts as fuzzing success.
         };
 
-        let (local_read_bytes, local_written_bytes) =
-            (local_read_write.read_bytes, local_read_write.written_bytes);
+        let (local_read_bytes, local_written_bytes) = (
+            local_read_write.read_bytes,
+            local_read_write.write_bytes_queued,
+        );
 
-        for _ in 0..local_read_bytes {
+        for _ in 0..local_read_write.read_bytes {
+            remote_to_local_buffer.first_mut().unwrap().remove(0);
+        }
+        if remote_to_local_buffer
+            .first()
+            .map_or(false, |b| b.is_empty())
+        {
             remote_to_local_buffer.remove(0);
         }
 

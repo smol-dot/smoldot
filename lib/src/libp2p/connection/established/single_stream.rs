@@ -56,7 +56,7 @@ use super::{
     Config, Event, SubstreamId, SubstreamIdInner,
 };
 
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
 use core::{
     cmp, fmt,
     num::{NonZeroU32, NonZeroUsize},
@@ -123,16 +123,6 @@ struct Inner<TNow, TSubUd> {
     ping_interval: Duration,
     /// See [`Config::ping_timeout`].
     ping_timeout: Duration,
-
-    /// Buffer used for intermediary data. When it is necessary, data is first copied here before
-    /// being turned into a `Vec`.
-    ///
-    /// While in theory this intermediary buffer could be shared between multiple different
-    /// connections, since data present in this buffer isn't always zero-ed, it could be possible
-    /// for a bug to cause data destined for connection A to be sent to connection B. Sharing this
-    /// buffer is too dangerous.
-    // TODO: remove; needs a lot of refactoring of noise and yamux
-    intermediary_buffer: Box<[u8]>,
 }
 
 impl<TNow, TSubUd> SingleStream<TNow, TSubUd>
@@ -459,9 +449,10 @@ where
                         let mut substream_read_write = ReadWrite {
                             now: read_write.now.clone(),
                             incoming_buffer: None,
-                            outgoing_buffer: None,
+                            write_buffers: Vec::new(),
+                            write_bytes_queued: 0,
+                            write_bytes_queueable: None,
                             read_bytes: 0,
-                            written_bytes: 0,
                             wake_up_after: None,
                         };
 
@@ -470,7 +461,7 @@ where
 
                         debug_assert!(
                             substream_read_write.read_bytes == 0
-                                && substream_read_write.written_bytes == 0
+                                && substream_read_write.write_bytes_queued == 0
                         );
 
                         if let Some(wake_up_after) = substream_read_write.wake_up_after {
@@ -511,27 +502,23 @@ where
             // The API user is supposed to call `read_write` in a loop until the number of bytes
             // written out is 0, meaning that there's no need to set `must_continue_looping` to
             // `true`.
-            let mut encrypt = self
-                .encryption
-                .encrypt(match read_write.outgoing_buffer.as_mut() {
-                    Some((a, b)) => (a, b),
-                    None => (&mut [], &mut []),
-                })
-                .map_err(Error::NoiseEncrypt)?;
-            let mut unencrypted_data_written = 0;
-            'main_write: for mut dest in encrypt.unencrypted_write_buffers() {
-                loop {
-                    let Some(buffer) = self.inner.yamux.extract_next(dest.len()) else {
-                        break 'main_write;
-                    };
-                    let buffer = buffer.as_ref();
-                    dest[..buffer.len()].copy_from_slice(buffer);
-                    dest = &mut dest[buffer.len()..];
-                    unencrypted_data_written += buffer.len();
+            let mut yamux_out = Vec::new();
+            let mut remain_writable = cmp::min(
+                read_write
+                    .write_bytes_queueable
+                    .unwrap_or(0)
+                    .saturating_sub(16 + 2),
+                65535 - 16,
+            ); // TODO: Noise implementation detail
+            while let Some(buffer) = self.inner.yamux.extract_next(remain_writable) {
+                remain_writable -= buffer.as_ref().len();
+                yamux_out.push(buffer.as_ref().to_vec());
+            }
+            if !yamux_out.is_empty() {
+                for encrypted_buffer in self.encryption.encrypt(yamux_out.into_iter()) {
+                    read_write.write_out(encrypted_buffer);
                 }
             }
-            let advance_write = encrypt.encrypt(unencrypted_data_written);
-            read_write.advance_write(advance_write);
 
             // If `must_continue_looping` is still false, then we didn't do anything meaningful
             // during this iteration. Return due to idleness.
@@ -579,13 +566,14 @@ where
             } else {
                 Some(in_data)
             },
-            outgoing_buffer: if !write_is_closed {
-                Some((&mut inner.intermediary_buffer, &mut []))
-            } else {
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: if write_is_closed {
                 None
+            } else {
+                Some(usize::max_value())
             },
             read_bytes: 0,
-            written_bytes: 0,
             wake_up_after: None,
         };
 
@@ -595,21 +583,16 @@ where
             outer_read_write.wake_up_after(&wake_up_after);
         }
 
-        let closed_after = substream_read_write.outgoing_buffer.is_none();
+        let closed_after = substream_read_write.write_bytes_queueable.is_none();
         let read_bytes = substream_read_write.read_bytes;
-        let written_bytes = substream_read_write.written_bytes;
-        if written_bytes != 0 {
+        for buffer in substream_read_write.write_buffers {
+            if buffer.is_empty() {
+                continue;
+            }
             debug_assert!(!write_is_closed);
-            inner
-                .yamux
-                .write(
-                    substream_id,
-                    inner.intermediary_buffer[..written_bytes].to_vec(),
-                )
-                .unwrap();
+            inner.yamux.write(substream_id, buffer).unwrap();
         }
         if !write_is_closed && closed_after {
-            debug_assert_eq!(written_bytes, 0);
             inner.yamux.close(substream_id).unwrap();
         }
 
@@ -1164,7 +1147,6 @@ impl ConnectionPrototype {
                 max_protocol_name_len: config.max_protocol_name_len,
                 ping_interval: config.ping_interval,
                 ping_timeout: config.ping_timeout,
-                intermediary_buffer: vec![0u8; 2048].into_boxed_slice(),
             }),
         }
     }

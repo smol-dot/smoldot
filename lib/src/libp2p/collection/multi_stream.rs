@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::util::{self, protobuf};
+use crate::util::{leb128, protobuf};
 
 use super::{
     super::{
@@ -27,7 +27,7 @@ use super::{
     SubstreamFate, SubstreamId,
 };
 
-use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec::Vec};
 use core::{
     cmp,
     hash::Hash,
@@ -839,7 +839,7 @@ where
     /// writing side of the substream was still open, then the user should reset that substream.
     ///
     /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
-    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    /// [`ReadWrite::write_bytes_queueable`] must always be `Some`.
     ///
     /// # Panic
     ///
@@ -855,7 +855,7 @@ where
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but
         // we do it here again because we're not necessarily in the ̀`established` state.
-        assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
+        assert!(read_write.incoming_buffer.is_some() && read_write.write_bytes_queueable.is_some());
 
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
@@ -923,23 +923,20 @@ where
                     }
                 };
 
-                // We allocate a buffer where the Noise state machine will temporarily write out
-                // its data. The size of the buffer is capped in order to prevent the substream
-                // from generating data that wouldn't fit in a single protobuf frame.
-                let mut intermediary_write_buffer =
-                    vec![
-                        0;
-                        cmp::min(read_write.outgoing_buffer_available(), 16384).saturating_sub(10)
-                    ]; // TODO: this -10 calculation is hacky because we need to account for the variable length prefixes everywhere
-
                 let mut sub_read_write = ReadWrite {
                     now: read_write.now.clone(),
                     incoming_buffer: Some(
                         &message_within_frame[*handshake_read_buffer_partial_read..],
                     ),
-                    outgoing_buffer: Some((&mut intermediary_write_buffer, &mut [])),
                     read_bytes: 0,
-                    written_bytes: 0,
+                    write_buffers: Vec::new(),
+                    write_bytes_queued: read_write.write_bytes_queued,
+                    // Don't write out more than one frame.
+                    // TODO: this `10` is here for the length and protobuf frame size and is a bit hacky
+                    write_bytes_queueable: Some(
+                        cmp::min(read_write.write_bytes_queueable.unwrap(), 16384)
+                            .saturating_sub(10),
+                    ),
                     wake_up_after: None,
                 };
 
@@ -951,33 +948,25 @@ where
 
                 // Send out the message that the Noise handshake has written
                 // into `intermediary_write_buffer`.
-                if sub_read_write.written_bytes != 0 {
-                    let written_bytes = sub_read_write.written_bytes;
+                if sub_read_write.write_bytes_queued != read_write.write_bytes_queued {
+                    let written_bytes =
+                        sub_read_write.write_bytes_queued - read_write.write_bytes_queued;
                     drop(sub_read_write);
 
-                    debug_assert!(written_bytes <= intermediary_write_buffer.len());
-
-                    let protobuf_frame =
-                        protobuf::bytes_tag_encode(2, &intermediary_write_buffer[..written_bytes]);
-                    let protobuf_frame_len = protobuf_frame.clone().fold(0, |mut l, b| {
-                        l += AsRef::<[u8]>::as_ref(&b).len();
-                        l
-                    });
+                    // TODO: don't do the encoding manually but use the protobuf module?
+                    let tag = protobuf::tag_encode(2, 2).collect::<Vec<_>>();
+                    let data_len = leb128::encode_usize(written_bytes).collect::<Vec<_>>();
+                    let libp2p_prefix =
+                        leb128::encode_usize(tag.len() + data_len.len()).collect::<Vec<_>>();
 
                     // The spec mentions that a frame plus its length prefix shouldn't exceed
                     // 16kiB. This is normally ensured by forbidding the substream from writing
                     // more data than would fit in 16kiB.
-                    debug_assert!(protobuf_frame_len <= 16384);
-                    debug_assert!(
-                        util::leb128::encode_usize(protobuf_frame_len).count() + protobuf_frame_len
-                            <= 16384
-                    );
-                    for byte in util::leb128::encode_usize(protobuf_frame_len) {
-                        read_write.write_out(&[byte]);
-                    }
-                    for buffer in protobuf_frame {
-                        read_write.write_out(AsRef::<[u8]>::as_ref(&buffer));
-                    }
+                    debug_assert!(libp2p_prefix.len() + tag.len() + data_len.len() <= 16384);
+
+                    read_write.write_out(libp2p_prefix);
+                    read_write.write_out(tag);
+                    read_write.write_out(data_len);
                 }
 
                 if protobuf_frame_size != 0

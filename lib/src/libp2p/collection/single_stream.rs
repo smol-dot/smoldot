@@ -794,7 +794,7 @@ where
 
                 loop {
                     let (read_before, written_before) =
-                        (read_write.read_bytes, read_write.written_bytes);
+                        (read_write.read_bytes, read_write.write_bytes_queued);
 
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
@@ -816,7 +816,7 @@ where
                     match result {
                         single_stream_handshake::Handshake::Healthy(updated_handshake)
                             if (read_before, written_before)
-                                == (read_write.read_bytes, read_write.written_bytes) =>
+                                == (read_write.read_bytes, read_write.write_bytes_queued) =>
                         {
                             self.connection = SingleStreamConnectionTaskInner::Handshake {
                                 handshake: updated_handshake,

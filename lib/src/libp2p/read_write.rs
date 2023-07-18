@@ -15,8 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::collections::VecDeque;
-use core::{cmp, mem};
+use core::cmp;
+
+use alloc::{collections::VecDeque, vec::Vec};
 
 // TODO: documentation
 
@@ -29,21 +30,22 @@ pub struct ReadWrite<'a, TNow> {
     /// Contains `None` if the remote has closed their writing side of the socket.
     pub incoming_buffer: Option<&'a [u8]>,
 
-    /// Pointer to two consecutive buffers of uninitialized data. Can be written to in order to
-    /// write data out towards the socket.
-    ///
-    /// Contains `None` if the writing side of the socket has been closed or must be closed.
-    pub outgoing_buffer: Option<(&'a mut [u8], &'a mut [u8])>,
-
     /// Total number of bytes that have been read from [`ReadWrite::incoming_buffer`].
     ///
     /// [`ReadWrite::incoming_buffer`] must have been advanced after these bytes.
     pub read_bytes: usize,
 
-    /// Total number of bytes that have been written to [`ReadWrite::outgoing_buffer`].
-    ///
-    /// [`ReadWrite::outgoing_buffer`] must have been advanced after these bytes.
-    pub written_bytes: usize,
+    /// List of buffers containing data to the written out. The consumer of the [`ReadWrite`] is
+    /// expected to add buffers.
+    // TODO: consider changing the inner `Vec` to `Box<dyn AsRef<[u8]>>`
+    pub write_buffers: Vec<Vec<u8>>,
+
+    /// Amount of data already queued, both outside and including [`ReadWrite::write_buffers`].
+    pub write_bytes_queued: usize,
+
+    /// Number of additional bytes that are allowed to be pushed to [`ReadWrite::write_buffers`].
+    /// `None` if the writing side of the stream is closed.
+    pub write_bytes_queueable: Option<usize>,
 
     /// If `Some`, the socket must be waken up after the given `TNow` is reached.
     pub wake_up_after: Option<TNow>,
@@ -51,9 +53,9 @@ pub struct ReadWrite<'a, TNow> {
 
 impl<'a, TNow> ReadWrite<'a, TNow> {
     /// Returns true if the connection should be considered dead. That is, both
-    /// [`ReadWrite::incoming_buffer`] and [`ReadWrite::outgoing_buffer`] are `None`.
+    /// [`ReadWrite::incoming_buffer`] is `None` and [`ReadWrite::write_bytes_queueable`] is `None`.
     pub fn is_dead(&self) -> bool {
-        self.incoming_buffer.is_none() && self.outgoing_buffer.is_none()
+        self.incoming_buffer.is_none() && self.write_bytes_queueable.is_none()
     }
 
     /// Discards the first `num` bytes of [`ReadWrite::incoming_buffer`] and adds them to
@@ -72,33 +74,11 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         }
     }
 
-    /// Discards the first `num` bytes of [`ReadWrite::outgoing_buffer`] and adds them to
-    /// [`ReadWrite::written_bytes`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if `num` is superior to the size of the available buffer.
-    ///
-    pub fn advance_write(&mut self, num: usize) {
-        if let Some(ref mut outgoing_buffer) = self.outgoing_buffer {
-            self.written_bytes += num;
-
-            let out_buf_0_len = outgoing_buffer.0.len();
-            advance_buf(&mut outgoing_buffer.0, cmp::min(num, out_buf_0_len));
-            advance_buf(&mut outgoing_buffer.1, num.saturating_sub(out_buf_0_len));
-            if outgoing_buffer.0.is_empty() && !outgoing_buffer.1.is_empty() {
-                mem::swap::<&mut [u8]>(&mut outgoing_buffer.0, &mut outgoing_buffer.1);
-            }
-        } else {
-            assert_eq!(num, 0);
-        }
-    }
-
     /// Sets the writing side of the connection to closed.
     ///
-    /// This is simply a shortcut for setting [`ReadWrite::outgoing_buffer`] to `None`.
+    /// This is simply a shortcut for setting [`ReadWrite::write_bytes_queueable`] to `None`.
     pub fn close_write(&mut self) {
-        self.outgoing_buffer = None;
+        self.write_bytes_queueable = None;
     }
 
     /// Returns the size of the data available in the incoming buffer.
@@ -139,61 +119,56 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         out
     }
 
-    /// Returns the size of the available outgoing buffer.
-    pub fn outgoing_buffer_available(&self) -> usize {
-        self.outgoing_buffer
-            .as_ref()
-            .map_or(0, |(a, b)| a.len() + b.len())
-    }
-
-    /// Copies the content of `data` to [`ReadWrite::outgoing_buffer`] and increases
-    /// [`ReadWrite::written_bytes`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if `data.len() > self.outgoing_buffer_available()`.
-    ///
-    pub fn write_out(&mut self, data: &[u8]) {
-        let outgoing_buffer = match &mut self.outgoing_buffer {
-            Some(b) => b,
-            None => {
-                assert!(data.is_empty());
-                return;
-            }
-        };
-
-        assert!(data.len() <= outgoing_buffer.0.len() + outgoing_buffer.1.len());
-
-        let to_copy_buf1 = cmp::min(outgoing_buffer.0.len(), data.len());
-        let to_copy_buf2 = data.len() - to_copy_buf1;
-        debug_assert_eq!(to_copy_buf1 + to_copy_buf2, data.len());
-
-        outgoing_buffer.0[..to_copy_buf1].copy_from_slice(&data[..to_copy_buf1]);
-        outgoing_buffer.1[..to_copy_buf2].copy_from_slice(&data[to_copy_buf1..][..to_copy_buf2]);
-
-        self.advance_write(data.len());
-    }
-
-    /// Copies as much as possible from the content of `data` to [`ReadWrite::outgoing_buffer`]
-    /// and increases [`ReadWrite::written_bytes`]. The bytes that have been written are removed
-    /// from `data`.
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::write_buffers`]
+    /// and updates [`ReadWrite::write_bytes_queued`] and [`ReadWrite::write_bytes_queueable`].
+    /// The bytes that have been written are removed from `data`.
     pub fn write_from_vec_deque(&mut self, data: &mut VecDeque<u8>) {
         let (slice1, slice2) = data.as_slices();
 
-        let outgoing_available = self.outgoing_buffer_available();
-        let to_copy1 = cmp::min(slice1.len(), outgoing_available);
+        let to_copy1 = cmp::min(slice1.len(), self.write_bytes_queueable.unwrap_or(0));
         let to_copy2 = if to_copy1 == slice1.len() {
-            cmp::min(slice2.len(), outgoing_available - to_copy1)
+            cmp::min(
+                slice2.len(),
+                self.write_bytes_queueable.unwrap_or(0) - to_copy1,
+            )
         } else {
             0
         };
 
-        self.write_out(&slice1[..to_copy1]);
-        self.write_out(&slice2[..to_copy2]);
+        let total_tocopy = to_copy1 + to_copy2;
 
-        for _ in 0..(to_copy1 + to_copy2) {
+        if total_tocopy == 0 {
+            return;
+        }
+
+        self.write_buffers.push(slice1[..to_copy1].to_vec());
+        self.write_buffers.push(slice2[..to_copy2].to_vec());
+
+        self.write_bytes_queued += total_tocopy;
+        *self.write_bytes_queueable.as_mut().unwrap() -= total_tocopy;
+
+        for _ in 0..total_tocopy {
             data.pop_front();
         }
+    }
+
+    /// Adds the `data` to [`ReadWrite::write_buffers`], increases
+    /// [`ReadWrite::write_bytes_queued`], and decreases [`ReadWrite::write_bytes_queueable`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if `data.len() > write_bytes_queueable`.
+    /// Panics if the writing side is closed and `data` isn't empty.
+    ///
+    // TODO: is this function necessary? it seems dangerous due to the panic regarding queuable bytes
+    pub fn write_out(&mut self, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+        assert!(data.len() <= self.write_bytes_queueable.unwrap_or(0));
+        self.write_bytes_queued += data.len();
+        *self.write_bytes_queueable.as_mut().unwrap() -= data.len();
+        self.write_buffers.push(data);
     }
 
     /// Sets [`ReadWrite::wake_up_after`] to `min(wake_up_after, after)`.
@@ -207,11 +182,6 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             ref mut t @ None => *t = Some(after.clone()),
         }
     }
-}
-
-fn advance_buf(buf: &mut &mut [u8], n: usize) {
-    let tmp = mem::take(buf);
-    *buf = &mut tmp[n..];
 }
 
 /// See [`ReadWrite::incoming_bytes_iter`].
@@ -257,9 +227,10 @@ mod tests {
         let mut rw = ReadWrite {
             now: 0,
             incoming_buffer: Some(&[1, 2, 3]),
-            outgoing_buffer: None,
             read_bytes: 2,
-            written_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: None,
             wake_up_after: None,
         };
 
@@ -290,9 +261,10 @@ mod tests {
         let mut rw = ReadWrite {
             now: 0,
             incoming_buffer: Some(&buf),
-            outgoing_buffer: None,
             read_bytes: 5,
-            written_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: None,
             wake_up_after: None,
         };
 
@@ -306,94 +278,60 @@ mod tests {
     }
 
     #[test]
-    fn advance_write() {
-        let mut buf1 = [1, 2, 3];
-        let mut buf2 = [4, 5];
-
+    fn write_out() {
         let mut rw = ReadWrite {
             now: 0,
             incoming_buffer: None,
-            outgoing_buffer: Some((&mut buf1, &mut buf2)),
             read_bytes: 0,
-            written_bytes: 5,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 11,
+            write_bytes_queueable: Some(10),
             wake_up_after: None,
         };
 
-        rw.advance_write(1);
-        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[2, 3]);
-        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().1, &[4, 5]);
-        assert_eq!(rw.written_bytes, 6);
-
-        rw.advance_write(2);
-        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[4, 5]);
-        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
-        assert_eq!(rw.written_bytes, 8);
-
-        rw.advance_write(2);
-        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
-        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
-        assert_eq!(rw.written_bytes, 10);
-
-        let mut rw = ReadWrite {
-            now: 0,
-            incoming_buffer: None,
-            outgoing_buffer: Some((&mut buf1, &mut buf2)),
-            read_bytes: 0,
-            written_bytes: 5,
-            wake_up_after: None,
-        };
-
-        rw.advance_write(4);
-        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[5]);
-        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
-        assert_eq!(rw.written_bytes, 9);
+        rw.write_out(b"hello".to_vec());
+        assert_eq!(rw.write_buffers.len(), 1);
+        assert_eq!(rw.write_bytes_queued, 16);
+        assert_eq!(rw.write_bytes_queueable, Some(5));
     }
 
     #[test]
     fn write_from_vec_deque_smaller() {
-        let mut buf1 = [0, 0, 0];
-        let mut buf2 = [0, 0];
         let mut input = [1, 2, 3, 4].iter().cloned().collect();
 
         let mut rw = ReadWrite {
             now: 0,
             incoming_buffer: None,
-            outgoing_buffer: Some((&mut buf1, &mut buf2)),
             read_bytes: 0,
-            written_bytes: 5,
+            write_buffers: Vec::new(),
+            write_bytes_queueable: Some(5),
+            write_bytes_queued: 5,
             wake_up_after: None,
         };
 
         rw.write_from_vec_deque(&mut input);
         assert!(input.is_empty());
-        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[0]);
-        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
-        assert_eq!(rw.written_bytes, 9);
-        assert_eq!(&buf1, &[1, 2, 3]);
-        assert_eq!(&buf2, &[4, 0]);
+        assert_eq!(rw.write_bytes_queued, 9);
+        assert_eq!(rw.write_bytes_queueable, Some(1));
     }
 
     #[test]
     fn write_from_vec_deque_larger() {
-        let mut buf1 = [0, 0, 0];
-        let mut buf2 = [0, 0];
         let mut input = [1, 2, 3, 4, 5, 6].iter().cloned().collect();
 
         let mut rw = ReadWrite {
             now: 0,
             incoming_buffer: None,
-            outgoing_buffer: Some((&mut buf1, &mut buf2)),
             read_bytes: 0,
-            written_bytes: 5,
+            write_buffers: Vec::new(),
+            write_bytes_queueable: Some(5),
+            write_bytes_queued: 5,
             wake_up_after: None,
         };
 
         rw.write_from_vec_deque(&mut input);
         assert_eq!(input.into_iter().collect::<Vec<_>>(), &[6]);
-        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
-        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
-        assert_eq!(rw.written_bytes, 10);
-        assert_eq!(&buf1, &[1, 2, 3]);
-        assert_eq!(&buf2, &[4, 5]);
+        assert_eq!(rw.write_bytes_queued, 10);
+        assert_eq!(rw.write_bytes_queueable, Some(0));
     }
 }

@@ -62,21 +62,20 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         (),
     );
 
-    let mut out_buffer = vec![0; 4096];
-
     loop {
         let mut read_write = smoldot::libp2p::read_write::ReadWrite {
             now: Duration::new(0, 0),
             incoming_buffer: Some(data),
-            outgoing_buffer: Some((&mut out_buffer, &mut [])),
             read_bytes: 0,
-            written_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: Some(4096),
             wake_up_after: None,
         };
         task.read_write(&mut read_write);
 
         let read_bytes = read_write.read_bytes;
-        let written_bytes = read_write.written_bytes;
+        let written_bytes = read_write.write_bytes_queued;
         data = &data[read_bytes..];
 
         // We need to call `pull_message_to_coordinator()`, as the connection state machine might
