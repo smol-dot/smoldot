@@ -101,7 +101,7 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                     nom::combinator::map_opt(
                         nom::sequence::preceded(
                             nom::bytes::streaming::tag("0x"),
-                            nom::character::streaming::hex_digit0,
+                            nom::character::complete::hex_digit0,
                         ),
                         |hex| {
                             let mut out = Box::new([0; 32]);
@@ -123,7 +123,7 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                 nom::combinator::map(
                     nom::sequence::preceded(
                         nom::bytes::streaming::tag("/"),
-                        nom::bytes::streaming::take_till1(|c| c == '/'),
+                        nom::bytes::complete::take_till1(|c| c == '/'),
                     ),
                     |code| DeriveJunction::from_components(false, code),
                 ),
@@ -131,7 +131,7 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                 nom::combinator::map(
                     nom::sequence::preceded(
                         nom::bytes::streaming::tag("//"),
-                        nom::bytes::streaming::take_till1(|c| c == '/'),
+                        nom::bytes::complete::take_till1(|c| c == '/'),
                     ),
                     |code| DeriveJunction::from_components(true, code),
                 ),
