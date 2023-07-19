@@ -847,7 +847,7 @@ impl HandshakeInProgress {
                             (&[u8], nom::error::ErrorKind),
                             _,
                         >(nom::combinator::map(
-                            nom::bytes::complete::take(32u32),
+                            nom::bytes::streaming::take(32u32),
                             |k| <&[u8; 32]>::try_from(k).unwrap(),
                         ));
                         match parser(available_message) {
@@ -885,10 +885,10 @@ impl HandshakeInProgress {
                             (&[u8], nom::error::ErrorKind),
                             _,
                         >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::complete::take(32u32), |k| {
+                            nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
                                 <&[u8; 32]>::try_from(k).unwrap()
                             }),
-                            nom::combinator::map(nom::bytes::complete::take(48u32), |k| {
+                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
                                 <&[u8; 48]>::try_from(k).unwrap()
                             }),
                             nom::combinator::rest,
@@ -1013,7 +1013,7 @@ impl HandshakeInProgress {
                             (&[u8], nom::error::ErrorKind),
                             _,
                         >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::complete::take(48u32), |k| {
+                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
                                 <&[u8; 48]>::try_from(k).unwrap()
                             }),
                             nom::combinator::rest,

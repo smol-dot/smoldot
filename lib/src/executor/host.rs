@@ -1021,7 +1021,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1205,7 +1205,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1252,7 +1252,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(2);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1875,11 +1875,11 @@ impl ReadyToRun {
                                     nom::sequence::tuple((
                                         nom::combinator::flat_map(
                                             crate::util::nom_scale_compact_usize,
-                                            nom::bytes::complete::take,
+                                            nom::bytes::streaming::take,
                                         ),
                                         nom::combinator::flat_map(
                                             crate::util::nom_scale_compact_usize,
-                                            nom::bytes::complete::take,
+                                            nom::bytes::streaming::take,
                                         ),
                                     )),
                                 )
@@ -1940,7 +1940,7 @@ impl ReadyToRun {
                                     num_elems,
                                     nom::combinator::flat_map(
                                         crate::util::nom_scale_compact_usize,
-                                        nom::bytes::complete::take,
+                                        nom::bytes::streaming::take,
                                     ),
                                 )
                             },

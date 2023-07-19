@@ -85,9 +85,9 @@ pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
     inner_decode: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Option<O>, E> {
     nom::branch::alt((
-        nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| None),
+        nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| None),
         nom::combinator::map(
-            nom::sequence::preceded(nom::bytes::complete::tag(&[1]), inner_decode),
+            nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), inner_decode),
             Some,
         ),
     ))
@@ -118,8 +118,8 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], bool, E> {
     nom::branch::alt((
-        nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
-        nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
+        nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| false),
+        nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| true),
     ))(bytes)
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn nom_varsize_number_decode_u64<'a, E: nom::error::ParseError<&'a [u
     num_bytes: usize,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
     nom::combinator::map_opt(
-        nom::bytes::complete::take(num_bytes),
+        nom::bytes::streaming::take(num_bytes),
         move |slice: &[u8]| {
             // `slice` contains the little endian block number. We extend the block
             // number to 64bits if it is smaller, or return an error if it is larger
@@ -156,10 +156,7 @@ macro_rules! decode_scale_compact {
             bytes: &'a [u8],
         ) -> nom::IResult<&'a [u8], $num_ty, E> {
             if bytes.is_empty() {
-                return Err(nom::Err::Error(nom::error::make_error(
-                    bytes,
-                    nom::error::ErrorKind::Eof,
-                )));
+                return Err(nom::Err::Incomplete(nom::Needed::Unknown));
             }
 
             match bytes[0] & 0b11 {
@@ -169,9 +166,8 @@ macro_rules! decode_scale_compact {
                 }
                 0b01 => {
                     if bytes.len() < 2 {
-                        return Err(nom::Err::Error(nom::error::make_error(
-                            bytes,
-                            nom::error::ErrorKind::Eof,
+                        return Err(nom::Err::Incomplete(nom::Needed::Size(
+                            core::num::NonZeroUsize::new(2).unwrap(),
                         )));
                     }
 
@@ -191,9 +187,8 @@ macro_rules! decode_scale_compact {
                 }
                 0b10 => {
                     if bytes.len() < 4 {
-                        return Err(nom::Err::Error(nom::error::make_error(
-                            bytes,
-                            nom::error::ErrorKind::Eof,
+                        return Err(nom::Err::Incomplete(nom::Needed::Size(
+                            core::num::NonZeroUsize::new(4).unwrap(),
                         )));
                     }
 
@@ -231,9 +226,8 @@ macro_rules! decode_scale_compact {
                     let num_bytes = usize::from(bytes[0] >> 2) + 4;
 
                     if bytes.len() < num_bytes + 1 {
-                        return Err(nom::Err::Error(nom::error::make_error(
-                            bytes,
-                            nom::error::ErrorKind::Eof,
+                        return Err(nom::Err::Incomplete(nom::Needed::Size(
+                            core::num::NonZeroUsize::new(num_bytes + 1).unwrap(),
                         )));
                     }
 

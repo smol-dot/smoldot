@@ -100,8 +100,8 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                 nom::combinator::map(
                     nom::combinator::map_opt(
                         nom::sequence::preceded(
-                            nom::bytes::complete::tag("0x"),
-                            nom::character::complete::hex_digit0,
+                            nom::bytes::streaming::tag("0x"),
+                            nom::character::streaming::hex_digit0,
                         ),
                         |hex| {
                             let mut out = Box::new([0; 32]);
@@ -112,30 +112,33 @@ pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateK
                     either::Left,
                 ),
                 // BIP39. Wrapped in `either::Right`
-                nom::combinator::map(nom::bytes::complete::take_till(|c| c == '/'), either::Right),
+                nom::combinator::map(
+                    nom::bytes::streaming::take_till(|c| c == '/'),
+                    either::Right,
+                ),
             )),
             // Derivation path
-            nom::multi::many0(nom::branch::alt((
+            nom::multi::many0(nom::combinator::complete(nom::branch::alt((
                 // Soft
                 nom::combinator::map(
                     nom::sequence::preceded(
-                        nom::bytes::complete::tag("/"),
-                        nom::bytes::complete::take_till1(|c| c == '/'),
+                        nom::bytes::streaming::tag("/"),
+                        nom::bytes::streaming::take_till1(|c| c == '/'),
                     ),
                     |code| DeriveJunction::from_components(false, code),
                 ),
                 // Hard
                 nom::combinator::map(
                     nom::sequence::preceded(
-                        nom::bytes::complete::tag("//"),
-                        nom::bytes::complete::take_till1(|c| c == '/'),
+                        nom::bytes::streaming::tag("//"),
+                        nom::bytes::streaming::take_till1(|c| c == '/'),
                     ),
                     |code| DeriveJunction::from_components(true, code),
                 ),
-            ))),
+            )))),
             // Optional password
             nom::combinator::opt(nom::sequence::preceded(
-                nom::bytes::complete::tag("///"),
+                nom::bytes::streaming::tag("///"),
                 |s| Ok(("", s)), // Take the rest of the input after the `///`
             )),
         )))(phrase);

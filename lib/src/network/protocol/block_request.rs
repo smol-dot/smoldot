@@ -404,7 +404,7 @@ fn decode_justifications<'a, E: nom::error::ParseError<&'a [u8]>>(
             num_elems,
             nom::combinator::map(
                 nom::sequence::tuple((
-                    nom::bytes::complete::take(4u32),
+                    nom::bytes::streaming::take(4u32),
                     crate::util::nom_bytes_decode,
                 )),
                 move |(consensus_engine, justification)| Justification {

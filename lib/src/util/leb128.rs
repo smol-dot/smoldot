@@ -152,10 +152,7 @@ pub(crate) fn nom_leb128_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
         }
     }
 
-    Err(nom::Err::Error(nom::error::make_error(
-        bytes,
-        nom::error::ErrorKind::Eof,
-    )))
+    Err(nom::Err::Incomplete(nom::Needed::Unknown))
 }
 
 // TODO: document all this below

@@ -880,12 +880,12 @@ pub(crate) fn connection_open_single_stream(connection_id: u32, initial_writable
 pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
     let (_, (local_tls_certificate_sha256, remote_tls_certificate_sha256)) =
         nom::sequence::preceded(
-            nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
+            nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
             nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     <&[u8; 32]>::try_from(b).unwrap()
                 }),
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     <&[u8; 32]>::try_from(b).unwrap()
                 }),
             )),

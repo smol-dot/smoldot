@@ -174,13 +174,13 @@ fn grandpa_notification<'a>(
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[0]),
+                    nom::bytes::streaming::tag(&[0]),
                     vote_message(block_number_bytes),
                 ),
                 GrandpaNotificationRef::Vote,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), move |s| {
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), move |s| {
                     decode::decode_partial_grandpa_commit(s, block_number_bytes)
                         .map(|(a, b)| (b, a))
                         .map_err(|_| {
@@ -194,18 +194,18 @@ fn grandpa_notification<'a>(
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
+                    nom::bytes::streaming::tag(&[2]),
                     neighbor_packet(block_number_bytes),
                 ),
                 GrandpaNotificationRef::Neighbor,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[3]), catch_up_request),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[3]), catch_up_request),
                 GrandpaNotificationRef::CatchUpRequest,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[4]),
+                    nom::bytes::streaming::tag(&[4]),
                     catch_up(block_number_bytes),
                 ),
                 GrandpaNotificationRef::CatchUp,
@@ -221,11 +221,11 @@ fn vote_message<'a>(
         "vote_message",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::number::complete::le_u64,
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
                 message(block_number_bytes),
-                nom::bytes::complete::take(64u32),
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(64u32),
+                nom::bytes::streaming::take(32u32),
             )),
             |(round_number, set_id, message, signature, authority_public_key)| VoteMessageRef {
                 round_number,
@@ -246,21 +246,21 @@ fn message<'a>(
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[0]),
+                    nom::bytes::streaming::tag(&[0]),
                     unsigned_prevote(block_number_bytes),
                 ),
                 MessageRef::Prevote,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1]),
                     unsigned_precommit(block_number_bytes),
                 ),
                 MessageRef::Precommit,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
+                    nom::bytes::streaming::tag(&[2]),
                     primary_propose(block_number_bytes),
                 ),
                 MessageRef::PrimaryPropose,
@@ -276,7 +276,7 @@ fn unsigned_prevote<'a>(
         "unsigned_prevote",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             )),
             |(target_hash, target_number)| UnsignedPrevoteRef {
@@ -294,7 +294,7 @@ fn unsigned_precommit<'a>(
         "unsigned_precommit",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             )),
             |(target_hash, target_number)| UnsignedPrecommitRef {
@@ -312,7 +312,7 @@ fn primary_propose<'a>(
         "primary_propose",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             )),
             |(target_hash, target_number)| PrimaryProposeRef {
@@ -330,10 +330,10 @@ fn neighbor_packet<'a>(
         "neighbor_packet",
         nom::combinator::map(
             nom::sequence::preceded(
-                nom::bytes::complete::tag(&[1]),
+                nom::bytes::streaming::tag(&[1]),
                 nom::sequence::tuple((
-                    nom::number::complete::le_u64,
-                    nom::number::complete::le_u64,
+                    nom::number::streaming::le_u64,
+                    nom::number::streaming::le_u64,
                     crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 )),
             ),
@@ -350,7 +350,7 @@ fn catch_up_request(bytes: &[u8]) -> nom::IResult<&[u8], CatchUpRequest> {
     nom::error::context(
         "catch_up_request",
         nom::combinator::map(
-            nom::sequence::tuple((nom::number::complete::le_u64, nom::number::complete::le_u64)),
+            nom::sequence::tuple((nom::number::streaming::le_u64, nom::number::streaming::le_u64)),
             |(round_number, set_id)| CatchUpRequest {
                 round_number,
                 set_id,
@@ -366,8 +366,8 @@ fn catch_up<'a>(
         "catch_up",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::number::complete::le_u64,
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                     nom::multi::many_m_n(num_elems, num_elems, prevote(block_number_bytes))
                 }),
@@ -386,7 +386,7 @@ fn catch_up<'a>(
                         })
                     })
                 }),
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             )),
             |(set_id, round_number, prevotes, precommits, base_hash, base_number)| CatchUpRef {
@@ -408,10 +408,10 @@ fn prevote<'a>(
         "prevote",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-                nom::bytes::complete::take(64u32),
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(64u32),
+                nom::bytes::streaming::take(32u32),
             )),
             |(target_hash, target_number, signature, authority_public_key)| PrevoteRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),

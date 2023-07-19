@@ -433,14 +433,14 @@ fn grandpa_consensus_log_ref<
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1]),
                     grandpa_scheduled_change_ref(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::ScheduledChange,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
+                    nom::bytes::streaming::tag(&[2]),
                     nom::sequence::tuple((
                         crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                         grandpa_scheduled_change_ref(block_number_bytes),
@@ -453,21 +453,21 @@ fn grandpa_consensus_log_ref<
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[3]),
-                    nom::number::complete::le_u64,
+                    nom::bytes::streaming::tag(&[3]),
+                    nom::number::streaming::le_u64,
                 ),
                 GrandpaConsensusLogRef::OnDisabled,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[4]),
+                    nom::bytes::streaming::tag(&[4]),
                     crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::Pause,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[5]),
+                    nom::bytes::streaming::tag(&[5]),
                     crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::Resume,
@@ -522,8 +522,8 @@ fn grandpa_authority_ref<
         "grandpa_authority_ref",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
-                nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
+                nom::bytes::streaming::take(32u32),
+                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
             )),
             |(public_key, weight)| GrandpaAuthorityRef {
                 public_key: TryFrom::try_from(public_key).unwrap(),
