@@ -167,7 +167,7 @@ impl Keystore {
                             ),
                             nom::bytes::streaming::tag("-"),
                             nom::combinator::map_opt(
-                                nom::bytes::streaming::take_while(|c: char| {
+                                nom::bytes::complete::take_while(|c: char| {
                                     c.is_ascii_digit() || ('a'..='f').contains(&c)
                                 }),
                                 |k: &str| {
