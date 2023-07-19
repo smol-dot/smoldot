@@ -80,8 +80,8 @@ fn commit_message<'a>(
         "commit_message",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::number::complete::le_u64,
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
                 compact_commit(block_number_bytes),
             )),
             |(round_number, set_id, message)| CommitMessageRef {
@@ -100,7 +100,7 @@ fn compact_commit<'a>(
         "compact_commit",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                     nom::multi::many_m_n(
@@ -115,8 +115,8 @@ fn compact_commit<'a>(
                         num_elems,
                         nom::combinator::map(
                             nom::sequence::tuple((
-                                nom::bytes::complete::take(64u32),
-                                nom::bytes::complete::take(32u32),
+                                nom::bytes::streaming::take(64u32),
+                                nom::bytes::streaming::take(32u32),
                             )),
                             |(sig, pubkey)| {
                                 (
@@ -145,7 +145,7 @@ fn unsigned_precommit<'a>(
         "unsigned_precommit",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             )),
             |(target_hash, target_number)| UnsignedPrecommitRef {

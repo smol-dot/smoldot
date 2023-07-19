@@ -121,8 +121,8 @@ pub fn decode_block_announce(
                     }
                 }),
                 nom::branch::alt((
-                    nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
-                    nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| false),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| true),
                 )),
                 crate::util::nom_bytes_decode,
             )),
@@ -174,13 +174,13 @@ pub fn decode_block_announces_handshake(
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
                 nom::branch::alt((
-                    nom::combinator::map(nom::bytes::complete::tag(&[0b1]), |_| Role::Full),
-                    nom::combinator::map(nom::bytes::complete::tag(&[0b10]), |_| Role::Light),
-                    nom::combinator::map(nom::bytes::complete::tag(&[0b100]), |_| Role::Authority),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b1]), |_| Role::Full),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b10]), |_| Role::Light),
+                    nom::combinator::map(nom::bytes::streaming::tag(&[0b100]), |_| Role::Authority),
                 )),
                 crate::util::nom_varsize_number_decode_u64(expected_block_number_bytes),
-                nom::bytes::complete::take(32u32),
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
+                nom::bytes::streaming::take(32u32),
             )),
             |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
                 role,

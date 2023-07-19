@@ -82,7 +82,7 @@ pub fn decode_grandpa_warp_sync_response(
     nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
             decode_fragments(block_number_bytes),
-            nom::number::complete::le_u8,
+            nom::number::streaming::le_u8,
         )),
         |(fragments, is_finished)| GrandpaWarpSyncResponse {
             fragments,

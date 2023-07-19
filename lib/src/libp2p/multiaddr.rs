@@ -147,7 +147,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         // Check whether this is indeed a valid list of protocols.
         if nom::combinator::all_consuming(nom::multi::fold_many0(
-            protocol::<nom::error::Error<&[u8]>>,
+            nom::combinator::complete(protocol::<nom::error::Error<&[u8]>>),
             || (),
             |(), _| (),
         ))(&bytes)
@@ -479,11 +479,11 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> nom::IResult<&'a [u8], ProtocolRef<'a>, E> {
     nom::combinator::flat_map(crate::util::leb128::nom_leb128_usize, |protocol_code| {
         move |bytes: &'a [u8]| match protocol_code {
-            4 => nom::combinator::map(nom::bytes::complete::take(4_u32), |ip: &'a [u8]| {
+            4 => nom::combinator::map(nom::bytes::streaming::take(4_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip4(ip.try_into().unwrap())
             })(bytes),
-            6 => nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Tcp)(bytes),
-            41 => nom::combinator::map(nom::bytes::complete::take(16_u32), |ip: &'a [u8]| {
+            6 => nom::combinator::map(nom::number::streaming::be_u16, ProtocolRef::Tcp)(bytes),
+            41 => nom::combinator::map(nom::bytes::streaming::take(16_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip6(ip.try_into().unwrap())
             })(bytes),
             53 => nom::combinator::map(
@@ -530,7 +530,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
                 ),
                 ProtocolRef::DnsAddr,
             )(bytes),
-            273 => nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Udp)(bytes),
+            273 => nom::combinator::map(nom::number::streaming::be_u16, ProtocolRef::Udp)(bytes),
             421 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
@@ -543,7 +543,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             477 => Ok((bytes, ProtocolRef::Ws)),
             478 => Ok((bytes, ProtocolRef::Wss)),
             // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
-            777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
+            777 => nom::combinator::map(nom::number::streaming::be_u64, ProtocolRef::Memory)(bytes),
             280 => Ok((bytes, ProtocolRef::WebRtcDirect)),
             466 => nom::combinator::map(
                 nom::combinator::verify(
