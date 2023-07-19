@@ -167,7 +167,7 @@ macro_rules! decode_scale_compact {
                 0b01 => {
                     if bytes.len() < 2 {
                         return Err(nom::Err::Incomplete(nom::Needed::Size(
-                            core::num::NonZeroUsize::new(2).unwrap(),
+                            core::num::NonZeroUsize::new(2 - bytes.len()).unwrap(),
                         )));
                     }
 
@@ -188,7 +188,7 @@ macro_rules! decode_scale_compact {
                 0b10 => {
                     if bytes.len() < 4 {
                         return Err(nom::Err::Incomplete(nom::Needed::Size(
-                            core::num::NonZeroUsize::new(4).unwrap(),
+                            core::num::NonZeroUsize::new(4 - bytes.len()).unwrap(),
                         )));
                     }
 
@@ -227,7 +227,7 @@ macro_rules! decode_scale_compact {
 
                     if bytes.len() < num_bytes + 1 {
                         return Err(nom::Err::Incomplete(nom::Needed::Size(
-                            core::num::NonZeroUsize::new(num_bytes + 1).unwrap(),
+                            core::num::NonZeroUsize::new(num_bytes + 1 - bytes.len()).unwrap(),
                         )));
                     }
 
