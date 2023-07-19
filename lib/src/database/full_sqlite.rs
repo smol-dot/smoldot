@@ -1622,7 +1622,10 @@ fn decode_babe_epoch_information(
                 )
             }),
             nom::bytes::streaming::take(32u32),
-            nom::sequence::tuple((nom::number::streaming::le_u64, nom::number::streaming::le_u64)),
+            nom::sequence::tuple((
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
+            )),
             nom::branch::alt((
                 nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                     header::BabeAllowedSlots::PrimarySlots

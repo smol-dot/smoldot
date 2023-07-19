@@ -180,7 +180,10 @@ fn epoch_header<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], EpochHeader, E> {
     nom::combinator::map(
-        nom::sequence::tuple((nom::number::streaming::le_u64, nom::number::streaming::le_u64)),
+        nom::sequence::tuple((
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
+        )),
         move |(start_slot, end_slot)| EpochHeader {
             _start_slot: start_slot,
             _end_slot: end_slot,

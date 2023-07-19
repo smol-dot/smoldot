@@ -238,15 +238,18 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
                     nom::bytes::streaming::tag(&[0, 0]),
                     nom::bytes::streaming::tag(&[0, 0, 0, 0]),
                     nom::branch::alt((
-                        nom::combinator::map(nom::bytes::streaming::tag(0u32.to_be_bytes()), |_| {
-                            GoAwayErrorCode::NormalTermination
-                        }),
-                        nom::combinator::map(nom::bytes::streaming::tag(1u32.to_be_bytes()), |_| {
-                            GoAwayErrorCode::ProtocolError
-                        }),
-                        nom::combinator::map(nom::bytes::streaming::tag(2u32.to_be_bytes()), |_| {
-                            GoAwayErrorCode::InternalError
-                        }),
+                        nom::combinator::map(
+                            nom::bytes::streaming::tag(0u32.to_be_bytes()),
+                            |_| GoAwayErrorCode::NormalTermination,
+                        ),
+                        nom::combinator::map(
+                            nom::bytes::streaming::tag(1u32.to_be_bytes()),
+                            |_| GoAwayErrorCode::ProtocolError,
+                        ),
+                        nom::combinator::map(
+                            nom::bytes::streaming::tag(2u32.to_be_bytes()),
+                            |_| GoAwayErrorCode::InternalError,
+                        ),
                     )),
                 )),
                 |(_, _, _, error_code)| DecodedYamuxHeader::GoAway { error_code },

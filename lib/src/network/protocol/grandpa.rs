@@ -350,7 +350,10 @@ fn catch_up_request(bytes: &[u8]) -> nom::IResult<&[u8], CatchUpRequest> {
     nom::error::context(
         "catch_up_request",
         nom::combinator::map(
-            nom::sequence::tuple((nom::number::streaming::le_u64, nom::number::streaming::le_u64)),
+            nom::sequence::tuple((
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
+            )),
             |(round_number, set_id)| CatchUpRequest {
                 round_number,
                 set_id,
