@@ -146,10 +146,12 @@ where
             .map(|(id, _)| id)
             .collect::<Vec<_>>()
         {
-            if let (_, Some(event)) =
-                Self::process_substream(&mut self.inner, substream_id, read_write)
-            {
+            let (call_again, event) =
+                Self::process_substream(&mut self.inner, substream_id, read_write);
+            if let Some(event) = event {
                 return Ok((self, Some(event)));
+            } else if call_again {
+                read_write.wake_up_asap();
             }
         }
 

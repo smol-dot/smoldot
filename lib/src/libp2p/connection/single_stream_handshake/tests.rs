@@ -56,9 +56,6 @@ fn handshake_basic_works() {
                             .drain(..)
                             .flat_map(|b| b.into_iter()),
                     );
-                    for _ in 0..read_write.read_bytes {
-                        buf_2_to_1.remove(0);
-                    }
                 }
             }
 
@@ -83,9 +80,6 @@ fn handshake_basic_works() {
                             .drain(..)
                             .flat_map(|b| b.into_iter()),
                     );
-                    for _ in 0..read_write.read_bytes {
-                        buf_1_to_2.remove(0);
-                    }
                 }
             }
         }

@@ -240,6 +240,14 @@ impl<TNow> ReadWrite<TNow> {
             ref mut t @ None => *t = Some(after.clone()),
         }
     }
+
+    /// Sets [`ReadWrite::wake_up_after`] to the value in [`ReadWrite::now`].
+    pub fn wake_up_asap(&mut self)
+    where
+        TNow: Clone + Ord,
+    {
+        self.wake_up_after = Some(self.now.clone());
+    }
 }
 
 /// Error potentially returned by [`ReadWrite::incoming_bytes_take`].
