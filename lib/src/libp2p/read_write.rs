@@ -97,17 +97,20 @@ impl<TNow> ReadWrite<TNow> {
         &mut self,
         num: usize,
     ) -> Result<Option<Vec<u8>>, IncomingBytesTakeError> {
-        let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() else {
-            return Err(IncomingBytesTakeError::ReadClosed);
-        };
-
         if self.incoming_buffer.len() < num {
-            *expected_incoming_bytes = num;
-            return Ok(None);
+            if let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() {
+                *expected_incoming_bytes = num;
+                return Ok(None);
+            } else {
+                return Err(IncomingBytesTakeError::ReadClosed);
+            }
         }
 
         self.read_bytes += num;
-        *expected_incoming_bytes = expected_incoming_bytes.saturating_sub(num);
+
+        if let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() {
+            *expected_incoming_bytes = expected_incoming_bytes.saturating_sub(num);
+        }
 
         if self.incoming_buffer.len() == num {
             Ok(Some(mem::take(&mut self.incoming_buffer)))
@@ -140,10 +143,6 @@ impl<TNow> ReadWrite<TNow> {
         &mut self,
         max_decoded_number: usize,
     ) -> Result<Option<usize>, IncomingBytesTakeLeb128Error> {
-        let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() else {
-            return Err(IncomingBytesTakeLeb128Error::ReadClosed);
-        };
-
         match crate::util::leb128::nom_leb128_usize::<nom::error::Error<&[u8]>>(
             &self.incoming_buffer,
         ) {
@@ -162,15 +161,26 @@ impl<TNow> ReadWrite<TNow> {
                     self.incoming_buffer.clear();
                 }
                 self.read_bytes += consumed_bytes;
-                *expected_incoming_bytes = expected_incoming_bytes.saturating_sub(consumed_bytes);
+                if let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() {
+                    *expected_incoming_bytes =
+                        expected_incoming_bytes.saturating_sub(consumed_bytes);
+                }
                 Ok(Some(num))
             }
             Err(nom::Err::Incomplete(nom::Needed::Size(num))) => {
-                *expected_incoming_bytes = self.incoming_buffer.len() + num.get();
+                if let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() {
+                    *expected_incoming_bytes = self.incoming_buffer.len() + num.get();
+                } else {
+                    return Err(IncomingBytesTakeLeb128Error::ReadClosed);
+                }
                 Ok(None)
             }
             Err(nom::Err::Incomplete(nom::Needed::Unknown)) => {
-                *expected_incoming_bytes = self.incoming_buffer.len() + 1;
+                if let Some(expected_incoming_bytes) = self.expected_incoming_bytes.as_mut() {
+                    *expected_incoming_bytes = self.incoming_buffer.len() + 1;
+                } else {
+                    return Err(IncomingBytesTakeLeb128Error::ReadClosed);
+                }
                 Ok(None)
             }
             Err(_) => Err(IncomingBytesTakeLeb128Error::InvalidLeb128),
@@ -288,17 +298,17 @@ mod tests {
         let buffer = rw.incoming_bytes_take(5).unwrap().unwrap();
         assert_eq!(buffer, &[0x80, 0x80, 0x80, 0x80, 0x80]);
         assert_eq!(rw.incoming_buffer.len(), 59);
-        assert_eq!(rw.read_bytes, 5);
+        assert_eq!(rw.read_bytes, 7);
         assert_eq!(rw.expected_incoming_bytes, Some(7));
 
         assert!(matches!(rw.incoming_bytes_take(1000), Ok(None)));
-        assert_eq!(rw.read_bytes, 5);
+        assert_eq!(rw.read_bytes, 7);
         assert_eq!(rw.expected_incoming_bytes, Some(1000));
 
         let buffer = rw.incoming_bytes_take(57).unwrap().unwrap();
         assert_eq!(buffer.len(), 57);
         assert_eq!(rw.incoming_buffer.len(), 2);
-        assert_eq!(rw.read_bytes, 62);
+        assert_eq!(rw.read_bytes, 64);
         assert_eq!(rw.expected_incoming_bytes, Some(1000 - 57));
     }
 
@@ -324,7 +334,7 @@ mod tests {
         let buffer = rw.incoming_bytes_take(5).unwrap().unwrap();
         assert_eq!(buffer, &[0x80, 0x80, 0x80, 0x80, 0x80]);
         assert_eq!(rw.incoming_buffer.len(), 59);
-        assert_eq!(rw.read_bytes, 5);
+        assert_eq!(rw.read_bytes, 7);
         assert_eq!(rw.expected_incoming_bytes, None);
 
         assert!(matches!(

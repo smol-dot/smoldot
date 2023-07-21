@@ -218,10 +218,7 @@ where
 
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
-                } else if !call_again {
-                    // Substream doesn't accept anymore data because it is blocked on writing out.
-                    return Ok((self, None));
-                } else {
+                } else if call_again {
                     // Jump back to the beginning of the loop. We don't want to read more data
                     // until this specific substream's data has been processed.
                     continue;
