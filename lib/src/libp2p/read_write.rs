@@ -127,6 +127,21 @@ impl<TNow> ReadWrite<TNow> {
         }
     }
 
+    /// Same as [`ReadWrite::incoming_bytes_take_array`], but reads a number of bytes as a
+    /// compile-time constant.
+    pub fn incoming_bytes_take_array<const N: usize>(
+        &mut self,
+    ) -> Result<Option<[u8; N]>, IncomingBytesTakeError>
+    {
+        let Some(vec) = self.incoming_bytes_take(N)?
+            else { 
+                return Ok(None)
+            };
+
+        let bytes = <&[u8; N]>::try_from(&vec[..]).unwrap();
+        Ok(Some(*bytes))
+    }
+
     /// Extract an LEB128-encoded number from the start of the read buffer.
     ///
     /// On success, updates [`ReadWrite::read_bytes`] and decreases
@@ -254,7 +269,7 @@ impl<TNow> ReadWrite<TNow> {
     /// Sets [`ReadWrite::wake_up_after`] to the value in [`ReadWrite::now`].
     pub fn wake_up_asap(&mut self)
     where
-        TNow: Clone + Ord,
+        TNow: Clone,
     {
         self.wake_up_after = Some(self.now.clone());
     }

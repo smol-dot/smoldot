@@ -57,8 +57,6 @@
 //! [`PeerId`] of the remote, which is known to be legitimate, and a [`Noise`] object through
 //! which all further communications should go through.
 //!
-//! Use [`Noise::encrypt`] in order to send out data to the remote, and
-//! [`Noise::decrypt_to_vec`] when data is received.
 
 // # Q&A
 //
@@ -83,7 +81,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{fmt, iter, mem};
+use core::{cmp, fmt, iter, mem, ops};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
@@ -251,136 +249,181 @@ pub struct Noise {
     /// Cipher used to decrypt incoming data.
     in_cipher_state: CipherState,
 
-    /// Buffer of data containing data received on the wire (still encrypted) but that isn't
-    /// enough to form a full message. Includes the two bytes of libp2p length prefix.
-    rx_buffer_encrypted: Vec<u8>,
+    /// Size in bytes of the next message to receive. `None` if unknown. If `Some`, the libp2p
+    /// length prefix has already been stripped from the incoming stream.
+    next_in_message_size: Option<u16>,
+
+    /// Buffer of data containing data that has been decrypted.
+    rx_buffer_decrypted: Vec<u8>,
+
+    /// Value of [`ReadWrite::expected_incoming_bytes`] of the inner stream the last time that
+    /// [`Noise::read_write`] was called. Encrypted data will be read until the length of
+    /// [`Noise::rx_buffer_decrypted`] reaches the value in this field.
+    inner_stream_expected_incoming_bytes: usize,
 }
 
 impl Noise {
-    /// Feeds encrypted data received from the wire and writes the decrypted data into `out`.
-    ///
-    /// Returns the number of bytes from `encrypted_data` that it has processed. These bytes must
-    /// be discarded and not passed again.
-    ///
-    /// The [`Noise`] state machine might copy some of the encrypted data internally for later.
-    /// Consequently, be aware that it is not possible to (easily) predict how much `out` is going
-    /// to grow based on the size of `encrypted_data`.
-    ///
-    /// This function always writes as much data to `out` as possible. In other words, calling
-    /// this function with an empty `encrypted_data` always has no effect.
-    ///
-    /// An error is returned if part of the payload fails to decode, which can happen if a
-    /// malicious actor has added or modified data to the stream of encrypted data. You are
-    /// encouraged to shut down the connection altogether if that happens.
-    // TODO: this API is very specific, maybe provide a way to decode into slices?
-    pub fn decrypt_to_vec(
-        &mut self,
-        mut encrypted_data: &[u8],
-        out: &mut Vec<u8>,
-    ) -> Result<usize, CipherError> {
-        let mut total_read = 0;
-
-        loop {
-            // Try to construct the length prefix in `rx_buffer_encrypted` by moving bytes from
-            // `payload`.
-            while self.rx_buffer_encrypted.len() < 2 {
-                if encrypted_data.is_empty() {
-                    return Ok(total_read);
-                }
-
-                self.rx_buffer_encrypted.push(encrypted_data[0]);
-                encrypted_data = &encrypted_data[1..];
-                total_read += 1;
-            }
-
-            // Length of the message currently being received.
-            let expected_len = usize::from(u16::from_be_bytes(
-                <[u8; 2]>::try_from(&self.rx_buffer_encrypted[..2]).unwrap(),
-            ));
-
-            // If there isn't enough data available for the full message, copy the partial message
-            // to `rx_buffer_encrypted` and return early.
-            if self.rx_buffer_encrypted.len() + encrypted_data.len() < expected_len + 2 {
-                self.rx_buffer_encrypted.extend_from_slice(encrypted_data);
-                total_read += encrypted_data.len();
-                return Ok(total_read);
-            }
-
-            // Construct the encrypted slice of data to decode.
-            let to_decode_slice = if self.rx_buffer_encrypted.len() == 2 {
-                // If the entirety of the message is in `payload`, decode it from there without
-                // moving data. This is the most common situation.
-                debug_assert!(encrypted_data.len() >= expected_len);
-                let decode = &encrypted_data[..expected_len];
-                encrypted_data = &encrypted_data[expected_len..];
-                total_read += expected_len;
-                decode
-            } else {
-                // Otherwise, copy the rest of the message to `rx_buffer_encrypted`.
-                let remains = expected_len - (self.rx_buffer_encrypted.len() - 2);
-                self.rx_buffer_encrypted
-                    .extend_from_slice(&encrypted_data[..remains]);
-                encrypted_data = &encrypted_data[remains..];
-                total_read += remains;
-                &self.rx_buffer_encrypted[2..]
-            };
-
-            // Read and decrypt the message.
-            // Note that `out` isn't modified if an error is returned.
-            let result = self.in_cipher_state.read_chachapoly_message_to_vec_append(
-                &[],
-                to_decode_slice,
-                out,
-            );
-
-            // Clear the now-decoded message. This is done even on failure, in order to potentially
-            // continue receiving messages if it is desired.
-            self.rx_buffer_encrypted.clear();
-
-            result?;
-        }
-    }
-
     /// Returns true if the local side has opened the connection.
     pub fn is_initiator(&self) -> bool {
         self.is_initiator
     }
 
-    /// Accepts as input a list of buffers containing un-encrypted data. Returns a list of buffers
-    /// that, when concatenated together, forms a Noise message that encodes this data.
+    /// Feeds data coming from a socket and outputs data to write to the socket.
     ///
-    /// This function can only encrypt a single Noise message. The sum of the length of all the
-    /// buffers must not exceed `65535 - 16`, in order for them to fit into a Noise message.
+    /// Returns an object that implements `Deref<Target = ReadWrite>`. This object represents the
+    /// decrypted stream of data.
     ///
-    /// # Panic
-    ///
-    /// Panics if `decrypted_buffers` contains more than `65535 - 16` bytes of data.
-    ///
-    pub fn encrypt<'a>(
+    /// An error is returned if the protocol is being violated by the remote or if the nonce
+    /// overflows. When that happens, the connection should be closed altogether.
+    pub fn read_write<'a, TNow: Clone>(
         &'a mut self,
-        decrypted_buffers: impl Iterator<Item = Vec<u8>> + 'a,
-    ) -> impl Iterator<Item = Vec<u8>> + 'a {
-        // TODO: don't unwrap if Nonce overflows
-        // TODO: don't collect into an intermediary buffer
-        let encrypted_buffers = self
-            .out_cipher_state
-            .write_chachapoly_message(&[], decrypted_buffers)
-            .unwrap()
-            .collect::<Vec<_>>();
+        outer_read_write: &'a mut ReadWrite<TNow>,
+    ) -> Result<InnerReadWrite<'a, TNow>, CipherError> {
+        // Try to pull data from `outer_read_write` to decrypt it.
+        while self.inner_stream_expected_incoming_bytes > self.rx_buffer_decrypted.len() {
+            // TODO: what if EOF in the middle of a message?
+            if let Some(next_in_message_size) = self.next_in_message_size {
+                if let Ok(Some(encrypted_message)) =
+                    outer_read_write.incoming_bytes_take(usize::from(next_in_message_size))
+                {
+                    self.next_in_message_size = None;
 
-        let message_length_prefix =
-            u16::try_from(encrypted_buffers.iter().fold(0, |c, b| c + b.len()))
-                .unwrap()
-                .to_be_bytes()
-                .to_vec();
+                    // Read and decrypt the message.
+                    self.in_cipher_state.read_chachapoly_message_to_vec_append(
+                        &[],
+                        &encrypted_message,
+                        &mut self.rx_buffer_decrypted,
+                    )?;
+                } else {
+                    break;
+                }
+            } else {
+                if let Ok(Some(next_frame_length)) =
+                    outer_read_write.incoming_bytes_take_array::<2>()
+                {
+                    self.next_in_message_size = Some(u16::from_be_bytes(next_frame_length));
+                } else {
+                    break;
+                }
+            }
+        }
 
-        iter::once(message_length_prefix).chain(encrypted_buffers.into_iter())
+        // Check ahead of time if writing out a message would panic.
+        if self.out_cipher_state.nonce_has_overflowed {
+            return Err(CipherError::NonceOverflow);
+        }
+
+        Ok(InnerReadWrite {
+            inner_read_write: ReadWrite {
+                now: outer_read_write.now.clone(),
+                incoming_buffer: mem::take(&mut self.rx_buffer_decrypted),
+                read_bytes: 0,
+                expected_incoming_bytes: if outer_read_write.expected_incoming_bytes.is_some()
+                    || !outer_read_write.incoming_buffer.is_empty()
+                {
+                    Some(self.inner_stream_expected_incoming_bytes)
+                } else {
+                    None
+                },
+                write_buffers: Vec::new(),
+                write_bytes_queued: 0,
+                write_bytes_queueable: outer_read_write.write_bytes_queueable.map(
+                    |outer_writable| cmp::min(outer_writable.saturating_sub(16 + 2), 65535 - 16),
+                ),
+                wake_up_after: outer_read_write.wake_up_after.clone(),
+            },
+            noise: self,
+            outer_read_write,
+        })
     }
 }
 
 impl fmt::Debug for Noise {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Noise").finish()
+    }
+}
+
+/// Stream of decrypted data. See [`Noise::read_write`].
+pub struct InnerReadWrite<'a, TNow: Clone> {
+    noise: &'a mut Noise,
+    outer_read_write: &'a mut ReadWrite<TNow>,
+    inner_read_write: ReadWrite<TNow>,
+}
+
+impl<'a, TNow: Clone> ops::Deref for InnerReadWrite<'a, TNow> {
+    type Target = ReadWrite<TNow>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner_read_write
+    }
+}
+
+impl<'a, TNow: Clone> ops::DerefMut for InnerReadWrite<'a, TNow> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner_read_write
+    }
+}
+
+impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
+    fn drop(&mut self) {
+        self.outer_read_write.wake_up_after = self.inner_read_write.wake_up_after.clone();
+        self.noise.rx_buffer_decrypted = mem::take(&mut self.inner_read_write.incoming_buffer);
+        self.noise.inner_stream_expected_incoming_bytes =
+            self.inner_read_write.expected_incoming_bytes.unwrap_or(0);
+
+        // It is possible that the inner stream processes some bytes of `self.rx_buffer_decrypted`
+        // and expects to be called again while no bytes was pulled from the outer `ReadWrite`.
+        // If that happens, the API user will not call `read_write` again and we will have a stall.
+        // For this reason, if the inner stream has read some bytes, we make sure that the outer
+        // `ReadWrite` wakes up as soon as possible.
+        if self.inner_read_write.read_bytes != 0 {
+            self.outer_read_write.wake_up_asap();
+        }
+
+        // Encrypt the data, transferring it from the inner `ReadWrite` to the outer `ReadWrite`.
+        if self
+            .inner_read_write
+            .write_buffers
+            .iter()
+            .any(|b| !b.is_empty())
+        {
+            self.outer_read_write
+                .write_buffers
+                .reserve(2 + self.inner_read_write.write_buffers.len() * 2);
+
+            // We push a dummy buffer to `outer_read_write.write_buffers`. This dummy buffer
+            // will later be overwritten with the actual message length.
+            let message_length_prefix_index = self.outer_read_write.write_buffers.len();
+            self.outer_read_write.write_buffers.push(Vec::new());
+
+            // Encrypt the message.
+            // `write_chachapoly_message` returns an error if the nonce has overflowed. It has
+            // been checked in the body of `read_write` that this can't happen.
+            let mut total_size = 0;
+            for encrypted_buffer in self
+                .noise
+                .out_cipher_state
+                .write_chachapoly_message(&[], self.inner_read_write.write_buffers.drain(..))
+                .unwrap_or_else(|_| unreachable!())
+            {
+                total_size += encrypted_buffer.len();
+                self.outer_read_write.write_buffers.push(encrypted_buffer);
+            }
+
+            // Now write the message length.
+            let message_length_prefix = u16::try_from(total_size).unwrap().to_be_bytes().to_vec();
+            self.outer_read_write.write_buffers[message_length_prefix_index] =
+                message_length_prefix;
+
+            // Properly update the outer `ReadWrite`.
+            self.outer_read_write.write_bytes_queued += total_size + 2;
+            *self
+                .outer_read_write
+                .write_bytes_queueable
+                .as_mut()
+                .unwrap() -= total_size + 2;
+        }
     }
 }
 
@@ -588,7 +631,9 @@ impl HandshakeInProgress {
                             nonce: 0,
                             nonce_has_overflowed: false,
                         },
-                        rx_buffer_encrypted: Vec::with_capacity(65535 + 2),
+                        rx_buffer_decrypted: Vec::with_capacity(65535 - 16),
+                        next_in_message_size: None,
+                        inner_stream_expected_incoming_bytes: 0,
                     },
                     remote_peer_id: {
                         // The logic of this module guarantees that `remote_peer_id` has

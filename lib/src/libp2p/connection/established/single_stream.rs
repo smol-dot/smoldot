@@ -58,7 +58,7 @@ use super::{
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
-    cmp, fmt,
+    fmt,
     num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
@@ -71,9 +71,6 @@ pub use substream::InboundTy;
 pub struct SingleStream<TNow, TSubUd> {
     /// Encryption layer applied directly on top of the incoming data and outgoing data.
     encryption: noise::Noise,
-
-    /// Buffer of data received from the socket, decrypted but yet to be parsed.
-    decrypted_data_buffer: Vec<u8>,
 
     /// Extra fields. Segregated in order to solve borrowing questions.
     inner: Box<Inner<TNow, TSubUd>>,
@@ -225,7 +222,6 @@ where
                 }
             }
 
-            // Transfer data from `incoming_data` to the `self. decrypted_data_buffer` buffer.
             // Note that we treat the reading side being closed the same way as no data being
             // received. The fact that the remote has closed their writing side is no different
             // than them leaving their writing side open but no longer send any data at all.
@@ -235,23 +231,17 @@ where
             // to closing their writing side. But this is not something we check or really care
             // about.
 
-            // We only buffer up to a certain amount of data, after which the internal
-            // state needs to finish processing it before more is read.
-            if self.decrypted_data_buffer.len() < 4 * 65536 {
-                let num_read = self
-                    .encryption
-                    .decrypt_to_vec(&read_write.incoming_buffer, &mut self.decrypted_data_buffer)
-                    .map_err(Error::Noise)?;
-                let _res = read_write.incoming_bytes_take(num_read);
-                debug_assert!(matches!(_res, Ok(Some(_))));
-            }
+            let mut decrypted_read_write = self
+                .encryption
+                .read_write(read_write)
+                .map_err(Error::Noise)?;
 
             // Ask the Yamux state machine to decode the data in `self.decrypted_data_buffer`.
             debug_assert!(self.inner.substream_to_process.is_none());
             let yamux_decode = self
                 .inner
                 .yamux
-                .incoming_data(&self.decrypted_data_buffer)
+                .incoming_data(&decrypted_read_write.incoming_buffer)
                 .map_err(Error::Yamux)?;
             self.inner.yamux = yamux_decode.yamux;
 
@@ -267,19 +257,13 @@ where
             match yamux_decode.detail {
                 None if yamux_decode.bytes_read == 0 => {}
                 None => {
-                    self.decrypted_data_buffer
-                        .copy_within(yamux_decode.bytes_read.., 0);
-                    self.decrypted_data_buffer
-                        .truncate(self.decrypted_data_buffer.len() - yamux_decode.bytes_read);
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
                 }
 
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
                     debug_assert!(!self.inner.yamux.goaway_queued_or_sent());
 
-                    self.decrypted_data_buffer
-                        .copy_within(yamux_decode.bytes_read.., 0);
-                    self.decrypted_data_buffer
-                        .truncate(self.decrypted_data_buffer.len() - yamux_decode.bytes_read);
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
 
                     // Receive a request from the remote for a new incoming substream.
                     // These requests are automatically accepted unless the total limit to the
@@ -314,10 +298,7 @@ where
                     yamux::IncomingDataDetail::StreamReset { .. }
                     | yamux::IncomingDataDetail::StreamClosed { .. },
                 ) => {
-                    self.decrypted_data_buffer
-                        .copy_within(yamux_decode.bytes_read.., 0);
-                    self.decrypted_data_buffer
-                        .truncate(self.decrypted_data_buffer.len() - yamux_decode.bytes_read);
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
@@ -331,23 +312,18 @@ where
                         .unwrap()
                         .2
                         .extend_from_slice(
-                            &self.decrypted_data_buffer[start_offset..yamux_decode.bytes_read],
+                            &decrypted_read_write.incoming_buffer
+                                [start_offset..yamux_decode.bytes_read],
                         );
 
-                    self.decrypted_data_buffer
-                        .copy_within(yamux_decode.bytes_read.., 0);
-                    self.decrypted_data_buffer
-                        .truncate(self.decrypted_data_buffer.len() - yamux_decode.bytes_read);
-
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
                     self.inner.substream_to_process = Some(substream_id);
                 }
 
                 Some(yamux::IncomingDataDetail::GoAway { .. }) => {
                     // TODO: somehow report the GoAway error code on the external API?
-                    self.decrypted_data_buffer
-                        .copy_within(yamux_decode.bytes_read.., 0);
-                    self.decrypted_data_buffer
-                        .truncate(self.decrypted_data_buffer.len() - yamux_decode.bytes_read);
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
+                    drop(decrypted_read_write);
                     return Ok((self, Some(Event::NewOutboundSubstreamsForbidden)));
                 }
 
@@ -356,6 +332,21 @@ where
                     unreachable!()
                 }
             };
+
+            // The yamux or encryption state machines might contain data that needs to be
+            // written out. Try to flush them.
+            // The API user is supposed to call `read_write` in a loop until the number of bytes
+            // written out is 0, meaning that there's no need to set `must_continue_looping` to
+            // `true`.
+            while let Some(buffer) = self
+                .inner
+                .yamux
+                .extract_next(decrypted_read_write.write_bytes_queueable.unwrap_or(0))
+            {
+                decrypted_read_write.write_out(buffer.as_ref().to_vec());
+            }
+
+            drop(decrypted_read_write);
 
             // Substreams that have been closed or reset aren't immediately removed the yamux state
             // machine. They must be removed manually, which is what is done here.
@@ -478,29 +469,6 @@ where
                             return Ok((self, Some(event_pass_through)));
                         }
                     }
-                }
-            }
-
-            // The yamux or encryption state machines might contain data that needs to be
-            // written out. Try to flush them.
-            // The API user is supposed to call `read_write` in a loop until the number of bytes
-            // written out is 0, meaning that there's no need to set `must_continue_looping` to
-            // `true`.
-            let mut yamux_out = Vec::new();
-            let mut remain_writable = cmp::min(
-                read_write
-                    .write_bytes_queueable
-                    .unwrap_or(0)
-                    .saturating_sub(16 + 2),
-                65535 - 16,
-            ); // TODO: Noise implementation detail
-            while let Some(buffer) = self.inner.yamux.extract_next(remain_writable) {
-                remain_writable -= buffer.as_ref().len();
-                yamux_out.push(buffer.as_ref().to_vec());
-            }
-            if !yamux_out.is_empty() {
-                for encrypted_buffer in self.encryption.encrypt(yamux_out.into_iter()) {
-                    read_write.write_out(encrypted_buffer);
                 }
             }
 
@@ -1131,7 +1099,6 @@ impl ConnectionPrototype {
 
         SingleStream {
             encryption: self.encryption,
-            decrypted_data_buffer: Vec::with_capacity(65536),
             inner: Box::new(Inner {
                 yamux,
                 substream_to_process: None,
