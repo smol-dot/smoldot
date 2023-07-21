@@ -131,10 +131,9 @@ impl<TNow> ReadWrite<TNow> {
     /// compile-time constant.
     pub fn incoming_bytes_take_array<const N: usize>(
         &mut self,
-    ) -> Result<Option<[u8; N]>, IncomingBytesTakeError>
-    {
+    ) -> Result<Option<[u8; N]>, IncomingBytesTakeError> {
         let Some(vec) = self.incoming_bytes_take(N)?
-            else { 
+            else {
                 return Ok(None)
             };
 
