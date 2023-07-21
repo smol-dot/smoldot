@@ -25,7 +25,7 @@ use smoldot::libp2p::{
     read_write::ReadWrite,
 };
 
-use core::{iter, time::Duration};
+use core::time::Duration;
 
 // This fuzzing target simulates an incoming or outgoing connection whose handshake has succeeded.
 // The remote endpoint of that connection sends the fuzzing data to smoldot after it has been
@@ -150,8 +150,26 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     // We now encrypt the fuzzing data and add it to the buffer to send to the remote. This is
     // done all in one go.
-    for buffer in remote.encrypt(iter::once(data.to_vec())) {
-        remote_to_local_buffer.extend_from_slice(&buffer);
+    {
+        let mut read_write = ReadWrite {
+            now: Duration::new(0, 0),
+            incoming_buffer: Vec::new(),
+            expected_incoming_bytes: Some(0),
+            read_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: Some(usize::max_value()),
+            wake_up_after: None,
+        };
+
+        remote
+            .read_write(&mut read_write)
+            .unwrap()
+            .write_out(data.to_vec());
+
+        for buffer in read_write.write_buffers {
+            remote_to_local_buffer.extend_from_slice(&buffer);
+        }
     }
 
     // Now send the data to the connection.
