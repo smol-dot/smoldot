@@ -292,6 +292,7 @@ impl Noise {
                     self.next_in_message_size = None;
 
                     // Read and decrypt the message.
+                    // TODO: decipher progressively, based on the inner `expected_incoming_bytes` value
                     self.in_cipher_state.read_chachapoly_message_to_vec_append(
                         &[],
                         &encrypted_message,
