@@ -58,7 +58,7 @@
 //! which all further communications should go through.
 //!
 //! Use [`Noise::encrypt`] in order to send out data to the remote, and
-//! [`Noise::decrypt_to_vecdeque`] when data is received.
+//! [`Noise::decrypt_to_vec`] when data is received.
 
 // # Q&A
 //
