@@ -92,9 +92,6 @@ fn perform_handshake(
                         .drain(..)
                         .flat_map(|b| b.into_iter()),
                 );
-                for _ in 0..read_write.read_bytes {
-                    bob_to_alice_buffer.remove(0);
-                }
             }
         }
 
@@ -122,9 +119,6 @@ fn perform_handshake(
                         .drain(..)
                         .flat_map(|b| b.into_iter()),
                 );
-                for _ in 0..read_write.read_bytes {
-                    alice_to_bob_buffer.remove(0);
-                }
             }
         }
     }
