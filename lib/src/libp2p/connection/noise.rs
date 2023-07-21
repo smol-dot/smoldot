@@ -58,7 +58,7 @@
 //! which all further communications should go through.
 //!
 //! Use [`Noise::encrypt`] in order to send out data to the remote, and
-//! [`Noise::decrypt_to_vecdeque`] when data is received.
+//! [`Noise::decrypt_to_vec`] when data is received.
 
 // # Q&A
 //
@@ -77,7 +77,7 @@
 use crate::{
     libp2p::{
         peer_id::{PeerId, PublicKey, SignatureVerifyFailed},
-        read_write::ReadWrite,
+        read_write::{self, ReadWrite},
     },
     util::protobuf,
 };
@@ -273,10 +273,10 @@ impl Noise {
     /// malicious actor has added or modified data to the stream of encrypted data. You are
     /// encouraged to shut down the connection altogether if that happens.
     // TODO: this API is very specific, maybe provide a way to decode into slices?
-    pub fn decrypt_to_vecdeque(
+    pub fn decrypt_to_vec(
         &mut self,
         mut encrypted_data: &[u8],
-        out: &mut VecDeque<u8>,
+        out: &mut Vec<u8>,
     ) -> Result<usize, CipherError> {
         let mut total_read = 0;
 
@@ -327,9 +327,11 @@ impl Noise {
 
             // Read and decrypt the message.
             // Note that `out` isn't modified if an error is returned.
-            let result =
-                self.in_cipher_state
-                    .read_chachapoly_message_to_vecdeque(&[], to_decode_slice, out);
+            let result = self.in_cipher_state.read_chachapoly_message_to_vec_append(
+                &[],
+                to_decode_slice,
+                out,
+            );
 
             // Clear the now-decoded message. This is done even on failure, in order to potentially
             // continue receiving messages if it is desired.
@@ -408,10 +410,11 @@ struct HandshakeInProgressInner {
     /// Queued data that should be sent out as soon as possible.
     pending_out_data: VecDeque<u8>,
 
-    /// Buffer of data containing data received on the wire. This buffer is only used in rare
-    /// situations where Noise handshake messages are split and received in multiple calls
-    /// to `read_write`.
-    receive_buffer: Vec<u8>,
+    /// Size of the next message being received, if already known.
+    ///
+    /// If `Some`, the libp2p size prefix has already been extracted from the incoming buffer.
+    /// If `None`, this hasn't been done yet.
+    next_in_message_size: Option<u16>,
 
     /// Progression of the handshake.
     ///
@@ -530,7 +533,7 @@ impl HandshakeInProgress {
             remote_public_key: None,
             is_initiator: config.is_initiator,
             pending_out_data: VecDeque::with_capacity(usize::from(u16::max_value()) + 2),
-            receive_buffer: Vec::with_capacity(usize::from(u16::max_value()) + 2),
+            next_in_message_size: None,
             num_buffered_or_transmitted_messages: 0,
             libp2p_handshake_message: config.key.handshake_message.clone(),
         }))
@@ -544,7 +547,7 @@ impl HandshakeInProgress {
     /// the connection should be closed altogether.
     pub fn read_write<TNow>(
         mut self,
-        read_write: &mut ReadWrite<'_, TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> Result<NoiseHandshake, HandshakeError> {
         loop {
             // Write out the data currently buffered waiting to be written out.
@@ -561,7 +564,7 @@ impl HandshakeInProgress {
             // If the handshake has finished, we return successfully here.
             if self.0.num_buffered_or_transmitted_messages == 3 {
                 debug_assert!(self.0.pending_out_data.is_empty());
-                debug_assert!(self.0.receive_buffer.is_empty());
+                debug_assert!(self.0.next_in_message_size.is_none());
 
                 // Perform the `Split()`.
                 let HkdfOutput {
@@ -585,8 +588,7 @@ impl HandshakeInProgress {
                             nonce: 0,
                             nonce_has_overflowed: false,
                         },
-                        // We reuse `self.receive_buffer` as it already has the correct capacity.
-                        rx_buffer_encrypted: mem::take(&mut self.0.receive_buffer),
+                        rx_buffer_encrypted: Vec::with_capacity(65535 + 2),
                     },
                     remote_peer_id: {
                         // The logic of this module guarantees that `remote_peer_id` has
@@ -773,65 +775,44 @@ impl HandshakeInProgress {
 
             // Since we have no more data to write out, and that the handshake isn't finished yet,
             // the next step is necessarily receiving a message sent by the remote.
-            // Most of the time, `incoming_buffer` will contain an entire Noise handshake message.
-            // However, it is also possible that the Noise message is split into multiple chunks
-            // received over time. When that is the case, we have to fall back to `receive_buffer`.
-            let available_message: &[u8] = {
-                // The remaining of the body requires reading from `read_write`. As such, error if
-                // the reading side is closed.
-                let Some(incoming_buffer) = read_write.incoming_buffer else {
-                    return Err(HandshakeError::ReadClosed);
+
+            // Grab the size of the next message, either from `self` or by extracting 2 bytes from
+            // the incoming buffer.
+            let next_in_message_size =
+                if let Some(next_in_message_size) = self.0.next_in_message_size {
+                    next_in_message_size
+                } else {
+                    match read_write.incoming_bytes_take(2) {
+                        Ok(Some(size_buffer)) => *self.0.next_in_message_size.insert(
+                            u16::from_be_bytes(<[u8; 2]>::try_from(&size_buffer[..2]).unwrap()),
+                        ),
+                        Ok(None) => {
+                            // Not enough data in incoming buffer.
+                            return Ok(NoiseHandshake::InProgress(self));
+                        }
+                        Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            return Err(HandshakeError::ReadClosed)
+                        }
+                    }
                 };
 
-                // If `self.receive_buffer` is empty and `incoming_data` contains at least a
-                // whole message, we can directly extract said message.
-                if self.0.receive_buffer.is_empty()
-                    && incoming_buffer.len() >= 2
-                    && incoming_buffer.len()
-                        >= usize::from(u16::from_be_bytes(
-                            <[u8; 2]>::try_from(&incoming_buffer[..2]).unwrap(),
-                        )) + 2
-                {
-                    let message_length = usize::from(u16::from_be_bytes(
-                        <[u8; 2]>::try_from(&incoming_buffer[..2]).unwrap(),
-                    )) + 2;
-                    read_write.read_bytes += message_length;
-                    read_write.incoming_buffer = Some(&incoming_buffer[message_length..]);
-                    &incoming_buffer[2..message_length]
-                } else {
-                    // The incoming buffer only contains a partial message, or we have started
-                    // reading a partial message in a previous iteration.
-                    // This is the more uncommon and complicated situation. We need to copy the
-                    // data from the incoming buffer to the receive buffer.
-                    let mut incoming_buffer_iter = incoming_buffer.iter();
-                    while self.0.receive_buffer.len() < 2 {
-                        let Some(byte) = incoming_buffer_iter.next() else {
-                            read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
-                            return Ok(NoiseHandshake::InProgress(self));
-                        };
-                        read_write.read_bytes += 1;
-                        self.0.receive_buffer.push(*byte);
+            // Extract the message from the incoming buffer.
+            let available_message =
+                match read_write.incoming_bytes_take(usize::from(next_in_message_size)) {
+                    Ok(Some(available_message)) => {
+                        self.0.next_in_message_size = None;
+                        available_message
                     }
-
-                    let message_length = usize::from(u16::from_be_bytes(
-                        <[u8; 2]>::try_from(&self.0.receive_buffer[..2]).unwrap(),
-                    )) + 2;
-                    while self.0.receive_buffer.len() < message_length {
-                        let Some(byte) = incoming_buffer_iter.next() else {
-                            read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
-                            return Ok(NoiseHandshake::InProgress(self));
-                        };
-                        read_write.read_bytes += 1;
-                        self.0.receive_buffer.push(*byte);
+                    Ok(None) => {
+                        // Not enough data in incoming buffer.
+                        return Ok(NoiseHandshake::InProgress(self));
                     }
+                    Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                        return Err(HandshakeError::ReadClosed)
+                    }
+                };
 
-                    // A full message is available in `receive_buffer`.
-                    read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
-                    &self.0.receive_buffer[2..]
-                }
-            };
-
-            // The rest of the function depends on the current handshake phase.
+            // How to parse the message depends on the current handshake phase.
             match (
                 self.0.num_buffered_or_transmitted_messages,
                 self.0.is_initiator,
@@ -850,7 +831,7 @@ impl HandshakeInProgress {
                             nom::bytes::streaming::take(32u32),
                             |k| <&[u8; 32]>::try_from(k).unwrap(),
                         ));
-                        match parser(available_message) {
+                        match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
@@ -866,7 +847,6 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, &[]);
 
                     // Message has been fully processed.
-                    self.0.receive_buffer.clear();
                     self.0.num_buffered_or_transmitted_messages += 1;
                     continue;
                 }
@@ -893,7 +873,7 @@ impl HandshakeInProgress {
                             }),
                             nom::combinator::rest,
                         )));
-                        match parser(available_message) {
+                        match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
@@ -996,7 +976,6 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, libp2p_handshake_encrypted);
 
                     // Message has been fully processed.
-                    self.0.receive_buffer.clear();
                     self.0.num_buffered_or_transmitted_messages += 1;
                     continue;
                 }
@@ -1018,7 +997,7 @@ impl HandshakeInProgress {
                             }),
                             nom::combinator::rest,
                         )));
-                        match parser(available_message) {
+                        match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
@@ -1099,7 +1078,6 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, libp2p_handshake_encrypted);
 
                     // Message has been fully processed.
-                    self.0.receive_buffer.clear();
                     self.0.num_buffered_or_transmitted_messages += 1;
                     continue;
                 }
@@ -1350,36 +1328,6 @@ impl CipherState {
         Ok(out)
     }
 
-    fn read_chachapoly_message_to_vecdeque(
-        &'_ mut self,
-        associated_data: &[u8],
-        message_data: &[u8],
-        destination: &mut VecDeque<u8>,
-    ) -> Result<(), CipherError> {
-        let original_dest_len = destination.len();
-        destination.resize(original_dest_len + message_data.len().saturating_sub(16), 0);
-
-        if destination.as_mut_slices().1.is_empty() {
-            match self.read_chachapoly_message_to_slice(
-                associated_data,
-                message_data,
-                &mut destination.as_mut_slices().0[original_dest_len..],
-            ) {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    destination.truncate(original_dest_len);
-                    Err(err)
-                }
-            }
-        } else {
-            destination.truncate(original_dest_len);
-            let intermediary =
-                self.read_chachapoly_message_to_vec(associated_data, message_data)?;
-            destination.extend(intermediary.into_iter());
-            Ok(())
-        }
-    }
-
     fn read_chachapoly_message_to_vec(
         &'_ mut self,
         associated_data: &[u8],
@@ -1388,6 +1336,25 @@ impl CipherState {
         let mut destination = vec![0; message_data.len().saturating_sub(16)];
         self.read_chachapoly_message_to_slice(associated_data, message_data, &mut destination)?;
         Ok(destination)
+    }
+
+    fn read_chachapoly_message_to_vec_append(
+        &'_ mut self,
+        associated_data: &[u8],
+        message_data: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CipherError> {
+        let len_before = out.len();
+        out.resize(len_before + message_data.len().saturating_sub(16), 0);
+        let result = self.read_chachapoly_message_to_slice(
+            associated_data,
+            message_data,
+            &mut out[len_before..],
+        );
+        if result.is_err() {
+            out.truncate(len_before);
+        }
+        result
     }
 
     fn read_chachapoly_message_to_slice(
@@ -1571,8 +1538,8 @@ mod tests {
                 ephemeral_secret_key: &rand::random(),
             });
 
-            let mut buf_1_to_2 = Vec::<Vec<u8>>::new();
-            let mut buf_2_to_1 = Vec::<Vec<u8>>::new();
+            let mut buf_1_to_2 = Vec::new();
+            let mut buf_2_to_1 = Vec::new();
 
             while !matches!(
                 (&handshake1, &handshake2),
@@ -1586,25 +1553,22 @@ mod tests {
                     NoiseHandshake::InProgress(nego) => {
                         let mut read_write = ReadWrite {
                             now: 0,
-                            incoming_buffer: Some(
-                                buf_2_to_1.first().map(|b| &b[..]).unwrap_or(&[]),
-                            ),
+                            incoming_buffer: buf_2_to_1,
+                            expected_incoming_bytes: Some(0),
                             read_bytes: 0,
                             write_buffers: Vec::new(),
                             write_bytes_queued: 0,
-                            write_bytes_queueable: Some(
-                                size1 - buf_1_to_2.iter().fold(0, |c, b| c + b.len()),
-                            ),
+                            write_bytes_queueable: Some(size1 - buf_1_to_2.len()),
                             wake_up_after: None,
                         };
                         handshake1 = nego.read_write(&mut read_write).unwrap();
-                        buf_1_to_2.extend(read_write.write_buffers.drain(..));
-                        for _ in 0..read_write.read_bytes {
-                            buf_2_to_1.first_mut().unwrap().remove(0);
-                        }
-                        if buf_2_to_1.first().map_or(false, |b| b.is_empty()) {
-                            buf_2_to_1.remove(0);
-                        }
+                        buf_2_to_1 = read_write.incoming_buffer;
+                        buf_1_to_2.extend(
+                            read_write
+                                .write_buffers
+                                .drain(..)
+                                .flat_map(|b| b.into_iter()),
+                        );
                     }
                 }
 
@@ -1613,25 +1577,22 @@ mod tests {
                     NoiseHandshake::InProgress(nego) => {
                         let mut read_write = ReadWrite {
                             now: 0,
-                            incoming_buffer: Some(
-                                buf_1_to_2.first().map(|b| &b[..]).unwrap_or(&[]),
-                            ),
+                            incoming_buffer: buf_1_to_2,
+                            expected_incoming_bytes: Some(0),
                             read_bytes: 0,
                             write_buffers: Vec::new(),
                             write_bytes_queued: 0,
-                            write_bytes_queueable: Some(
-                                size2 - buf_2_to_1.iter().fold(0, |c, b| c + b.len()),
-                            ),
+                            write_bytes_queueable: Some(size2 - buf_2_to_1.len()),
                             wake_up_after: None,
                         };
                         handshake2 = nego.read_write(&mut read_write).unwrap();
-                        buf_2_to_1.extend(read_write.write_buffers.drain(..));
-                        for _ in 0..read_write.read_bytes {
-                            buf_1_to_2.first_mut().unwrap().remove(0);
-                        }
-                        if buf_1_to_2.first().map_or(false, |b| b.is_empty()) {
-                            buf_1_to_2.remove(0);
-                        }
+                        buf_1_to_2 = read_write.incoming_buffer;
+                        buf_2_to_1.extend(
+                            read_write
+                                .write_buffers
+                                .drain(..)
+                                .flat_map(|b| b.into_iter()),
+                        );
                     }
                 }
             }

@@ -61,8 +61,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     // Store the data that the local has emitted but the remote hasn't received yet, and vice
     // versa.
-    let mut local_to_remote_buffer = Vec::<Vec<u8>>::new();
-    let mut remote_to_local_buffer = Vec::<Vec<u8>>::new();
+    let mut local_to_remote_buffer = Vec::new();
+    let mut remote_to_local_buffer = Vec::new();
 
     // Perform handshake.
     while !matches!(
@@ -77,32 +77,23 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let mut read_write = ReadWrite {
                     now: Duration::new(0, 0),
-                    incoming_buffer: Some(
-                        remote_to_local_buffer
-                            .first()
-                            .map(|b| &b[..])
-                            .unwrap_or(&[]),
-                    ),
+                    incoming_buffer: remote_to_local_buffer,
+                    expected_incoming_bytes: Some(0),
                     read_bytes: 0,
                     write_buffers: Vec::new(),
                     write_bytes_queued: 0,
-                    write_bytes_queueable: Some(
-                        8162 - local_to_remote_buffer.iter().fold(0, |c, b| c + b.len()),
-                    ),
+                    write_bytes_queueable: Some(8162 - local_to_remote_buffer.len()),
                     wake_up_after: None,
                 };
 
                 local = nego.read_write(&mut read_write).unwrap();
-                local_to_remote_buffer.extend(read_write.write_buffers.drain(..));
-                for _ in 0..read_write.read_bytes {
-                    remote_to_local_buffer.first_mut().unwrap().remove(0);
-                }
-                if remote_to_local_buffer
-                    .first()
-                    .map_or(false, |b| b.is_empty())
-                {
-                    remote_to_local_buffer.remove(0);
-                }
+                remote_to_local_buffer = read_write.incoming_buffer;
+                local_to_remote_buffer.extend(
+                    read_write
+                        .write_buffers
+                        .drain(..)
+                        .flat_map(|b| b.into_iter()),
+                );
             }
         }
 
@@ -111,32 +102,23 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             single_stream_handshake::Handshake::Healthy(nego) => {
                 let mut read_write = ReadWrite {
                     now: Duration::new(0, 0),
-                    incoming_buffer: Some(
-                        local_to_remote_buffer
-                            .first()
-                            .map(|b| &b[..])
-                            .unwrap_or(&[]),
-                    ),
+                    incoming_buffer: local_to_remote_buffer,
+                    expected_incoming_bytes: Some(0),
                     read_bytes: 0,
                     write_buffers: Vec::new(),
                     write_bytes_queued: 0,
-                    write_bytes_queueable: Some(
-                        8162 - remote_to_local_buffer.iter().fold(0, |c, b| c + b.len()),
-                    ),
+                    write_bytes_queueable: Some(8162 - remote_to_local_buffer.len()),
                     wake_up_after: None,
                 };
 
                 remote = nego.read_write(&mut read_write).unwrap();
-                remote_to_local_buffer.extend(read_write.write_buffers.drain(..));
-                for _ in 0..read_write.read_bytes {
-                    local_to_remote_buffer.first_mut().unwrap().remove(0);
-                }
-                if local_to_remote_buffer
-                    .first()
-                    .map_or(false, |b| b.is_empty())
-                {
-                    local_to_remote_buffer.remove(0);
-                }
+                local_to_remote_buffer = read_write.incoming_buffer;
+                remote_to_local_buffer.extend(
+                    read_write
+                        .write_buffers
+                        .drain(..)
+                        .flat_map(|b| b.into_iter()),
+                );
             }
         }
     }
@@ -169,19 +151,15 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // We now encrypt the fuzzing data and add it to the buffer to send to the remote. This is
     // done all in one go.
     for buffer in remote.encrypt(iter::once(data.to_vec())) {
-        remote_to_local_buffer.push(buffer);
+        remote_to_local_buffer.extend_from_slice(&buffer);
     }
 
     // Now send the data to the connection.
     loop {
         let mut local_read_write = ReadWrite {
             now: Duration::new(0, 0),
-            incoming_buffer: Some(
-                remote_to_local_buffer
-                    .first()
-                    .map(|b| &b[..])
-                    .unwrap_or(&[]),
-            ),
+            incoming_buffer: remote_to_local_buffer,
+            expected_incoming_bytes: Some(0),
             read_bytes: 0,
             write_buffers: Vec::new(),
             write_bytes_queued: 0,
@@ -192,6 +170,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         let local_event = match local.read_write(&mut local_read_write) {
             Ok((new_local, local_event)) => {
                 local = new_local;
+                remote_to_local_buffer = local_read_write.incoming_buffer;
                 local_event
             }
             Err(_) => return, // Invalid data. Counts as fuzzing success.
@@ -201,16 +180,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             local_read_write.read_bytes,
             local_read_write.write_bytes_queued,
         );
-
-        for _ in 0..local_read_write.read_bytes {
-            remote_to_local_buffer.first_mut().unwrap().remove(0);
-        }
-        if remote_to_local_buffer
-            .first()
-            .map_or(false, |b| b.is_empty())
-        {
-            remote_to_local_buffer.remove(0);
-        }
 
         // Process some of the events in order to drive the fuzz test as far as possible.
         match local_event {

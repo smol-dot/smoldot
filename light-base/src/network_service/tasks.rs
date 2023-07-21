@@ -237,8 +237,13 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // Perform a read-write. This updates the internal state of the connection task.
             let mut read_write = ReadWrite {
                 now: now.clone(),
-                incoming_buffer,
+                incoming_buffer: incoming_buffer.map(|b| b.to_vec()).unwrap_or_else(Vec::new), // TODO: extra copy
                 read_bytes: 0,
+                expected_incoming_bytes: if incoming_buffer.is_some() {
+                    Some(0)
+                } else {
+                    None
+                },
                 write_buffers: Vec::new(),
                 write_bytes_queued: 0,
                 write_bytes_queueable,
@@ -460,8 +465,9 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
                 let mut read_write = ReadWrite {
                     now: now.clone(),
-                    incoming_buffer: Some(incoming_buffer),
+                    incoming_buffer: incoming_buffer.to_vec(), // TODO: extra copy
                     read_bytes: 0,
+                    expected_incoming_bytes: Some(0),
                     write_buffers: Vec::new(),
                     write_bytes_queued: 0,
                     write_bytes_queueable,

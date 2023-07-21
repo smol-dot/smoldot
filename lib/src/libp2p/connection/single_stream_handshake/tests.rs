@@ -28,8 +28,8 @@ fn handshake_basic_works() {
         let mut handshake1 = Handshake::noise_yamux(&key1, &rand::random(), true);
         let mut handshake2 = Handshake::noise_yamux(&key2, &rand::random(), false);
 
-        let mut buf_1_to_2 = Vec::<Vec<u8>>::new();
-        let mut buf_2_to_1 = Vec::<Vec<u8>>::new();
+        let mut buf_1_to_2 = Vec::new();
+        let mut buf_2_to_1 = Vec::new();
 
         while !matches!(
             (&handshake1, &handshake2),
@@ -40,23 +40,22 @@ fn handshake_basic_works() {
                 Handshake::Healthy(nego) => {
                     let mut read_write = ReadWrite {
                         now: 0,
-                        incoming_buffer: Some(buf_2_to_1.first().map(|b| &b[..]).unwrap_or(&[])),
+                        incoming_buffer: buf_2_to_1,
+                        expected_incoming_bytes: Some(0),
                         read_bytes: 0,
                         write_buffers: Vec::new(),
                         write_bytes_queued: 0,
-                        write_bytes_queueable: Some(
-                            size1 - buf_1_to_2.iter().fold(0, |c, b| c + b.len()),
-                        ),
+                        write_bytes_queueable: Some(size1 - buf_1_to_2.len()),
                         wake_up_after: None,
                     };
                     handshake1 = nego.read_write(&mut read_write).unwrap();
-                    buf_1_to_2.extend(read_write.write_buffers.drain(..));
-                    for _ in 0..read_write.read_bytes {
-                        buf_2_to_1.first_mut().unwrap().remove(0);
-                    }
-                    if buf_2_to_1.first().map_or(false, |b| b.is_empty()) {
-                        buf_2_to_1.remove(0);
-                    }
+                    buf_2_to_1 = read_write.incoming_buffer;
+                    buf_1_to_2.extend(
+                        read_write
+                            .write_buffers
+                            .drain(..)
+                            .flat_map(|b| b.into_iter()),
+                    );
                 }
             }
 
@@ -65,23 +64,22 @@ fn handshake_basic_works() {
                 Handshake::Healthy(nego) => {
                     let mut read_write = ReadWrite {
                         now: 0,
-                        incoming_buffer: Some(buf_1_to_2.first().map(|b| &b[..]).unwrap_or(&[])),
+                        incoming_buffer: buf_1_to_2,
+                        expected_incoming_bytes: Some(0),
                         read_bytes: 0,
                         write_buffers: Vec::new(),
                         write_bytes_queued: 0,
-                        write_bytes_queueable: Some(
-                            size2 - buf_2_to_1.iter().fold(0, |c, b| c + b.len()),
-                        ),
+                        write_bytes_queueable: Some(size2 - buf_2_to_1.len()),
                         wake_up_after: None,
                     };
                     handshake2 = nego.read_write(&mut read_write).unwrap();
-                    buf_2_to_1.extend(read_write.write_buffers.drain(..));
-                    for _ in 0..read_write.read_bytes {
-                        buf_1_to_2.first_mut().unwrap().remove(0);
-                    }
-                    if buf_1_to_2.first().map_or(false, |b| b.is_empty()) {
-                        buf_1_to_2.remove(0);
-                    }
+                    buf_1_to_2 = read_write.incoming_buffer;
+                    buf_2_to_1.extend(
+                        read_write
+                            .write_buffers
+                            .drain(..)
+                            .flat_map(|b| b.into_iter()),
+                    );
                 }
             }
         }

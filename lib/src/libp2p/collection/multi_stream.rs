@@ -31,6 +31,7 @@ use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec::Vec};
 use core::{
     cmp,
     hash::Hash,
+    mem,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -51,8 +52,6 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// All incoming data for the handshake substream is first transferred to this buffer.
         // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
         handshake_read_buffer: Vec<u8>,
-
-        handshake_read_buffer_partial_read: usize,
 
         /// Other substreams, besides [`MultiStreamConnectionTaskInner::Handshake::opened_substream`],
         /// that have been opened. For each substream, contains a boolean indicating whether the
@@ -157,7 +156,6 @@ where
                 handshake: Some(handshake),
                 opened_substream: None,
                 handshake_read_buffer: Vec::new(),
-                handshake_read_buffer_partial_read: 0,
                 extra_open_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                     0,
                     Default::default(),
@@ -850,19 +848,21 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<'_, TNow>,
+        read_write: &'_ mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but
         // we do it here again because we're not necessarily in the ̀`established` state.
-        assert!(read_write.incoming_buffer.is_some() && read_write.write_bytes_queueable.is_some());
+        assert!(
+            read_write.expected_incoming_bytes.is_some()
+                && read_write.write_bytes_queueable.is_some()
+        );
 
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
                 handshake,
                 opened_substream,
                 handshake_read_buffer,
-                handshake_read_buffer_partial_read,
                 established,
                 extra_open_substreams,
             } if opened_substream
@@ -877,20 +877,11 @@ where
                 //
                 // According to the libp2p WebRTC spec, a frame and its length prefix must not be
                 // larger than 16kiB, meaning that the read buffer never has to exceed this size.
+                //
+                // Try to add data to `handshake_read_buffer`.
                 // TODO: this is very suboptimal; improve
-                if let Some(incoming_buffer) = read_write.incoming_buffer {
-                    // TODO: reset the substream if `remote_writing_side_closed`
-                    let max_to_transfer =
-                        cmp::min(incoming_buffer.len(), 16384 - handshake_read_buffer.len());
-                    handshake_read_buffer.extend_from_slice(&incoming_buffer[..max_to_transfer]);
-                    debug_assert!(handshake_read_buffer.len() <= 16384);
-                    read_write.advance_read(max_to_transfer);
-                }
-
-                // Try to parse the content of `handshake_read_buffer`.
-                // If the content of `handshake_read_buffer` is an incomplete frame, the flags
-                // will be `None` and the message will be `&[]`.
-                let (protobuf_frame_size, flags, message_within_frame) = {
+                // TODO: this doesn't properly back-pressure, because we read unconditionally
+                let (protobuf_frame_size, flags) = {
                     let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
                         nom::combinator::map_parser(
                             nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
@@ -901,34 +892,47 @@ where
                         ),
                     );
 
-                    match nom::Finish::finish(parser(handshake_read_buffer)) {
+                    match parser(&read_write.incoming_buffer) {
                         Ok((rest, framed_message)) => {
+                            if let Some(message) = framed_message.message {
+                                handshake_read_buffer.extend_from_slice(message);
+                            }
+
                             let protobuf_frame_size = handshake_read_buffer.len() - rest.len();
-                            (
-                                protobuf_frame_size,
-                                framed_message.flags,
-                                framed_message.message.unwrap_or(&[][..]),
-                            )
+                            (protobuf_frame_size, framed_message.flags)
                         }
-                        Err(err) if err.code == nom::error::ErrorKind::Eof => {
-                            // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large, and remove the debug_assert below
-                            debug_assert!(handshake_read_buffer.len() < 16384);
-                            (0, None, &[][..])
+                        Err(nom::Err::Incomplete(needed)) => {
+                            read_write.expected_incoming_bytes = Some(
+                                handshake_read_buffer.len()
+                                    + match needed {
+                                        nom::Needed::Size(s) => s.get(),
+                                        nom::Needed::Unknown => 1,
+                                    },
+                            );
+                            return SubstreamFate::Continue;
                         }
                         Err(_) => {
                             // Message decoding error.
-                            // TODO: no, handshake failed
+                            // TODO: no, handshake error
                             return SubstreamFate::Reset;
                         }
                     }
                 };
 
+                let _ = read_write.incoming_bytes_take(protobuf_frame_size);
+
+                // If the remote has sent a `FIN` or `RESET_STREAM` flag, mark the
+                // remote writing side as closed.
+                if flags.map_or(false, |f| f == 0 || f == 2) {
+                    // TODO: no, handshake error
+                    return SubstreamFate::Reset;
+                }
+
                 let mut sub_read_write = ReadWrite {
                     now: read_write.now.clone(),
-                    incoming_buffer: Some(
-                        &message_within_frame[*handshake_read_buffer_partial_read..],
-                    ),
+                    incoming_buffer: mem::take(handshake_read_buffer),
                     read_bytes: 0,
+                    expected_incoming_bytes: Some(0),
                     write_buffers: Vec::new(),
                     write_bytes_queued: read_write.write_bytes_queued,
                     // Don't write out more than one frame.
@@ -941,7 +945,7 @@ where
                 };
 
                 let handshake_outcome = handshake.take().unwrap().read_write(&mut sub_read_write);
-                *handshake_read_buffer_partial_read += sub_read_write.read_bytes;
+                *handshake_read_buffer = sub_read_write.incoming_buffer;
                 if let Some(wake_up_after) = &sub_read_write.wake_up_after {
                     read_write.wake_up_after(wake_up_after)
                 }
@@ -951,7 +955,6 @@ where
                 if sub_read_write.write_bytes_queued != read_write.write_bytes_queued {
                     let written_bytes =
                         sub_read_write.write_bytes_queued - read_write.write_bytes_queued;
-                    drop(sub_read_write);
 
                     // TODO: don't do the encoding manually but use the protobuf module?
                     let tag = protobuf::tag_encode(2, 2).collect::<Vec<_>>();
@@ -967,28 +970,6 @@ where
                     read_write.write_out(libp2p_prefix);
                     read_write.write_out(tag);
                     read_write.write_out(data_len);
-                }
-
-                if protobuf_frame_size != 0
-                    && message_within_frame.len() <= *handshake_read_buffer_partial_read
-                {
-                    // If the substream state machine has processed all the data within
-                    // `read_buffer`, process the flags of the current protobuf frame and
-                    // discard that protobuf frame so that at the next iteration we pick
-                    // up the rest.
-
-                    // Discard the data.
-                    *handshake_read_buffer_partial_read = 0;
-                    *handshake_read_buffer = handshake_read_buffer
-                        .split_at(protobuf_frame_size)
-                        .1
-                        .to_vec();
-
-                    // Process the flags.
-                    // TODO: ignore FIN and treat any other flag as error
-                    if flags.map_or(false, |f| f != 0) {
-                        todo!()
-                    }
                 }
 
                 match handshake_outcome {
@@ -1010,7 +991,8 @@ where
                         // indicate that it's not dead and store it in the state machine while
                         // waiting for it to be closed by the remote.
                         read_write.close_write();
-                        let handshake_substream_still_open = read_write.incoming_buffer.is_some();
+                        let handshake_substream_still_open =
+                            read_write.expected_incoming_bytes.is_some();
 
                         let mut established = established.take().unwrap();
                         for (substream_id, outbound) in extra_open_substreams.drain() {
@@ -1057,7 +1039,7 @@ where
                 // dead and simply wait for the remote to close it.
                 // TODO: kill the connection if the remote sends more data?
                 read_write.close_write();
-                if read_write.incoming_buffer.is_none() {
+                if read_write.expected_incoming_bytes.is_none() {
                     *handshake_substream = None;
                     SubstreamFate::Reset
                 } else {
