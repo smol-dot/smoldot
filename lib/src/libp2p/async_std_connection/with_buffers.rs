@@ -24,9 +24,15 @@
 
 // TODO: usage and example
 
-use core::{fmt, future, pin::Pin, task::Poll};
+use crate::libp2p::read_write;
+
+use core::{
+    fmt, future, mem, ops,
+    pin::{self, Pin},
+    task::Poll,
+};
 use futures_util::{AsyncRead, AsyncWrite};
-use std::io;
+use std::{io, time::Instant};
 
 /// Holds an implementation of `AsyncRead` and `AsyncWrite`, alongside with a read buffer and a
 /// write buffer.
@@ -37,49 +43,33 @@ pub struct WithBuffers<T> {
     socket: T,
     /// Error that has happened on the socket, if any.
     error: Option<io::Error>,
-    /// Storage for data read from the socket.
-    read_buffer: Box<[u8]>,
-    /// Offset in `read_buffer` of the buffer returned by [`WithBuffers::buffers`].
-    /// If this is equal to `socket_in_cursor_start`, then `buffers` should return an empty slice.
-    read_buffer_processed_cursor: usize,
-    /// Offset in `read_buffer` where the socket will put incoming data. Also equal to the end
-    /// of the buffer returned by [`WithBuffers::buffers`].
-    socket_in_cursor_start: usize,
+    /// Storage for data read from the socket. The first [`WithBuffers::read_buffer_valid`] bytes
+    /// contain actual socket data, while the rest contains garbage data.
+    /// The capacity of this buffer is at least equal to the amount of bytes requested by the
+    /// inner data consumer.
+    read_buffer: Vec<u8>,
+    /// Number of bytes of data in [`WithBuffers::read_buffer`] that contain actual data.
+    read_buffer_valid: usize,
+    read_buffer_reasonable_capacity: usize,
     /// True if reading from the socket has returned `Ok(0)` earlier, in other words "end of
     /// file".
     read_closed: bool,
     /// Storage for data to write to the socket.
-    write_buffer: Box<[u8]>,
-    /// Offset in `write_buffer` of the data ready to be sent out on the socket.
-    write_ready_start: usize,
-    /// Offset in `write_buffer` of the end of the data ready to be sent out on the socket.
-    /// Can be inferior to `write_ready_start` in case the data wraps around.
-    /// If equal to `write_ready_start`, that means no data is ready.
-    write_ready_end: usize,
-    /// True if the user has called [`WithBuffers::close`] earlier.
+    write_buffers: Vec<Vec<u8>>,
+    /// True if the consumer has closed the writing side earlier.
     write_closed: bool,
-    /// True if the user has called [`WithBuffers::close`] earlier, and the socket still has to
+    /// True if the consumer has closed the writing side earlier, and the socket still has to
     /// be closed.
     close_pending: bool,
     /// True if data has been written on the socket and the socket needs to be flushed.
     flush_pending: bool,
-}
 
-/// See [`WithBuffers::buffers`].
-pub struct Buffers<'a> {
-    /// Two buffers which, when concatenated, represent the data available from the socket.
-    ///
-    /// `None` if the reading side of the socket has been closed.
-    pub read_buffer: Option<(&'a [u8], &'a [u8])>,
-
-    /// Two buffers which, when concatenated, can be written to in order to send data to the
-    /// socket.
-    ///
-    /// `None` if the writing side of the socket has been closed.
-    ///
-    /// > **Note**: The write buffer is `None` only after the writing side has actually been
-    /// >           closed, not immediately after calling [`WithBuffers::close`].
-    pub write_buffer: Option<(&'a mut [u8], &'a mut [u8])>,
+    /// Value of [`ReadWrite::now`] that was fed by the latest call to
+    /// [`WriteBuffers::read_write_access`].
+    read_write_now: Option<Instant>,
+    /// Value of [`ReadWrite::wake_up_after`] produced by the latest call
+    /// to [`WriteBuffers::read_write_access`].
+    read_write_wake_up_after: Option<Instant>,
 }
 
 impl<T> WithBuffers<T> {
@@ -87,184 +77,77 @@ impl<T> WithBuffers<T> {
     ///
     /// The socket must still be open in both directions.
     pub fn new(socket: T) -> Self {
+        let read_buffer_reasonable_capacity = 65536; // TODO: make configurable?
+
         WithBuffers {
             socket,
             error: None,
-            read_buffer: vec![0; 8192].into_boxed_slice(),
-            read_buffer_processed_cursor: 0,
-            socket_in_cursor_start: 0,
+            read_buffer: Vec::with_capacity(read_buffer_reasonable_capacity),
+            read_buffer_valid: 0,
+            read_buffer_reasonable_capacity,
             read_closed: false,
-            write_buffer: vec![0; 8192].into_boxed_slice(),
-            write_ready_start: 0,
-            write_ready_end: 0,
+            write_buffers: Vec::with_capacity(64),
             write_closed: false,
             close_pending: false,
             flush_pending: false,
+            read_write_now: None,
+            read_write_wake_up_after: None,
         }
     }
 
-    /// Returns a buffer containing data read from the socket, and a buffer containing data
-    /// destined to be written to the socket.
+    /// Returns an object that implements `Deref<Target = ReadWrite>`. This object can be used
+    /// to push or pull data to/from the socket.
     ///
-    /// If an error happened on the socket earlier, it is returned instead.
-    ///
-    /// If the returned object contains two `None`, the socket is now useless and can be dropped.
-    ///
-    /// This method is idempotent. You should later call [`WithBuffers::advance`] to advance the
-    /// cursor in these buffers.
-    pub fn buffers(&mut self) -> Result<Buffers, &io::Error> {
-        if let Some(error) = self.error.as_ref() {
+    /// > **Note**: The parameter requires `Self` to be pinned for consistency with
+    /// >           [`WithBuffers::wait_read_write_again`].
+    pub fn read_write_access(
+        self: Pin<&mut Self>,
+        now: Instant,
+    ) -> Result<ReadWriteAccess, &io::Error> {
+        let this = self.project();
+
+        debug_assert!(this
+            .read_write_now
+            .as_ref()
+            .map_or(true, |old_now| *old_now <= now));
+        *this.read_write_wake_up_after = None;
+        *this.read_write_now = Some(now);
+
+        if let Some(error) = this.error.as_ref() {
             return Err(error);
         }
 
-        let read_buffer = if self.read_closed
-            && self.read_buffer_processed_cursor == self.socket_in_cursor_start
-        {
-            None
-        } else if self.read_buffer_processed_cursor <= self.socket_in_cursor_start {
-            Some((
-                &self.read_buffer[self.read_buffer_processed_cursor..self.socket_in_cursor_start],
-                &[][..],
-            ))
-        } else {
-            let (buf2, buf1) = self.read_buffer.split_at(self.read_buffer_processed_cursor);
-            let buf2 = &buf2[..self.socket_in_cursor_start];
-            Some((buf1, buf2))
-        };
+        this.read_buffer.truncate(*this.read_buffer_valid);
 
-        let write_buffer = if self.write_closed {
-            if self.close_pending {
-                Some((&mut [][..], &mut [][..]))
-            } else {
-                None
-            }
-        } else if self.write_ready_end < self.write_ready_start {
-            Some((
-                &mut self.write_buffer[self.write_ready_end..self.write_ready_start - 1],
-                &mut [][..],
-            ))
-        } else if self.write_ready_start == 0 {
-            let end = self.write_buffer.len() - 1;
-            Some((
-                &mut self.write_buffer[self.write_ready_end..end],
-                &mut [][..],
-            ))
-        } else {
-            let (buf2, buf1) = self.write_buffer.split_at_mut(self.write_ready_end);
-            let buf2 = &mut buf2[..self.write_ready_start - 1];
-            Some((buf1, buf2))
-        };
+        let write_bytes_queued = this.write_buffers.iter().map(Vec::len).sum();
 
-        Ok(Buffers {
-            read_buffer,
-            write_buffer,
+        Ok(ReadWriteAccess {
+            read_buffer_len_before: this.read_buffer.len(),
+            write_buffers_len_before: this.write_buffers.len(),
+            read_write: read_write::ReadWrite {
+                now,
+                incoming_buffer: mem::take(this.read_buffer),
+                expected_incoming_bytes: if !*this.read_closed { Some(0) } else { None },
+                read_bytes: 0,
+                write_bytes_queued,
+                write_buffers: mem::take(this.write_buffers),
+                write_bytes_queueable: if !*this.write_closed {
+                    // Limit outgoing buffer size to 128kiB.
+                    // TODO: make configurable?
+                    Some((128 * 1024usize).saturating_sub(write_bytes_queued))
+                } else {
+                    None
+                },
+                wake_up_after: this.read_write_wake_up_after.take(),
+            },
+            read_buffer: this.read_buffer,
+            read_buffer_valid: this.read_buffer_valid,
+            read_buffer_reasonable_capacity: *this.read_buffer_reasonable_capacity,
+            write_buffers: this.write_buffers,
+            write_closed: this.write_closed,
+            close_pending: this.close_pending,
+            read_write_wake_up_after: this.read_write_wake_up_after,
         })
-    }
-
-    /// Advances the cursors of the buffers.
-    ///
-    /// Discards the first `read_n` bytes of the read buffer, and the first `write_n` bytes of the
-    /// write buffer. The bytes discarded from the write buffer will later be sent when
-    /// [`WithBuffers::process`] is called.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `read_n` or `write_n` are larger than the lengths of the buffers returned by
-    /// [`WithBuffers::buffers`].
-    /// Panics if [`WithBuffers::buffers`] has returned an error.
-    ///
-    pub fn advance(&mut self, read_n: usize, write_n: usize) {
-        // Read cursor.
-        if self.read_buffer_processed_cursor > self.socket_in_cursor_start {
-            self.read_buffer_processed_cursor = self
-                .read_buffer_processed_cursor
-                .checked_add(read_n)
-                .unwrap();
-            if self.read_buffer_processed_cursor >= self.read_buffer.len() {
-                self.read_buffer_processed_cursor -= self.read_buffer.len();
-                assert!(self.read_buffer_processed_cursor <= self.socket_in_cursor_start);
-            }
-        } else {
-            self.read_buffer_processed_cursor = self
-                .read_buffer_processed_cursor
-                .checked_add(read_n)
-                .unwrap();
-            assert!(self.read_buffer_processed_cursor <= self.socket_in_cursor_start);
-        }
-
-        // Write cursor.
-        if self.write_closed {
-            assert_eq!(write_n, 0);
-        } else if self.write_ready_end < self.write_ready_start {
-            self.write_ready_end = self.write_ready_end.checked_add(write_n).unwrap();
-            assert!(self.write_ready_end < self.write_ready_start);
-        } else {
-            self.write_ready_end = self.write_ready_end.checked_add(write_n).unwrap();
-            if self.write_ready_end >= self.write_buffer.len() {
-                self.write_ready_end -= self.write_buffer.len();
-                assert!(self.write_ready_end < self.write_ready_start);
-            } else {
-                assert!(self.write_ready_end >= self.write_ready_start);
-            }
-        }
-    }
-
-    /// Indicate that the writing side of the connection must be closed. The write buffer returned
-    /// by [`WithBuffers::buffers`] will then return `Some(&mut [])`. After the writing side has
-    /// actually been closed, it will return `None`.
-    pub fn close(&mut self) {
-        // TODO: should we not panic here or something? or return an error?
-        if !self.write_closed {
-            self.write_closed = true;
-            self.close_pending = true;
-        }
-    }
-
-    /// True if [`WithBuffers::close`] has been called earlier.
-    pub fn is_closed(&self) -> bool {
-        self.write_closed
-    }
-}
-
-impl<T> WithBuffers<T>
-where
-    T: AsyncWrite,
-{
-    /// Wait until the socket has been properly closed.
-    ///
-    /// Implicitly calls [`WithBuffers::close`] if it hasn't been done.
-    ///
-    /// Has no effect if an error has happened in the past on the socket.
-    ///
-    /// This is similar to [`WithBuffers::process`], except that no reading or writing is ever
-    /// performed.
-    pub async fn flush_close(self: Pin<&mut Self>) {
-        let mut this = self.project();
-
-        if !*this.write_closed {
-            *this.write_closed = true;
-            debug_assert!(!*this.close_pending);
-            *this.close_pending = true;
-        }
-
-        future::poll_fn(move |cx| {
-            if !*this.close_pending || this.error.is_some() {
-                return Poll::Ready(());
-            }
-
-            match AsyncWrite::poll_close(this.socket.as_mut(), cx) {
-                Poll::Ready(Ok(())) => {
-                    *this.close_pending = false;
-                    Poll::Ready(())
-                }
-                Poll::Ready(Err(err)) => {
-                    *this.error = Some(err);
-                    Poll::Ready(())
-                }
-                Poll::Pending => Poll::Pending,
-            }
-        })
-        .await;
     }
 }
 
@@ -272,63 +155,65 @@ impl<T> WithBuffers<T>
 where
     T: AsyncRead + AsyncWrite,
 {
-    /// Waits either for data to be received or for data to be written out.
+    /// Waits until [`WithBuffers::read_write_access`] should be called again.
     ///
-    /// Also returns if an error happened on the socket. If an error has already happened in the
-    /// past, returns immediately.
-    ///
-    /// After this function has returned, the buffers returned by [`WithBuffers::buffers`] might
-    /// have changed. The read buffer might have been extended with more data, and the write buffer
-    /// might have been extended.
-    pub async fn process(self: Pin<&mut Self>) {
+    /// Returns if an error happens on the socket. If an error happened in the past on the socket,
+    /// the future never yields.
+    pub async fn wait_read_write_again<F>(
+        self: Pin<&mut Self>,
+        timer_builder: impl FnOnce(Instant) -> F,
+    ) where
+        F: future::Future<Output = ()>,
+    {
         let mut this = self.project();
+
+        // Return immediately if `wake_up_after <= now`.
+        match (&*this.read_write_wake_up_after, &*this.read_write_now) {
+            (Some(when_wake_up), Some(now)) if *when_wake_up <= *now => {
+                return;
+            }
+            _ => {}
+        }
+
+        let mut timer = pin::pin!({
+            let fut = this
+                .read_write_wake_up_after
+                .as_ref()
+                .map(|when| timer_builder(*when));
+            async {
+                if let Some(fut) = fut {
+                    fut.await;
+                } else {
+                    future::pending::<()>().await;
+                }
+            }
+        });
+
+        // Grow the read buffer in order to make space for potentially more data.
+        this.read_buffer.resize(this.read_buffer.capacity(), 0);
 
         future::poll_fn(move |cx| {
             if this.error.is_some() {
-                return Poll::Ready(());
+                // Never return.
+                return Poll::Pending;
             }
 
             // If still `true` at the end of the function, `Poll::Pending` is returned.
             let mut pending = true;
 
-            // All the reading is skipped if the reading side of the socket is closed or if
-            // `socket_in_cursor_start == read_buffer_processed_cursor - 1`, as we don't want the
-            // socket reading to catch up with the processing.
-            if !*this.read_closed
-                && *this.socket_in_cursor_start
-                    != this
-                        .read_buffer_processed_cursor
-                        .checked_sub(1)
-                        .unwrap_or(this.read_buffer.len() - 1)
-            {
-                let read_result = if *this.socket_in_cursor_start
-                    < *this.read_buffer_processed_cursor
-                {
-                    debug_assert_ne!(
-                        *this.socket_in_cursor_start,
-                        *this.read_buffer_processed_cursor - 1
-                    );
-                    AsyncRead::poll_read(
-                        this.socket.as_mut(),
-                        cx,
-                        &mut this.read_buffer
-                            [*this.socket_in_cursor_start..*this.read_buffer_processed_cursor - 1],
-                    )
-                } else if *this.read_buffer_processed_cursor == 0 {
-                    debug_assert!(*this.socket_in_cursor_start < this.read_buffer.len() - 1);
-                    let end = this.read_buffer.len() - 1;
-                    AsyncRead::poll_read(
-                        this.socket.as_mut(),
-                        cx,
-                        &mut this.read_buffer[*this.socket_in_cursor_start..end],
-                    )
-                } else {
-                    let (buf2, buf1) = this.read_buffer.split_at_mut(*this.socket_in_cursor_start);
-                    let buf1 = io::IoSliceMut::new(buf1);
-                    let buf2 =
-                        io::IoSliceMut::new(&mut buf2[..*this.read_buffer_processed_cursor - 1]);
-                    AsyncRead::poll_read_vectored(this.socket.as_mut(), cx, &mut [buf1, buf2])
-                };
+            match future::Future::poll(Pin::new(&mut timer), cx) {
+                Poll::Pending => {}
+                Poll::Ready(()) => {
+                    pending = false;
+                }
+            }
+
+            if !*this.read_closed {
+                let read_result = AsyncRead::poll_read(
+                    this.socket.as_mut(),
+                    cx,
+                    &mut this.read_buffer[*this.read_buffer_valid..],
+                );
 
                 match read_result {
                     Poll::Pending => {}
@@ -337,17 +222,8 @@ where
                         pending = false;
                     }
                     Poll::Ready(Ok(n)) => {
-                        // Note that fewer checks are being performed compared to
-                        // [`WithBuffers::advance`], as it is assumed that the implementation of
-                        // `AsyncRead` is working.
-                        *this.socket_in_cursor_start += n;
-                        if *this.socket_in_cursor_start >= this.read_buffer.len() {
-                            *this.socket_in_cursor_start -= this.read_buffer.len();
-                        }
-                        assert_ne!(
-                            *this.socket_in_cursor_start,
-                            *this.read_buffer_processed_cursor
-                        );
+                        *this.read_buffer_valid += n;
+                        // TODO: consider waking up only if the expected bytes of the consumer are exceeded
                         pending = false;
                     }
                     Poll::Ready(Err(err)) => {
@@ -358,18 +234,14 @@ where
             }
 
             loop {
-                if *this.write_ready_start != *this.write_ready_end {
-                    let write_result = if *this.write_ready_start < *this.write_ready_end {
-                        AsyncWrite::poll_write(
-                            this.socket.as_mut(),
-                            cx,
-                            &this.write_buffer[*this.write_ready_start..*this.write_ready_end],
-                        )
-                    } else {
-                        let (buf2, buf1) = this.write_buffer.split_at(*this.write_ready_start);
-                        let buf1 = io::IoSlice::new(buf1);
-                        let buf2 = io::IoSlice::new(&buf2[..*this.write_ready_end]);
-                        AsyncWrite::poll_write_vectored(this.socket.as_mut(), cx, &[buf1, buf2])
+                if this.write_buffers.iter().any(|b| !b.is_empty()) {
+                    let write_result = {
+                        let buffers = this
+                            .write_buffers
+                            .iter()
+                            .map(|buf| io::IoSlice::new(&buf))
+                            .collect::<Vec<_>>();
+                        AsyncWrite::poll_write_vectored(this.socket.as_mut(), cx, &buffers)
                     };
 
                     match write_result {
@@ -377,12 +249,20 @@ where
                             // It is not legal for `poll_write` to return 0 bytes written.
                             unreachable!();
                         }
-                        Poll::Ready(Ok(n)) => {
+                        Poll::Ready(Ok(mut n)) => {
                             pending = false;
                             *this.flush_pending = true;
-                            *this.write_ready_start += n;
-                            if *this.write_ready_start >= this.write_buffer.len() {
-                                *this.write_ready_start -= this.write_buffer.len();
+                            while n > 0 {
+                                let first_buf = this.write_buffers.first_mut().unwrap();
+                                if first_buf.len() <= n {
+                                    n -= first_buf.len();
+                                    this.write_buffers.remove(0);
+                                } else {
+                                    // TODO: consider keeping the buffer as is but starting the next write at a later offset
+                                    first_buf.copy_within(n.., 0);
+                                    first_buf.truncate(first_buf.len() - n);
+                                    break;
+                                }
                             }
                         }
                         Poll::Ready(Err(err)) => {
@@ -434,6 +314,77 @@ where
 impl<T: fmt::Debug> fmt::Debug for WithBuffers<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("WithBuffers").field(&self.socket).finish()
+    }
+}
+
+/// See [`WithBuffers::read_write_access`].
+pub struct ReadWriteAccess<'a> {
+    read_write: read_write::ReadWrite<Instant>,
+
+    read_buffer_len_before: usize,
+    write_buffers_len_before: usize,
+
+    // Fields below as references from the content of the `WithBuffers`.
+    read_buffer: &'a mut Vec<u8>,
+    read_buffer_valid: &'a mut usize,
+    read_buffer_reasonable_capacity: usize,
+    write_buffers: &'a mut Vec<Vec<u8>>,
+    write_closed: &'a mut bool,
+    close_pending: &'a mut bool,
+    read_write_wake_up_after: &'a mut Option<Instant>,
+}
+
+impl<'a> ops::Deref for ReadWriteAccess<'a> {
+    type Target = read_write::ReadWrite<Instant>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.read_write
+    }
+}
+
+impl<'a> ops::DerefMut for ReadWriteAccess<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.read_write
+    }
+}
+
+impl<'a> Drop for ReadWriteAccess<'a> {
+    fn drop(&mut self) {
+        *self.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
+        *self.read_buffer_valid = self.read_buffer.len();
+
+        // Adjust `read_buffer` to the number of bytes requested by the consumer.
+        if let Some(expected_incoming_bytes) = self.read_write.expected_incoming_bytes {
+            if expected_incoming_bytes < self.read_buffer_reasonable_capacity
+                && self.read_buffer.is_empty()
+            {
+                // We use `shrink_to(0)` then `reserve(cap)` rather than just `shrink_to(cap)`
+                // so that the `Vec` doesn't try to preserve the data in the read buffer.
+                self.read_buffer.shrink_to(0);
+                self.read_buffer
+                    .reserve(self.read_buffer_reasonable_capacity);
+            } else if expected_incoming_bytes > self.read_buffer.len() {
+                self.read_buffer
+                    .reserve(expected_incoming_bytes - self.read_buffer.len());
+            }
+            debug_assert!(self.read_buffer.capacity() >= expected_incoming_bytes);
+        }
+
+        *self.write_buffers = mem::take(&mut self.read_write.write_buffers);
+
+        if self.read_write.write_bytes_queueable.is_none() && !*self.write_closed {
+            *self.write_closed = true;
+            *self.close_pending = true;
+        }
+
+        *self.read_write_wake_up_after = self.read_write.wake_up_after.take();
+        // If the consumer has advanced its reading or writing sides, we make the next call to
+        // `read_write_access` return immediately by setting `wake_up_after`.
+        if self.read_buffer_len_before != self.read_buffer.len()
+            || self.write_buffers_len_before != self.write_buffers.len()
+        {
+            *self.read_write_wake_up_after = Some(self.read_write.now.clone());
+        }
     }
 }
 

@@ -1256,6 +1256,7 @@ async fn background_task(mut inner: Inner) {
 
                 (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
                     inner.log_callback.clone(),
+                    info.multiaddr.to_string(),
                     socket,
                     connection_id,
                     connection_task,
@@ -1275,7 +1276,7 @@ async fn background_task(mut inner: Inner) {
                     inner.network.add_single_stream_incoming_connection(
                         when_connected,
                         service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
-                        multiaddr,
+                        multiaddr.clone(),
                     );
 
                 let (tx, rx) = channel::bounded(16); // TODO: ?!
@@ -1283,6 +1284,7 @@ async fn background_task(mut inner: Inner) {
 
                 (inner.tasks_executor)(Box::pin(tasks::established_connection_task(
                     inner.log_callback.clone(),
+                    multiaddr.to_string(),
                     socket,
                     connection_id,
                     connection_task,
