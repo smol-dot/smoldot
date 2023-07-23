@@ -64,11 +64,11 @@ pub struct WithBuffers<T> {
     /// True if data has been written on the socket and the socket needs to be flushed.
     flush_pending: bool,
 
-    /// Value of [`ReadWrite::now`] that was fed by the latest call to
-    /// [`WriteBuffers::read_write_access`].
+    /// Value of [`read_write::ReadWrite::now`] that was fed by the latest call to
+    /// [`WithBuffers::read_write_access`].
     read_write_now: Option<Instant>,
-    /// Value of [`ReadWrite::wake_up_after`] produced by the latest call
-    /// to [`WriteBuffers::read_write_access`].
+    /// Value of [`read_write::ReadWrite::wake_up_after`] produced by the latest call
+    /// to [`WithBuffers::read_write_access`].
     read_write_wake_up_after: Option<Instant>,
 }
 
