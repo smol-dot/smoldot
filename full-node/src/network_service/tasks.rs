@@ -96,20 +96,22 @@ pub(super) async fn established_connection_task(
         // message is currently being sent.
         if message_sending.is_none() {
             if let Ok(mut socket_read_write) = socket.as_mut().read_write_access(Instant::now()) {
+                let read_bytes_before = socket_read_write.read_bytes;
+                let written_bytes_before = socket_read_write.write_bytes_queued;
                 let write_closed = socket_read_write.write_bytes_queueable.is_none();
 
                 connection_task.read_write(&mut *socket_read_write);
 
-                if socket_read_write.read_bytes != 0
-                    || socket_read_write.write_bytes_queued != 0
+                if socket_read_write.read_bytes != read_bytes_before
+                    || socket_read_write.write_bytes_queued != written_bytes_before
                     || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
                 {
                     log_callback.log(
                         LogLevel::Trace,
                         format!(
                             "connection-activity; address={address}; read={}; written={}; wake_up_after={:?}; write_close={:?}",
-                            socket_read_write.read_bytes,
-                            socket_read_write.write_bytes_queued,
+                            socket_read_write.read_bytes - read_bytes_before,
+                            socket_read_write.write_bytes_queued - written_bytes_before,
                             socket_read_write.wake_up_after.map(|w| w
                                 .checked_duration_since(socket_read_write.now)
                                 .unwrap_or(Duration::new(0, 0))),
