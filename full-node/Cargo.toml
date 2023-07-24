@@ -21,7 +21,7 @@ clap = { version = "4.3.19", default-features = false, features = ["color", "der
 ctrlc = "3.4.0"
 derive_more = "0.99.17"
 directories = "5.0.1"
-either = { version = "1.8.1", default-features = false }
+either = { version = "1.9.0", default-features = false }
 event-listener = "2.5.3"
 fnv = { version = "1.0.7", default-features = false }
 futures-channel = "0.3.27"
