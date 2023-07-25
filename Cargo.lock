@@ -2425,6 +2425,7 @@ dependencies = [
  "lru",
  "no-std-net",
  "parking_lot",
+ "pin-project",
  "rand",
  "rand_chacha",
  "serde",
