@@ -396,19 +396,3 @@ pub struct ConnectError {
     /// Human-readable error message.
     pub message: String,
 }
-
-/// State of the read buffer, as returned by [`PlatformRef::read_buffer`].
-#[derive(Debug)]
-pub enum ReadBuffer<'a> {
-    /// Reading side of the stream is fully open. Contains the data waiting to be processed.
-    Open(&'a [u8]),
-
-    /// The reading side of the stream has been closed by the remote.
-    ///
-    /// Note that this is forbidden for connections of
-    /// type [`MultiStreamAddress::WebRtc`].
-    Closed,
-
-    /// The stream has been abruptly closed by the remote.
-    Reset,
-}
