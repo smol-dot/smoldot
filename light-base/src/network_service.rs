@@ -1059,6 +1059,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "".into(),
                     tasks::single_stream_connection_task::<TPlat>(
                         connection,
+                        multiaddr.to_string(),
                         task.platform.clone(),
                         connection_id,
                         connection_task,
@@ -1099,6 +1100,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "".into(),
                     tasks::webrtc_multi_stream_connection_task::<TPlat>(
                         connection,
+                        multiaddr.to_string(),
                         task.platform.clone(),
                         connection_id,
                         connection_task,

@@ -786,6 +786,20 @@ where
         }
     }
 
+    /// Returns `true` if [`MultiStreamConnectionTask::reset`] has been called in the past.
+    pub fn is_reset_called(&self) -> bool {
+        matches!(
+            self.connection,
+            MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                initiator: ShutdownInitiator::Api,
+                ..
+            } | MultiStreamConnectionTaskInner::ShutdownAcked {
+                initiator: ShutdownInitiator::Api,
+                ..
+            }
+        )
+    }
+
     /// Immediately destroys the substream with the given identifier.
     ///
     /// The given identifier is now considered invalid by the state machine.
