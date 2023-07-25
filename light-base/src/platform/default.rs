@@ -27,7 +27,11 @@ use alloc::{borrow::Cow, sync::Arc};
 use core::{pin::Pin, str, time::Duration};
 use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
-use std::{io, net::SocketAddr};
+use std::{
+    io,
+    net::SocketAddr,
+    time::{Instant, UNIX_EPOCH},
+};
 
 /// Implementation of the [`PlatformRef`] trait that leverages the operating system.
 pub struct DefaultPlatform {
@@ -46,8 +50,8 @@ impl DefaultPlatform {
 
 impl PlatformRef for Arc<DefaultPlatform> {
     type Delay = future::BoxFuture<'static, ()>;
-    type Instant = std::time::Instant;
-    type MultiStream = std::convert::Infallible;
+    type Instant = Instant;
+    type MultiStream = std::convert::Infallible; // TODO: replace with `!` once stable: https://github.com/rust-lang/rust/issues/35121
     type Stream = Stream;
     type StreamConnectFuture = future::BoxFuture<'static, Result<Self::Stream, ConnectError>>;
     type MultiStreamConnectFuture = future::BoxFuture<
@@ -61,11 +65,11 @@ impl PlatformRef for Arc<DefaultPlatform> {
 
     fn now_from_unix_epoch(&self) -> Duration {
         // Intentionally panic if the time is configured earlier than the UNIX EPOCH.
-        std::time::UNIX_EPOCH.elapsed().unwrap()
+        UNIX_EPOCH.elapsed().unwrap()
     }
 
     fn now(&self) -> Self::Instant {
-        std::time::Instant::now()
+        Instant::now()
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
@@ -78,7 +82,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
-        let duration = when.saturating_duration_since(std::time::Instant::now());
+        let duration = when.saturating_duration_since(Instant::now());
         self.sleep(duration)
     }
 
@@ -210,7 +214,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         stream: Pin<&'a mut Self::Stream>,
     ) -> Result<Self::ReadWriteAccess<'a>, &'a io::Error> {
         let stream = stream.project();
-        stream.0.read_write_access(std::time::Instant::now())
+        stream.0.read_write_access(Instant::now())
     }
 
     fn wait_read_write_again<'a>(
