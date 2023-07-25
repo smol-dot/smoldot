@@ -57,6 +57,9 @@ pub enum CliOptionsCommand {
     /// Computes the 64 bits BLAKE2 hash of a string payload and prints the hexadecimal-encoded hash.
     #[command(name = "blake2-64bits-hash")]
     Blake264BitsHash(CliOptionsBlake264Hash),
+    /// Computes the 256 bits BLAKE2 hash of a file and prints the hexadecimal-encoded hash.
+    #[command(name = "blake2-256bits-hash")]
+    Blake2256BitsHash(CliOptionsBlake2256Hash),
 }
 
 #[derive(Debug, clap::Parser)]
@@ -111,6 +114,12 @@ pub struct CliOptionsRun {
 pub struct CliOptionsBlake264Hash {
     /// Payload whose hash to compute.
     pub payload: String,
+}
+
+#[derive(Debug, clap::Parser)]
+pub struct CliOptionsBlake2256Hash {
+    /// Path of the file whose hash to compute.
+    pub file: PathBuf,
 }
 
 #[derive(Debug, Clone)]
