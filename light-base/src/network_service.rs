@@ -988,10 +988,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
             let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                if let (true, Some(event)) = (
-                    can_generate_event,
-                    task.network.next_event(task.platform.now()),
-                ) {
+                if let Some(event) = if can_generate_event {
+                    task.network.next_event(task.platform.now())
+                } else {
+                    None
+                } {
                     WhatHappened::NetworkEvent(event)
                 } else if let Some(start_connect) =
                     task.network.next_start_connect(|| task.platform.now())
