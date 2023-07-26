@@ -1231,7 +1231,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             let storage_value = match storage_value {
                                                 Ok(v) => v,
-                                                Err(error) => {
+                                                Err(_) => {
                                                     runtime_call_lock.unlock(
                                                         runtime_host::RuntimeHostVm::StorageGet(
                                                             get,
@@ -1240,9 +1240,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     );
                                                     subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                                                         subscription: (&subscription_id).into(),
-                                                        result: methods::ChainHeadCallEvent::Inaccessible {
-                                                            error: error.to_string().into(),
-                                                        },
+                                                        result: methods::ChainHeadCallEvent::Inaccessible { },
                                                     }).await;
                                                     break;
                                                 }
@@ -1261,7 +1259,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             let merkle_value = match merkle_value {
                                                 Ok(v) => v,
-                                                Err(error) => {
+                                                Err(_) => {
                                                     runtime_call_lock.unlock(
                                                         runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
                                                             mv,
@@ -1270,9 +1268,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     );
                                                     subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                                                         subscription: (&subscription_id).into(),
-                                                        result: methods::ChainHeadCallEvent::Inaccessible {
-                                                            error: error.to_string().into(),
-                                                        },
+                                                        result: methods::ChainHeadCallEvent::Inaccessible { },
                                                     }).await;
                                                     break;
                                                 }
@@ -1293,7 +1289,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             let next_key = match next_key {
                                                 Ok(v) => v,
-                                                Err(error) => {
+                                                Err(_) => {
                                                     runtime_call_lock.unlock(
                                                         runtime_host::RuntimeHostVm::NextKey(
                                                             nk,
@@ -1302,9 +1298,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     );
                                                     subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
                                                         subscription: (&subscription_id).into(),
-                                                        result: methods::ChainHeadCallEvent::Inaccessible {
-                                                            error: error.to_string().into(),
-                                                        },
+                                                        result: methods::ChainHeadCallEvent::Inaccessible { },
                                                     }).await;
                                                     break;
                                                 }
