@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Fix several potential panics due to mismatches in the state of the networking.
+- Fix several potential panics due to mismatches in the state of the networking. ([#967](https://github.com/smol-dot/smoldot/pull/967))
 
 ## 1.0.13 - 2023-07-16
 
