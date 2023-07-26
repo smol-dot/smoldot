@@ -710,6 +710,42 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
+    #[serde(rename = "operation-body-done")]
+    OperationBodyDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        value: Vec<HexString>,
+    },
+    #[serde(rename = "operation-call-done")]
+    OperationCallDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        output: HexString,
+    },
+    #[serde(rename = "operation-inaccessible")]
+    OperationInaccessible {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "operation-storage-items")]
+    OperationStorageItems {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        items: Vec<ChainHeadStorageResponseItem>,
+    },
+    #[serde(rename = "operation-storage-done")]
+    OperationStorageDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "operation-waiting-for-continue")]
+    OperationWaitingForContinue,
+    #[serde(rename = "operation-error")]
+    OperationError {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        error: Cow<'a, str>,
+    },
     #[serde(rename = "stop")]
     Stop {},
 }

@@ -884,9 +884,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         Ok(block_data) => {
                             subscription
                                 .send_notification(
-                                    methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadBodyEvent::Done {
+                                        result: methods::FollowEvent::OperationBodyDone {
+                                            operation_id: todo!(),
                                             value: block_data
                                                 .body
                                                 .unwrap()
@@ -901,9 +902,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         Err(()) => {
                             subscription
                                 .send_notification(
-                                    methods::ServerToClient::chainHead_unstable_bodyEvent {
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadBodyEvent::Inaccessible {},
+                                        result: methods::FollowEvent::OperationInaccessible {
+                                            operation_id: todo!(),
+                                        },
                                     },
                                 )
                                 .await;
@@ -967,9 +970,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             // return.
                             subscription
                                 .send_notification(
-                                    methods::ServerToClient::chainHead_unstable_storageEvent {
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Error {
+                                        result: methods::FollowEvent::OperationError {
+                                            operation_id: todo!(),
                                             error: err.to_string().into(),
                                         },
                                     },
@@ -1077,9 +1081,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             if !items.is_empty() {
                                 subscription
                                     .send_notification(
-                                        methods::ServerToClient::chainHead_unstable_storageEvent {
+                                        methods::ServerToClient::chainHead_unstable_followEvent {
                                             subscription: (&subscription_id).into(),
-                                            result: methods::ChainHeadStorageEvent::Items { items },
+                                            result: methods::FollowEvent::OperationStorageItems {
+                                                operation_id: todo!(),
+                                                items
+                                            },
                                         },
                                     )
                                     .await;
@@ -1087,9 +1094,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                             subscription
                                 .send_notification(
-                                    methods::ServerToClient::chainHead_unstable_storageEvent {
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Done,
+                                        result: methods::FollowEvent::OperationStorageDone {
+                                            operation_id: todo!(),
+                                        },
                                     },
                                 )
                                 .await;
@@ -1097,9 +1106,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         Err(_) => {
                             subscription
                                 .send_notification(
-                                    methods::ServerToClient::chainHead_unstable_storageEvent {
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
                                         subscription: (&subscription_id).into(),
-                                        result: methods::ChainHeadStorageEvent::Inaccessible {},
+                                        result: methods::FollowEvent::OperationInaccessible {
+                                            operation_id: todo!(),
+                                        },
                                     },
                                 )
                                 .await;
@@ -1200,9 +1211,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
-                                subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                     subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadCallEvent::Error {
+                                    result: methods::FollowEvent::OperationError {
+                                        operation_id: todo!(),
                                         error: error.to_string().into(),
                                     },
                                 }).await;
@@ -1215,9 +1227,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 success.virtual_machine.value().as_ref().to_owned();
                                             runtime_call_lock
                                                 .unlock(success.virtual_machine.into_prototype());
-                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                                 subscription: (&subscription_id).into(),
-                                                result: methods::ChainHeadCallEvent::Done {
+                                                result: methods::FollowEvent::OperationCallDone {
+                                                    operation_id: todo!(),
                                                     output: methods::HexString(output),
                                                 },
                                             }).await;
@@ -1225,9 +1238,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                                             runtime_call_lock.unlock(error.prototype);
-                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                                 subscription: (&subscription_id).into(),
-                                                result: methods::ChainHeadCallEvent::Error {
+                                                result: methods::FollowEvent::OperationError {
+                                                    operation_id: todo!(),
                                                     error: error.detail.to_string().into(),
                                                 },
                                             }).await;
@@ -1248,9 +1262,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                         )
                                                         .into_prototype(),
                                                     );
-                                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                                         subscription: (&subscription_id).into(),
-                                                        result: methods::ChainHeadCallEvent::Inaccessible { },
+                                                        result: methods::FollowEvent::OperationInaccessible {
+                                                            operation_id: todo!(),
+                                                        },
                                                     }).await;
                                                     break;
                                                 }
@@ -1276,9 +1292,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                         )
                                                         .into_prototype(),
                                                     );
-                                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                                         subscription: (&subscription_id).into(),
-                                                        result: methods::ChainHeadCallEvent::Inaccessible { },
+                                                        result: methods::FollowEvent::OperationInaccessible {
+                                                            operation_id: todo!(),
+                                                        },
                                                     }).await;
                                                     break;
                                                 }
@@ -1306,9 +1324,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                         )
                                                         .into_prototype(),
                                                     );
-                                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                                         subscription: (&subscription_id).into(),
-                                                        result: methods::ChainHeadCallEvent::Inaccessible { },
+                                                        result: methods::FollowEvent::OperationInaccessible {
+                                                            operation_id: todo!(),
+                                                        },
                                                     }).await;
                                                     break;
                                                 }
@@ -1323,9 +1343,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::Offchain(ctx) => {
                                             runtime_call_lock.unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
-                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                                            subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                                                 subscription: (&subscription_id).into(),
-                                                result: methods::ChainHeadCallEvent::Error {
+                                                result: methods::FollowEvent::OperationError {
+                                                    operation_id: todo!(),
                                                     error: "Runtime has called an offchain host function".to_string().into(),
                                                 },
                                             }).await;
@@ -1337,49 +1358,55 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
                     }
                     Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: todo!(),
                                 error: error.to_string().into(),
                             },
                         }).await;
                     }
                     Err(runtime_service::RuntimeCallError::StorageRetrieval(error)) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: todo!(),
                                 error: error.to_string().into(),
                             },
                         }).await;
                     }
                     Err(runtime_service::RuntimeCallError::MissingProofEntry(_error)) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: todo!(),
                                 error: "incomplete call proof".into(),
                             },
                         }).await;
                     }
                     Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: todo!(),
                                 error: "invalid call proof".into(),
                             },
                         }).await;
                     }
                     Err(runtime_service::RuntimeCallError::CallProof(error)) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: todo!(),
                                 error: error.to_string().into(),
                             },
                         }).await
                     }
                     Err(runtime_service::RuntimeCallError::StorageQuery(error)) => {
-                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription.send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: (&subscription_id).into(),
-                            result: methods::ChainHeadCallEvent::Error {
+                            result: methods::FollowEvent::OperationError {
+                                operation_id: todo!(),
                                 error: format!("failed to fetch call proof: {error}").into(),
                             },
                         }).await;
