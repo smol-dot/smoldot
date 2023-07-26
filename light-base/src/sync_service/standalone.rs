@@ -21,10 +21,11 @@ use super::{
 };
 use crate::{network_service, platform::PlatformRef, util};
 
-use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{
     iter,
     num::{NonZeroU32, NonZeroU64},
+    pin::Pin,
     time::Duration,
 };
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
@@ -95,9 +96,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         network_up_to_date_finalized: true,
         known_finalized_runtime: None,
         pending_requests: stream::FuturesUnordered::new(),
-        warp_sync_taking_long_time_warning: future::Either::Left(
+        warp_sync_taking_long_time_warning: future::Either::Left(Box::pin(
             platform.sleep(Duration::from_secs(10)),
-        )
+        ))
         .fuse(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
@@ -311,7 +312,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 };
 
                 task.warp_sync_taking_long_time_warning =
-                    future::Either::Left(task.platform.sleep(Duration::from_secs(10))).fuse();
+                    future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10)))).fuse();
                 continue;
             },
 
@@ -374,7 +375,7 @@ struct Task<TPlat: PlatformRef> {
     /// time. Set to `Pending` after the warp sync has finished, so that future remains pending
     /// forever.
     warp_sync_taking_long_time_warning:
-        future::Fuse<future::Either<TPlat::Delay, future::Pending<()>>>,
+        future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
 
     /// Network service. Used to send out requests to peers.
     network_service: Arc<network_service::NetworkService<TPlat>>,

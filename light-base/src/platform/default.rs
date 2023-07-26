@@ -49,7 +49,7 @@ impl DefaultPlatform {
 }
 
 impl PlatformRef for Arc<DefaultPlatform> {
-    type Delay = future::BoxFuture<'static, ()>;
+    type Delay = futures_util::future::Map<smol::Timer, fn(Instant) -> ()>;
     type Instant = Instant;
     type MultiStream = std::convert::Infallible; // TODO: replace with `!` once stable: https://github.com/rust-lang/rust/issues/35121
     type Stream = Stream;
@@ -73,17 +73,15 @@ impl PlatformRef for Arc<DefaultPlatform> {
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
-        use rand::RngCore as _;
-        rand::thread_rng().fill_bytes(buffer);
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), buffer);
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
-        smol::Timer::after(duration).map(|_| ()).boxed()
+        smol::Timer::after(duration).map(|_| ())
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
-        let duration = when.saturating_duration_since(Instant::now());
-        self.sleep(duration)
+        smol::Timer::at(when).map(|_| ())
     }
 
     fn spawn_task(

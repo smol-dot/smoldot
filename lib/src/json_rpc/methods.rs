@@ -730,7 +730,7 @@ pub enum ChainHeadCallEvent<'a> {
     #[serde(rename = "done")]
     Done { output: HexString },
     #[serde(rename = "inaccessible")]
-    Inaccessible { error: Cow<'a, str> },
+    Inaccessible {},
     #[serde(rename = "error")]
     Error { error: Cow<'a, str> },
     #[serde(rename = "disjoint")]
