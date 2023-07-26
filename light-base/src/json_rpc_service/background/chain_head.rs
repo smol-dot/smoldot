@@ -538,34 +538,54 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         >,
     ) {
         loop {
-            let outcome = {
+            enum WhatHappened {
+                SubscriptionDead,
+                NotificationWithRuntime(runtime_service::Notification),
+                NotificationWithoutRuntime(sync_service::Notification),
+                Unsubscribed,
+                NewRequest(service::RequestProcess),
+                NewSubscriptionStart(service::SubscriptionStartProcess),
+            }
+
+            let outcome: WhatHappened = {
                 let next_block = async {
                     match &mut self.subscription {
                         Subscription::WithRuntime { notifications, .. } => {
-                            Some(either::Left(either::Left(notifications.next().await)))
+                            match notifications.next().await {
+                                Some(n) => WhatHappened::NotificationWithRuntime(n),
+                                None => WhatHappened::SubscriptionDead,
+                            }
                         }
                         Subscription::WithoutRuntime(notifications) => {
-                            Some(either::Left(either::Right(notifications.next().await)))
+                            match notifications.next().await {
+                                Some(n) => WhatHappened::NotificationWithoutRuntime(n),
+                                None => WhatHappened::SubscriptionDead,
+                            }
                         }
                     }
                 };
 
-                match next_block
-                    .or(async { Some(either::Right(messages_rx.next().await)) })
+                let message = async {
+                    match messages_rx.next().await {
+                        Some(either::Left(rq)) => WhatHappened::NewRequest(rq),
+                        Some(either::Right(rq)) => WhatHappened::NewSubscriptionStart(rq),
+                        None => WhatHappened::Unsubscribed,
+                    }
+                };
+
+                next_block
+                    .or(message)
                     .or(async {
                         subscription.wait_until_stale().await;
-                        None
+                        WhatHappened::Unsubscribed
                     })
                     .await
-                {
-                    Some(outcome) => outcome,
-                    None => return,
-                }
             };
 
             // TODO: doesn't enforce any maximum number of pinned blocks
             match outcome {
-                either::Left(either::Left(None) | either::Right(None)) => {
+                WhatHappened::Unsubscribed => return,
+                WhatHappened::SubscriptionDead => {
                     subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
@@ -576,16 +596,19 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         .await;
                     break;
                 }
-                either::Left(
-                    either::Left(Some(runtime_service::Notification::Finalized {
+
+                WhatHappened::NotificationWithRuntime(
+                    runtime_service::Notification::Finalized {
                         best_block_hash,
                         hash,
                         ..
-                    }))
-                    | either::Right(Some(sync_service::Notification::Finalized {
+                    },
+                )
+                | WhatHappened::NotificationWithoutRuntime(
+                    sync_service::Notification::Finalized {
                         best_block_hash,
                         hash,
-                    })),
+                    },
                 ) => {
                     let mut finalized_blocks_hashes = Vec::new();
                     let mut pruned_blocks_hashes = Vec::new();
@@ -623,9 +646,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         )
                         .await;
                 }
-                either::Left(
-                    either::Left(Some(runtime_service::Notification::BestBlockChanged { hash }))
-                    | either::Right(Some(sync_service::Notification::BestBlockChanged { hash })),
+                WhatHappened::NotificationWithoutRuntime(
+                    sync_service::Notification::BestBlockChanged { hash },
+                )
+                | WhatHappened::NotificationWithRuntime(
+                    runtime_service::Notification::BestBlockChanged { hash },
                 ) => {
                     subscription
                         .send_notification(
@@ -638,7 +663,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         )
                         .await;
                 }
-                either::Left(either::Left(Some(runtime_service::Notification::Block(block)))) => {
+                WhatHappened::NotificationWithRuntime(runtime_service::Notification::Block(
+                    block,
+                )) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                     let _was_in = self
@@ -681,7 +708,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             .await;
                     }
                 }
-                either::Left(either::Right(Some(sync_service::Notification::Block(block)))) => {
+                WhatHappened::NotificationWithoutRuntime(sync_service::Notification::Block(
+                    block,
+                )) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                     let _was_in = self
@@ -721,8 +750,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             .await;
                     }
                 }
-                either::Right(Some(message)) => self.on_foreground_message(message).await,
-                either::Right(None) => unreachable!(), // TODO: really unreachable?
+                WhatHappened::NewRequest(rq) => self.on_foreground_message(either::Left(rq)).await,
+                WhatHappened::NewSubscriptionStart(rq) => {
+                    self.on_foreground_message(either::Right(rq)).await
+                }
             }
         }
     }
