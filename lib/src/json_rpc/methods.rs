@@ -479,8 +479,9 @@ define_methods! {
         items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>
     ) -> Cow<'a, str>,
-    chainHead_unstable_storageContinue(
-        #[rename = "subscription"] subscription: Cow<'a, str>
+    chainHead_unstable_continue(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>

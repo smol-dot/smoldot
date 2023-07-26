@@ -360,17 +360,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         }
     }
 
-    /// Handles a call to [`methods::MethodCall::chainHead_unstable_storageContinue`].
-    pub(super) async fn chain_head_storage_continue(
-        self: &Arc<Self>,
-        request: service::RequestProcess,
-    ) {
-        let methods::MethodCall::chainHead_unstable_storageContinue { .. } = request.request()
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_continue`].
+    pub(super) async fn chain_head_continue(self: &Arc<Self>, request: service::RequestProcess) {
+        let methods::MethodCall::chainHead_unstable_continue { .. } = request.request()
         else {
             unreachable!()
         };
         // TODO: not implemented properly
-        request.respond(methods::Response::chainHead_unstable_storageContinue(()));
+        request.respond(methods::Response::chainHead_unstable_continue(()));
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].

@@ -429,9 +429,9 @@ impl ClientMainTask {
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
+                | methods::MethodCall::chainHead_unstable_continue { .. }
                 | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                 | methods::MethodCall::chainHead_unstable_header { .. }
-                | methods::MethodCall::chainHead_unstable_storageContinue { .. }
                 | methods::MethodCall::chainHead_unstable_unpin { .. } => {
                     // Simple one-request-one-response.
                     return Event::HandleRequest {
