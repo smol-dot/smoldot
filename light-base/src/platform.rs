@@ -60,19 +60,14 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>>
-        + Unpin
-        + Send
-        + 'static;
+    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>> + Send + 'static;
     type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
-        + Unpin
         + Send
         + 'static;
     type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
-    type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
+    type StreamUpdateFuture<'a>: Future<Output = ()> + Send + 'a;
     type StreamErrorRef<'a>: fmt::Display + fmt::Debug;
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
-        + Unpin
         + Send
         + 'a;
 
