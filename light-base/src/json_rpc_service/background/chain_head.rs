@@ -46,10 +46,7 @@ use smoldot::{
 
 impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_call`].
-    pub(super) async fn chain_head_call(
-        self: &Arc<Self>,
-        request: service::SubscriptionStartProcess,
-    ) {
+    pub(super) async fn chain_head_call(self: &Arc<Self>, request: service::RequestProcess) {
         let methods::MethodCall::chainHead_unstable_call {
             follow_subscription,
             ..
@@ -64,11 +61,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let mut lock = self.chain_head_follow_tasks.lock().await;
 
         let send_outcome = if let Some(sender) = lock.get_mut(&*follow_subscription) {
-            match sender.deliver(either::Right(request)).await {
-                Ok(()) => Ok(()),
-                Err(either::Right(v)) => Err(v),
-                Err(either::Left(_)) => unreachable!(),
-            }
+            sender.deliver(request).await
         } else {
             Err(request)
         };
@@ -325,10 +318,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_storage`].
-    pub(super) async fn chain_head_storage(
-        self: &Arc<Self>,
-        request: service::SubscriptionStartProcess,
-    ) {
+    pub(super) async fn chain_head_storage(self: &Arc<Self>, request: service::RequestProcess) {
         let methods::MethodCall::chainHead_unstable_storage {
             follow_subscription,
             ..
@@ -343,11 +333,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let mut lock = self.chain_head_follow_tasks.lock().await;
 
         let send_outcome = if let Some(sender) = lock.get_mut(&*follow_subscription) {
-            match sender.deliver(either::Right(request)).await {
-                Ok(()) => Ok(()),
-                Err(either::Right(v)) => Err(v),
-                Err(either::Left(_)) => unreachable!(),
-            }
+            sender.deliver(request).await
         } else {
             Err(request)
         };
@@ -377,7 +363,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
     pub(super) async fn chain_head_unstable_body(
         self: &Arc<Self>,
-        request: service::SubscriptionStartProcess,
+        request: service::RequestProcess,
     ) {
         let methods::MethodCall::chainHead_unstable_body {
             follow_subscription,
@@ -393,11 +379,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let mut lock = self.chain_head_follow_tasks.lock().await;
 
         let send_outcome = if let Some(sender) = lock.get_mut(&*follow_subscription) {
-            match sender.deliver(either::Right(request)).await {
-                Ok(()) => Ok(()),
-                Err(either::Right(v)) => Err(v),
-                Err(either::Left(_)) => unreachable!(),
-            }
+            sender.deliver(request).await
         } else {
             Err(request)
         };
@@ -433,11 +415,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let mut lock = self.chain_head_follow_tasks.lock().await;
 
         let send_outcome = if let Some(sender) = lock.get_mut(&*follow_subscription) {
-            match sender.deliver(either::Left(request)).await {
-                Ok(()) => Ok(()),
-                Err(either::Left(v)) => Err(v),
-                Err(either::Right(_)) => unreachable!(),
-            }
+            sender.deliver(request).await
         } else {
             Err(request)
         };
@@ -466,11 +444,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let mut lock = self.chain_head_follow_tasks.lock().await;
 
         let send_outcome = if let Some(sender) = lock.get_mut(&*follow_subscription) {
-            match sender.deliver(either::Left(request)).await {
-                Ok(()) => Ok(()),
-                Err(either::Left(v)) => Err(v),
-                Err(either::Right(_)) => unreachable!(),
-            }
+            sender.deliver(request).await
         } else {
             Err(request)
         };
@@ -544,9 +518,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         mut self,
         mut subscription: service::Subscription,
         subscription_id: String,
-        mut messages_rx: service::DeliverReceiver<
-            either::Either<service::RequestProcess, service::SubscriptionStartProcess>,
-        >,
+        mut messages_rx: service::DeliverReceiver<service::RequestProcess>,
     ) {
         loop {
             enum WhatHappened {
@@ -556,7 +528,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 OperationEvent(methods::FollowEvent<'static>, u32),
                 Unsubscribed,
                 NewRequest(service::RequestProcess),
-                NewSubscriptionStart(service::SubscriptionStartProcess),
             }
 
             let outcome: WhatHappened = {
@@ -584,8 +555,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 let message = async {
                     match messages_rx.next().await {
-                        Some(either::Left(rq)) => WhatHappened::NewRequest(rq),
-                        Some(either::Right(rq)) => WhatHappened::NewSubscriptionStart(rq),
+                        Some(rq) => WhatHappened::NewRequest(rq),
                         None => WhatHappened::Unsubscribed,
                     }
                 };
@@ -779,82 +749,71 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             .await;
                     }
                 }
-                WhatHappened::NewRequest(rq) => self.on_foreground_message(either::Left(rq)).await,
-                WhatHappened::NewSubscriptionStart(rq) => {
-                    self.on_foreground_message(either::Right(rq)).await
-                }
+                WhatHappened::NewRequest(rq) => self.on_foreground_message(rq).await,
             }
         }
     }
 
-    async fn on_foreground_message(
-        &mut self,
-        message: either::Either<service::RequestProcess, service::SubscriptionStartProcess>,
-    ) {
-        match message {
-            either::Left(request) => match request.request() {
-                methods::MethodCall::chainHead_unstable_header {
-                    follow_subscription: _,
-                    hash,
-                } => {
-                    let response = self.pinned_blocks_headers.get(&hash.0).cloned();
-                    request.respond(methods::Response::chainHead_unstable_header(
-                        response.map(methods::HexString),
-                    ));
-                }
-                methods::MethodCall::chainHead_unstable_unpin {
-                    follow_subscription: _,
-                    hash,
-                } => {
-                    let all_hashes = match &hash {
-                        methods::HashHexStringSingleOrArray::Single(hash) => {
-                            either::Left(iter::once(&hash.0))
-                        }
-                        methods::HashHexStringSingleOrArray::Array(hashes) => {
-                            either::Right(hashes.iter().map(|h| &h.0))
-                        }
-                    };
-
-                    let is_valid = all_hashes
-                        .clone()
-                        .all(|hash| self.pinned_blocks_headers.contains_key(hash));
-
-                    if is_valid {
-                        for hash in all_hashes {
-                            self.pinned_blocks_headers.remove(hash);
-                            if let Subscription::WithRuntime {
-                                subscription_id, ..
-                            } = self.subscription
-                            {
-                                self.runtime_service
-                                    .unpin_block(subscription_id, hash)
-                                    .await;
-                            }
-                        }
-
-                        request.respond(methods::Response::chainHead_unstable_unpin(()));
-                    } else {
-                        request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+    async fn on_foreground_message(&mut self, request: service::RequestProcess) {
+        match request.request() {
+            methods::MethodCall::chainHead_unstable_body { .. } => {
+                self.start_chain_head_body(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_storage { .. } => {
+                self.start_chain_head_storage(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_call { .. } => {
+                self.start_chain_head_call(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_header {
+                follow_subscription: _,
+                hash,
+            } => {
+                let response = self.pinned_blocks_headers.get(&hash.0).cloned();
+                request.respond(methods::Response::chainHead_unstable_header(
+                    response.map(methods::HexString),
+                ));
+            }
+            methods::MethodCall::chainHead_unstable_unpin {
+                follow_subscription: _,
+                hash,
+            } => {
+                let all_hashes = match &hash {
+                    methods::HashHexStringSingleOrArray::Single(hash) => {
+                        either::Left(iter::once(&hash.0))
                     }
+                    methods::HashHexStringSingleOrArray::Array(hashes) => {
+                        either::Right(hashes.iter().map(|h| &h.0))
+                    }
+                };
+
+                let is_valid = all_hashes
+                    .clone()
+                    .all(|hash| self.pinned_blocks_headers.contains_key(hash));
+
+                if is_valid {
+                    for hash in all_hashes {
+                        self.pinned_blocks_headers.remove(hash);
+                        if let Subscription::WithRuntime {
+                            subscription_id, ..
+                        } = self.subscription
+                        {
+                            self.runtime_service
+                                .unpin_block(subscription_id, hash)
+                                .await;
+                        }
+                    }
+
+                    request.respond(methods::Response::chainHead_unstable_unpin(()));
+                } else {
+                    request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
                 }
-                _ => unreachable!(),
-            },
-            either::Right(request) => match request.request() {
-                methods::MethodCall::chainHead_unstable_body { .. } => {
-                    self.start_chain_head_body(request).await;
-                }
-                methods::MethodCall::chainHead_unstable_storage { .. } => {
-                    self.start_chain_head_storage(request).await;
-                }
-                methods::MethodCall::chainHead_unstable_call { .. } => {
-                    self.start_chain_head_call(request).await;
-                }
-                _ => unreachable!(),
-            },
+            }
+            _ => unreachable!(),
         }
     }
 
-    async fn start_chain_head_body(&mut self, request: service::SubscriptionStartProcess) {
+    async fn start_chain_head_body(&mut self, request: service::RequestProcess) {
         let methods::MethodCall::chainHead_unstable_body {
             hash,
             ..
@@ -945,7 +904,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             });
     }
 
-    async fn start_chain_head_storage(&mut self, request: service::SubscriptionStartProcess) {
+    async fn start_chain_head_storage(&mut self, request: service::RequestProcess) {
         let methods::MethodCall::chainHead_unstable_storage {
             hash,
             items,
@@ -1132,7 +1091,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             });
     }
 
-    async fn start_chain_head_call(&mut self, request: service::SubscriptionStartProcess) {
+    async fn start_chain_head_call(&mut self, request: service::RequestProcess) {
         let (hash, function_to_call, call_parameters) = {
             let methods::MethodCall::chainHead_unstable_call {
                 hash,

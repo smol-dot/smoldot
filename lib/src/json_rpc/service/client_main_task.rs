@@ -429,9 +429,12 @@ impl ClientMainTask {
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
+                | methods::MethodCall::chainHead_unstable_body { .. }
+                | methods::MethodCall::chainHead_unstable_call { .. }
                 | methods::MethodCall::chainHead_unstable_continue { .. }
                 | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                 | methods::MethodCall::chainHead_unstable_header { .. }
+                | methods::MethodCall::chainHead_unstable_storage { .. }
                 | methods::MethodCall::chainHead_unstable_unpin { .. } => {
                     // Simple one-request-one-response.
                     return Event::HandleRequest {
@@ -455,10 +458,7 @@ impl ClientMainTask {
                 | methods::MethodCall::state_subscribeStorage { .. }
                 | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
                 | methods::MethodCall::network_unstable_subscribeEvents { .. }
-                | methods::MethodCall::chainHead_unstable_body { .. }
-                | methods::MethodCall::chainHead_unstable_call { .. }
-                | methods::MethodCall::chainHead_unstable_follow { .. }
-                | methods::MethodCall::chainHead_unstable_storage { .. } => {
+                | methods::MethodCall::chainHead_unstable_follow { .. } => {
                     // Subscription starting requests.
 
                     // We must check the maximum number of subscriptions.
@@ -1178,17 +1178,8 @@ impl SubscriptionStartProcess {
                     &self.subscription_id,
                 ))
             }
-            methods::MethodCall::chainHead_unstable_body { .. } => {
-                methods::Response::chainHead_unstable_body(Cow::Borrowed(&self.subscription_id))
-            }
-            methods::MethodCall::chainHead_unstable_call { .. } => {
-                methods::Response::chainHead_unstable_call(Cow::Borrowed(&self.subscription_id))
-            }
             methods::MethodCall::chainHead_unstable_follow { .. } => {
                 methods::Response::chainHead_unstable_follow(Cow::Borrowed(&self.subscription_id))
-            }
-            methods::MethodCall::chainHead_unstable_storage { .. } => {
-                methods::Response::chainHead_unstable_storage(Cow::Borrowed(&self.subscription_id))
             }
             _ => unreachable!(),
         }
