@@ -308,6 +308,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     to_main_task: to_operation_handlers,
                     from_operation_handlers,
                     available_operation_slots: 32, // TODO: make configurable? adjust dynamically?
+                    operations_in_progress: hashbrown::HashMap::with_capacity_and_hasher(
+                        32,
+                        Default::default(),
+                    ),
                 }
                 .run(subscription, subscription_id, rx)
             });
@@ -505,14 +509,27 @@ struct ChainHeadFollowTask<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
-    to_main_task: async_channel::Sender<(methods::FollowEvent<'static>, u32)>,
+    to_main_task: async_channel::Sender<OperationEvent>,
 
-    from_operation_handlers: async_channel::Receiver<(methods::FollowEvent<'static>, u32)>,
+    from_operation_handlers: async_channel::Receiver<OperationEvent>,
 
     /// Identifier to assign to the next body/call/storage operation.
     next_operation_id: u128,
 
+    /// List of body/call/storage operations currently in progress. Keys are operation IDs.
+    operations_in_progress: hashbrown::HashMap<String, Operation, fnv::FnvBuildHasher>,
+
     available_operation_slots: u32,
+}
+
+struct OperationEvent {
+    operation_id: String,
+    notification: methods::FollowEvent<'static>,
+    is_done: bool,
+}
+
+struct Operation {
+    occupied_slots: u32,
 }
 
 enum Subscription<TPlat: PlatformRef> {
@@ -536,7 +553,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 SubscriptionDead,
                 NotificationWithRuntime(runtime_service::Notification),
                 NotificationWithoutRuntime(sync_service::Notification),
-                OperationEvent(methods::FollowEvent<'static>, u32),
+                OperationEvent {
+                    operation_id: String,
+                    notification: methods::FollowEvent<'static>,
+                    is_done: bool,
+                },
                 Unsubscribed,
                 NewRequest(service::RequestProcess),
             }
@@ -560,8 +581,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 let operation_event = async {
-                    let (notif, slots_dec) = self.from_operation_handlers.next().await.unwrap();
-                    WhatHappened::OperationEvent(notif, slots_dec)
+                    let event = self.from_operation_handlers.next().await.unwrap();
+                    WhatHappened::OperationEvent {
+                        operation_id: event.operation_id,
+                        notification: event.notification,
+                        is_done: event.is_done,
+                    }
                 };
 
                 let message = async {
@@ -596,8 +621,16 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     break;
                 }
 
-                WhatHappened::OperationEvent(notification, occupied_slots_decrease) => {
-                    self.available_operation_slots += occupied_slots_decrease;
+                WhatHappened::OperationEvent {
+                    operation_id,
+                    notification,
+                    is_done,
+                } => {
+                    if is_done {
+                        let operation = self.operations_in_progress.remove(&operation_id).unwrap();
+                        self.available_operation_slots += operation.occupied_slots;
+                    }
+
                     subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
@@ -868,6 +901,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
+        let _was_in = self
+            .operations_in_progress
+            .insert(operation_id.clone(), Operation { occupied_slots: 1 });
+        debug_assert!(_was_in.is_none());
+
         request.respond(methods::Response::chainHead_unstable_body(
             methods::ChainHeadBodyCallReturn::Started {
                 operation_id: (&operation_id).into(),
@@ -907,8 +945,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     match outcome {
                         Ok(block_data) => {
                             let _ = to_main_task
-                                .send((
-                                    methods::FollowEvent::OperationBodyDone {
+                                .send(OperationEvent {
+                                    operation_id: operation_id.clone(),
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationBodyDone {
                                         operation_id: operation_id.clone().into(),
                                         value: block_data
                                             .body
@@ -917,18 +957,18 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             .map(methods::HexString)
                                             .collect(),
                                     },
-                                    1,
-                                ))
+                                })
                                 .await;
                         }
                         Err(()) => {
                             let _ = to_main_task
-                                .send((
-                                    methods::FollowEvent::OperationInaccessible {
+                                .send(OperationEvent {
+                                    operation_id: operation_id.clone(),
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationInaccessible {
                                         operation_id: operation_id.clone().into(),
                                     },
-                                    1,
-                                ))
+                                })
                                 .await;
                         }
                     }
@@ -1018,6 +1058,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             (operation_id, num_items_u32)
         };
 
+        let _was_in = self.operations_in_progress.insert(
+            operation_id.clone(),
+            Operation {
+                occupied_slots: occupied_operation_slots,
+            },
+        );
+        debug_assert!(_was_in.is_none());
+
         let to_main_task = self.to_main_task.clone();
 
         // Finish the call asynchronously.
@@ -1033,13 +1081,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         Err(err) => {
                             // Header can't be decoded. Generate a single `error` event and
                             // return.
-                            let _ = to_main_task.send((
-                                methods::FollowEvent::OperationError {
+                            let _ = to_main_task.send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
                                     operation_id: operation_id.clone().into(),
                                     error: err.to_string().into(),
-                                },
-                                occupied_operation_slots
-                            ))
+                                }
+                            })
                             .await;
                             return;
                         }
@@ -1141,23 +1190,32 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                 .collect::<Vec<_>>();
 
                             if !items.is_empty() {
-                                let _ = to_main_task.send((methods::FollowEvent::OperationStorageItems {
-                                    operation_id: operation_id.clone().into(),
-                                    items
-                                }, 0)).await;
+                                let _ = to_main_task.send(OperationEvent {
+                                    operation_id: operation_id.clone(),
+                                    is_done: false,
+                                    notification: methods::FollowEvent::OperationStorageItems {
+                                        operation_id: operation_id.clone().into(),
+                                        items
+                                    }
+                                }).await;
                             }
 
-                            let _ = to_main_task.send((
-                                methods::FollowEvent::OperationStorageDone {
+                            let _ = to_main_task.send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationStorageDone {
                                     operation_id: operation_id.clone().into(),
-                                },
-                                occupied_operation_slots
-                            )).await;
+                                }
+                            }).await;
                         }
                         Err(_) => {
-                            let _ = to_main_task.send((methods::FollowEvent::OperationInaccessible {
-                                operation_id: operation_id.clone().into(),
-                            }, occupied_operation_slots)).await;
+                            let _ = to_main_task.send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationInaccessible {
+                                    operation_id: operation_id.clone().into(),
+                                }
+                            }).await;
                         }
                     }
                 }
@@ -1227,6 +1285,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
+        let _was_in = self
+            .operations_in_progress
+            .insert(operation_id.clone(), Operation { occupied_slots: 1 });
+        debug_assert!(_was_in.is_none());
+
         request.respond(methods::Response::chainHead_unstable_call(
             methods::ChainHeadBodyCallReturn::Started {
                 operation_id: (&operation_id).into(),
@@ -1265,10 +1328,13 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
-                                let _ = to_main_task.send((methods::FollowEvent::OperationError {
+                                let _ = to_main_task.send(OperationEvent {
+                                    operation_id: operation_id.clone(),
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationError {
                                     operation_id: operation_id.clone().into(),
                                     error: error.to_string().into(),
-                                }, 1)).await;
+                                }}).await;
                             }
                             Ok(mut runtime_call) => {
                                 loop {
@@ -1278,18 +1344,24 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 success.virtual_machine.value().as_ref().to_owned();
                                             runtime_call_lock
                                                 .unlock(success.virtual_machine.into_prototype());
-                                            let _ = to_main_task.send((methods::FollowEvent::OperationCallDone {
+                                            let _ = to_main_task.send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationCallDone {
                                                 operation_id: operation_id.clone().into(),
                                                 output: methods::HexString(output),
-                                            }, 1)).await;
+                                            }}).await;
                                             break;
                                         }
                                         runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                                             runtime_call_lock.unlock(error.prototype);
-                                            let _ = to_main_task.send((methods::FollowEvent::OperationError {
+                                            let _ = to_main_task.send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationError {
                                                 operation_id: operation_id.clone().into(),
                                                 error: error.detail.to_string().into(),
-                                            }, 1)).await;
+                                            }}).await;
                                             break;
                                         }
                                         runtime_host::RuntimeHostVm::StorageGet(get) => {
@@ -1307,9 +1379,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                         )
                                                         .into_prototype(),
                                                     );
-                                                    let _ = to_main_task.send((methods::FollowEvent::OperationInaccessible {
+                                                    let _ = to_main_task.send(OperationEvent {
+                                                        operation_id: operation_id.clone(),
+                                                        is_done: true,
+                                                        notification: methods::FollowEvent::OperationInaccessible {
                                                         operation_id: operation_id.clone().into(),
-                                                    }, 1)).await;
+                                                    }}).await;
                                                     break;
                                                 }
                                             };
@@ -1334,9 +1409,13 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                         )
                                                         .into_prototype(),
                                                     );
-                                                    let _ = to_main_task.send((methods::FollowEvent::OperationInaccessible {
-                                                        operation_id: operation_id.clone().into(),
-                                                    }, 1)).await;
+                                                    let _ = to_main_task.send(OperationEvent {
+                                                        operation_id: operation_id.clone(),
+                                                        is_done: true,
+                                                        notification: methods::FollowEvent::OperationInaccessible {
+                                                            operation_id: operation_id.clone().into(),
+                                                        }
+                                                    }).await;
                                                     break;
                                                 }
                                             };
@@ -1363,9 +1442,13 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                         )
                                                         .into_prototype(),
                                                     );
-                                                    let _ = to_main_task.send((methods::FollowEvent::OperationInaccessible {
-                                                        operation_id: operation_id.clone().into(),
-                                                    }, 1)).await;
+                                                    let _ = to_main_task.send(OperationEvent {
+                                                        operation_id: operation_id.clone(),
+                                                        is_done: true,
+                                                        notification: methods::FollowEvent::OperationInaccessible {
+                                                            operation_id: operation_id.clone().into(),
+                                                        }
+                                                    }).await;
                                                     break;
                                                 }
                                             };
@@ -1379,10 +1462,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::Offchain(ctx) => {
                                             runtime_call_lock.unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
-                                            let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: "Runtime has called an offchain host function".to_string().into(),
-                                            }, 1)).await;
+                                            let _ = to_main_task.send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationError {
+                                                    operation_id: operation_id.clone().into(),
+                                                    error: "Runtime has called an offchain host function".to_string().into(),
+                                                }
+                                            }).await;
                                             break;
                                         }
                                     }
@@ -1391,40 +1478,64 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
                     }
                     Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
-                        let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: error.to_string().into(),
-                        }, 1)).await;
+                        let _ = to_main_task.send(OperationEvent {
+                            operation_id: operation_id.clone(),
+                            is_done: true,
+                            notification: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: error.to_string().into(),
+                            }
+                        }).await;
                     }
                     Err(runtime_service::RuntimeCallError::StorageRetrieval(error)) => {
-                        let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: error.to_string().into(),
-                        }, 1)).await;
+                        let _ = to_main_task.send(OperationEvent {
+                            operation_id: operation_id.clone(),
+                            is_done: true,
+                            notification: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: error.to_string().into(),
+                            }
+                        }).await;
                     }
                     Err(runtime_service::RuntimeCallError::MissingProofEntry(_error)) => {
-                        let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: "incomplete call proof".into(),
-                        }, 1)).await;
+                        let _ = to_main_task.send(OperationEvent {
+                            operation_id: operation_id.clone(),
+                            is_done: true,
+                            notification: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: "incomplete call proof".into(),
+                            }
+                        }).await;
                     }
                     Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot) => {
-                        let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: "invalid call proof".into(),
-                        }, 1)).await;
+                        let _ = to_main_task.send(OperationEvent {
+                            operation_id: operation_id.clone(),
+                            is_done: true,
+                            notification: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: "invalid call proof".into(),
+                            }
+                        }).await;
                     }
                     Err(runtime_service::RuntimeCallError::CallProof(error)) => {
-                        let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: error.to_string().into(),
-                        }, 1)).await;
+                        let _ = to_main_task.send(OperationEvent {
+                            operation_id: operation_id.clone(),
+                            is_done: true,
+                            notification: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: error.to_string().into(),
+                            }
+                        }).await;
                     }
                     Err(runtime_service::RuntimeCallError::StorageQuery(error)) => {
-                        let _ = to_main_task.send((methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: format!("failed to fetch call proof: {error}").into(),
-                        }, 1)).await;
+                        let _ = to_main_task.send(OperationEvent {
+                            operation_id: operation_id.clone(),
+                            is_done: true,
+                            notification: methods::FollowEvent::OperationError {
+                                operation_id: operation_id.clone().into(),
+                                error: format!("failed to fetch call proof: {error}").into(),
+                            }
+                        }).await;
                     }
                 }
             }
