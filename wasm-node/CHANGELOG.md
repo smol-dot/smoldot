@@ -8,6 +8,10 @@
 - A JSON-RPC error is now returned if the JSON-RPC client tries to open more than two simultaneous `chainHead_unstable_follow` subscriptions, in accordance with the latest changes in the JSON-RPC API specification. ([#962](https://github.com/smol-dot/smoldot/pull/962))
 - Rename `chainHead_unstable_storageContinue` to `chainHead_unstable_continue`, in accordance with the latest changes in the JSON-RPC API specification. ([#965](https://github.com/smol-dot/smoldot/pull/965))
 
+### Fixed
+
+- Fix several potential panics due to mismatches in the state of the networking.
+
 ## 1.0.13 - 2023-07-16
 
 ### Added
