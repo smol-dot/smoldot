@@ -520,10 +520,7 @@ define_methods! {
     state_storage(subscription: Cow<'a, str>, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_bodyEvent(subscription: Cow<'a, str>, result: ChainHeadBodyEvent) -> (),
-    chainHead_unstable_callEvent(subscription: Cow<'a, str>, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent<'a>) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
@@ -777,30 +774,6 @@ pub enum ChainHeadStorageReturn<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadBodyEvent {
-    #[serde(rename = "done")]
-    Done { value: Vec<HexString> },
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "disjoint")]
-    Disjoint {},
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadCallEvent<'a> {
-    #[serde(rename = "done")]
-    Done { output: HexString },
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "error")]
-    Error { error: Cow<'a, str> },
-    #[serde(rename = "disjoint")]
-    Disjoint {},
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChainHeadStorageRequestItem {
     pub key: HexString,
     #[serde(rename = "type")]
@@ -833,25 +806,6 @@ pub enum ChainHeadStorageType {
     DescendantsValues,
     #[serde(rename = "descendants-hashes")]
     DescendantsHashes,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadStorageEvent<'a> {
-    #[serde(rename = "items")]
-    Items {
-        items: Vec<ChainHeadStorageResponseItem>,
-    },
-    #[serde(rename = "done")]
-    Done,
-    #[serde(rename = "waiting-for-continue")]
-    WaitingForContinue,
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "error")]
-    Error { error: Cow<'a, str> },
-    #[serde(rename = "disjoint")]
-    Disjoint {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
