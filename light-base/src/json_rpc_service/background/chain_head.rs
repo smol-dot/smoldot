@@ -29,7 +29,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    cmp, iter,
+    iter,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
@@ -800,7 +800,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     async fn start_chain_head_body(&mut self, request: service::SubscriptionStartProcess) {
         let methods::MethodCall::chainHead_unstable_body {
             hash,
-            network_config,
             ..
         } = request.request()
         else {
@@ -820,12 +819,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
         };
 
-        let network_config = network_config.unwrap_or(methods::NetworkConfig {
-            max_parallel: 1,
-            timeout_ms: 4000,
-            total_attempts: 3,
-        });
-
         let mut subscription = request.accept();
         let subscription_id = subscription.subscription_id().to_owned();
 
@@ -843,12 +836,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             body: true,
                             justifications: false,
                         },
-                        cmp::min(10, network_config.total_attempts),
-                        Duration::from_millis(u64::from(cmp::min(
-                            20000,
-                            network_config.timeout_ms,
-                        ))),
-                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                        3,
+                        Duration::from_secs(20),
+                        NonZeroU32::new(2).unwrap(),
                     );
 
                     // Drive the future, but cancel execution if the JSON-RPC client
@@ -900,7 +890,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             hash,
             items,
             child_trie,
-            network_config,
             ..
         } = request.request()
         else {
@@ -917,12 +906,6 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 return;
             }
         };
-
-        let network_config = network_config.unwrap_or(methods::NetworkConfig {
-            max_parallel: 1,
-            timeout_ms: 8000,
-            total_attempts: 3,
-        });
 
         if child_trie.is_some() {
             // TODO: implement this
@@ -998,12 +981,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         &hash.0,
                         decoded_header.state_root,
                         queries.into_iter(),
-                        cmp::min(10, network_config.total_attempts),
-                        Duration::from_millis(u64::from(cmp::min(
-                            20000,
-                            network_config.timeout_ms,
-                        ))),
-                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                        3,
+                        Duration::from_secs(20),
+                        NonZeroU32::new(2).unwrap(),
                     );
 
                     // Drive the future, but cancel execution if the JSON-RPC client
@@ -1102,30 +1082,18 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     }
 
     async fn start_chain_head_call(&mut self, request: service::SubscriptionStartProcess) {
-        let (hash, function_to_call, call_parameters, network_config) = {
+        let (hash, function_to_call, call_parameters) = {
             let methods::MethodCall::chainHead_unstable_call {
                 hash,
                 function,
                 call_parameters,
-                network_config,
                 ..
             } = request.request()
             else {
                 unreachable!()
             };
 
-            let network_config = network_config.unwrap_or(methods::NetworkConfig {
-                max_parallel: 1,
-                timeout_ms: 8000,
-                total_attempts: 3,
-            });
-
-            (
-                hash,
-                function.into_owned(),
-                call_parameters.0,
-                network_config,
-            )
+            (hash, function.into_owned(), call_parameters.0)
         };
 
         // Determine whether the requested block hash is valid and start the call.
@@ -1180,12 +1148,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     let call_future = pre_runtime_call.start(
                         &function_to_call,
                         iter::once(&call_parameters),
-                        cmp::min(10, network_config.total_attempts),
-                        Duration::from_millis(u64::from(cmp::min(
-                            20000,
-                            network_config.timeout_ms,
-                        ))),
-                        NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                        3,
+                        Duration::from_secs(20),
+                        NonZeroU32::new(2).unwrap(),
                     );
 
                     // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
