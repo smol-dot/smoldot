@@ -33,9 +33,8 @@ pub mod default;
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
-// TODO: remove `Unpin` trait bounds
 pub trait PlatformRef: Clone + Send + Sync + 'static {
-    type Delay: Future<Output = ()> + Unpin + Send + 'static;
+    type Delay: Future<Output = ()> + Send + 'static;
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>

@@ -22,6 +22,7 @@ use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Ve
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
     time::Duration,
 };
 use futures_lite::FutureExt as _;
@@ -215,7 +216,8 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     >,
 
     /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch: future::Either<future::Fuse<TPlat::Delay>, future::Pending<()>>,
+    next_start_parahead_fetch:
+        future::Either<Pin<Box<future::Fuse<TPlat::Delay>>>, future::Pending<()>>,
 }
 
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
@@ -694,7 +696,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             {
                 async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
                     runtime_subscription.next_start_parahead_fetch =
-                        future::Either::Left(self.platform.sleep_until(when).fuse());
+                        future::Either::Left(Box::pin(self.platform.sleep_until(when).fuse()));
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
