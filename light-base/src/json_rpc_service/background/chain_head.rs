@@ -29,7 +29,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    cmp, iter,
+    iter,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
