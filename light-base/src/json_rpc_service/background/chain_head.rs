@@ -307,7 +307,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     next_operation_id: 1,
                     to_main_task: to_operation_handlers,
                     from_operation_handlers,
-                    available_operation_slots: 32,
+                    available_operation_slots: 32, // TODO: make configurable? adjust dynamically?
                 }
                 .run(subscription, subscription_id, rx)
             });
