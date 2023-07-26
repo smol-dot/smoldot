@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.14 - 2023-07-26
+
 ### Changed
 
 - Remove `networkConfig` parameter from all `chainHead` JSON-RPC functions, in accordance with the latest changes to the JSON-RPC API specification. ([#963](https://github.com/smol-dot/smoldot/pull/963))
