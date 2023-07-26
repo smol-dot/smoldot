@@ -33,9 +33,8 @@ pub mod default;
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
-// TODO: remove `Unpin` trait bounds
 pub trait PlatformRef: Clone + Send + Sync + 'static {
-    type Delay: Future<Output = ()> + Unpin + Send + 'static;
+    type Delay: Future<Output = ()> + Send + 'static;
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -60,19 +59,14 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>>
-        + Unpin
-        + Send
-        + 'static;
+    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>> + Send + 'static;
     type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
-        + Unpin
         + Send
         + 'static;
     type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
-    type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
+    type StreamUpdateFuture<'a>: Future<Output = ()> + Send + 'a;
     type StreamErrorRef<'a>: fmt::Display + fmt::Debug;
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
-        + Unpin
         + Send
         + 'a;
 
