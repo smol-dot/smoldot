@@ -95,6 +95,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             unreachable!()
         };
 
+        let (mut subscription, rx) = {
+            let mut lock = self.chain_head_follow_tasks.lock().await;
+
+            // As mentioned in the spec, the JSON-RPC server accepts 2 or more subscriptions per
+            // JSON-RPC client. We choose to accept only exactly 2 in order to make sure that
+            // JSON-RPC client implementations are made aware of this limit. This number of 2 might
+            // be relaxed and/or configurable in the future.
+            if lock.len() >= 2 {
+                log::warn!(
+                    target: &self.log_target,
+                    "Rejected `chainHead_unstable_follow` subscription due to limit reached."
+                );
+                request.fail(json_rpc::parse::ErrorResponse::ApplicationDefined(
+                    -32100,
+                    "Maximum number of `chainHead_unstable_follow` subscriptions reached",
+                ));
+                return;
+            }
+
+            let (tx, rx) = service::deliver_channel();
+            let subscription = request.accept();
+            lock.insert(subscription.subscription_id().to_owned(), tx);
+            (subscription, rx)
+        };
+        let subscription_id = subscription.subscription_id().to_owned();
+
         let events = if with_runtime {
             let subscribe_all = self
                 .runtime_service
@@ -105,15 +131,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         } else {
             either::Right(self.sync_service.subscribe_all(32, false).await)
         };
-
-        let (mut subscription, rx) = {
-            let (tx, rx) = service::deliver_channel();
-            let mut lock = self.chain_head_follow_tasks.lock().await;
-            let subscription = request.accept();
-            lock.insert(subscription.subscription_id().to_owned(), tx);
-            (subscription, rx)
-        };
-        let subscription_id = subscription.subscription_id().to_owned();
 
         let (non_finalized_blocks, pinned_blocks_headers, events) = {
             let mut pinned_blocks_headers =
