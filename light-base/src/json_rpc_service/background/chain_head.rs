@@ -341,6 +341,29 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         }
     }
 
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopOperation`].
+    pub(super) async fn chain_head_stop_operation(
+        self: &Arc<Self>,
+        request: service::RequestProcess,
+    ) {
+        let methods::MethodCall::chainHead_unstable_stopOperation {
+            follow_subscription,
+            ..
+        } = request.request()
+        else {
+            unreachable!()
+        };
+
+        // This is implemented by sending a message to the notifications task.
+        // The task dedicated to this subscription will receive the message and send a response to
+        // the JSON-RPC client.
+        let mut lock = self.chain_head_follow_tasks.lock().await;
+
+        if let Some(sender) = lock.get_mut(&*follow_subscription) {
+            let _ = sender.deliver(request).await;
+        }
+    }
+
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_continue`].
     pub(super) async fn chain_head_continue(self: &Arc<Self>, request: service::RequestProcess) {
         let methods::MethodCall::chainHead_unstable_continue { .. } = request.request()
@@ -753,6 +776,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_call { .. } => {
                 self.start_chain_head_call(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_stopOperation {
+                follow_subscription,
+                operation_id,
+            } => {
+                // TODO: /!\
             }
             methods::MethodCall::chainHead_unstable_header {
                 follow_subscription: _,

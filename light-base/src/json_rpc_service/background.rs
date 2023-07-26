@@ -347,9 +347,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
-            | methods::MethodCall::chainHead_unstable_stopBody { .. }
-            | methods::MethodCall::chainHead_unstable_stopCall { .. }
-            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_stopOperation { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
@@ -461,6 +459,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_storage { .. } => {
                 self.chain_head_storage(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
+                self.chain_head_stop_operation(request).await;
             }
             methods::MethodCall::chainHead_unstable_header { .. } => {
                 self.chain_head_unstable_header(request).await;
@@ -620,9 +621,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
-            | methods::MethodCall::chainHead_unstable_stopBody { .. }
-            | methods::MethodCall::chainHead_unstable_stopCall { .. }
-            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_stopOperation { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }

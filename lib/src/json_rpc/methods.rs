@@ -464,14 +464,9 @@ define_methods! {
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> Option<HexString>,
-    chainHead_unstable_stopBody(
-        subscription: Cow<'a, str>
-    ) -> (),
-    chainHead_unstable_stopCall(
-        subscription: Cow<'a, str>
-    ) -> (),
-    chainHead_unstable_stopStorage(
-        subscription: Cow<'a, str>
+    chainHead_unstable_stopOperation(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
     chainHead_unstable_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,

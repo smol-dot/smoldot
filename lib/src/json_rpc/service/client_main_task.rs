@@ -434,6 +434,7 @@ impl ClientMainTask {
                 | methods::MethodCall::chainHead_unstable_continue { .. }
                 | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                 | methods::MethodCall::chainHead_unstable_header { .. }
+                | methods::MethodCall::chainHead_unstable_stopOperation { .. }
                 | methods::MethodCall::chainHead_unstable_storage { .. }
                 | methods::MethodCall::chainHead_unstable_unpin { .. } => {
                     // Simple one-request-one-response.
@@ -530,9 +531,6 @@ impl ClientMainTask {
                 | methods::MethodCall::network_unstable_unsubscribeEvents {
                     subscription, ..
                 }
-                | methods::MethodCall::chainHead_unstable_stopBody { subscription, .. }
-                | methods::MethodCall::chainHead_unstable_stopStorage { subscription, .. }
-                | methods::MethodCall::chainHead_unstable_stopCall { subscription, .. }
                 | methods::MethodCall::chainHead_unstable_unfollow {
                     follow_subscription: subscription,
                     ..
@@ -560,15 +558,6 @@ impl ClientMainTask {
                                     methods::MethodCall::network_unstable_unsubscribeEvents {
                                         ..
                                     } => methods::Response::network_unstable_unsubscribeEvents(()),
-                                    methods::MethodCall::chainHead_unstable_stopBody { .. } => {
-                                        methods::Response::chainHead_unstable_stopBody(())
-                                    }
-                                    methods::MethodCall::chainHead_unstable_stopStorage {
-                                        ..
-                                    } => methods::Response::chainHead_unstable_stopStorage(()),
-                                    methods::MethodCall::chainHead_unstable_stopCall { .. } => {
-                                        methods::Response::chainHead_unstable_stopCall(())
-                                    }
                                     methods::MethodCall::chainHead_unstable_unfollow { .. } => {
                                         methods::Response::chainHead_unstable_unfollow(())
                                     }
