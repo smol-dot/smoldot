@@ -627,19 +627,27 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     notification,
                     is_done,
                 } => {
-                    if is_done {
-                        let operation = self.operations_in_progress.remove(&operation_id).unwrap();
-                        self.available_operation_slots += operation.occupied_slots;
-                    }
+                    let operation_is_valid = if is_done {
+                        if let Some(operation) = self.operations_in_progress.remove(&operation_id) {
+                            self.available_operation_slots += operation.occupied_slots;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        self.operations_in_progress.contains_key(&operation_id)
+                    };
 
-                    subscription
-                        .send_notification(
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: (&subscription_id).into(),
-                                result: notification,
-                            },
-                        )
-                        .await;
+                    if operation_is_valid {
+                        subscription
+                            .send_notification(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: notification,
+                                },
+                            )
+                            .await;
+                    }
                 }
 
                 WhatHappened::NotificationWithRuntime(
@@ -814,6 +822,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             methods::MethodCall::chainHead_unstable_stopOperation { operation_id, .. } => {
                 if let Some(operation) = self.operations_in_progress.remove(&*operation_id) {
                     operation.interrupt.notify(usize::max_value());
+                    self.available_operation_slots += operation.occupied_slots;
                 }
             }
             methods::MethodCall::chainHead_unstable_header {
