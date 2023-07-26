@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Remove `networkConfig` parameter from all `chainHead` JSON-RPC functions, in accordance with the latest changes to the JSON-RPC API specification.
+
 ## 1.0.13 - 2023-07-16
 
 ### Added

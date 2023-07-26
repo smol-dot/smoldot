@@ -448,15 +448,13 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexString,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+        hash: HashHexString
     ) -> Cow<'a, str>,
     chainHead_unstable_call(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         function: Cow<'a, str>,
-        #[rename = "callParameters"] call_parameters: HexString,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+        #[rename = "callParameters"] call_parameters: HexString
     ) -> Cow<'a, str>,
     chainHead_unstable_follow(
         #[rename = "withRuntime"] with_runtime: bool
@@ -479,8 +477,7 @@ define_methods! {
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         items: Vec<ChainHeadStorageRequestItem>,
-        #[rename = "childTrie"] child_trie: Option<HexString>,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+        #[rename = "childTrie"] child_trie: Option<HexString>
     ) -> Cow<'a, str>,
     chainHead_unstable_storageContinue(
         #[rename = "subscription"] subscription: Cow<'a, str>
@@ -996,16 +993,6 @@ impl Header {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeaderDigest {
     pub logs: Vec<HexString>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct NetworkConfig {
-    #[serde(rename = "totalAttempts")]
-    pub total_attempts: u32,
-    #[serde(rename = "maxParallel")]
-    pub max_parallel: u32, // TODO: NonZeroU32?
-    #[serde(rename = "timeoutMs")]
-    pub timeout_ms: u32,
 }
 
 #[derive(Debug, Clone)]
