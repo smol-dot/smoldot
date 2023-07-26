@@ -345,6 +345,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_body { .. }
             | methods::MethodCall::chainHead_unstable_call { .. }
+            | methods::MethodCall::chainHead_unstable_continue { .. }
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
@@ -352,7 +353,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
-            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
@@ -449,8 +449,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 self.system_version(request).await;
             }
 
-            methods::MethodCall::chainHead_unstable_storageContinue { .. } => {
-                self.chain_head_storage_continue(request).await;
+            methods::MethodCall::chainHead_unstable_continue { .. } => {
+                self.chain_head_continue(request).await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
                 self.chain_head_unstable_genesis_hash(request).await;
@@ -609,6 +609,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_body { .. }
             | methods::MethodCall::chainHead_unstable_call { .. }
+            | methods::MethodCall::chainHead_unstable_continue { .. }
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
@@ -616,7 +617,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_stopCall { .. }
             | methods::MethodCall::chainHead_unstable_stopStorage { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
-            | methods::MethodCall::chainHead_unstable_storageContinue { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
             | methods::MethodCall::chainSpec_unstable_chainName { .. }
