@@ -307,6 +307,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     next_operation_id: 1,
                     to_main_task: to_operation_handlers,
                     from_operation_handlers,
+                    available_operation_slots: 32,
                 }
                 .run(subscription, subscription_id, rx)
             });
@@ -487,6 +488,8 @@ struct ChainHeadFollowTask<TPlat: PlatformRef> {
 
     /// Identifier to assign to the next body/call/storage operation.
     next_operation_id: u128,
+
+    available_operation_slots: u32,
 }
 
 enum Subscription<TPlat: PlatformRef> {
@@ -571,6 +574,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 }
 
                 WhatHappened::OperationEvent(notification, occupied_slots_decrease) => {
+                    self.available_operation_slots += occupied_slots_decrease;
                     subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
@@ -820,6 +824,17 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
         };
 
+        // Check whether there is an operation slot available.
+        self.available_operation_slots = match self.available_operation_slots.checked_sub(1) {
+            Some(s) => s,
+            None => {
+                request.respond(methods::Response::chainHead_unstable_call(
+                    methods::ChainHeadBodyCallReturn::LimitReached {},
+                ));
+                return;
+            }
+        };
+
         let operation_id = self.next_operation_id.to_string();
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
@@ -895,7 +910,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     async fn start_chain_head_storage(&mut self, request: service::RequestProcess) {
         let methods::MethodCall::chainHead_unstable_storage {
             hash,
-            items,
+            mut items,
             child_trie,
             ..
         } = request.request()
@@ -928,16 +943,53 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             return;
         }
 
-        let operation_id = self.next_operation_id.to_string();
-        self.next_operation_id += 1;
-        let to_main_task = self.to_main_task.clone();
+        // Scrap some of the items so that it fits in the number of operation slots.
+        let (operation_id, occupied_operation_slots) = if self.available_operation_slots == 0 {
+            request.respond(methods::Response::chainHead_unstable_storage(
+                methods::ChainHeadStorageReturn::LimitReached {},
+            ));
+            return;
+        } else if u32::try_from(items.len())
+            .map_or(true, |num_items| num_items > self.available_operation_slots)
+        {
+            let operation_id = self.next_operation_id.to_string();
+            self.next_operation_id += 1;
 
-        request.respond(methods::Response::chainHead_unstable_storage(
-            methods::ChainHeadStorageReturn::Started {
-                operation_id: (&operation_id).into(),
-                discarded_items: todo!(),
-            },
-        ));
+            request.respond(methods::Response::chainHead_unstable_storage(
+                methods::ChainHeadStorageReturn::Started {
+                    operation_id: (&operation_id).into(),
+                    // This block is reached only if `items.len() > available_slots`. Since
+                    // `items.len()` is a `usize`, we know that `available_slots` fits in a `usize`
+                    // as well.
+                    discarded_items: items.len()
+                        - usize::try_from(self.available_operation_slots).unwrap(),
+                },
+            ));
+
+            let occupied_slots = self.available_operation_slots;
+            items.drain(..usize::try_from(self.available_operation_slots).unwrap());
+            self.available_operation_slots = 0;
+
+            (operation_id, occupied_slots)
+        } else {
+            let operation_id = self.next_operation_id.to_string();
+            self.next_operation_id += 1;
+
+            request.respond(methods::Response::chainHead_unstable_storage(
+                methods::ChainHeadStorageReturn::Started {
+                    operation_id: (&operation_id).into(),
+                    discarded_items: 0,
+                },
+            ));
+
+            // Since this block is reached only if `items.len() < available_slots` and that
+            // `available_slots` is a `u32`, we know that `items.len()` fits in a `u32` as well.
+            let num_items_u32 = u32::try_from(items.len()).unwrap();
+
+            (operation_id, num_items_u32)
+        };
+
+        let to_main_task = self.to_main_task.clone();
 
         // Finish the call asynchronously.
         self.platform
@@ -957,7 +1009,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     operation_id: operation_id.clone().into(),
                                     error: err.to_string().into(),
                                 },
-                                todo!()
+                                occupied_operation_slots
                             ))
                             .await;
                             return;
@@ -1068,15 +1120,15 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                             let _ = to_main_task.send((
                                 methods::FollowEvent::OperationStorageDone {
-                                            operation_id: operation_id.clone().into(),
+                                    operation_id: operation_id.clone().into(),
                                 },
-                                todo!()
+                                occupied_operation_slots
                             )).await;
                         }
                         Err(_) => {
                             let _ = to_main_task.send((methods::FollowEvent::OperationInaccessible {
                                 operation_id: operation_id.clone().into(),
-                            }, todo!())).await;
+                            }, occupied_operation_slots)).await;
                         }
                     }
                 }
@@ -1096,6 +1148,17 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             };
 
             (hash, function.into_owned(), call_parameters.0)
+        };
+
+        // Check whether there is an operation slot available.
+        self.available_operation_slots = match self.available_operation_slots.checked_sub(1) {
+            Some(s) => s,
+            None => {
+                request.respond(methods::Response::chainHead_unstable_call(
+                    methods::ChainHeadBodyCallReturn::LimitReached {},
+                ));
+                return;
+            }
         };
 
         // Determine whether the requested block hash is valid and start the call.

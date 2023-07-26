@@ -770,7 +770,7 @@ pub enum ChainHeadStorageReturn<'a> {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
         #[serde(rename = "discardedItems")]
-        discarded_items: u64,
+        discarded_items: usize,
     },
     #[serde(rename = "limitReached")]
     LimitReached {},
