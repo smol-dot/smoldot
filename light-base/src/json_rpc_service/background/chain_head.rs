@@ -530,6 +530,7 @@ struct OperationEvent {
 
 struct Operation {
     occupied_slots: u32,
+    interrupt: event_listener::Event,
 }
 
 enum Subscription<TPlat: PlatformRef> {
@@ -810,11 +811,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             methods::MethodCall::chainHead_unstable_call { .. } => {
                 self.start_chain_head_call(request).await;
             }
-            methods::MethodCall::chainHead_unstable_stopOperation {
-                follow_subscription,
-                operation_id,
-            } => {
-                // TODO: /!\
+            methods::MethodCall::chainHead_unstable_stopOperation { operation_id, .. } => {
+                if let Some(operation) = self.operations_in_progress.remove(&*operation_id) {
+                    operation.interrupt.notify(usize::max_value());
+                }
             }
             methods::MethodCall::chainHead_unstable_header {
                 follow_subscription: _,
@@ -901,9 +901,16 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
-        let _was_in = self
-            .operations_in_progress
-            .insert(operation_id.clone(), Operation { occupied_slots: 1 });
+        let interrupt = event_listener::Event::new();
+        let on_interrupt = interrupt.listen();
+
+        let _was_in = self.operations_in_progress.insert(
+            operation_id.clone(),
+            Operation {
+                occupied_slots: 1,
+                interrupt,
+            },
+        );
         debug_assert!(_was_in.is_none());
 
         request.respond(methods::Response::chainHead_unstable_body(
@@ -933,11 +940,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                     // Drive the future, but cancel execution if the JSON-RPC client
                     // unsubscribes.
-                    let outcome = match future
-                        .map(Some)
-                        .or(subscription.wait_until_stale().map(|()| None))
-                        .await
-                    {
+                    let outcome = match future.map(Some).or(on_interrupt.map(|()| None)).await {
                         Some(v) => v,
                         None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                     };
@@ -1058,10 +1061,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             (operation_id, num_items_u32)
         };
 
+        let interrupt = event_listener::Event::new();
+        let on_interrupt = interrupt.listen();
+
         let _was_in = self.operations_in_progress.insert(
             operation_id.clone(),
             Operation {
                 occupied_slots: occupied_operation_slots,
+                interrupt,
             },
         );
         debug_assert!(_was_in.is_none());
@@ -1133,7 +1140,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     // unsubscribes.
                     let outcome = match future
                         .map(Some)
-                        .or(subscription.wait_until_stale().map(|()| None))
+                        .or(on_interrupt.map(|()| None))
                         .await
                     {
                         Some(v) => v,
@@ -1285,9 +1292,16 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
-        let _was_in = self
-            .operations_in_progress
-            .insert(operation_id.clone(), Operation { occupied_slots: 1 });
+        let interrupt = event_listener::Event::new();
+        let on_interrupt = interrupt.listen();
+
+        let _was_in = self.operations_in_progress.insert(
+            operation_id.clone(),
+            Operation {
+                occupied_slots: 1,
+                interrupt,
+            },
+        );
         debug_assert!(_was_in.is_none());
 
         request.respond(methods::Response::chainHead_unstable_call(
@@ -1310,7 +1324,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     );
 
                     // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
-                    match call_future.map(Some).or(subscription.wait_until_stale().map(|()| None)).await {
+                    match call_future.map(Some).or(on_interrupt.map(|()| None)).await {
                         Some(v) => v,
                         None => return  // JSON-RPC client has unsubscribed in the meanwhile.
                     }
