@@ -67,14 +67,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         if let Err(request) = send_outcome {
-            let mut subscription = request.accept();
-            let subscription_id = subscription.subscription_id().to_owned();
-            subscription
-                .send_notification(methods::ServerToClient::chainHead_unstable_callEvent {
-                    subscription: (&subscription_id).into(),
-                    result: methods::ChainHeadCallEvent::Disjoint {},
-                })
-                .await;
+            request.respond(methods::Response::chainHead_unstable_call(
+                methods::ChainHeadBodyCallReturn::LimitReached {},
+            ));
         }
     }
 
@@ -339,14 +334,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         if let Err(request) = send_outcome {
-            let mut subscription = request.accept();
-            let subscription_id = subscription.subscription_id().to_owned();
-            subscription
-                .send_notification(methods::ServerToClient::chainHead_unstable_storageEvent {
-                    subscription: (&subscription_id).into(),
-                    result: methods::ChainHeadStorageEvent::Disjoint {},
-                })
-                .await;
+            request.respond(methods::Response::chainHead_unstable_storage(
+                methods::ChainHeadStorageReturn::LimitReached {},
+            ));
         }
     }
 
@@ -385,14 +375,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         if let Err(request) = send_outcome {
-            let mut subscription = request.accept();
-            let subscription_id = subscription.subscription_id().to_owned();
-            subscription
-                .send_notification(methods::ServerToClient::chainHead_unstable_bodyEvent {
-                    subscription: (&subscription_id).into(),
-                    result: methods::ChainHeadBodyEvent::Disjoint {},
-                })
-                .await;
+            request.respond(methods::Response::chainHead_unstable_body(
+                methods::ChainHeadBodyCallReturn::LimitReached {},
+            ));
         }
     }
 
@@ -839,8 +824,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
-        let mut subscription = request.accept();
-        let subscription_id = subscription.subscription_id().to_owned();
+        request.respond(methods::Response::chainHead_unstable_body(
+            methods::ChainHeadBodyCallReturn::Started {
+                operation_id: (&operation_id).into(),
+            },
+        ));
 
         // Finish the request asynchronously.
         self.platform
@@ -944,8 +932,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
-        let mut subscription = request.accept();
-        let subscription_id = subscription.subscription_id().to_owned();
+        request.respond(methods::Response::chainHead_unstable_storage(
+            methods::ChainHeadStorageReturn::Started {
+                operation_id: (&operation_id).into(),
+                discarded_items: todo!(),
+            },
+        ));
 
         // Finish the call asynchronously.
         self.platform
@@ -1124,18 +1116,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 {
                     Ok(c) => c,
                     Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
-                        // The runtime service subscription is dead. Generate a single "disjoint"
-                        // event.
-                        let mut subscription = request.accept();
-                        let subscription_id = subscription.subscription_id().to_owned();
-                        subscription
-                            .send_notification(
-                                methods::ServerToClient::chainHead_unstable_callEvent {
-                                    subscription: (&subscription_id).into(),
-                                    result: methods::ChainHeadCallEvent::Disjoint {},
-                                },
-                            )
-                            .await;
+                        // The runtime service subscription is dead.
+                        request.respond(methods::Response::chainHead_unstable_call(
+                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                        ));
                         return;
                     }
                 }
@@ -1151,8 +1135,11 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.next_operation_id += 1;
         let to_main_task = self.to_main_task.clone();
 
-        let mut subscription = request.accept();
-        let subscription_id = subscription.subscription_id().to_owned();
+        request.respond(methods::Response::chainHead_unstable_call(
+            methods::ChainHeadBodyCallReturn::Started {
+                operation_id: (&operation_id).into(),
+            },
+        ));
 
         // Finish the call asynchronously.
         self.platform

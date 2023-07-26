@@ -449,13 +449,13 @@ define_methods! {
     chainHead_unstable_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
-    ) -> Cow<'a, str>,
+    ) -> ChainHeadBodyCallReturn<'a>,
     chainHead_unstable_call(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         function: Cow<'a, str>,
         #[rename = "callParameters"] call_parameters: HexString
-    ) -> Cow<'a, str>,
+    ) -> ChainHeadBodyCallReturn<'a>,
     chainHead_unstable_follow(
         #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
@@ -478,7 +478,7 @@ define_methods! {
         hash: HashHexString,
         items: Vec<ChainHeadStorageRequestItem>,
         #[rename = "childTrie"] child_trie: Option<HexString>
-    ) -> Cow<'a, str>,
+    ) -> ChainHeadStorageReturn<'a>,
     chainHead_unstable_continue(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         #[rename = "operationId"] operation_id: Cow<'a, str>
@@ -748,6 +748,32 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "stop")]
     Stop {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "result")]
+pub enum ChainHeadBodyCallReturn<'a> {
+    #[serde(rename = "started")]
+    Started {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "limitReached")]
+    LimitReached {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "result")]
+pub enum ChainHeadStorageReturn<'a> {
+    #[serde(rename = "started")]
+    Started {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        #[serde(rename = "discardedItems")]
+        discarded_items: u64,
+    },
+    #[serde(rename = "limitReached")]
+    LimitReached {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
