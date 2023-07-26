@@ -7,6 +7,8 @@
 - Remove `networkConfig` parameter from all `chainHead` JSON-RPC functions, in accordance with the latest changes to the JSON-RPC API specification. ([#963](https://github.com/smol-dot/smoldot/pull/963))
 - A JSON-RPC error is now returned if the JSON-RPC client tries to open more than two simultaneous `chainHead_unstable_follow` subscriptions, in accordance with the latest changes in the JSON-RPC API specification. ([#962](https://github.com/smol-dot/smoldot/pull/962))
 - Rename `chainHead_unstable_storageContinue` to `chainHead_unstable_continue`, in accordance with the latest changes in the JSON-RPC API specification. ([#965](https://github.com/smol-dot/smoldot/pull/965))
+- Merge `chainHead_unstable_stopBody`, `chainHead_unstable_stopCall`, and `chainHead_unstable_stopStorage` into `chainHead_unstable_stopOperation`, in accordance with the latest changes in the JSON-RPC API specification. ([#966](https://github.com/smol-dot/smoldot/pull/966))
+- Merge `chainHead_unstable_body`, `chainHead_unstable_call`, and `chainHead_unstable_storage` are now simple request-response functions that generate their notifications onto the corresponding `chainHead_unstable_follow` subscription, in accordance with the latest changes in the JSON-RPC API specification. ([#966](https://github.com/smol-dot/smoldot/pull/966))
 
 ### Fixed
 

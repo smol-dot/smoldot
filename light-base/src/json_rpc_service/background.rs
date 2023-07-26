@@ -108,9 +108,7 @@ struct Background<TPlat: PlatformRef> {
     chain_head_follow_tasks: Mutex<
         hashbrown::HashMap<
             String,
-            service::DeliverSender<
-                either::Either<service::RequestProcess, service::SubscriptionStartProcess>,
-            >,
+            service::DeliverSender<service::RequestProcess>,
             fnv::FnvBuildHasher,
         >,
     >,
@@ -349,9 +347,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
-            | methods::MethodCall::chainHead_unstable_stopBody { .. }
-            | methods::MethodCall::chainHead_unstable_stopCall { .. }
-            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_stopOperation { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
@@ -449,11 +445,23 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 self.system_version(request).await;
             }
 
+            methods::MethodCall::chainHead_unstable_body { .. } => {
+                self.chain_head_unstable_body(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_call { .. } => {
+                self.chain_head_call(request).await;
+            }
             methods::MethodCall::chainHead_unstable_continue { .. } => {
                 self.chain_head_continue(request).await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
                 self.chain_head_unstable_genesis_hash(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_storage { .. } => {
+                self.chain_head_storage(request).await;
+            }
+            methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
+                self.chain_head_stop_operation(request).await;
             }
             methods::MethodCall::chainHead_unstable_header { .. } => {
                 self.chain_head_unstable_header(request).await;
@@ -613,9 +621,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
-            | methods::MethodCall::chainHead_unstable_stopBody { .. }
-            | methods::MethodCall::chainHead_unstable_stopCall { .. }
-            | methods::MethodCall::chainHead_unstable_stopStorage { .. }
+            | methods::MethodCall::chainHead_unstable_stopOperation { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
@@ -645,15 +651,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 unreachable!()
             }
 
-            methods::MethodCall::chainHead_unstable_body { .. } => {
-                self.chain_head_unstable_body(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_call { .. } => {
-                self.chain_head_call(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_storage { .. } => {
-                self.chain_head_storage(request).await;
-            }
             methods::MethodCall::chainHead_unstable_follow { .. } => {
                 self.chain_head_follow(request).await;
             }
