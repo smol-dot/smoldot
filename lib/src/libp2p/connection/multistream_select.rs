@@ -60,8 +60,8 @@
 use super::super::read_write::ReadWrite;
 use crate::{libp2p::read_write, util::leb128};
 
-use alloc::{string::String, vec::Vec};
-use core::{cmp, fmt, iter, mem, str};
+use alloc::{collections::VecDeque, string::String};
+use core::{cmp, fmt, str};
 
 /// Configuration of a multistream-select protocol.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -130,56 +130,44 @@ impl<P> ListenerAcceptOrDeny<P> {
     /// Accept the requested protocol and resume the handshake.
     pub fn accept(mut self) -> InProgress<P> {
         debug_assert!(matches!(self.inner.state, InProgressState::CommandExpected));
-        self.inner.state = InProgressState::SendProtocolOk {
-            num_bytes_written: 0,
-            protocol: self.protocol.into_bytes(),
-        };
+        write_message(
+            Message::ProtocolOk(self.protocol.into_bytes()),
+            &mut self.inner.data_send_out,
+        );
+        self.inner.state = InProgressState::Finishing;
         self.inner
     }
 
     /// Reject the requested protocol and resume the handshake.
     pub fn reject(mut self) -> InProgress<P> {
         debug_assert!(matches!(self.inner.state, InProgressState::CommandExpected));
-        self.inner.state = InProgressState::SendProtocolNa {
-            num_bytes_written: 0,
-        };
+        write_message(
+            Message::<&'static [u8]>::ProtocolNa,
+            &mut self.inner.data_send_out,
+        );
         self.inner
     }
 }
 
 /// Negotiation in progress.
 pub struct InProgress<P> {
-    /// Configuration of the negotiation. Always `Some` except right before destruction.
-    config: Option<Config<P>>,
+    /// Configuration of the negotiation.
+    config: Config<P>,
+    /// Data currently being sent out.
+    data_send_out: VecDeque<u8>,
     /// Current state of the negotiation.
     state: InProgressState,
-    /// Maximum allowed size of a frame.
-    max_frame_len: usize,
+    /// Maximum allowed size of an incoming frame.
+    max_in_frame_len: usize,
     /// Size of the next frame to receive, or `None` if not known yet. If `Some`, we have already
     /// extracted the length from the incoming buffer.
-    next_frame_len: Option<usize>,
+    next_in_frame_len: Option<usize>,
 }
 
 /// Current state of the negotiation.
+#[derive(Debug, Copy, Clone)]
 enum InProgressState {
-    SendHandshake {
-        /// Number of bytes of the handshake already written out.
-        num_bytes_written: usize,
-    },
-    SendProtocolRequest {
-        /// Number of bytes of the request already written out.
-        num_bytes_written: usize,
-    },
-    SendProtocolOk {
-        /// Number of bytes of the response already written out.
-        num_bytes_written: usize,
-        /// Which protocol to acknowledge.
-        protocol: Vec<u8>,
-    },
-    SendProtocolNa {
-        /// Number of bytes of the response already written out.
-        num_bytes_written: usize,
-    },
+    Finishing,
     HandshakeExpected,
     CommandExpected,
     ProtocolRequestAnswerExpected,
@@ -211,17 +199,26 @@ where
         ) + 1;
 
         InProgress {
-            config: Some(config),
             // Note that the listener theoretically doesn't necessarily have to immediately send
             // a handshake, and could instead wait for a command from the dialer. In practice,
             // however, the specification doesn't mention anything about this, and some libraries
             // such as js-libp2p wait for the listener to send a handshake before emitting a
             // command.
-            state: InProgressState::SendHandshake {
-                num_bytes_written: 0,
+            data_send_out: {
+                let mut data = VecDeque::new();
+                write_message(Message::<&'static [u8]>::Handshake, &mut data);
+                if let Config::Dialer { requested_protocol } = &config {
+                    write_message(
+                        Message::ProtocolRequest(requested_protocol.as_ref()),
+                        &mut data,
+                    );
+                }
+                data
             },
-            max_frame_len,
-            next_frame_len: None,
+            config,
+            state: InProgressState::HandshakeExpected,
+            max_in_frame_len: max_frame_len,
+            next_in_frame_len: None,
         }
     }
 
@@ -251,147 +248,44 @@ where
         read_write: &mut ReadWrite<TNow>,
     ) -> Result<Negotiation<P>, Error> {
         loop {
-            // First, handle the state where we send to send out bytes.
-            match (self.state, &mut self.config) {
-                (
-                    InProgressState::SendHandshake {
-                        mut num_bytes_written,
-                    },
-                    Some(config),
-                ) => {
-                    if read_write.write_bytes_queueable.is_none() {
-                        return Err(Error::WriteClosed);
-                    }
+            // First, try to send out data currently being queued for sending.
+            read_write.write_from_vec_deque(&mut self.data_send_out);
 
-                    let message = MessageOut::Handshake::<&'static str>;
-
-                    let written_before = read_write.write_bytes_queued;
-                    let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.write_bytes_queued - written_before;
-
-                    match (done, config) {
-                        (false, _) => {
-                            self.state = InProgressState::SendHandshake { num_bytes_written };
-                            break;
-                        }
-                        (true, Config::Dialer { .. }) => {
-                            self.state = InProgressState::SendProtocolRequest {
-                                num_bytes_written: 0,
-                            };
-                            continue;
-                        }
-                        (true, Config::Listener { .. }) => {
-                            self.state = InProgressState::HandshakeExpected;
-                            continue;
-                        }
-                    };
+            // The `Finishing` state is special because it doesn't expect any incoming message
+            // anymore, and just finishes the negotiation after all the data has been written out.
+            // As such, we do not proceed further unless we have finished sending out everything.
+            if let InProgressState::Finishing = self.state {
+                debug_assert!(matches!(self.config, Config::Listener { .. }));
+                if self.data_send_out.is_empty() {
+                    return Ok(Negotiation::Success);
+                } else {
+                    break;
                 }
-
-                (
-                    InProgressState::SendProtocolRequest {
-                        mut num_bytes_written,
-                    },
-                    Some(Config::Dialer { requested_protocol }),
-                ) => {
-                    if read_write.write_bytes_queueable.is_none() {
-                        return Err(Error::WriteClosed);
-                    }
-
-                    let message = MessageOut::ProtocolRequest(requested_protocol.as_ref());
-
-                    let written_before = read_write.write_bytes_queued;
-                    let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.write_bytes_queued - written_before;
-
-                    if done {
-                        self.state = InProgressState::HandshakeExpected;
-                        continue;
-                    } else {
-                        self.state = InProgressState::SendProtocolRequest { num_bytes_written };
-                        break;
-                    }
-                }
-
-                (
-                    InProgressState::SendProtocolNa {
-                        mut num_bytes_written,
-                    },
-                    _,
-                ) => {
-                    if read_write.write_bytes_queueable.is_none() {
-                        return Err(Error::WriteClosed);
-                    }
-
-                    let message = MessageOut::ProtocolNa::<&'static str>;
-
-                    let written_before = read_write.write_bytes_queued;
-                    let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.write_bytes_queued - written_before;
-
-                    if done {
-                        self.state = InProgressState::CommandExpected;
-                    } else {
-                        self.state = InProgressState::SendProtocolNa { num_bytes_written };
-                        break;
-                    }
-
-                    continue;
-                }
-
-                (
-                    InProgressState::SendProtocolOk {
-                        mut num_bytes_written,
-                        protocol,
-                    },
-                    _,
-                ) => {
-                    if read_write.write_bytes_queueable.is_none() {
-                        return Err(Error::WriteClosed);
-                    }
-
-                    let message = MessageOut::ProtocolOk(&protocol);
-
-                    let written_before = read_write.write_bytes_queued;
-                    let done = message.write_out(num_bytes_written, read_write);
-                    num_bytes_written += read_write.write_bytes_queued - written_before;
-
-                    if done {
-                        return Ok(Negotiation::Success);
-                    } else {
-                        self.state = InProgressState::SendProtocolOk {
-                            num_bytes_written,
-                            protocol,
-                        };
-                        break;
-                    }
-                }
-
-                (s, _) => self.state = s,
-            };
+            }
 
             // Try to extract a message from the incoming buffer.
-            let mut frame = if let Some(next_frame_len) = self.next_frame_len {
+            let mut frame = if let Some(next_frame_len) = self.next_in_frame_len {
                 match read_write.incoming_bytes_take(next_frame_len) {
                     Ok(None) => return Ok(Negotiation::InProgress(self)),
                     Ok(Some(frame)) => {
-                        self.next_frame_len = None;
+                        self.next_in_frame_len = None;
                         frame
                     }
                     Err(err) => return Err(Error::Frame(err)),
                 }
             } else {
-                match read_write.incoming_bytes_take_leb128(self.max_frame_len) {
+                match read_write.incoming_bytes_take_leb128(self.max_in_frame_len) {
                     Ok(None) => return Ok(Negotiation::InProgress(self)),
                     Ok(Some(size)) => {
-                        self.next_frame_len = Some(size);
+                        self.next_in_frame_len = Some(size);
                         continue;
                     }
                     Err(err) => return Err(Error::FrameLength(err)),
                 }
             };
 
-            match (self.state, &mut self.config) {
-                (InProgressState::HandshakeExpected, Some(Config::Dialer { .. })) => {
+            match (self.state, &self.config) {
+                (InProgressState::HandshakeExpected, Config::Dialer { .. }) => {
                     if &*frame != HANDSHAKE {
                         return Err(Error::BadHandshake);
                     }
@@ -402,7 +296,7 @@ where
                     self.state = InProgressState::ProtocolRequestAnswerExpected;
                 }
 
-                (InProgressState::HandshakeExpected, Some(Config::Listener { .. })) => {
+                (InProgressState::HandshakeExpected, Config::Listener { .. }) => {
                     if &*frame != HANDSHAKE {
                         return Err(Error::BadHandshake);
                     }
@@ -412,14 +306,13 @@ where
                     self.state = InProgressState::CommandExpected;
                 }
 
-                (InProgressState::CommandExpected, Some(Config::Listener { .. })) => {
+                (InProgressState::CommandExpected, Config::Listener { .. }) => {
                     if frame.pop() != Some(b'\n') {
                         return Err(Error::InvalidCommand);
                     }
 
                     let protocol = String::from_utf8(frame).map_err(|_| Error::InvalidCommand)?;
 
-                    self.state = InProgressState::CommandExpected;
                     return Ok(Negotiation::ListenerAcceptOrDeny(ListenerAcceptOrDeny {
                         inner: self,
                         protocol,
@@ -428,15 +321,8 @@ where
 
                 (
                     InProgressState::ProtocolRequestAnswerExpected,
-                    cfg @ Some(Config::Dialer { .. }),
+                    Config::Dialer { requested_protocol },
                 ) => {
-                    // Extract `config` to get the protocol name. All the paths below return,
-                    // thereby `config` doesn't need to be put back in `self`.
-                    let requested_protocol = match cfg.take() {
-                        Some(Config::Dialer { requested_protocol }) => requested_protocol,
-                        _ => unreachable!(),
-                    };
-
                     if frame.pop() != Some(b'\n') {
                         return Err(Error::UnexpectedProtocolRequestAnswer);
                     }
@@ -452,21 +338,12 @@ where
                     return Ok(Negotiation::Success);
                 }
 
-                // Already handled above.
-                (InProgressState::SendHandshake { .. }, Some(_))
-                | (InProgressState::SendProtocolRequest { .. }, Some(Config::Dialer { .. }))
-                | (InProgressState::SendProtocolNa { .. }, _)
-                | (InProgressState::SendProtocolOk { .. }, _) => unreachable!(),
-
                 // Invalid states.
-                (InProgressState::SendProtocolRequest { .. }, Some(Config::Listener { .. })) => {
+                (InProgressState::CommandExpected, Config::Dialer { .. })
+                | (InProgressState::ProtocolRequestAnswerExpected, Config::Listener { .. })
+                | (InProgressState::Finishing, _) => {
                     unreachable!();
                 }
-                (InProgressState::CommandExpected, Some(Config::Dialer { .. })) => unreachable!(),
-                (InProgressState::ProtocolRequestAnswerExpected, Some(Config::Listener { .. })) => {
-                    unreachable!();
-                }
-                (_, None) => unreachable!(),
             };
         }
 
@@ -507,147 +384,60 @@ const HANDSHAKE: &[u8] = b"/multistream/1.0.0\n";
 
 /// Message on the multistream-select protocol.
 #[derive(Debug, Copy, Clone)]
-pub enum MessageOut<P> {
+enum Message<P> {
     Handshake,
     ProtocolRequest(P),
     ProtocolOk(P),
-    LnAfterProtocol,
     ProtocolNa,
 }
 
-impl<P> MessageOut<P>
-where
-    P: AsRef<[u8]>,
-{
-    /// Returns the bytes representation of this message, as a list of buffers. The message
-    /// consists in the concatenation of all buffers.
-    pub fn into_bytes(mut self) -> impl Iterator<Item = impl AsRef<[u8]>> {
-        let len = match &self {
-            MessageOut::Handshake => HANDSHAKE.len(),
-            MessageOut::ProtocolRequest(p) => p.as_ref().len() + 1,
-            MessageOut::ProtocolOk(p) => p.as_ref().len() + 1,
-            MessageOut::LnAfterProtocol => 1,
-            MessageOut::ProtocolNa => 3,
-        };
-
-        let length_prefix = leb128::encode_usize(len).map(|n| [n]);
-
-        let mut n = 0;
-        let body = iter::from_fn(move || {
-            let ret = match (&mut self, n) {
-                (MessageOut::Handshake, 0) => Some(either::Left(HANDSHAKE)),
-                (MessageOut::Handshake, _) => None,
-                (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), 0) => {
-                    let proto = match mem::replace(&mut self, MessageOut::LnAfterProtocol) {
-                        MessageOut::ProtocolOk(p) | MessageOut::ProtocolRequest(p) => p,
-                        _ => unreachable!(),
-                    };
-
-                    Some(either::Right(proto))
-                }
-                (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), _) => {
-                    unreachable!()
-                }
-                (MessageOut::LnAfterProtocol, 0 | 1) => {
-                    n = 1;
-                    Some(either::Left(&b"\n"[..]))
-                }
-                (MessageOut::LnAfterProtocol, _) => None,
-                (MessageOut::ProtocolNa, 0) => Some(either::Left(&b"na\n"[..])),
-                (MessageOut::ProtocolNa, _) => None,
-            };
-
-            if ret.is_some() {
-                n += 1;
-            }
-
-            ret
-        });
-
-        length_prefix
-            .map(either::Left)
-            .chain(body.map(either::Right))
-    }
-
-    /// Write to the given [`ReadWrite`] as many bytes of the message as possible, starting at
-    /// `message_offset`.
-    ///
-    /// Returns a boolean indicating whether the message has been fully written in the buffer.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `message_offset` is larger than the size of the message.
-    ///
-    pub fn write_out<TNow>(
-        self,
-        mut message_offset: usize,
-        read_write: &mut ReadWrite<TNow>,
-    ) -> bool {
-        for buf in self.into_bytes() {
-            let buf = buf.as_ref();
-            if message_offset >= buf.len() {
-                message_offset -= buf.len();
-                continue;
-            }
-
-            let buf = &buf[message_offset..];
-            debug_assert!(!buf.is_empty());
-
-            let to_write = cmp::min(buf.len(), read_write.write_bytes_queueable.unwrap_or(0));
-
-            read_write.write_out(buf[..to_write].to_vec()); // TODO: extra copy
-            message_offset = 0;
-
-            if to_write < buf.len() {
-                return false;
-            }
+fn write_message(message: Message<impl AsRef<[u8]>>, out: &mut VecDeque<u8>) {
+    match message {
+        Message::Handshake => {
+            out.reserve(HANDSHAKE.len() + 4);
+            out.extend(leb128::encode_usize(HANDSHAKE.len()));
+            out.extend(HANDSHAKE);
         }
-
-        true
+        Message::ProtocolRequest(p) | Message::ProtocolOk(p) => {
+            let p = p.as_ref();
+            out.reserve(p.len() + 5);
+            out.extend(leb128::encode_usize(p.len() + 1));
+            out.extend(p);
+            out.push_back(b'\n');
+        }
+        Message::ProtocolNa => {
+            out.reserve(8);
+            out.extend(leb128::encode_usize(3));
+            out.extend(b"na\n");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::VecDeque;
     use core::{cmp, mem};
 
-    use super::{super::super::read_write::ReadWrite, Config, MessageOut, Negotiation};
+    use super::{super::super::read_write::ReadWrite, write_message, Config, Message, Negotiation};
 
     #[test]
     fn encode() {
+        let mut message = VecDeque::new();
+
+        write_message(Message::<&'static [u8]>::Handshake, &mut message);
         assert_eq!(
-            MessageOut::<&'static [u8]>::Handshake.into_bytes().fold(
-                Vec::new(),
-                move |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }
-            ),
+            message.drain(..).collect::<Vec<_>>(),
             b"\x13/multistream/1.0.0\n".to_vec()
         );
 
+        write_message(Message::ProtocolRequest("/hello"), &mut message);
         assert_eq!(
-            MessageOut::ProtocolRequest("/hello")
-                .into_bytes()
-                .fold(Vec::new(), move |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }),
+            message.drain(..).collect::<Vec<_>>(),
             b"\x07/hello\n".to_vec()
         );
 
-        assert_eq!(
-            MessageOut::<&'static [u8]>::ProtocolNa.into_bytes().fold(
-                Vec::new(),
-                move |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }
-            ),
-            b"\x03na\n".to_vec()
-        );
-
-        // TODO: all encoding testing
+        write_message(Message::<&'static [u8]>::ProtocolNa, &mut message);
+        assert_eq!(message.drain(..).collect::<Vec<_>>(), b"\x03na\n".to_vec());
     }
 
     #[test]
@@ -663,10 +453,15 @@ mod tests {
             let mut buf_1_to_2 = Vec::new();
             let mut buf_2_to_1 = Vec::new();
 
+            let mut num_iterations = 0;
+
             while !matches!(
                 (&negotiation1, &negotiation2),
                 (Negotiation::Success, Negotiation::Success)
             ) {
+                num_iterations += 1;
+                assert!(num_iterations <= 5000);
+
                 match negotiation1 {
                     Negotiation::InProgress(nego) => {
                         let mut read_write = ReadWrite {
@@ -731,9 +526,8 @@ mod tests {
         }
 
         test_with_buffer_sizes(256, 256);
-        // TODO: tests below don't work
-        /*test_with_buffer_sizes(1, 1);
+        test_with_buffer_sizes(1, 1);
         test_with_buffer_sizes(1, 2048);
-        test_with_buffer_sizes(2048, 1);*/
+        test_with_buffer_sizes(2048, 1);
     }
 }
