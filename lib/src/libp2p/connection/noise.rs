@@ -280,7 +280,6 @@ impl Noise {
         outer_read_write: &'a mut ReadWrite<TNow>,
     ) -> Result<InnerReadWrite<'a, TNow>, CipherError> {
         // Try to pull data from `outer_read_write` to decrypt it.
-        // TODO: https://github.com/smol-dot/smoldot/issues/944
         while self.rx_buffer_decrypted.is_empty()
             || self.inner_stream_expected_incoming_bytes > self.rx_buffer_decrypted.len()
         {
