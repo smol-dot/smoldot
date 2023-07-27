@@ -702,37 +702,37 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
-    #[serde(rename = "operation-body-done")]
+    #[serde(rename = "operationBodyDone")]
     OperationBodyDone {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
         value: Vec<HexString>,
     },
-    #[serde(rename = "operation-call-done")]
+    #[serde(rename = "operationCallDone")]
     OperationCallDone {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
         output: HexString,
     },
-    #[serde(rename = "operation-inaccessible")]
+    #[serde(rename = "operationInaccessible")]
     OperationInaccessible {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
     },
-    #[serde(rename = "operation-storage-items")]
+    #[serde(rename = "operationStorageItems")]
     OperationStorageItems {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
         items: Vec<ChainHeadStorageResponseItem>,
     },
-    #[serde(rename = "operation-storage-done")]
+    #[serde(rename = "operationStorageDone")]
     OperationStorageDone {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
     },
-    #[serde(rename = "operation-waiting-for-continue")]
+    #[serde(rename = "operationWaitingForContinue")]
     OperationWaitingForContinue,
-    #[serde(rename = "operation-error")]
+    #[serde(rename = "operationError")]
     OperationError {
         #[serde(rename = "operationId")]
         operation_id: Cow<'a, str>,
@@ -783,7 +783,7 @@ pub struct ChainHeadStorageResponseItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<HexString>,
     #[serde(
-        rename = "closest-descendant-merkle-value",
+        rename = "closestDescendantMerkleValue",
         skip_serializing_if = "Option::is_none"
     )]
     pub closest_descendant_merkle_value: Option<HexString>,
@@ -795,11 +795,11 @@ pub enum ChainHeadStorageType {
     Value,
     #[serde(rename = "hash")]
     Hash,
-    #[serde(rename = "closest-descendant-merkle-value")]
+    #[serde(rename = "closestDescendantMerkleValue")]
     ClosestDescendantMerkleValue,
-    #[serde(rename = "descendants-values")]
+    #[serde(rename = "descendantsValues")]
     DescendantsValues,
-    #[serde(rename = "descendants-hashes")]
+    #[serde(rename = "descendantsHashes")]
     DescendantsHashes,
 }
 
