@@ -26,9 +26,8 @@ use smol::{
 };
 use smoldot::{
     libp2p::{
-        async_std_connection::with_buffers,
         multiaddr::{Multiaddr, ProtocolRef},
-        websocket,
+        websocket, with_buffers,
     },
     network::service::{self, CoordinatorToConnection},
 };

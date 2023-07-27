@@ -91,7 +91,6 @@
 //! See also the documentation of [`peers`] for more information.
 //!
 
-pub mod async_std_connection;
 pub mod collection;
 pub mod connection;
 pub mod multiaddr;
@@ -100,6 +99,7 @@ pub mod peer_id;
 pub mod peers;
 pub mod read_write;
 pub mod websocket;
+pub mod with_buffers;
 
 pub use multiaddr::Multiaddr;
 pub use peer_id::PeerId;
