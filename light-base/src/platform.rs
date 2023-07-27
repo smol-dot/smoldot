@@ -23,7 +23,7 @@ pub use smoldot::libp2p::read_write;
 
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
-pub use smoldot::libp2p::async_std_connection::with_buffers;
+pub use smoldot::libp2p::with_buffers;
 
 pub mod address_parse;
 pub mod default;
