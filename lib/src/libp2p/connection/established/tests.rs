@@ -21,7 +21,7 @@ use super::{
     Config, Event, InboundError, InboundTy, NotificationsOutErr, RequestError, SingleStream,
 };
 use crate::libp2p::read_write::ReadWrite;
-use std::time::Duration;
+use core::{cmp, mem, time::Duration};
 
 struct TwoEstablished {
     alice: SingleStream<Duration, ()>,
@@ -41,8 +41,8 @@ struct TwoEstablished {
 
 /// Performs a handshake between two peers, and returns the established connection objects.
 fn perform_handshake(
-    alice_to_bob_buffer_size: usize,
-    bob_to_alice_buffer_size: usize,
+    mut alice_to_bob_buffer_size: usize,
+    mut bob_to_alice_buffer_size: usize,
     alice_config: Config<Duration>,
     bob_config: Config<Duration>,
 ) -> TwoEstablished {
@@ -76,11 +76,11 @@ fn perform_handshake(
                     incoming_buffer: bob_to_alice_buffer,
                     expected_incoming_bytes: Some(0),
                     read_bytes: 0,
-                    write_buffers: Vec::new(),
-                    write_bytes_queued: 0,
+                    write_bytes_queued: alice_to_bob_buffer.len(),
                     write_bytes_queueable: Some(
                         alice_to_bob_buffer_size - alice_to_bob_buffer.len(),
                     ),
+                    write_buffers: vec![mem::take(&mut alice_to_bob_buffer)],
                     wake_up_after: None,
                 };
 
@@ -91,6 +91,10 @@ fn perform_handshake(
                         .write_buffers
                         .drain(..)
                         .flat_map(|b| b.into_iter()),
+                );
+                bob_to_alice_buffer_size = cmp::max(
+                    bob_to_alice_buffer_size,
+                    read_write.expected_incoming_bytes.unwrap_or(0),
                 );
             }
         }
@@ -103,11 +107,11 @@ fn perform_handshake(
                     incoming_buffer: alice_to_bob_buffer,
                     expected_incoming_bytes: Some(0),
                     read_bytes: 0,
-                    write_buffers: Vec::new(),
-                    write_bytes_queued: 0,
+                    write_bytes_queued: bob_to_alice_buffer.len(),
                     write_bytes_queueable: Some(
                         bob_to_alice_buffer_size - bob_to_alice_buffer.len(),
                     ),
+                    write_buffers: vec![mem::take(&mut bob_to_alice_buffer)],
                     wake_up_after: None,
                 };
 
@@ -118,6 +122,10 @@ fn perform_handshake(
                         .write_buffers
                         .drain(..)
                         .flat_map(|b| b.into_iter()),
+                );
+                alice_to_bob_buffer_size = cmp::max(
+                    alice_to_bob_buffer_size,
+                    read_write.expected_incoming_bytes.unwrap_or(0),
                 );
             }
         }
@@ -173,11 +181,11 @@ impl TwoEstablished {
                 incoming_buffer: self.bob_to_alice_buffer,
                 expected_incoming_bytes: Some(0),
                 read_bytes: 0,
-                write_buffers: Vec::new(),
-                write_bytes_queued: 0,
+                write_bytes_queued: self.alice_to_bob_buffer.len(),
                 write_bytes_queueable: Some(
                     self.alice_to_bob_buffer_size - self.alice_to_bob_buffer.len(),
                 ),
+                write_buffers: vec![mem::take(&mut self.alice_to_bob_buffer)],
                 wake_up_after: self.wake_up_after,
             };
 
@@ -192,6 +200,10 @@ impl TwoEstablished {
                     .drain(..)
                     .flat_map(|b| b.into_iter()),
             );
+            self.bob_to_alice_buffer_size = cmp::max(
+                self.bob_to_alice_buffer_size,
+                alice_read_write.expected_incoming_bytes.unwrap_or(0),
+            );
 
             if let Some(event) = alice_event {
                 return (self, either::Left(event));
@@ -202,11 +214,11 @@ impl TwoEstablished {
                 incoming_buffer: self.alice_to_bob_buffer,
                 expected_incoming_bytes: Some(0),
                 read_bytes: 0,
-                write_buffers: Vec::new(),
-                write_bytes_queued: 0,
+                write_bytes_queued: self.bob_to_alice_buffer.len(),
                 write_bytes_queueable: Some(
                     self.bob_to_alice_buffer_size - self.bob_to_alice_buffer.len(),
                 ),
+                write_buffers: vec![mem::take(&mut self.bob_to_alice_buffer)],
                 wake_up_after: self.wake_up_after,
             };
 
@@ -220,6 +232,10 @@ impl TwoEstablished {
                     .write_buffers
                     .drain(..)
                     .flat_map(|b| b.into_iter()),
+            );
+            self.alice_to_bob_buffer_size = cmp::max(
+                self.alice_to_bob_buffer_size,
+                bob_read_write.expected_incoming_bytes.unwrap_or(0),
             );
 
             if let Some(event) = bob_event {
