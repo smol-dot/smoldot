@@ -609,6 +609,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use core::{cmp, mem};
+
     use super::{super::super::read_write::ReadWrite, Config, MessageOut, Negotiation};
 
     #[test]
@@ -650,7 +652,7 @@ mod tests {
 
     #[test]
     fn negotiation_basic_works() {
-        fn test_with_buffer_sizes(size1: usize, size2: usize) {
+        fn test_with_buffer_sizes(mut size1: usize, mut size2: usize) {
             let mut negotiation1 = Negotiation::new(Config::Dialer {
                 requested_protocol: "/foo",
             });
@@ -672,9 +674,9 @@ mod tests {
                             incoming_buffer: buf_2_to_1,
                             expected_incoming_bytes: Some(0),
                             read_bytes: 0,
-                            write_buffers: Vec::new(),
-                            write_bytes_queued: 0,
+                            write_bytes_queued: buf_1_to_2.len(),
                             write_bytes_queueable: Some(size1 - buf_1_to_2.len()),
+                            write_buffers: vec![mem::take(&mut buf_1_to_2)],
                             wake_up_after: None,
                         };
                         negotiation1 = nego.read_write(&mut read_write).unwrap();
@@ -685,6 +687,7 @@ mod tests {
                                 .drain(..)
                                 .flat_map(|b| b.into_iter()),
                         );
+                        size2 = cmp::max(size2, read_write.expected_incoming_bytes.unwrap_or(0));
                     }
                     Negotiation::Success => {}
                     Negotiation::ListenerAcceptOrDeny(_) => unreachable!(),
@@ -698,9 +701,9 @@ mod tests {
                             incoming_buffer: buf_1_to_2,
                             expected_incoming_bytes: Some(0),
                             read_bytes: 0,
-                            write_buffers: Vec::new(),
-                            write_bytes_queued: 0,
+                            write_bytes_queued: buf_2_to_1.len(),
                             write_bytes_queueable: Some(size2 - buf_2_to_1.len()),
+                            write_buffers: vec![mem::take(&mut buf_2_to_1)],
                             wake_up_after: None,
                         };
                         negotiation2 = nego.read_write(&mut read_write).unwrap();
@@ -711,6 +714,7 @@ mod tests {
                                 .drain(..)
                                 .flat_map(|b| b.into_iter()),
                         );
+                        size1 = cmp::max(size1, read_write.expected_incoming_bytes.unwrap_or(0));
                     }
                     Negotiation::ListenerAcceptOrDeny(accept_reject)
                         if accept_reject.requested_protocol() == "/foo" =>
