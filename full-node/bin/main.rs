@@ -42,6 +42,11 @@ async fn async_main() {
             let hash = blake2_rfc::blake2b::blake2b(8, &[], opt.payload.as_bytes());
             println!("0x{}", hex::encode(hash));
         }
+        cli::CliOptionsCommand::Blake2256BitsHash(opt) => {
+            let content = fs::read(opt.file).expect("Failed to read file content");
+            let hash = blake2_rfc::blake2b::blake2b(32, &[], &content);
+            println!("0x{}", hex::encode(hash));
+        }
     }
 }
 
@@ -401,7 +406,6 @@ async fn run(cli_options: cli::CliOptionsRun) {
         },
         log_callback: log_callback.clone(),
         jaeger_agent: cli_options.jaeger,
-        show_informant: matches!(cli_output, cli::Output::Informant),
     })
     .await;
 

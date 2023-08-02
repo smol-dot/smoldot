@@ -314,8 +314,8 @@ fn grandpa_justification<'a>(
         "grandpa_justification",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::bytes::complete::take(32u32),
+                nom::number::streaming::le_u64,
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 precommits(block_number_bytes),
                 votes_ancestries(block_number_bytes),
@@ -364,10 +364,10 @@ fn precommit<'a>(
         "precommit",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-                nom::bytes::complete::take(64u32),
-                nom::bytes::complete::take(32u32),
+                nom::bytes::streaming::take(64u32),
+                nom::bytes::streaming::take(32u32),
             )),
             |(target_hash, target_number, signature, authority_public_key)| PrecommitRef {
                 target_hash: TryFrom::try_from(target_hash).unwrap(),

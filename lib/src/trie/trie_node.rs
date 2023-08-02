@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::nibble;
+use super::{nibble, HashFunction};
 use alloc::vec::Vec;
 use core::{cmp, fmt, iter, slice};
 
@@ -179,6 +179,7 @@ pub fn calculate_merkle_value(
         impl ExactSizeIterator<Item = nibble::Nibble> + Clone,
         impl AsRef<[u8]> + Clone,
     >,
+    hash_function: HashFunction,
     is_root_node: bool,
 ) -> Result<MerkleValueOutput, EncodeError> {
     /// The Merkle value of a node is defined as either the hash of the node value, or the node value
@@ -189,13 +190,18 @@ pub fn calculate_merkle_value(
     /// value to this struct which automatically switches to hashing if the value exceeds 32 bytes.
     enum HashOrInline {
         Inline(arrayvec::ArrayVec<u8, 31>),
-        Hasher(blake2_rfc::blake2b::Blake2b),
+        Blake2Hasher(blake2_rfc::blake2b::Blake2b),
+        Keccak256Hasher(sha3::Keccak256),
     }
 
-    let mut merkle_value_sink = if is_root_node {
-        HashOrInline::Hasher(blake2_rfc::blake2b::Blake2b::new(32))
-    } else {
-        HashOrInline::Inline(arrayvec::ArrayVec::new())
+    let mut merkle_value_sink = match (is_root_node, hash_function) {
+        (true, HashFunction::Blake2) => {
+            HashOrInline::Blake2Hasher(blake2_rfc::blake2b::Blake2b::new(32))
+        }
+        (true, HashFunction::Keccak256) => {
+            HashOrInline::Keccak256Hasher(<sha3::Keccak256 as sha3::Digest>::new())
+        }
+        (false, _) => HashOrInline::Inline(arrayvec::ArrayVec::new()),
     };
 
     for buffer in encode(decoded)? {
@@ -206,13 +212,26 @@ pub fn calculate_merkle_value(
                     continue;
                 }
 
-                let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
-                hasher.update(curr);
-                hasher.update(buffer);
-                merkle_value_sink = HashOrInline::Hasher(hasher);
+                match hash_function {
+                    HashFunction::Blake2 => {
+                        let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
+                        hasher.update(curr);
+                        hasher.update(buffer);
+                        merkle_value_sink = HashOrInline::Blake2Hasher(hasher);
+                    }
+                    HashFunction::Keccak256 => {
+                        let mut hasher = <sha3::Keccak256 as sha3::Digest>::new();
+                        sha3::Digest::update(&mut hasher, curr);
+                        sha3::Digest::update(&mut hasher, buffer);
+                        merkle_value_sink = HashOrInline::Keccak256Hasher(hasher);
+                    }
+                }
             }
-            HashOrInline::Hasher(hasher) => {
+            HashOrInline::Blake2Hasher(hasher) => {
                 hasher.update(buffer);
+            }
+            HashOrInline::Keccak256Hasher(hasher) => {
+                sha3::Digest::update(hasher, buffer);
             }
         }
     }
@@ -220,7 +239,10 @@ pub fn calculate_merkle_value(
     Ok(MerkleValueOutput {
         inner: match merkle_value_sink {
             HashOrInline::Inline(b) => MerkleValueOutputInner::Inline(b),
-            HashOrInline::Hasher(h) => MerkleValueOutputInner::Hasher(h.finalize()),
+            HashOrInline::Blake2Hasher(h) => MerkleValueOutputInner::Blake2Hasher(h.finalize()),
+            HashOrInline::Keccak256Hasher(h) => {
+                MerkleValueOutputInner::Keccak256Hasher(sha3::Digest::finalize(h).into())
+            }
         },
     })
 }
@@ -234,7 +256,8 @@ pub struct MerkleValueOutput {
 #[derive(Clone)]
 enum MerkleValueOutputInner {
     Inline(arrayvec::ArrayVec<u8, 31>),
-    Hasher(blake2_rfc::blake2b::Blake2bResult),
+    Blake2Hasher(blake2_rfc::blake2b::Blake2bResult),
+    Keccak256Hasher([u8; 32]),
     Bytes(arrayvec::ArrayVec<u8, 32>),
 }
 
@@ -261,7 +284,8 @@ impl AsRef<[u8]> for MerkleValueOutput {
     fn as_ref(&self) -> &[u8] {
         match &self.inner {
             MerkleValueOutputInner::Inline(a) => a.as_slice(),
-            MerkleValueOutputInner::Hasher(a) => a.as_bytes(),
+            MerkleValueOutputInner::Blake2Hasher(a) => a.as_bytes(),
+            MerkleValueOutputInner::Keccak256Hasher(a) => &a[..],
             MerkleValueOutputInner::Bytes(a) => a.as_slice(),
         }
     }
@@ -289,7 +313,7 @@ impl fmt::Debug for MerkleValueOutput {
 
 /// Decodes a node value found in a proof into its components.
 ///
-/// This can decode nodes no matter their version.
+/// This can decode nodes no matter their version or hash algorithm.
 pub fn decode(mut node_value: &'_ [u8]) -> Result<Decoded<DecodedPartialKey<'_>, &'_ [u8]>, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
@@ -474,7 +498,7 @@ impl<'a, I, C> Decoded<'a, I, C> {
 pub enum StorageValue<'a> {
     /// Storage value of the item is present in the node value.
     Unhashed(&'a [u8]),
-    /// BLAKE2 hash of the storage value of the item is present in the node value.
+    /// Hash of the storage value of the item is present in the node value.
     Hashed(&'a [u8; 32]),
     /// Item doesn't have any storage value.
     None,

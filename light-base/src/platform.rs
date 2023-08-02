@@ -16,8 +16,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::{borrow::Cow, string::String};
-use core::{future::Future, ops, str, time::Duration};
+use core::{fmt, future::Future, ops, pin::Pin, str, time::Duration};
 use futures_util::future;
+
+pub use smoldot::libp2p::read_write;
+
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use smoldot::libp2p::with_buffers;
 
 pub mod address_parse;
 pub mod default;
@@ -27,9 +33,8 @@ pub mod default;
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
-// TODO: remove `Unpin` trait bounds
 pub trait PlatformRef: Clone + Send + Sync + 'static {
-    type Delay: Future<Output = ()> + Unpin + Send + 'static;
+    type Delay: Future<Output = ()> + Send + 'static;
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -54,17 +59,14 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>>
-        + Unpin
-        + Send
-        + 'static;
+    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>> + Send + 'static;
     type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
-        + Unpin
         + Send
         + 'static;
-    type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
+    type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
+    type StreamUpdateFuture<'a>: Future<Output = ()> + Send + 'a;
+    type StreamErrorRef<'a>: fmt::Display + fmt::Debug;
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
-        + Unpin
         + Send
         + 'a;
 
@@ -80,6 +82,14 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
 
     /// Returns an object that represents "now".
     fn now(&self) -> Self::Instant;
+
+    /// The given buffer must be completely filled with pseudo-random bytes.
+    ///
+    /// # Panic
+    ///
+    /// Must panic if for some reason it is not possible to fill the buffer.
+    ///
+    fn fill_random_bytes(&self, buffer: &mut [u8]);
 
     /// Creates a future that becomes ready after at least the given duration has elapsed.
     fn sleep(&self, duration: Duration) -> Self::Delay;
@@ -158,82 +168,33 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
         connection: &'a mut Self::MultiStream,
     ) -> Self::NextSubstreamFuture<'a>;
 
-    /// Synchronizes the stream with the "actual" stream.
+    /// Returns an object that implements `DerefMut<Target = ReadWrite>`. The
+    /// [`read_write::ReadWrite`] object allows the API user to read data from the stream and write
+    /// data to the stream.
     ///
-    /// Returns a future that becomes ready when "something" in the state has changed. In other
-    /// words, when data has been added to the read buffer of the given stream , or the remote
-    /// closes their sending side, or the number of writable bytes (see
-    /// [`PlatformRef::writable_bytes`]) increases.
+    /// If the stream has been reset in the past, this function should return a reference to
+    /// the error that happened.
     ///
-    /// This function might not add data to the read buffer nor process the remote closing its
-    /// writing side, unless the read buffer has been emptied beforehand using
-    /// [`PlatformRef::advance_read_cursor`].
+    /// See the documentation of [`read_write`] for more information
     ///
-    /// In the specific situation where the reading side is closed and the writing side has been
-    /// closed using [`PlatformRef::close_send`], the API user must call this function before
-    /// dropping the `Stream` object. This makes it possible for the implementation to finish
-    /// cleaning up everything gracefully before the object is dropped.
-    ///
-    /// This function should also flush any outgoing data if necessary.
-    ///
-    /// In order to avoid race conditions, the state of the read buffer and the writable bytes
-    /// shouldn't be updated unless this function is called.
-    /// In other words, calling this function switches the stream from a state to another, and
-    /// this state transition should only happen when this function is called and not otherwise.
-    fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a>;
+    /// > **Note**: The `with_buffers` module provides a helper to more easily implement this
+    /// >           function.
+    fn read_write_access<'a>(
+        &self,
+        stream: Pin<&'a mut Self::Stream>,
+    ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>>;
 
-    /// Gives access to the content of the read buffer of the given stream.
-    fn read_buffer<'a>(&self, stream: &'a mut Self::Stream) -> ReadBuffer<'a>;
-
-    /// Discards the first `bytes` bytes of the read buffer of this stream.
+    /// Returns a future that becomes ready when [`PlatformRef::read_write_access`] should be
+    /// called again on this stream.
     ///
-    /// This makes it possible for more data to be received when [`PlatformRef::update_stream`] is
-    /// called.
+    /// See the documentation of [`read_write`] for more information.
     ///
-    /// # Panic
-    ///
-    /// Panics if there aren't enough bytes to discard in the buffer.
-    ///
-    fn advance_read_cursor(&self, stream: &mut Self::Stream, bytes: usize);
-
-    /// Returns the maximum size of the buffer that can be passed to [`PlatformRef::send`].
-    ///
-    /// Must return 0 if [`PlatformRef::close_send`] has previously been called, or if the stream
-    /// has been reset by the remote.
-    ///
-    /// If [`PlatformRef::send`] is called, the number of writable bytes must decrease by exactly
-    /// the size of the buffer that was provided.
-    /// The number of writable bytes should never change unless [`PlatformRef::update_stream`] is
-    /// called.
-    fn writable_bytes(&self, stream: &mut Self::Stream) -> usize;
-
-    /// Queues the given bytes to be sent out on the given stream.
-    ///
-    /// > **Note**: In the case of [`MultiStreamAddress::WebRtc`], be aware that there
-    /// >           exists a limit to the amount of data to send in a single packet. The `data`
-    /// >           parameter is guaranteed to fit within that limit. Due to the existence of this
-    /// >           limit, the implementation of this function shouldn't attempt to save function
-    /// >           calls by performing internal buffering and batching multiple calls into one.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `data.is_empty()`.
-    /// Panics if `data.len()` is superior to the value returned by [`PlatformRef::writable_bytes`].
-    /// Panics if [`PlatformRef::close_send`] has been called before on this stream.
-    ///
-    fn send(&self, stream: &mut Self::Stream, data: &[u8]);
-
-    /// Closes the sending side of the given stream.
-    ///
-    /// > **Note**: In situations where this isn't possible, such as with the WebSocket protocol,
-    /// >           this is a no-op.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`PlatformRef::close_send`] has already been called on this stream.
-    ///
-    // TODO: consider not calling this function at all for WebSocket
-    fn close_send(&self, stream: &mut Self::Stream);
+    /// > **Note**: The `with_buffers` module provides a helper to more easily implement this
+    /// >           function.
+    fn wait_read_write_again<'a>(
+        &self,
+        stream: Pin<&'a mut Self::Stream>,
+    ) -> Self::StreamUpdateFuture<'a>;
 }
 
 /// Established multistream connection information. See [`PlatformRef::connect_multistream`].
@@ -260,10 +221,30 @@ pub enum SubstreamDirection {
 /// Connection type passed to [`PlatformRef::supports_connection_type`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ConnectionType {
-    /// TCP/IP connections.
-    Tcp,
-    /// WebSocket connections.
-    WebSocket {
+    /// TCP/IP connection.
+    TcpIpv4,
+    /// TCP/IP connection.
+    TcpIpv6,
+    /// TCP/IP connection.
+    TcpDns,
+    /// Non-secure WebSocket connection.
+    WebSocketIpv4 {
+        /// `true` if the target of the connection is `localhost`.
+        ///
+        /// > **Note**: Some platforms (namely browsers) sometimes only accept non-secure WebSocket
+        /// >           connections only towards `localhost`.
+        remote_is_localhost: bool,
+    },
+    /// Non-secure WebSocket connection.
+    WebSocketIpv6 {
+        /// `true` if the target of the connection is `localhost`.
+        ///
+        /// > **Note**: Some platforms (namely browsers) sometimes only accept non-secure WebSocket
+        /// >           connections only towards `localhost`.
+        remote_is_localhost: bool,
+    },
+    /// WebSocket connection.
+    WebSocketDns {
         /// `true` for WebSocket secure connections.
         secure: bool,
         /// `true` if the target of the connection is `localhost`.
@@ -273,28 +254,34 @@ pub enum ConnectionType {
         remote_is_localhost: bool,
     },
     /// Libp2p-specific WebRTC flavour.
-    WebRtc,
+    WebRtcIpv4,
+    /// Libp2p-specific WebRTC flavour.
+    WebRtcIpv6,
 }
 
 impl<'a> From<&'a Address<'a>> for ConnectionType {
     fn from(address: &'a Address<'a>) -> ConnectionType {
         match address {
-            Address::TcpDns { .. } | Address::TcpIp { .. } => ConnectionType::Tcp,
+            Address::TcpIp {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::TcpIpv4,
+            Address::TcpIp {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::TcpIpv6,
+            Address::TcpDns { .. } => ConnectionType::TcpDns,
             Address::WebSocketIp {
                 ip: IpAddr::V4(ip), ..
-            } => ConnectionType::WebSocket {
-                secure: false,
+            } => ConnectionType::WebSocketIpv4 {
                 remote_is_localhost: no_std_net::Ipv4Addr::from(*ip).is_loopback(),
             },
             Address::WebSocketIp {
                 ip: IpAddr::V6(ip), ..
-            } => ConnectionType::WebSocket {
-                secure: false,
+            } => ConnectionType::WebSocketIpv6 {
                 remote_is_localhost: no_std_net::Ipv6Addr::from(*ip).is_loopback(),
             },
             Address::WebSocketDns {
                 hostname, secure, ..
-            } => ConnectionType::WebSocket {
+            } => ConnectionType::WebSocketDns {
                 secure: *secure,
                 remote_is_localhost: hostname.eq_ignore_ascii_case("localhost"),
             },
@@ -305,7 +292,12 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
 impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
     fn from(address: &'a MultiStreamAddress) -> ConnectionType {
         match address {
-            MultiStreamAddress::WebRtc { .. } => ConnectionType::WebRtc,
+            MultiStreamAddress::WebRtc {
+                ip: IpAddr::V4(_), ..
+            } => ConnectionType::WebRtcIpv4,
+            MultiStreamAddress::WebRtc {
+                ip: IpAddr::V6(_), ..
+            } => ConnectionType::WebRtcIpv6,
         }
     }
 }
@@ -397,20 +389,4 @@ pub enum IpAddr {
 pub struct ConnectError {
     /// Human-readable error message.
     pub message: String,
-}
-
-/// State of the read buffer, as returned by [`PlatformRef::read_buffer`].
-#[derive(Debug)]
-pub enum ReadBuffer<'a> {
-    /// Reading side of the stream is fully open. Contains the data waiting to be processed.
-    Open(&'a [u8]),
-
-    /// The reading side of the stream has been closed by the remote.
-    ///
-    /// Note that this is forbidden for connections of
-    /// type [`MultiStreamAddress::WebRtc`].
-    Closed,
-
-    /// The stream has been abruptly closed by the remote.
-    Reset,
 }

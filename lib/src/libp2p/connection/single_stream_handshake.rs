@@ -41,7 +41,7 @@ use super::{
     yamux,
 };
 
-use alloc::{boxed::Box, collections::VecDeque};
+use alloc::boxed::Box;
 use core::fmt;
 
 mod tests;
@@ -89,7 +89,6 @@ enum NegotiationState {
     Multiplexing {
         peer_id: PeerId,
         encryption: Box<noise::Noise>,
-        decrypted_data_buffer: VecDeque<u8>,
         negotiation: multistream_select::InProgress<&'static str>,
     },
 }
@@ -135,9 +134,9 @@ impl HealthyHandshake {
     ///
     /// An error is returned if the protocol is being violated by the remote. When that happens,
     /// the connection should be closed altogether.
-    pub fn read_write<TNow>(
+    pub fn read_write<TNow: Clone>(
         mut self,
-        read_write: &mut ReadWrite<'_, TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> Result<Handshake, HandshakeError> {
         loop {
             match self.state {
@@ -211,7 +210,6 @@ impl HealthyHandshake {
                             self.state = NegotiationState::Multiplexing {
                                 peer_id: remote_peer_id,
                                 encryption: Box::new(cipher),
-                                decrypted_data_buffer: VecDeque::with_capacity(65536),
                                 negotiation,
                             };
 
@@ -228,69 +226,30 @@ impl HealthyHandshake {
                 NegotiationState::Multiplexing {
                     negotiation,
                     mut encryption,
-                    mut decrypted_data_buffer,
                     peer_id,
                 } => {
                     // During the multiplexing protocol negotiation, all exchanges have to go
                     // through the Noise cipher.
 
-                    if read_write.incoming_buffer.is_none() {
+                    if read_write.expected_incoming_bytes.is_none() {
                         return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::ReadClosed,
                         ));
                     }
-                    if read_write.outgoing_buffer.is_none() {
+                    if read_write.write_bytes_queueable.is_none() {
                         return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::WriteClosed,
                         ));
                     }
 
-                    // TODO: explain
-                    let num_read = encryption
-                        .decrypt_to_vecdeque(
-                            read_write.incoming_buffer.unwrap(),
-                            &mut decrypted_data_buffer,
-                        )
-                        .map_err(HandshakeError::Noise)?;
-                    read_write.advance_read(num_read);
-
-                    let outgoing_buffer = read_write.outgoing_buffer.as_mut().unwrap();
-                    let mut encrypt = encryption
-                        .encrypt((&mut outgoing_buffer.0, &mut outgoing_buffer.1))
-                        .unwrap();
-                    let mut unencrypted_data_written = 0;
-                    let mut negotiation_update =
-                        multistream_select::Negotiation::InProgress(negotiation);
-                    for unencrypted_dest in encrypt.unencrypted_write_buffers() {
-                        let multistream_select::Negotiation::InProgress(in_progress) =
-                            negotiation_update
-                        else {
-                            break;
-                        };
-
-                        // Continue the multistream-select negotiation.
-                        let mut interm_read_write = ReadWrite {
-                            now: 0,
-                            incoming_buffer: Some(decrypted_data_buffer.as_slices().0),
-                            outgoing_buffer: Some((unencrypted_dest, &mut [])),
-                            read_bytes: 0,
-                            written_bytes: 0,
-                            wake_up_after: None,
-                        };
-                        let updated = in_progress
-                            .read_write(&mut interm_read_write)
-                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
-                        negotiation_update = updated;
-                        let decrypted_read_num = interm_read_write.read_bytes;
-                        unencrypted_data_written += interm_read_write.written_bytes;
-
-                        // TODO: can the logic get stuck because the user stops calling this function if the negotiation only consumes from decrypted_data_buffer?
-                        for _ in 0..decrypted_read_num {
-                            let _ = decrypted_data_buffer.pop_front();
-                        }
-                    }
-                    let advance_write = encrypt.encrypt(unencrypted_data_written);
-                    read_write.advance_write(advance_write);
+                    let negotiation_update = {
+                        let mut decrypted_stream = encryption
+                            .read_write(read_write)
+                            .map_err(HandshakeError::Noise)?;
+                        negotiation
+                            .read_write(&mut *decrypted_stream)
+                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?
+                    };
 
                     return match negotiation_update {
                         multistream_select::Negotiation::InProgress(updated) => {
@@ -298,7 +257,6 @@ impl HealthyHandshake {
                                 state: NegotiationState::Multiplexing {
                                     negotiation: updated,
                                     encryption,
-                                    decrypted_data_buffer,
                                     peer_id,
                                 },
                             }))
@@ -313,13 +271,11 @@ impl HealthyHandshake {
                             self.state = NegotiationState::Multiplexing {
                                 peer_id,
                                 encryption,
-                                decrypted_data_buffer,
                                 negotiation,
                             };
                             continue;
                         }
                         multistream_select::Negotiation::Success => Ok(Handshake::Success {
-                            // TODO: is it correct to throw away decrypted_data_buffer?
                             connection: ConnectionPrototype::from_noise_yamux(*encryption),
                             remote_peer_id: peer_id,
                         }),

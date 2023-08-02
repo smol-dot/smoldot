@@ -847,7 +847,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         },
                         scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                         verified_header,
-                        scale_encoded_justifications: block.scale_encoded_justifications.clone(),
+                        scale_encoded_justifications: block.scale_encoded_justifications,
                         source_id,
                     },
                     new_best_hash,
@@ -969,8 +969,8 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
     pub fn parent_user_data(&self) -> Option<&TBl> {
         let parent_hash = self.parent_hash();
         // TODO: optimize?
-        if self.parent.chain.contains_non_finalized_block(&parent_hash) {
-            Some(&self.parent.chain[&parent_hash].user_data)
+        if self.parent.chain.contains_non_finalized_block(parent_hash) {
+            Some(&self.parent.chain[parent_hash].user_data)
         } else {
             None
         }
@@ -978,7 +978,7 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
 
     /// Returns the SCALE-encoded header of the block that was verified.
     pub fn scale_encoded_header(&self) -> &[u8] {
-        &self.verified_header.scale_encoded_header()
+        self.verified_header.scale_encoded_header()
     }
 
     /// Returns the SCALE-encoded header of the parent of the block.

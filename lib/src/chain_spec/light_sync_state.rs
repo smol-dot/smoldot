@@ -97,8 +97,8 @@ fn epoch_changes<'a, E: nom::error::ParseError<&'a [u8]>>(
                     num_elems,
                     num_elems,
                     nom::sequence::tuple((
-                        nom::bytes::complete::take(32u32),
-                        nom::number::complete::le_u32,
+                        nom::bytes::streaming::take(32u32),
+                        nom::number::streaming::le_u32,
                         persisted_epoch,
                     )),
                 )
@@ -128,17 +128,17 @@ fn gap_epochs<'a, E: nom::error::ParseError<&'a [u8]>>(
     nom::combinator::map(
         nom::sequence::tuple((
             nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     *<&[u8; 32]>::try_from(b).unwrap()
                 }),
-                nom::number::complete::le_u32,
+                nom::number::streaming::le_u32,
                 persisted_epoch,
             )),
             crate::util::nom_option_decode(nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     *<&[u8; 32]>::try_from(b).unwrap()
                 }),
-                nom::number::complete::le_u32,
+                nom::number::streaming::le_u32,
                 babe_epoch,
             ))),
         )),
@@ -158,13 +158,13 @@ fn persisted_epoch_header<'a, E: nom::error::ParseError<&'a [u8]>>(
     nom::branch::alt((
         nom::combinator::map(
             nom::sequence::preceded(
-                nom::bytes::complete::tag(&[0]),
+                nom::bytes::streaming::tag(&[0]),
                 nom::sequence::tuple((epoch_header, epoch_header)),
             ),
             |(a, b)| PersistedEpochHeader::Genesis(a, b),
         ),
         nom::combinator::map(
-            nom::sequence::preceded(nom::bytes::complete::tag(&[1]), epoch_header),
+            nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), epoch_header),
             PersistedEpochHeader::Regular,
         ),
     ))(bytes)
@@ -180,7 +180,10 @@ fn epoch_header<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], EpochHeader, E> {
     nom::combinator::map(
-        nom::sequence::tuple((nom::number::complete::le_u64, nom::number::complete::le_u64)),
+        nom::sequence::tuple((
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
+        )),
         move |(start_slot, end_slot)| EpochHeader {
             _start_slot: start_slot,
             _end_slot: end_slot,
@@ -200,13 +203,13 @@ fn persisted_epoch<'a, E: nom::error::ParseError<&'a [u8]>>(
     nom::branch::alt((
         nom::combinator::map(
             nom::sequence::preceded(
-                nom::bytes::complete::tag(&[0]),
+                nom::bytes::streaming::tag(&[0]),
                 nom::sequence::tuple((babe_epoch, babe_epoch)),
             ),
             |(a, b)| PersistedEpoch::Genesis(a, b),
         ),
         nom::combinator::map(
-            nom::sequence::preceded(nom::bytes::complete::tag(&[1]), babe_epoch),
+            nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), babe_epoch),
             PersistedEpoch::Regular,
         ),
     ))(bytes)
@@ -227,13 +230,13 @@ fn babe_epoch<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> nom::IResult<&'a [u8], BabeEpoch, E> {
     nom::combinator::map(
         nom::sequence::tuple((
-            nom::number::complete::le_u64,
-            nom::number::complete::le_u64,
-            nom::number::complete::le_u64,
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
             nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                 nom::multi::many_m_n(num_elems, num_elems, babe_authority)
             }),
-            nom::bytes::complete::take(32u32),
+            nom::bytes::streaming::take(32u32),
             |b| {
                 BabeNextConfig::from_slice(b)
                     .map(|c| (&b[17..], c)) // TODO: hacky to use a constant
@@ -269,8 +272,8 @@ fn babe_authority<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> nom::IResult<&'a [u8], BabeAuthority, E> {
     nom::combinator::map(
         nom::sequence::tuple((
-            nom::bytes::complete::take(32u32),
-            nom::number::complete::le_u64,
+            nom::bytes::streaming::take(32u32),
+            nom::number::streaming::le_u64,
         )),
         move |(public_key, weight)| BabeAuthority {
             public_key: *<&[u8; 32]>::try_from(public_key).unwrap(),
@@ -298,7 +301,7 @@ fn authority_set<'a, E: nom::error::ParseError<&'a [u8]>>(
             nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                 nom::multi::many_m_n(num_elems, num_elems, grandpa_authority)
             }),
-            nom::number::complete::le_u64,
+            nom::number::streaming::le_u64,
             fork_tree(pending_change),
             nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                 nom::multi::many_m_n(num_elems, num_elems, pending_change)
@@ -308,8 +311,8 @@ fn authority_set<'a, E: nom::error::ParseError<&'a [u8]>>(
                     num_elems,
                     num_elems,
                     nom::sequence::tuple((
-                        nom::number::complete::le_u64,
-                        nom::number::complete::le_u32,
+                        nom::number::streaming::le_u64,
+                        nom::number::streaming::le_u32,
                     )),
                 )
             }),
@@ -347,9 +350,9 @@ fn pending_change<'a, E: nom::error::ParseError<&'a [u8]>>(
             nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                 nom::multi::many_m_n(num_elems, num_elems, grandpa_authority)
             }),
-            nom::number::complete::le_u32,
-            nom::number::complete::le_u32,
-            nom::bytes::complete::take(32u32),
+            nom::number::streaming::le_u32,
+            nom::number::streaming::le_u32,
+            nom::bytes::streaming::take(32u32),
             delay_kind,
         )),
         move |(next_authorities, delay, canon_height, canon_hash, delay_kind)| PendingChange {
@@ -372,11 +375,11 @@ fn delay_kind<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], DelayKind, E> {
     nom::branch::alt((
-        nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| DelayKind::Finalized),
+        nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| DelayKind::Finalized),
         nom::combinator::map(
             nom::sequence::preceded(
-                nom::bytes::complete::tag(&[1]),
-                nom::number::complete::le_u32,
+                nom::bytes::streaming::tag(&[1]),
+                nom::number::streaming::le_u32,
             ),
             |median_last_finalized| DelayKind::Best {
                 _median_last_finalized: median_last_finalized,
@@ -402,8 +405,8 @@ fn grandpa_authority<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> nom::IResult<&'a [u8], GrandpaAuthority, E> {
     nom::combinator::map(
         nom::sequence::tuple((
-            nom::bytes::complete::take(32u32),
-            nom::number::complete::le_u64,
+            nom::bytes::streaming::take(32u32),
+            nom::number::streaming::le_u64,
         )),
         move |(public_key, weight)| GrandpaAuthority {
             public_key: *<&[u8; 32]>::try_from(public_key).unwrap(),
@@ -443,7 +446,7 @@ fn fork_tree<'a, T, E: nom::error::ParseError<&'a [u8]>>(
 
                 Ok((bytes, roots))
             },
-            crate::util::nom_option_decode(nom::number::complete::le_u32),
+            crate::util::nom_option_decode(nom::number::streaming::le_u32),
         )),
         |(roots, best_finalized_number)| ForkTree {
             _roots: roots,
@@ -465,8 +468,8 @@ fn fork_tree_node<'a, 'p, T, E: nom::error::ParseError<&'a [u8]>>(
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], ForkTreeNode<T>, E> + 'p {
     nom::combinator::map(
         nom::sequence::tuple((
-            nom::bytes::complete::take(32u32),
-            nom::number::complete::le_u32,
+            nom::bytes::streaming::take(32u32),
+            nom::number::streaming::le_u32,
             // We do parsing manually due to borrow checking troubles regarding `inner`.
             move |mut bytes| {
                 let (bytes_rest, data) = match inner(bytes) {

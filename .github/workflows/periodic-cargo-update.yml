@@ -32,5 +32,9 @@ jobs:
         title: Periodic `cargo update`
         body: >
           This automatic pull request runs `cargo update` on the repository.
+
+          Note that merging this pull request will invalidate the build cache of the GitHub Actions
+          and thus slow down the continuous integration. While this pull request is opened and
+          updated every day, please consider *not* merging it every day.
         commit-message: Periodic `cargo update`
         delete-branch: true

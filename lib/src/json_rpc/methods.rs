@@ -448,16 +448,14 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexString,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
-    ) -> Cow<'a, str>,
+        hash: HashHexString
+    ) -> ChainHeadBodyCallReturn<'a>,
     chainHead_unstable_call(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         function: Cow<'a, str>,
-        #[rename = "callParameters"] call_parameters: HexString,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
-    ) -> Cow<'a, str>,
+        #[rename = "callParameters"] call_parameters: HexString
+    ) -> ChainHeadBodyCallReturn<'a>,
     chainHead_unstable_follow(
         #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
@@ -466,24 +464,19 @@ define_methods! {
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> Option<HexString>,
-    chainHead_unstable_stopBody(
-        subscription: Cow<'a, str>
-    ) -> (),
-    chainHead_unstable_stopCall(
-        subscription: Cow<'a, str>
-    ) -> (),
-    chainHead_unstable_stopStorage(
-        subscription: Cow<'a, str>
+    chainHead_unstable_stopOperation(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
     chainHead_unstable_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         items: Vec<ChainHeadStorageRequestItem>,
-        #[rename = "childTrie"] child_trie: Option<HexString>,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
-    ) -> Cow<'a, str>,
-    chainHead_unstable_storageContinue(
-        #[rename = "subscription"] subscription: Cow<'a, str>
+        #[rename = "childTrie"] child_trie: Option<HexString>
+    ) -> ChainHeadStorageReturn<'a>,
+    chainHead_unstable_continue(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
@@ -522,10 +515,7 @@ define_methods! {
     state_storage(subscription: Cow<'a, str>, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_bodyEvent(subscription: Cow<'a, str>, result: ChainHeadBodyEvent) -> (),
-    chainHead_unstable_callEvent(subscription: Cow<'a, str>, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent<'a>) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
@@ -712,32 +702,70 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
+    #[serde(rename = "operationBodyDone")]
+    OperationBodyDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        value: Vec<HexString>,
+    },
+    #[serde(rename = "operationCallDone")]
+    OperationCallDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        output: HexString,
+    },
+    #[serde(rename = "operationInaccessible")]
+    OperationInaccessible {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "operationStorageItems")]
+    OperationStorageItems {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        items: Vec<ChainHeadStorageResponseItem>,
+    },
+    #[serde(rename = "operationStorageDone")]
+    OperationStorageDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "operationWaitingForContinue")]
+    OperationWaitingForContinue,
+    #[serde(rename = "operationError")]
+    OperationError {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        error: Cow<'a, str>,
+    },
     #[serde(rename = "stop")]
     Stop {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadBodyEvent {
-    #[serde(rename = "done")]
-    Done { value: Vec<HexString> },
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "disjoint")]
-    Disjoint {},
+#[serde(tag = "result")]
+pub enum ChainHeadBodyCallReturn<'a> {
+    #[serde(rename = "started")]
+    Started {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "limitReached")]
+    LimitReached {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadCallEvent<'a> {
-    #[serde(rename = "done")]
-    Done { output: HexString },
-    #[serde(rename = "inaccessible")]
-    Inaccessible { error: Cow<'a, str> },
-    #[serde(rename = "error")]
-    Error { error: Cow<'a, str> },
-    #[serde(rename = "disjoint")]
-    Disjoint {},
+#[serde(tag = "result")]
+pub enum ChainHeadStorageReturn<'a> {
+    #[serde(rename = "started")]
+    Started {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        #[serde(rename = "discardedItems")]
+        discarded_items: usize,
+    },
+    #[serde(rename = "limitReached")]
+    LimitReached {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -755,7 +783,7 @@ pub struct ChainHeadStorageResponseItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<HexString>,
     #[serde(
-        rename = "closest-descendant-merkle-value",
+        rename = "closestDescendantMerkleValue",
         skip_serializing_if = "Option::is_none"
     )]
     pub closest_descendant_merkle_value: Option<HexString>,
@@ -767,31 +795,12 @@ pub enum ChainHeadStorageType {
     Value,
     #[serde(rename = "hash")]
     Hash,
-    #[serde(rename = "closest-descendant-merkle-value")]
+    #[serde(rename = "closestDescendantMerkleValue")]
     ClosestDescendantMerkleValue,
-    #[serde(rename = "descendants-values")]
+    #[serde(rename = "descendantsValues")]
     DescendantsValues,
-    #[serde(rename = "descendants-hashes")]
+    #[serde(rename = "descendantsHashes")]
     DescendantsHashes,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadStorageEvent<'a> {
-    #[serde(rename = "items")]
-    Items {
-        items: Vec<ChainHeadStorageResponseItem>,
-    },
-    #[serde(rename = "done")]
-    Done,
-    #[serde(rename = "waiting-for-continue")]
-    WaitingForContinue,
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "error")]
-    Error { error: Cow<'a, str> },
-    #[serde(rename = "disjoint")]
-    Disjoint {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -996,16 +1005,6 @@ impl Header {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeaderDigest {
     pub logs: Vec<HexString>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct NetworkConfig {
-    #[serde(rename = "totalAttempts")]
-    pub total_attempts: u32,
-    #[serde(rename = "maxParallel")]
-    pub max_parallel: u32, // TODO: NonZeroU32?
-    #[serde(rename = "timeoutMs")]
-    pub timeout_ms: u32,
 }
 
 #[derive(Debug, Clone)]

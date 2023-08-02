@@ -762,7 +762,7 @@ fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error
                 nom::combinator::map(
                     nom::combinator::recognize(nom::combinator::flat_map(
                         crate::util::nom_scale_compact_usize,
-                        nom::bytes::complete::take,
+                        nom::bytes::streaming::take,
                     )),
                     |v: &[u8]| v.to_vec(),
                 ),
@@ -871,12 +871,12 @@ fn apply_extrinsic_result(
         "apply extrinsic result",
         nom::branch::alt((
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[0]), dispatch_outcome),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), dispatch_outcome),
                 Ok,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1]),
                     transaction_validity_error,
                 ),
                 Err,
@@ -889,9 +889,9 @@ fn dispatch_outcome(bytes: &[u8]) -> nom::IResult<&[u8], Result<(), DispatchErro
     nom::error::context(
         "dispatch outcome",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| Ok(())),
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| Ok(())),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), dispatch_error),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), dispatch_error),
                 Err,
             ),
         )),
@@ -902,16 +902,16 @@ fn dispatch_error(bytes: &[u8]) -> nom::IResult<&[u8], DispatchError> {
     nom::error::context(
         "dispatch error",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                 DispatchError::CannotLookup
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                 DispatchError::BadOrigin
             }),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
-                    nom::sequence::tuple((nom::number::complete::u8, nom::number::complete::u8)),
+                    nom::bytes::streaming::tag(&[2]),
+                    nom::sequence::tuple((nom::number::streaming::u8, nom::number::streaming::u8)),
                 ),
                 |(index, error)| DispatchError::Module { index, error },
             ),
@@ -924,11 +924,11 @@ fn transaction_validity_error(bytes: &[u8]) -> nom::IResult<&[u8], TransactionVa
         "transaction validity error",
         nom::branch::alt((
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[0]), invalid_transaction),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), invalid_transaction),
                 TransactionValidityError::Invalid,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), unknown_transaction),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), unknown_transaction),
                 TransactionValidityError::Unknown,
             ),
         )),
@@ -939,38 +939,38 @@ fn invalid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], InvalidTransaction> 
     nom::error::context(
         "invalid transaction",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                 InvalidTransaction::Call
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                 InvalidTransaction::Payment
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
                 InvalidTransaction::Future
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[3]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[3]), |_| {
                 InvalidTransaction::Stale
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[4]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[4]), |_| {
                 InvalidTransaction::BadProof
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[5]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[5]), |_| {
                 InvalidTransaction::AncientBirthBlock
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[6]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[6]), |_| {
                 InvalidTransaction::ExhaustsResources
             }),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[7]),
-                    nom::bytes::complete::take(1u32),
+                    nom::bytes::streaming::tag(&[7]),
+                    nom::bytes::streaming::take(1u32),
                 ),
                 |n: &[u8]| InvalidTransaction::Custom(n[0]),
             ),
-            nom::combinator::map(nom::bytes::complete::tag(&[8]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[8]), |_| {
                 InvalidTransaction::BadMandatory
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[9]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[9]), |_| {
                 InvalidTransaction::MandatoryDispatch
             }),
         )),
@@ -981,16 +981,16 @@ fn unknown_transaction(bytes: &[u8]) -> nom::IResult<&[u8], UnknownTransaction> 
     nom::error::context(
         "unknown transaction",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                 UnknownTransaction::CannotLookup
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                 UnknownTransaction::NoUnsignedValidator
             }),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
-                    nom::bytes::complete::take(1u32),
+                    nom::bytes::streaming::tag(&[2]),
+                    nom::bytes::streaming::take(1u32),
                 ),
                 |n: &[u8]| UnknownTransaction::Custom(n[0]),
             ),

@@ -99,7 +99,7 @@ test('chainHead_unstable_body works', async t => {
     .then(async (chain) => {
       while (true) {
         const parsed = JSON.parse(await chain.nextJsonRpcResponse());
-        if (parsed.method == "chainHead_unstable_bodyEvent" && parsed.params.result.event == "inaccessible") {
+        if (parsed.method == "chainHead_unstable_followEvent" && parsed.params.result.event == "operationInaccessible") {
           t.pass();
           break;
         }

@@ -17,13 +17,12 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot_light::platform::{ConnectError, SubstreamDirection};
+use smoldot_light::platform::{read_write, ConnectError, SubstreamDirection};
 
-use core::{future, mem, pin, str, task, time::Duration};
+use core::{future, iter, mem, ops, pin, str, task, time::Duration};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
-    iter,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -51,6 +50,8 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type StreamConnectFuture =
         pin::Pin<Box<dyn future::Future<Output = Result<Self::Stream, ConnectError>> + Send>>;
+    type ReadWriteAccess<'a> = ReadWriteAccess<'a>;
+    type StreamErrorRef<'a> = String;
     type MultiStreamConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
@@ -81,6 +82,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
     fn now(&self) -> Self::Instant {
         Instant::now()
+    }
+
+    fn fill_random_bytes(&self, buffer: &mut [u8]) {
+        use rand::RngCore as _;
+        rand::thread_rng().fill_bytes(buffer);
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
@@ -142,15 +148,31 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         &self,
         connection_type: smoldot_light::platform::ConnectionType,
     ) -> bool {
-        // TODO: no, should ask the JS code what it supports
-        match connection_type {
-            smoldot_light::platform::ConnectionType::WebRtc => true,
-            smoldot_light::platform::ConnectionType::WebSocket {
-                secure,
-                remote_is_localhost,
-            } => secure || remote_is_localhost,
-            smoldot_light::platform::ConnectionType::Tcp => false,
-        }
+        let ty = match connection_type {
+            smoldot_light::platform::ConnectionType::TcpIpv4 => 0,
+            smoldot_light::platform::ConnectionType::TcpIpv6 => 1,
+            smoldot_light::platform::ConnectionType::TcpDns => 2,
+            smoldot_light::platform::ConnectionType::WebSocketIpv4 {
+                remote_is_localhost: true,
+                ..
+            }
+            | smoldot_light::platform::ConnectionType::WebSocketIpv6 {
+                remote_is_localhost: true,
+                ..
+            }
+            | smoldot_light::platform::ConnectionType::WebSocketDns {
+                secure: false,
+                remote_is_localhost: true,
+            } => 7,
+            smoldot_light::platform::ConnectionType::WebSocketIpv4 { .. } => 4,
+            smoldot_light::platform::ConnectionType::WebSocketIpv6 { .. } => 5,
+            smoldot_light::platform::ConnectionType::WebSocketDns { secure: false, .. } => 6,
+            smoldot_light::platform::ConnectionType::WebSocketDns { secure: true, .. } => 14,
+            smoldot_light::platform::ConnectionType::WebRtcIpv4 => 16,
+            smoldot_light::platform::ConnectionType::WebRtcIpv6 => 17,
+        };
+
+        unsafe { bindings::connection_type_supported(ty) != 0 }
     }
 
     fn connect_stream(
@@ -263,16 +285,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 }
                 ConnectionInner::SingleStreamMsNoiseYamux => {
                     debug_assert!(lock.streams.contains_key(&(connection_id, None)));
-
-                    let read_buffer = ReadBuffer {
-                        buffer: Vec::new().into(),
-                        buffer_first_offset: 0,
-                    };
-
                     Ok(StreamWrapper {
                         connection_id,
                         stream_id: None,
-                        read_buffer,
+                        read_buffer: Vec::new(),
                         is_reset: false,
                         writable_bytes: 0,
                         write_closable,
@@ -437,10 +453,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 StreamWrapper {
                     connection_id,
                     stream_id: Some(stream_id),
-                    read_buffer: ReadBuffer {
-                        buffer: Vec::<u8>::new().into(),
-                        buffer_first_offset: 0,
-                    },
+                    read_buffer: Vec::new(),
                     is_reset: false,
                     writable_bytes: usize::try_from(initial_writable_bytes).unwrap(),
                     write_closable: false, // Note: this is currently hardcoded for WebRTC.
@@ -470,50 +483,53 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         }
     }
 
-    fn update_stream<'a>(
+    fn wait_read_write_again<'a>(
         &self,
-        StreamWrapper {
-            connection_id,
-            stream_id,
-            read_buffer,
-            is_reset,
-            writable_bytes,
-            ..
-        }: &'a mut Self::Stream,
+        stream: pin::Pin<&'a mut Self::Stream>,
     ) -> Self::StreamUpdateFuture<'a> {
         Box::pin(async move {
-            loop {
-                if *is_reset {
-                    future::pending::<()>().await;
-                }
+            let stream = stream.get_mut();
 
+            if stream.is_reset {
+                future::pending::<()>().await;
+            }
+
+            loop {
                 let listener = {
                     let mut lock = STATE.try_lock().unwrap();
-                    let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
+                    let stream_inner = lock
+                        .streams
+                        .get_mut(&(stream.connection_id, stream.stream_id))
+                        .unwrap();
 
-                    if stream.reset {
-                        *is_reset = true;
+                    if stream_inner.reset {
+                        stream.is_reset = true;
                         return;
                     }
 
                     let mut shall_return = false;
 
-                    // Move the next buffer from `STATE` into `read_buffer`.
-                    if read_buffer.buffer_first_offset == read_buffer.buffer.len() {
-                        if let Some(msg) = stream.messages_queue.pop_front() {
-                            stream.messages_queue_total_size -= msg.len();
-                            read_buffer.buffer = msg;
-                            read_buffer.buffer_first_offset = 0;
+                    // Move the buffers from `STATE` into `read_buffer`.
+                    if !stream_inner.messages_queue.is_empty() {
+                        stream
+                            .read_buffer
+                            .reserve(stream_inner.messages_queue_total_size);
+
+                        while let Some(msg) = stream_inner.messages_queue.pop_front() {
+                            // TODO: could be optimized by reworking the bindings
+                            stream.read_buffer.extend_from_slice(&msg);
                             shall_return = true;
                         }
+
+                        stream_inner.messages_queue_total_size = 0;
                     }
 
-                    if stream.writable_bytes_extra != 0 {
+                    if stream_inner.writable_bytes_extra != 0 {
                         // As documented, the number of writable bytes must never exceed the
                         // initial writable bytes value. As such, this can't overflow unless there
                         // is a bug on the JavaScript side.
-                        *writable_bytes += stream.writable_bytes_extra;
-                        stream.writable_bytes_extra = 0;
+                        stream.writable_bytes += stream_inner.writable_bytes_extra;
+                        stream_inner.writable_bytes_extra = 0;
                         shall_return = true;
                     }
 
@@ -521,7 +537,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         return;
                     }
 
-                    stream.something_happened.listen()
+                    stream_inner.something_happened.listen()
                 };
 
                 listener.await
@@ -529,125 +545,104 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         })
     }
 
-    fn read_buffer<'a>(
+    fn read_write_access<'a>(
         &self,
-        StreamWrapper {
-            read_buffer,
-            is_reset,
-            ..
-        }: &'a mut Self::Stream,
-    ) -> smoldot_light::platform::ReadBuffer<'a> {
-        if *is_reset {
-            return smoldot_light::platform::ReadBuffer::Reset;
+        stream: pin::Pin<&'a mut Self::Stream>,
+    ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>> {
+        let stream = stream.get_mut();
+
+        if stream.is_reset {
+            todo!()
         }
 
-        // TODO: doesn't detect closed
-
-        smoldot_light::platform::ReadBuffer::Open(
-            &read_buffer.buffer[read_buffer.buffer_first_offset..],
-        )
+        Ok(ReadWriteAccess {
+            read_write: read_write::ReadWrite {
+                now: Instant::now(),
+                incoming_buffer: mem::take(&mut stream.read_buffer),
+                expected_incoming_bytes: Some(0),
+                read_bytes: 0,
+                write_buffers: Vec::new(),
+                write_bytes_queued: 0,
+                write_bytes_queueable: if !stream.write_closed {
+                    Some(stream.writable_bytes)
+                } else {
+                    None
+                },
+                wake_up_after: None,
+            },
+            stream,
+        })
     }
+}
 
-    fn advance_read_cursor(
-        &self,
-        StreamWrapper {
-            read_buffer,
-            is_reset,
-            ..
-        }: &mut Self::Stream,
-        bytes: usize,
-    ) {
-        assert!(!*is_reset);
-        assert!(bytes <= read_buffer.buffer.len() - read_buffer.buffer_first_offset);
-        read_buffer.buffer_first_offset += bytes;
-        debug_assert!(read_buffer.buffer_first_offset <= read_buffer.buffer.len());
+pub(crate) struct ReadWriteAccess<'a> {
+    read_write: read_write::ReadWrite<Instant>,
+    stream: &'a mut StreamWrapper,
+}
+
+impl<'a> ops::Deref for ReadWriteAccess<'a> {
+    type Target = read_write::ReadWrite<Instant>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.read_write
     }
+}
 
-    fn writable_bytes(
-        &self,
-        StreamWrapper {
-            is_reset,
-            writable_bytes,
-            write_closed,
-            ..
-        }: &mut Self::Stream,
-    ) -> usize {
-        if *is_reset || *write_closed {
-            return 0;
-        }
-
-        *writable_bytes
+impl<'a> ops::DerefMut for ReadWriteAccess<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.read_write
     }
+}
 
-    fn send(
-        &self,
-        StreamWrapper {
-            connection_id,
-            stream_id,
-            write_closed,
-            writable_bytes,
-            ..
-        }: &mut Self::Stream,
-        data: &[u8],
-    ) {
-        assert!(!*write_closed);
-
+impl<'a> Drop for ReadWriteAccess<'a> {
+    fn drop(&mut self) {
         let mut lock = STATE.try_lock().unwrap();
-        let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
-        if stream.reset {
-            return;
-        }
+        let stream_inner = lock
+            .streams
+            .get_mut(&(self.stream.connection_id, self.stream.stream_id))
+            .unwrap();
 
-        assert!(data.len() <= *writable_bytes);
-        *writable_bytes -= data.len();
+        self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
 
-        // `unwrap()` is ok as there's no way that `data.len()` doesn't fit in a `u64`.
-        TOTAL_BYTES_SENT.fetch_add(u64::try_from(data.len()).unwrap(), Ordering::Relaxed);
+        for buffer in self.read_write.write_buffers.drain(..) {
+            assert!(buffer.len() <= self.stream.writable_bytes);
+            self.stream.writable_bytes -= buffer.len();
 
-        unsafe {
-            bindings::stream_send(
-                *connection_id,
-                stream_id.unwrap_or(0),
-                u32::try_from(data.as_ptr() as usize).unwrap(),
-                u32::try_from(data.len()).unwrap(),
-            );
-        }
-    }
+            // `unwrap()` is ok as there's no way that `buffer.len()` doesn't fit in a `u64`.
+            TOTAL_BYTES_SENT.fetch_add(u64::try_from(buffer.len()).unwrap(), Ordering::Relaxed);
 
-    fn close_send(
-        &self,
-        StreamWrapper {
-            connection_id,
-            stream_id,
-            write_closable,
-            write_closed,
-            ..
-        }: &mut Self::Stream,
-    ) {
-        assert!(!*write_closed);
-
-        let mut lock = STATE.try_lock().unwrap();
-        let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
-
-        if stream.reset {
-            return;
-        }
-
-        if *write_closable {
-            unsafe {
-                bindings::stream_send_close(*connection_id, stream_id.unwrap_or(0));
+            if !stream_inner.reset {
+                unsafe {
+                    bindings::stream_send(
+                        self.stream.connection_id,
+                        self.stream.stream_id.unwrap_or(0),
+                        u32::try_from(buffer.as_ptr() as usize).unwrap(),
+                        u32::try_from(buffer.len()).unwrap(),
+                    );
+                }
             }
         }
 
-        *write_closed = true;
+        if self.read_write.write_bytes_queueable.is_none() && !self.stream.write_closed {
+            if !stream_inner.reset && self.stream.write_closable {
+                unsafe {
+                    bindings::stream_send_close(
+                        self.stream.connection_id,
+                        self.stream.stream_id.unwrap_or(0),
+                    );
+                }
+            }
+
+            self.stream.write_closed = true;
+        }
     }
 }
 
 pub(crate) struct StreamWrapper {
     connection_id: u32,
     stream_id: Option<u32>,
-    read_buffer: ReadBuffer,
+    read_buffer: Vec<u8>,
     /// `true` if the remote has reset the stream and `update_stream` has since then been called.
     is_reset: bool,
     writable_bytes: usize,
@@ -823,15 +818,6 @@ struct Stream {
     something_happened: event_listener::Event,
 }
 
-struct ReadBuffer {
-    /// Buffer containing incoming data.
-    buffer: Box<[u8]>,
-
-    /// The first bytes of [`ReadBuffer::buffer`] have already been processed are not considered
-    /// not part of the read buffer anymore.
-    buffer_first_offset: usize,
-}
-
 pub(crate) fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let lock = &mut *lock;
@@ -859,12 +845,12 @@ pub(crate) fn connection_open_single_stream(connection_id: u32, initial_writable
 pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
     let (_, (local_tls_certificate_sha256, remote_tls_certificate_sha256)) =
         nom::sequence::preceded(
-            nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
+            nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
             nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     <&[u8; 32]>::try_from(b).unwrap()
                 }),
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     <&[u8; 32]>::try_from(b).unwrap()
                 }),
             )),

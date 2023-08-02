@@ -234,10 +234,10 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 case 4:
                 case 5:
                 case 6: {
-                    return config.forbidWs ? 0 : 1
+                    return config.forbidNonLocalWs ? 0 : 1
                 }
                 case 7: {
-                    return config.forbidNonLocalWs ? 0 : 1
+                    return config.forbidWs ? 0 : 1
                 }
                 case 14: {
                     return config.forbidWss ? 0 : 1

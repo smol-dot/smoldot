@@ -200,7 +200,7 @@ impl ClosestDescendant {
                     } else {
                         // If the element doesn't have a parent, then the trie is completely empty.
                         InProgress::Finished {
-                            trie_root_hash: trie::EMPTY_TRIE_MERKLE_VALUE,
+                            trie_root_hash: trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         }
                     };
                 }
@@ -339,7 +339,7 @@ impl StorageValue {
                 // This case is handled separately in order to not generate
                 // a `TrieNodeInsertUpdateEvent` for a node that doesn't actually exist.
                 InProgress::Finished {
-                    trie_root_hash: trie::EMPTY_TRIE_MERKLE_VALUE,
+                    trie_root_hash: trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                 }
             }
 
@@ -373,6 +373,7 @@ impl StorageValue {
                             (None, _) => trie::trie_node::StorageValue::None,
                         },
                     },
+                    trie::HashFunction::Blake2,
                     parent_node.is_none(),
                 )
                 .unwrap_or_else(|_| panic!());
@@ -582,7 +583,7 @@ impl TrieNodeRemoveEvent {
                     self.inner.next()
                 } else {
                     InProgress::Finished {
-                        trie_root_hash: trie::EMPTY_TRIE_MERKLE_VALUE,
+                        trie_root_hash: trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                     }
                 }
             }

@@ -153,19 +153,19 @@ impl Keystore {
                     nom::combinator::all_consuming::<_, _, (&str, nom::error::ErrorKind), _>(
                         nom::combinator::complete(nom::sequence::tuple((
                             nom::combinator::map_opt(
-                                nom::bytes::complete::take(4u32),
+                                nom::bytes::streaming::take(4u32),
                                 KeyNamespace::from_string,
                             ),
-                            nom::bytes::complete::tag("-"),
+                            nom::bytes::streaming::tag("-"),
                             nom::combinator::map_opt(
-                                nom::bytes::complete::take(7u32),
+                                nom::bytes::streaming::take(7u32),
                                 |b| match b {
                                     "ed25519" => Some(PrivateKey::FileEd25519),
                                     "sr25519" => Some(PrivateKey::FileSr25519),
                                     _ => None,
                                 },
                             ),
-                            nom::bytes::complete::tag("-"),
+                            nom::bytes::streaming::tag("-"),
                             nom::combinator::map_opt(
                                 nom::bytes::complete::take_while(|c: char| {
                                     c.is_ascii_digit() || ('a'..='f').contains(&c)
@@ -535,7 +535,7 @@ impl Keystore {
         // TODO: `to_bytes` isn't zeroize-friendly
         let bytes = key.to_bytes();
         let mut phrase = zeroize::Zeroizing::new(vec![0; bytes.len() * 2]);
-        hex::encode_to_slice(&bytes, &mut phrase).unwrap();
+        hex::encode_to_slice(bytes, &mut phrase).unwrap();
         Self::write_to_file(path, &phrase).await
     }
 

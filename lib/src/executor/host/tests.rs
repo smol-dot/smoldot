@@ -19,7 +19,7 @@
 
 use super::{vm::ExecHint, Config, HeapPages, HostVm, HostVmPrototype};
 
-mod host_algorithms;
+mod hash_algorithms;
 mod initialization;
 mod run;
 
