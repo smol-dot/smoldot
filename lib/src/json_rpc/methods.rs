@@ -1274,15 +1274,11 @@ mod tests {
     #[test]
     fn no_params_accepted() {
         // No `params` field in the request.
-        let (_, call) = super::parse_json_call(
-            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_v1_chainName"}"#,
-        )
-        .unwrap();
+        let (_, call) =
+            super::parse_json_call(r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_v1_chainName"}"#)
+                .unwrap();
 
-        assert!(matches!(
-            call,
-            super::MethodCall::chainSpec_v1_chainName {}
-        ));
+        assert!(matches!(call, super::MethodCall::chainSpec_v1_chainName {}));
     }
 
     #[test]
