@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.15 - 2023-08-08
+
 ### Changed
 
 - The `operation-body-done`, `operation-call-done`, `operation-storage-done`, `operation-storage-items`, `operation-waiting-for-continue`, `operation-inaccessible`, and `operation-error` events, and the `closest-descendant-merkle-value`, `descendants-values`, and `descendants-hashes` item types of the new JSON-RPC API have been renamed and are now camelCased (`operationBodyDone`, `operationStorageItems`, `descendantsValues`, etc.), in accordance with the latest changes in the JSON-RPC API specification. ([#973](https://github.com/smol-dot/smoldot/pull/973))
