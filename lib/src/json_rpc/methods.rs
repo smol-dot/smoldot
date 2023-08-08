@@ -486,9 +486,9 @@ define_methods! {
         hash: HashHexStringSingleOrArray
     ) -> (),
 
-    chainSpec_unstable_chainName() -> Cow<'a, str>,
-    chainSpec_unstable_genesisHash() -> HashHexString,
-    chainSpec_unstable_properties() -> Box<serde_json::value::RawValue>,
+    chainSpec_v1_chainName() -> Cow<'a, str>,
+    chainSpec_v1_genesisHash() -> HashHexString,
+    chainSpec_v1_properties() -> Box<serde_json::value::RawValue>,
 
     sudo_unstable_p2pDiscover(multiaddr: Cow<'a, str>) -> (),
     sudo_unstable_version() -> Cow<'a, str>,
@@ -1275,13 +1275,13 @@ mod tests {
     fn no_params_accepted() {
         // No `params` field in the request.
         let (_, call) = super::parse_json_call(
-            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_unstable_chainName"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_v1_chainName"}"#,
         )
         .unwrap();
 
         assert!(matches!(
             call,
-            super::MethodCall::chainSpec_unstable_chainName {}
+            super::MethodCall::chainSpec_v1_chainName {}
         ));
     }
 

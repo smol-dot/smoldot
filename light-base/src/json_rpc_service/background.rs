@@ -351,9 +351,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_storage { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
-            | methods::MethodCall::chainSpec_unstable_chainName { .. }
-            | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
-            | methods::MethodCall::chainSpec_unstable_properties { .. }
+            | methods::MethodCall::chainSpec_v1_chainName { .. }
+            | methods::MethodCall::chainSpec_v1_genesisHash { .. }
+            | methods::MethodCall::chainSpec_v1_properties { .. }
             | methods::MethodCall::rpc_methods { .. }
             | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
             | methods::MethodCall::sudo_unstable_version { .. }
@@ -472,13 +472,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
                 self.chain_head_unstable_finalized_database(request).await;
             }
-            methods::MethodCall::chainSpec_unstable_chainName {} => {
+            methods::MethodCall::chainSpec_v1_chainName {} => {
                 self.chain_spec_unstable_chain_name(request).await;
             }
-            methods::MethodCall::chainSpec_unstable_genesisHash {} => {
+            methods::MethodCall::chainSpec_v1_genesisHash {} => {
                 self.chain_spec_unstable_genesis_hash(request).await;
             }
-            methods::MethodCall::chainSpec_unstable_properties {} => {
+            methods::MethodCall::chainSpec_v1_properties {} => {
                 self.chain_spec_unstable_properties(request).await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
@@ -625,9 +625,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_storage { .. }
             | methods::MethodCall::chainHead_unstable_unfollow { .. }
             | methods::MethodCall::chainHead_unstable_unpin { .. }
-            | methods::MethodCall::chainSpec_unstable_chainName { .. }
-            | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
-            | methods::MethodCall::chainSpec_unstable_properties { .. }
+            | methods::MethodCall::chainSpec_v1_chainName { .. }
+            | methods::MethodCall::chainSpec_v1_genesisHash { .. }
+            | methods::MethodCall::chainSpec_v1_properties { .. }
             | methods::MethodCall::rpc_methods { .. }
             | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
             | methods::MethodCall::sudo_unstable_version { .. }

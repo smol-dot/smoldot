@@ -423,9 +423,9 @@ impl ClientMainTask {
                 | methods::MethodCall::system_removeReservedPeer { .. }
                 | methods::MethodCall::system_version { .. }
                 | methods::MethodCall::chainHead_unstable_genesisHash { .. }
-                | methods::MethodCall::chainSpec_unstable_chainName { .. }
-                | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
-                | methods::MethodCall::chainSpec_unstable_properties { .. }
+                | methods::MethodCall::chainSpec_v1_chainName { .. }
+                | methods::MethodCall::chainSpec_v1_genesisHash { .. }
+                | methods::MethodCall::chainSpec_v1_properties { .. }
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
