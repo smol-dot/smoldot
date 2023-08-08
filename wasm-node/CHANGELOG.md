@@ -7,6 +7,10 @@
 - The `operation-body-done`, `operation-call-done`, `operation-storage-done`, `operation-storage-items`, `operation-waiting-for-continue`, `operation-inaccessible`, and `operation-error` events, and the `closest-descendant-merkle-value`, `descendants-values`, and `descendants-hashes` item types of the new JSON-RPC API have been renamed and are now camelCased (`operationBodyDone`, `operationStorageItems`, `descendantsValues`, etc.), in accordance with the latest changes in the JSON-RPC API specification. ([#973](https://github.com/smol-dot/smoldot/pull/973))
 - The `chainSpec_unstable` JSON-RPC functions have been renamed to `chainSpec_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#989](https://github.com/smol-dot/smoldot/pull/989))
 
+### Fixed
+
+- A change in the logic of BABE has been backported. Smoldot no longer considers blocks as invalid after no block has been authored for an entire epoch.
+
 ## 1.0.14 - 2023-07-26
 
 ### Changed

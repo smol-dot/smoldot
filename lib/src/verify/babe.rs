@@ -322,7 +322,16 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         }
     };
 
-    // TODO: check that we didn't entirely skip an epoch?
+    // Calculate the epoch index of the epoch of the block.
+    // This is the vast majority of the time equal to `block_epoch_info.epoch_index`. However,
+    // if no block has been produced for an entire epoch, the value needs to be increased by the
+    // number of skipped epochs.
+    let block_epoch_index = block_epoch_info.epoch_index
+        + block_epoch_info
+            .start_slot_number
+            .map_or(0, |start_slot_number| {
+                (slot_number - start_slot_number) / config.slots_per_epoch
+            });
 
     // TODO: in case of epoch change, should also check the randomness value; while the runtime
     //       checks that the randomness value is correct, light clients in particular do not
@@ -354,7 +363,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     let epoch_transition_target = match config.header.digest.babe_epoch_information() {
         None => None,
         Some((info, None)) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
+            epoch_index: block_epoch_index.checked_add(1).unwrap(),
             start_slot_number: Some(
                 block_epoch_info
                     .start_slot_number
@@ -368,7 +377,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             allowed_slots: block_epoch_info.allowed_slots,
         }),
         Some((info, Some(epoch_cfg))) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
+            epoch_index: block_epoch_index.checked_add(1).unwrap(),
             start_slot_number: Some(
                 block_epoch_info
                     .start_slot_number
@@ -426,7 +435,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         let transcript = {
             let mut transcript = merlin::Transcript::new(&b"BABE"[..]);
             transcript.append_u64(b"slot number", slot_number);
-            transcript.append_u64(b"current epoch", block_epoch_info.epoch_index);
+            transcript.append_u64(b"current epoch", block_epoch_index);
             transcript.append_message(b"chain randomness", &block_epoch_info.randomness[..]);
             transcript
         };
