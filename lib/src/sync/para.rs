@@ -116,8 +116,8 @@ fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
         nom::sequence::tuple((
             crate::util::nom_bytes_decode,
             crate::util::nom_varsize_number_decode_u64(block_number_bytes),
-            nom::bytes::complete::take(32u32),
-            nom::number::complete::le_u32,
+            nom::bytes::streaming::take(32u32),
+            nom::number::streaming::le_u32,
         )),
         |(parent_head, relay_parent_number, relay_parent_storage_root, max_pov_size)| {
             PersistedValidationDataRef {

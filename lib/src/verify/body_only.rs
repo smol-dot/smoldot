@@ -775,7 +775,7 @@ fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
                 num_elems,
                 num_elems,
                 nom::sequence::tuple((
-                    nom::combinator::map(nom::bytes::complete::take(8u8), |b| {
+                    nom::combinator::map(nom::bytes::streaming::take(8u8), |b| {
                         <[u8; 8]>::try_from(b).unwrap()
                     }),
                     crate::util::nom_bytes_decode,

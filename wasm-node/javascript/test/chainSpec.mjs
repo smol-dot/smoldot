@@ -26,7 +26,7 @@ test('chainSpec_chainName works', async t => {
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_chainName","params":[]}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_v1_chainName","params":[]}');
       return chain;
     })
     .then(async (chain) => {
@@ -40,12 +40,12 @@ test('chainSpec_chainName works', async t => {
     .then(() => client.terminate());
 });
 
-test('chainSpec_unstable_genesisHash works', async t => {
+test('chainSpec_v1_genesisHash works', async t => {
   const client = start({ logCallback: () => { } });
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_genesisHash","params":[]}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_v1_genesisHash","params":[]}');
       return chain;
     })
     .then(async (chain) => {
@@ -59,12 +59,12 @@ test('chainSpec_unstable_genesisHash works', async t => {
     .then(() => client.terminate());
 });
 
-test('chainSpec_unstable_properties works', async t => {
+test('chainSpec_v1_properties works', async t => {
   const client = start({ logCallback: () => { } });
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_properties","params":[]}');
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_v1_properties","params":[]}');
       return chain;
     })
     .then(async (chain) => {

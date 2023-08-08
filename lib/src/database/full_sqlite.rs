@@ -1603,16 +1603,16 @@ fn decode_babe_epoch_information(
 ) -> Result<chain_information::BabeEpochInformation, AccessError> {
     let result = nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
-            nom::number::complete::le_u64,
-            util::nom_option_decode(nom::number::complete::le_u64),
+            nom::number::streaming::le_u64,
+            util::nom_option_decode(nom::number::streaming::le_u64),
             nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
                 nom::multi::many_m_n(
                     num_elems,
                     num_elems,
                     nom::combinator::map(
                         nom::sequence::tuple((
-                            nom::bytes::complete::take(32u32),
-                            nom::number::complete::le_u64,
+                            nom::bytes::streaming::take(32u32),
+                            nom::number::streaming::le_u64,
                         )),
                         move |(public_key, weight)| header::BabeAuthority {
                             public_key: TryFrom::try_from(public_key).unwrap(),
@@ -1621,16 +1621,19 @@ fn decode_babe_epoch_information(
                     ),
                 )
             }),
-            nom::bytes::complete::take(32u32),
-            nom::sequence::tuple((nom::number::complete::le_u64, nom::number::complete::le_u64)),
+            nom::bytes::streaming::take(32u32),
+            nom::sequence::tuple((
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
+            )),
             nom::branch::alt((
-                nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                     header::BabeAllowedSlots::PrimarySlots
                 }),
-                nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                     header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
                 }),
-                nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
                     header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
                 }),
             )),

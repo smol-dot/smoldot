@@ -554,7 +554,7 @@ where
     ///
     /// Panics if [`SingleStreamConnectionTask::reset`] has been called in the past.
     ///
-    pub fn read_write(&mut self, read_write: &'_ mut ReadWrite<'_, TNow>) {
+    pub fn read_write(&mut self, read_write: &'_ mut ReadWrite<TNow>) {
         // There is already at least one pending message. We back-pressure the connection by not
         // performing any reading or writing, as this might generate more messages and open the
         // door for a DoS attack by the remote. As documented, the API user is supposed to pull
@@ -794,7 +794,7 @@ where
 
                 loop {
                     let (read_before, written_before) =
-                        (read_write.read_bytes, read_write.written_bytes);
+                        (read_write.read_bytes, read_write.write_bytes_queued);
 
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
@@ -816,7 +816,7 @@ where
                     match result {
                         single_stream_handshake::Handshake::Healthy(updated_handshake)
                             if (read_before, written_before)
-                                == (read_write.read_bytes, read_write.written_bytes) =>
+                                == (read_write.read_bytes, read_write.write_bytes_queued) =>
                         {
                             self.connection = SingleStreamConnectionTaskInner::Handshake {
                                 handshake: updated_handshake,

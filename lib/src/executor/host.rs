@@ -533,6 +533,7 @@ impl HostVmPrototype {
                 common: self.common,
                 vm,
                 storage_transaction_depth: 0,
+                signatures_batch_verification: None,
                 allocator,
             }),
         })
@@ -1020,7 +1021,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1204,7 +1205,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1251,7 +1252,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(2);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1372,7 +1373,20 @@ impl ReadyToRun {
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_crypto_ed25519_verify_version_1 => {
+            HostFunction::ext_crypto_ed25519_verify_version_1
+            | HostFunction::ext_crypto_ed25519_batch_verify_version_1 => {
+                let is_batch_verification = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_ed25519_batch_verify_version_1
+                );
+
+                if is_batch_verification && self.inner.signatures_batch_verification.is_none() {
+                    return HostVm::Error {
+                        error: Error::BatchVerifyWithoutStarting,
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
                 let (message_ptr, message_size) = expect_pointer_size_raw!(1);
                 HostVm::SignatureVerification(SignatureVerification {
                     algorithm: SignatureVerificationAlgorithm::Ed25519,
@@ -1381,13 +1395,26 @@ impl ReadyToRun {
                     message_ptr,
                     message_size,
                     inner: self.inner,
+                    is_batch_verification,
                 })
             }
-            HostFunction::ext_crypto_ed25519_batch_verify_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_sign_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_crypto_sr25519_verify_version_1 => {
+            HostFunction::ext_crypto_sr25519_verify_version_1
+            | HostFunction::ext_crypto_sr25519_batch_verify_version_1 => {
+                let is_batch_verification = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_sr25519_batch_verify_version_1
+                );
+
+                if is_batch_verification && self.inner.signatures_batch_verification.is_none() {
+                    return HostVm::Error {
+                        error: Error::BatchVerifyWithoutStarting,
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
                 let (message_ptr, message_size) = expect_pointer_size_raw!(1);
                 HostVm::SignatureVerification(SignatureVerification {
                     algorithm: SignatureVerificationAlgorithm::Sr25519V1,
@@ -1396,6 +1423,7 @@ impl ReadyToRun {
                     message_ptr,
                     message_size,
                     inner: self.inner,
+                    is_batch_verification,
                 })
             }
             HostFunction::ext_crypto_sr25519_verify_version_2 => {
@@ -1407,9 +1435,9 @@ impl ReadyToRun {
                     message_ptr,
                     message_size,
                     inner: self.inner,
+                    is_batch_verification: false,
                 })
             }
-            HostFunction::ext_crypto_sr25519_batch_verify_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_sign_version_1 => {
                 // NOTE: safe to unwrap here because we supply the nn to blake2b fn
@@ -1438,7 +1466,20 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_crypto_ecdsa_verify_version_1 => {
+            HostFunction::ext_crypto_ecdsa_verify_version_1
+            | HostFunction::ext_crypto_ecdsa_batch_verify_version_1 => {
+                let is_batch_verification = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_ecdsa_batch_verify_version_1
+                );
+
+                if is_batch_verification && self.inner.signatures_batch_verification.is_none() {
+                    return HostVm::Error {
+                        error: Error::BatchVerifyWithoutStarting,
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
                 let (message_ptr, message_size) = expect_pointer_size_raw!(1);
                 HostVm::SignatureVerification(SignatureVerification {
                     algorithm: SignatureVerificationAlgorithm::Ecdsa,
@@ -1447,6 +1488,7 @@ impl ReadyToRun {
                     message_ptr,
                     message_size,
                     inner: self.inner,
+                    is_batch_verification,
                 })
             }
             HostFunction::ext_crypto_ecdsa_verify_version_2 => host_fn_not_implemented!(),
@@ -1479,9 +1521,9 @@ impl ReadyToRun {
                     message_ptr: expect_pointer_constant_size_raw!(1, 32),
                     message_size: 32,
                     inner: self.inner,
+                    is_batch_verification: false,
                 })
             }
-            HostFunction::ext_crypto_ecdsa_batch_verify_version_1 => host_fn_not_implemented!(),
 
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
@@ -1582,26 +1624,31 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
             }
             HostFunction::ext_crypto_start_batch_verify_version_1 => {
+                if self.inner.signatures_batch_verification.is_some() {
+                    return HostVm::Error {
+                        error: Error::AlreadyBatchVerify,
+                        prototype: self.inner.into_prototype(),
+                    };
+                }
+
+                self.inner.signatures_batch_verification = Some(true);
+
                 HostVm::ReadyToRun(ReadyToRun {
                     resume_value: None,
                     inner: self.inner,
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                // This function is a dummy implementation. After `ext_crypto_start_batch_verify`
-                // has been called, the runtime is supposed to call
-                // `ext_crypto_ed25519_batch_verify`, `ext_crypto_sr25519_batch_verify`, or
-                // `ext_crypto_ecdsa_batch_verify`, then retrieve the result using
-                // `ext_crypto_finish_batch_verify`. However, none of the three
-                // `<algo>_batch_verify` functions is supported by smoldot at the moment.
-                // Thus, if the runtime calls `ext_crypto_finish_batch_verify`, then it
-                // necessarily means that the batch is empty, and thus we always return success.
-                // At the moment, batch signatures verification isn't enabled on any production
-                // chain.
-                // Once support for any of the `<algo>_batch_verify` function is added, this
-                // implementation should of course change.
+                let Some(outcome) = self.inner.signatures_batch_verification.take()
+                else {
+                    return HostVm::Error {
+                        error: Error::NoBatchVerify,
+                        prototype: self.inner.into_prototype(),
+                    }
+                };
+
                 HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(1)),
+                    resume_value: Some(vm::WasmValue::I32(if outcome { 1 } else { 0 })),
                     inner: self.inner,
                 })
             }
@@ -1828,11 +1875,11 @@ impl ReadyToRun {
                                     nom::sequence::tuple((
                                         nom::combinator::flat_map(
                                             crate::util::nom_scale_compact_usize,
-                                            nom::bytes::complete::take,
+                                            nom::bytes::streaming::take,
                                         ),
                                         nom::combinator::flat_map(
                                             crate::util::nom_scale_compact_usize,
-                                            nom::bytes::complete::take,
+                                            nom::bytes::streaming::take,
                                         ),
                                     )),
                                 )
@@ -1893,7 +1940,7 @@ impl ReadyToRun {
                                     num_elems,
                                     nom::combinator::flat_map(
                                         crate::util::nom_scale_compact_usize,
-                                        nom::bytes::complete::take,
+                                        nom::bytes::streaming::take,
                                     ),
                                 )
                             },
@@ -2760,6 +2807,8 @@ pub struct SignatureVerification {
     message_ptr: u32,
     /// Size of the message. Guaranteed to be in range.
     message_size: u32,
+    /// `true` if the host function is a batch verification function.
+    is_batch_verification: bool,
 }
 
 enum SignatureVerificationAlgorithm {
@@ -2926,7 +2975,14 @@ impl SignatureVerification {
         self.resume(false)
     }
 
-    fn resume(self, success: bool) -> HostVm {
+    fn resume(mut self, success: bool) -> HostVm {
+        debug_assert!(
+            !self.is_batch_verification || self.inner.signatures_batch_verification.is_some()
+        );
+        if self.is_batch_verification && !success {
+            self.inner.signatures_batch_verification = Some(false);
+        }
+
         // All signature-related host functions work the same way in terms of return value.
         HostVm::ReadyToRun(ReadyToRun {
             resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
@@ -3430,6 +3486,15 @@ struct Inner {
     /// The depth of storage transaction started with `ext_storage_start_transaction_version_1`.
     storage_transaction_depth: u32,
 
+    /// The host provides a "batch signature verification" mechanism, where the runtime can start
+    /// verifying multiple signatures at once. This mechanism is deprecated, but is emulated
+    /// through a simple field.
+    ///
+    /// Contains `Some` if and only if the runtime is currently within a batch signatures
+    /// verification. If `Some`, contains `true` if all the signatures have been verified
+    /// successfully so far.
+    signatures_batch_verification: Option<bool>,
+
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
 
@@ -3746,6 +3811,14 @@ pub enum Error {
     #[display(fmt = "Called `ext_default_child_storage_root_version_1` or
         `ext_default_child_storage_root_version_2` on a child trie that doesn't exist.")]
     ChildStorageRootTrieDoesntExist,
+    /// Runtime has tried to perform a signature batch verification before initiating a batch
+    /// verification.
+    BatchVerifyWithoutStarting,
+    /// Runtime has tried to initiate a batch signatures verification while there was already one
+    /// in progress.
+    AlreadyBatchVerify,
+    /// Runtime has tried to finish a batch signatures verification while none is in progress.
+    NoBatchVerify,
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented
     #[display(fmt = "Host function not implemented: {function}")]

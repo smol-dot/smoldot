@@ -2,13 +2,39 @@
 
 ## Unreleased
 
+### Changed
+
+- The `operation-body-done`, `operation-call-done`, `operation-storage-done`, `operation-storage-items`, `operation-waiting-for-continue`, `operation-inaccessible`, and `operation-error` events, and the `closest-descendant-merkle-value`, `descendants-values`, and `descendants-hashes` item types of the new JSON-RPC API have been renamed and are now camelCased (`operationBodyDone`, `operationStorageItems`, `descendantsValues`, etc.), in accordance with the latest changes in the JSON-RPC API specification. ([#973](https://github.com/smol-dot/smoldot/pull/973))
+- The `chainSpec_unstable` JSON-RPC functions have been renamed to `chainSpec_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#989](https://github.com/smol-dot/smoldot/pull/989))
+
+## 1.0.14 - 2023-07-26
+
+### Changed
+
+- Remove `networkConfig` parameter from all `chainHead` JSON-RPC functions, in accordance with the latest changes to the JSON-RPC API specification. ([#963](https://github.com/smol-dot/smoldot/pull/963))
+- A JSON-RPC error is now returned if the JSON-RPC client tries to open more than two simultaneous `chainHead_unstable_follow` subscriptions, in accordance with the latest changes in the JSON-RPC API specification. ([#962](https://github.com/smol-dot/smoldot/pull/962))
+- Rename `chainHead_unstable_storageContinue` to `chainHead_unstable_continue`, in accordance with the latest changes in the JSON-RPC API specification. ([#965](https://github.com/smol-dot/smoldot/pull/965))
+- Merge `chainHead_unstable_stopBody`, `chainHead_unstable_stopCall`, and `chainHead_unstable_stopStorage` into `chainHead_unstable_stopOperation`, in accordance with the latest changes in the JSON-RPC API specification. ([#966](https://github.com/smol-dot/smoldot/pull/966))
+- Merge `chainHead_unstable_body`, `chainHead_unstable_call`, and `chainHead_unstable_storage` are now simple request-response functions that generate their notifications onto the corresponding `chainHead_unstable_follow` subscription, in accordance with the latest changes in the JSON-RPC API specification. ([#966](https://github.com/smol-dot/smoldot/pull/966))
+
+### Fixed
+
+- Fix several potential panics due to mismatches in the state of the networking. ([#967](https://github.com/smol-dot/smoldot/pull/967))
+
+## 1.0.13 - 2023-07-16
+
 ### Added
 
 - Add support for the `ext_trie_keccak_256_root_version_1`, `ext_trie_keccak_256_root_version_2`, `ext_trie_keccak_256_ordered_root_version_1`, and `ext_trie_keccak_256_ordered_root_version_2` host functions. ([#906](https://github.com/smol-dot/smoldot/pull/906))
+- Add support for the `ext_crypto_ed25519_batch_verify_version_1`, `ext_crypto_sr25519_batch_verify_version_1`, `ext_crypto_ecdsa_batch_verify_version_1`, `ext_crypto_start_batch_verify_version_1`, and `ext_crypto_finish_batch_verify_version_1` host functions. ([#920](https://github.com/smol-dot/smoldot/pull/920))
 
 ### Changed
 
 - The smoldot binary now longer has SIMD enabled, in order to make it work on a greater range of hardware. It was previously assumed that SIMD instructions were emulated on hardware that doesn't natively support them, but this doesn't seem to be the case for some browser engines. ([#903](https://github.com/smol-dot/smoldot/pull/903))
+
+### Fixed
+
+- Fix regression introduced in version 1.0.12 where only WebSocket secure and WebRTC connections were ever opened, regardless of the `forbid*` configuration flags. ([#923](https://github.com/smol-dot/smoldot/pull/923))
 
 ## 1.0.12 - 2023-07-10
 

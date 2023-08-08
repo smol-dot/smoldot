@@ -62,7 +62,6 @@
 //! Responses can be pulled by calling the [`AddChainSuccess::json_rpc_responses`] that is returned
 //! after a chain has been added.
 //!
-// TODO: talk about the fact that a randomness environment is assumed?
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![forbid(unsafe_code)]

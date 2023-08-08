@@ -56,9 +56,9 @@ use super::{
     Config, Event, SubstreamId, SubstreamIdInner,
 };
 
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
-    cmp, fmt,
+    fmt,
     num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
@@ -72,9 +72,6 @@ pub struct SingleStream<TNow, TSubUd> {
     /// Encryption layer applied directly on top of the incoming data and outgoing data.
     encryption: noise::Noise,
 
-    /// Buffer of data received from the socket, decrypted but yet to be parsed.
-    decrypted_data_buffer: VecDeque<u8>,
-
     /// Extra fields. Segregated in order to solve borrowing questions.
     inner: Box<Inner<TNow, TSubUd>>,
 }
@@ -86,16 +83,10 @@ struct Inner<TNow, TSubUd> {
     /// object, or `None` if the substream has been reset.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
-    yamux: yamux::Yamux<Option<(substream::Substream<TNow>, Option<TSubUd>)>>,
+    yamux: yamux::Yamux<Option<(substream::Substream<TNow>, Option<TSubUd>, Vec<u8>)>>,
 
-    /// If `Some`, contains the substream and number of bytes that [`Inner::yamux`] has already
-    /// processed but haven't been consumed from the buffer of decoded data in
-    /// [`SingleStream::encryption`] yet.
-    ///
-    /// After Yamux indicates that it has just processed a frame of data belonging to a certain
-    /// substream, we set this value to `Some` but leave the data in the buffer. This way, we can
-    /// process the data at a slower pace than Yamux.
-    current_data_frame: Option<(yamux::SubstreamId, NonZeroUsize)>,
+    /// If `Some`, contains a substream whose read buffer contains data.
+    substream_to_process: Option<yamux::SubstreamId>,
 
     /// Substream in [`Inner::yamux`] used for outgoing pings.
     ///
@@ -123,16 +114,6 @@ struct Inner<TNow, TSubUd> {
     ping_interval: Duration,
     /// See [`Config::ping_timeout`].
     ping_timeout: Duration,
-
-    /// Buffer used for intermediary data. When it is necessary, data is first copied here before
-    /// being turned into a `Vec`.
-    ///
-    /// While in theory this intermediary buffer could be shared between multiple different
-    /// connections, since data present in this buffer isn't always zero-ed, it could be possible
-    /// for a bug to cause data destined for connection A to be sent to connection B. Sharing this
-    /// buffer is too dangerous.
-    // TODO: remove; needs a lot of refactoring of noise and yamux
-    intermediary_buffer: Box<[u8]>,
 }
 
 impl<TNow, TSubUd> SingleStream<TNow, TSubUd>
@@ -151,7 +132,7 @@ where
     // TODO: consider exposing an API more similar to the one of substream::Substream::read_write?
     pub fn read_write(
         mut self,
-        read_write: &'_ mut ReadWrite<'_, TNow>,
+        read_write: &'_ mut ReadWrite<TNow>,
     ) -> Result<(SingleStream<TNow, TSubUd>, Option<Event<TSubUd>>), Error> {
         // First, update all the internal substreams.
         // This doesn't read data from `read_write`, but can potential write out data.
@@ -162,11 +143,12 @@ where
             .map(|(id, _)| id)
             .collect::<Vec<_>>()
         {
-            let (_num_read, event) =
-                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
-            debug_assert_eq!(_num_read, 0);
+            let (call_again, event) =
+                Self::process_substream(&mut self.inner, substream_id, read_write);
             if let Some(event) = event {
                 return Ok((self, Some(event)));
+            } else if call_again {
+                read_write.wake_up_asap();
             }
         }
 
@@ -217,57 +199,29 @@ where
             // having nothing more to do.
             let mut must_continue_looping = false;
 
-            // If `self.inner.current_data_frame` is `Some`, that means that yamux has already
-            // processed some of the data in the buffer of decrypted data and has determined that
-            // it was data belonging to a certain substream. We now pass over this data again,
-            // but this time update the state machine specific to that substream.
-            if let Some((substream_id, bytes_remaining)) = self.inner.current_data_frame {
+            if let Some(substream_id) = self.inner.substream_to_process {
                 // It might be that the substream has been closed in `process_substream`.
                 if !self.inner.yamux.has_substream(substream_id) {
-                    for _ in 0..bytes_remaining.get() {
-                        let _ = self.decrypted_data_buffer.pop_front();
-                    }
-                    self.inner.current_data_frame = None;
+                    self.inner.substream_to_process = None;
                     continue;
                 }
 
-                let (num_read, event) = {
-                    let decrypted_data = self.decrypted_data_buffer.as_slices().0;
-                    let data =
-                        &decrypted_data[..cmp::min(decrypted_data.len(), bytes_remaining.get())];
-                    Self::process_substream(&mut self.inner, substream_id, read_write, data)
-                };
+                let (call_again, event) =
+                    Self::process_substream(&mut self.inner, substream_id, read_write);
 
-                if let Some(more_remaining) = NonZeroUsize::new(bytes_remaining.get() - num_read) {
-                    self.inner.current_data_frame = Some((substream_id, more_remaining))
-                } else {
-                    self.inner.current_data_frame = None;
+                if !call_again {
+                    self.inner.substream_to_process = None;
                 }
-
-                // Discard the data from the decrypted data buffer.
-                for _ in 0..num_read {
-                    let _ = self.decrypted_data_buffer.pop_front();
-                }
-
-                // Give the possibility for the remote to send more data.
-                // TODO: only do that for notification substreams? because for requests we already set the value to the maximum when the substream is created
-                self.inner
-                    .yamux
-                    .add_remote_window_saturating(substream_id, u64::try_from(num_read).unwrap());
 
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
-                } else if num_read == 0 {
-                    // Substream doesn't accept anymore data because it is blocked on writing out.
-                    return Ok((self, None));
-                } else {
+                } else if call_again {
                     // Jump back to the beginning of the loop. We don't want to read more data
                     // until this specific substream's data has been processed.
                     continue;
                 }
             }
 
-            // Transfer data from `incoming_data` to the `self. decrypted_data_buffer` buffer.
             // Note that we treat the reading side being closed the same way as no data being
             // received. The fact that the remote has closed their writing side is no different
             // than them leaving their writing side open but no longer send any data at all.
@@ -276,24 +230,18 @@ where
             // Note, however, that in principle the remote should have sent a GoAway frame prior
             // to closing their writing side. But this is not something we check or really care
             // about.
-            if let Some(incoming_data) = read_write.incoming_buffer {
-                // We only buffer up to a certain amount of data, after which the internal
-                // state needs to finish processing it before more is read.
-                if self.decrypted_data_buffer.len() < 4 * 65536 {
-                    let num_read = self
-                        .encryption
-                        .decrypt_to_vecdeque(incoming_data, &mut self.decrypted_data_buffer)
-                        .map_err(Error::Noise)?;
-                    read_write.advance_read(num_read);
-                }
-            }
+
+            let mut decrypted_read_write = self
+                .encryption
+                .read_write(read_write)
+                .map_err(Error::Noise)?;
 
             // Ask the Yamux state machine to decode the data in `self.decrypted_data_buffer`.
-            debug_assert!(self.inner.current_data_frame.is_none());
+            debug_assert!(self.inner.substream_to_process.is_none());
             let yamux_decode = self
                 .inner
                 .yamux
-                .incoming_data(self.decrypted_data_buffer.as_slices().0)
+                .incoming_data(&decrypted_read_write.incoming_buffer)
                 .map_err(Error::Yamux)?;
             self.inner.yamux = yamux_decode.yamux;
 
@@ -309,17 +257,13 @@ where
             match yamux_decode.detail {
                 None if yamux_decode.bytes_read == 0 => {}
                 None => {
-                    for _ in 0..yamux_decode.bytes_read {
-                        let _ = self.decrypted_data_buffer.pop_front();
-                    }
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
                 }
 
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
                     debug_assert!(!self.inner.yamux.goaway_queued_or_sent());
 
-                    for _ in 0..yamux_decode.bytes_read {
-                        let _ = self.decrypted_data_buffer.pop_front();
-                    }
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
 
                     // Receive a request from the remote for a new incoming substream.
                     // These requests are automatically accepted unless the total limit to the
@@ -345,6 +289,7 @@ where
                         .accept_pending_substream(Some((
                             substream::Substream::ingoing(self.inner.max_protocol_name_len),
                             None,
+                            Vec::new(),
                         )))
                         .unwrap_or_else(|_| panic!());
                 }
@@ -353,35 +298,32 @@ where
                     yamux::IncomingDataDetail::StreamReset { .. }
                     | yamux::IncomingDataDetail::StreamClosed { .. },
                 ) => {
-                    for _ in 0..yamux_decode.bytes_read {
-                        let _ = self.decrypted_data_buffer.pop_front();
-                    }
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
                     start_offset,
                     substream_id,
                 }) => {
-                    // Discard the data in `self.decrypted_data_buffer` up to where the data
-                    // frame starts.
-                    for _ in 0..start_offset {
-                        let _ = self.decrypted_data_buffer.pop_front();
-                    }
+                    self.inner
+                        .yamux
+                        .user_data_mut(substream_id)
+                        .as_mut()
+                        .unwrap()
+                        .2
+                        .extend_from_slice(
+                            &decrypted_read_write.incoming_buffer
+                                [start_offset..yamux_decode.bytes_read],
+                        );
 
-                    // The substream's data isn't immediately processed. Instead, we leave this
-                    // data in the buffer and update our internal state so that it gets processed
-                    // during the next loop.
-                    debug_assert!(self.inner.current_data_frame.is_none());
-                    if let Some(len) = NonZeroUsize::new(yamux_decode.bytes_read - start_offset) {
-                        self.inner.current_data_frame = Some((substream_id, len));
-                    }
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
+                    self.inner.substream_to_process = Some(substream_id);
                 }
 
                 Some(yamux::IncomingDataDetail::GoAway { .. }) => {
                     // TODO: somehow report the GoAway error code on the external API?
-                    for _ in 0..yamux_decode.bytes_read {
-                        let _ = self.decrypted_data_buffer.pop_front();
-                    }
+                    let _ = decrypted_read_write.incoming_bytes_take(yamux_decode.bytes_read);
+                    drop(decrypted_read_write);
                     return Ok((self, Some(Event::NewOutboundSubstreamsForbidden)));
                 }
 
@@ -390,6 +332,21 @@ where
                     unreachable!()
                 }
             };
+
+            // The yamux or encryption state machines might contain data that needs to be
+            // written out. Try to flush them.
+            // The API user is supposed to call `read_write` in a loop until the number of bytes
+            // written out is 0, meaning that there's no need to set `must_continue_looping` to
+            // `true`.
+            while let Some(buffer) = self
+                .inner
+                .yamux
+                .extract_next(decrypted_read_write.write_bytes_queueable.unwrap_or(0))
+            {
+                decrypted_read_write.write_out(buffer.as_ref().to_vec());
+            }
+
+            drop(decrypted_read_write);
 
             // Substreams that have been closed or reset aren't immediately removed the yamux state
             // machine. They must be removed manually, which is what is done here.
@@ -407,7 +364,7 @@ where
 
                         // If the substream was reset by the remote, then the substream state
                         // machine will still be `Some`.
-                        if let Some((state_machine, mut user_data)) =
+                        if let Some((state_machine, mut user_data, _)) =
                             self.inner.yamux.remove_dead_substream(dead_substream_id)
                         {
                             // TODO: consider changing this `state_machine.reset()` function to be a state transition of the substream state machine (that doesn't take ownership), to simplify the implementation of both the substream state machine and this code
@@ -439,29 +396,34 @@ where
                             self.inner.yamux.user_data_mut(dead_substream_id);
 
                         // Extract the substream state machine, maybe putting it back later.
-                        let (state_machine_extracted, mut substream_user_data) =
-                            match state_machine_refmut.take() {
-                                Some(s) => s,
-                                None => {
-                                    // Substream has already been removed from the Yamux state machine
-                                    // previously. We know that it can't yield any more event.
-                                    self.inner.yamux.remove_dead_substream(dead_substream_id);
+                        let (
+                            state_machine_extracted,
+                            mut substream_user_data,
+                            substream_read_buffer,
+                        ) = match state_machine_refmut.take() {
+                            Some(s) => s,
+                            None => {
+                                // Substream has already been removed from the Yamux state machine
+                                // previously. We know that it can't yield any more event.
+                                self.inner.yamux.remove_dead_substream(dead_substream_id);
 
-                                    // Removing a dead substream might lead to Yamux being able to
-                                    // process more incoming data. As such, we loop again.
-                                    must_continue_looping = true;
+                                // Removing a dead substream might lead to Yamux being able to
+                                // process more incoming data. As such, we loop again.
+                                must_continue_looping = true;
 
-                                    continue;
-                                }
-                            };
+                                continue;
+                            }
+                        };
 
                         // Now we run `state_machine_extracted.read_write`.
                         let mut substream_read_write = ReadWrite {
                             now: read_write.now.clone(),
-                            incoming_buffer: None,
-                            outgoing_buffer: None,
+                            incoming_buffer: Vec::new(),
+                            expected_incoming_bytes: None,
+                            write_buffers: Vec::new(),
+                            write_bytes_queued: 0,
+                            write_bytes_queueable: None,
                             read_bytes: 0,
-                            written_bytes: 0,
                             wake_up_after: None,
                         };
 
@@ -470,7 +432,7 @@ where
 
                         debug_assert!(
                             substream_read_write.read_bytes == 0
-                                && substream_read_write.written_bytes == 0
+                                && substream_read_write.write_bytes_queued == 0
                         );
 
                         if let Some(wake_up_after) = substream_read_write.wake_up_after {
@@ -488,7 +450,11 @@ where
                         if let Some(substream_update) = substream_update {
                             // Put back the substream state machine. It will be picked up again
                             // the next time `read_write` is called.
-                            *state_machine_refmut = Some((substream_update, substream_user_data));
+                            *state_machine_refmut = Some((
+                                substream_update,
+                                substream_user_data,
+                                substream_read_buffer,
+                            ));
                         } else {
                             // Substream has no more events to give us. Remove it from the Yamux
                             // state machine.
@@ -506,33 +472,6 @@ where
                 }
             }
 
-            // The yamux or encryption state machines might contain data that needs to be
-            // written out. Try to flush them.
-            // The API user is supposed to call `read_write` in a loop until the number of bytes
-            // written out is 0, meaning that there's no need to set `must_continue_looping` to
-            // `true`.
-            let mut encrypt = self
-                .encryption
-                .encrypt(match read_write.outgoing_buffer.as_mut() {
-                    Some((a, b)) => (a, b),
-                    None => (&mut [], &mut []),
-                })
-                .map_err(Error::NoiseEncrypt)?;
-            let mut unencrypted_data_written = 0;
-            'main_write: for mut dest in encrypt.unencrypted_write_buffers() {
-                loop {
-                    let Some(buffer) = self.inner.yamux.extract_next(dest.len()) else {
-                        break 'main_write;
-                    };
-                    let buffer = buffer.as_ref();
-                    dest[..buffer.len()].copy_from_slice(buffer);
-                    dest = &mut dest[buffer.len()..];
-                    unencrypted_data_written += buffer.len();
-                }
-            }
-            let advance_write = encrypt.encrypt(unencrypted_data_written);
-            read_write.advance_write(advance_write);
-
             // If `must_continue_looping` is still false, then we didn't do anything meaningful
             // during this iteration. Return due to idleness.
             if !must_continue_looping {
@@ -543,8 +482,8 @@ where
 
     /// Advances a single substream.
     ///
-    /// Returns the number of bytes that have been read from `in_data`, and optionally returns an
-    /// event to yield to the user.
+    /// Returns a `boolean` indicating whether the substream should be processed again as soon as
+    /// possible. Also optionally returns an event to yield to the user.
     ///
     /// If the substream wants to wake up at a certain time or after a certain future,
     /// `outer_read_write` will be updated to also wake up at that moment.
@@ -560,12 +499,11 @@ where
         inner: &mut Inner<TNow, TSubUd>,
         substream_id: yamux::SubstreamId,
         outer_read_write: &mut ReadWrite<TNow>,
-        in_data: &[u8],
-    ) -> (usize, Option<Event<TSubUd>>) {
-        let (state_machine, mut substream_user_data) =
+    ) -> (bool, Option<Event<TSubUd>>) {
+        let (state_machine, mut substream_user_data, substream_read_buffer) =
             match inner.yamux.user_data_mut(substream_id).take() {
                 Some(s) => s,
-                None => return (0, None),
+                None => return (false, None),
             };
 
         let read_is_closed = !inner.yamux.can_receive(substream_id);
@@ -573,19 +511,16 @@ where
 
         let mut substream_read_write = ReadWrite {
             now: outer_read_write.now.clone(),
-            incoming_buffer: if read_is_closed {
-                assert!(in_data.is_empty());
-                None
-            } else {
-                Some(in_data)
-            },
-            outgoing_buffer: if !write_is_closed {
-                Some((&mut inner.intermediary_buffer, &mut []))
-            } else {
-                None
-            },
+            expected_incoming_bytes: if !read_is_closed { Some(0) } else { None },
+            incoming_buffer: substream_read_buffer,
             read_bytes: 0,
-            written_bytes: 0,
+            write_buffers: Vec::new(),
+            write_bytes_queued: 0,
+            write_bytes_queueable: if write_is_closed {
+                None
+            } else {
+                Some(usize::max_value())
+            },
             wake_up_after: None,
         };
 
@@ -595,21 +530,22 @@ where
             outer_read_write.wake_up_after(&wake_up_after);
         }
 
-        let closed_after = substream_read_write.outgoing_buffer.is_none();
-        let read_bytes = substream_read_write.read_bytes;
-        let written_bytes = substream_read_write.written_bytes;
-        if written_bytes != 0 {
+        // Give the possibility for the remote to send more data.
+        // TODO: only do that for notification substreams? because for requests we already set the value to the maximum when the substream is created
+        inner.yamux.add_remote_window_saturating(
+            substream_id,
+            u64::try_from(substream_read_write.read_bytes).unwrap(),
+        );
+
+        let closed_after = substream_read_write.write_bytes_queueable.is_none();
+        for buffer in substream_read_write.write_buffers {
+            if buffer.is_empty() {
+                continue;
+            }
             debug_assert!(!write_is_closed);
-            inner
-                .yamux
-                .write(
-                    substream_id,
-                    inner.intermediary_buffer[..written_bytes].to_vec(),
-                )
-                .unwrap();
+            inner.yamux.write(substream_id, buffer).unwrap();
         }
         if !write_is_closed && closed_after {
-            debug_assert_eq!(written_bytes, 0);
             inner.yamux.close(substream_id).unwrap();
         }
 
@@ -618,7 +554,10 @@ where
         });
 
         match substream_update {
-            Some(s) => *inner.yamux.user_data_mut(substream_id) = Some((s, substream_user_data)),
+            Some(s) => {
+                *inner.yamux.user_data_mut(substream_id) =
+                    Some((s, substream_user_data, substream_read_write.incoming_buffer))
+            }
             None => {
                 if !closed_after || !read_is_closed {
                     // TODO: what we do here is definitely correct, but the docs of `reset()` seem sketchy, investigate
@@ -627,7 +566,11 @@ where
             }
         };
 
-        (read_bytes, event_to_yield)
+        let call_again = substream_read_write.read_bytes != 0
+            || substream_read_write.write_bytes_queued != 0
+            || event_to_yield.is_some();
+
+        (call_again, event_to_yield)
     }
 
     /// Turns an event from the [`substream`] module into an [`Event`].
@@ -767,6 +710,7 @@ where
                     max_response_size,
                 ),
                 Some(user_data),
+                Vec::new(),
             )))
             .unwrap(); // TODO: consider not panicking
 
@@ -817,6 +761,7 @@ where
                     max_handshake_size,
                 ),
                 Some(user_data),
+                Vec::new(),
             )))
             .unwrap(); // TODO: consider not panicking
 
@@ -836,7 +781,7 @@ where
             _ => panic!(),
         };
 
-        let (substream, ud) = self
+        let (substream, ud, _) = self
             .inner
             .yamux
             .user_data_mut(substream_id)
@@ -860,7 +805,7 @@ where
             _ => panic!(),
         };
 
-        let (substream, ud) = self
+        let (substream, ud, _) = self
             .inner
             .yamux
             .user_data_mut(substream_id)
@@ -1146,6 +1091,7 @@ impl ConnectionPrototype {
             .open_substream(Some((
                 substream::Substream::ping_out(config.ping_protocol.clone()),
                 None,
+                Vec::new(),
             )))
             // Can only panic if a `GoAway` has been received, or if there are too many substreams
             // already open, which we know for sure can't happen here
@@ -1153,10 +1099,9 @@ impl ConnectionPrototype {
 
         SingleStream {
             encryption: self.encryption,
-            decrypted_data_buffer: VecDeque::with_capacity(65536),
             inner: Box::new(Inner {
                 yamux,
-                current_data_frame: None,
+                substream_to_process: None,
                 outgoing_pings,
                 next_ping: config.first_out_ping,
                 ping_payload_randomness: randomness,
@@ -1164,7 +1109,6 @@ impl ConnectionPrototype {
                 max_protocol_name_len: config.max_protocol_name_len,
                 ping_interval: config.ping_interval,
                 ping_timeout: config.ping_timeout,
-                intermediary_buffer: vec![0u8; 2048].into_boxed_slice(),
             }),
         }
     }
