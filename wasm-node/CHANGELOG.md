@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- A change in the logic of BABE has been backported. Smoldot no longer considers blocks as invalid after no block has been authored for an entire epoch.
+- A change in the logic of BABE has been backported. Smoldot no longer considers blocks as invalid after no block has been authored for an entire epoch. ([#991](https://github.com/smol-dot/smoldot/pull/991))
 
 ## 1.0.14 - 2023-07-26
 
