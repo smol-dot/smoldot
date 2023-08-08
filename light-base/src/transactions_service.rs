@@ -673,7 +673,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     // A block body download has finished, successfully or not.
                     let (block_hash, block_body) = download;
 
-                    let mut block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
+                    let block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
                         None => {
                             // It is possible that this block has been discarded because a sibling

@@ -227,7 +227,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 }
             }
         };
-        let mut guarded_lock = &mut *guarded_lock;
+        let guarded_lock = &mut *guarded_lock;
 
         // Extract the components of the `FinalizedBlockRuntimeKnown`. We are guaranteed by the
         // block above to be in this state.
@@ -1413,7 +1413,7 @@ async fn run_background<TPlat: PlatformRef>(
                             let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
 
                             let mut guarded = background.guarded.lock().await;
-                            let mut guarded = &mut *guarded;
+                            let guarded = &mut *guarded;
                             // TODO: note that this code is never reached for parachains
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
@@ -1466,7 +1466,7 @@ async fn run_background<TPlat: PlatformRef>(
                             let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
 
                             let mut guarded = background.guarded.lock().await;
-                            let mut guarded = &mut *guarded;
+                            let guarded = &mut *guarded;
                             guarded.best_near_head_of_chain = near_head_of_chain;
 
                             match &mut guarded.tree {
