@@ -26,6 +26,15 @@ pub struct Config {
     pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
     pub receiver: async_channel::Receiver<Message>,
+
+    /// Name of the chain, as found in the chain specification.
+    pub chain_name: String,
+
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    pub chain_properties_json: String,
+
+    /// Hash of the genesis block.
+    pub genesis_block_hash: [u8; 32],
 }
 
 pub enum Message {
@@ -45,6 +54,23 @@ pub fn spawn_requests_handler(mut config: Config) {
                                 .collect(),
                         }));
                     }
+
+                    methods::MethodCall::chainSpec_v1_chainName {} => {
+                        request.respond(methods::Response::chainSpec_v1_chainName(
+                            (&config.chain_name).into(),
+                        ));
+                    }
+                    methods::MethodCall::chainSpec_v1_genesisHash {} => {
+                        request.respond(methods::Response::chainSpec_v1_genesisHash(
+                            methods::HashHexString(config.genesis_block_hash),
+                        ));
+                    }
+                    methods::MethodCall::chainSpec_v1_properties {} => {
+                        request.respond(methods::Response::chainSpec_v1_properties(
+                            serde_json::from_str(&config.chain_properties_json).unwrap(),
+                        ));
+                    }
+
                     methods::MethodCall::system_name {} => {
                         request.respond(methods::Response::system_version(
                             env!("CARGO_PKG_NAME").into(),
@@ -55,6 +81,7 @@ pub fn spawn_requests_handler(mut config: Config) {
                             env!("CARGO_PKG_VERSION").into(),
                         ));
                     }
+
                     _ => request.fail(service::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",
