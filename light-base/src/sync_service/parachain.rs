@@ -30,7 +30,7 @@ use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
-    chain::{self, async_tree},
+    chain::async_tree,
     executor::{host, runtime_host},
     header,
     informant::HashDisplay,
@@ -43,7 +43,7 @@ use smoldot::{
 pub(super) async fn start_parachain<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
-    chain_information: chain::chain_information::ValidChainInformation,
+    finalized_block_header: Vec<u8>,
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
@@ -52,56 +52,49 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
-    let task = {
-        let obsolete_finalized_parahead = chain_information
-            .as_ref()
-            .finalized_block_header
-            .scale_encoding_vec(block_number_bytes);
-
-        ParachainBackgroundTask {
-            log_target,
-            from_foreground,
-            block_number_bytes,
-            relay_chain_block_number_bytes,
-            parachain_id,
-            network_chain_index,
-            from_network_service: from_network_service.fuse(),
-            sync_sources: sources::AllForksSources::new(
-                40,
-                header::decode(&obsolete_finalized_parahead, block_number_bytes)
-                    .unwrap()
-                    .number,
-            ),
-            obsolete_finalized_parahead,
-            sync_sources_map: HashMap::with_capacity_and_hasher(
-                0,
-                util::SipHasherBuild::new({
-                    let mut seed = [0; 16];
-                    platform.fill_random_bytes(&mut seed);
-                    seed
-                }),
-            ),
-            subscription_state: ParachainBackgroundState::NotSubscribed {
-                all_subscriptions: Vec::new(),
-                subscribe_future: {
-                    let relay_chain_sync = relay_chain_sync.clone();
-                    Box::pin(async move {
-                        relay_chain_sync
-                            .subscribe_all(
-                                "parachain-sync",
-                                32,
-                                NonZeroUsize::new(usize::max_value()).unwrap(),
-                            )
-                            .await
-                    })
-                },
+    ParachainBackgroundTask {
+        log_target,
+        from_foreground,
+        block_number_bytes,
+        relay_chain_block_number_bytes,
+        parachain_id,
+        network_chain_index,
+        from_network_service: from_network_service.fuse(),
+        sync_sources: sources::AllForksSources::new(
+            40,
+            header::decode(&finalized_block_header, block_number_bytes)
+                .unwrap()
+                .number,
+        ),
+        obsolete_finalized_parahead: finalized_block_header,
+        sync_sources_map: HashMap::with_capacity_and_hasher(
+            0,
+            util::SipHasherBuild::new({
+                let mut seed = [0; 16];
+                platform.fill_random_bytes(&mut seed);
+                seed
+            }),
+        ),
+        subscription_state: ParachainBackgroundState::NotSubscribed {
+            all_subscriptions: Vec::new(),
+            subscribe_future: {
+                let relay_chain_sync = relay_chain_sync.clone();
+                Box::pin(async move {
+                    relay_chain_sync
+                        .subscribe_all(
+                            "parachain-sync",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
+                        .await
+                })
             },
-            relay_chain_sync,
-            platform,
-        }
-    };
-
-    task.run().await;
+        },
+        relay_chain_sync,
+        platform,
+    }
+    .run()
+    .await;
 }
 
 /// Task that is running in the background.
