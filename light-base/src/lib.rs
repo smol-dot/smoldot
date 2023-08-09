@@ -1136,12 +1136,15 @@ async fn start_services<TPlat: platform::PlatformRef>(
             sync_service::SyncService::new(sync_service::Config {
                 platform: platform.clone(),
                 log_name: log_name.clone(),
-                chain_information: chain_information.clone(),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
+                        finalized_block_header: chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .scale_encoding_vec(usize::from(chain_spec.block_number_bytes())),
                         parachain_id: chain_spec.relay_chain().unwrap().1,
                         relay_chain_sync: relay_chain.runtime_service.clone(),
                         relay_chain_block_number_bytes: relay_chain
@@ -1175,13 +1178,13 @@ async fn start_services<TPlat: platform::PlatformRef>(
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
                 log_name: log_name.clone(),
-                chain_information: chain_information.clone(),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 platform: platform.clone(),
                 network_service: (network_service.clone(), 0),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
                 chain_type: sync_service::ConfigChainType::RelayChain(
                     sync_service::ConfigRelayChain {
+                        chain_information: chain_information.clone(),
                         runtime_code_hint: runtime_code_hint.map(|hint| {
                             sync_service::ConfigRelayChainRuntimeCodeHint {
                                 storage_value: hint.code,
