@@ -469,6 +469,12 @@ pub async fn start(mut config: Config<'_>) -> Client {
             bind_address: json_rpc_config.address,
             max_parallel_requests: 32,
             max_json_rpc_clients: json_rpc_config.max_json_rpc_clients,
+            chain_name: chain_spec.name().to_owned(),
+            chain_properties_json: chain_spec.properties().to_owned(),
+            genesis_block_hash: genesis_chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(usize::from(chain_spec.block_number_bytes())),
         })
         .await;
 

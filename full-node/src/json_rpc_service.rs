@@ -55,6 +55,15 @@ pub struct Config {
 
     /// Maximum number of JSON-RPC clients until new ones are rejected.
     pub max_json_rpc_clients: u32,
+
+    /// Name of the chain, as found in the chain specification.
+    pub chain_name: String,
+
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    pub chain_properties_json: String,
+
+    /// Hash of the genesis block.
+    pub genesis_block_hash: [u8; 32],
 }
 
 /// Running JSON-RPC service. Holds a server open for as long as it is alive.
@@ -103,6 +112,9 @@ impl JsonRpcService {
             requests_handler::spawn_requests_handler(requests_handler::Config {
                 tasks_executor: config.tasks_executor.clone(),
                 receiver: from_background.clone(),
+                chain_name: config.chain_name.clone(),
+                chain_properties_json: config.chain_properties_json.clone(),
+                genesis_block_hash: config.genesis_block_hash,
             });
         }
 
