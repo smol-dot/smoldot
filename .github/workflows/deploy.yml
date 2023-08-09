@@ -248,21 +248,21 @@ jobs:
       image: rust:1.71
     steps:
       - uses: actions/checkout@v3
-      - run: cargo publish --dry-run
+      - run: cargo publish --dry-run --locked
         working-directory: ./lib
-      - run: cargo publish --dry-run
+      - run: cargo publish --dry-run --locked
         working-directory: ./light-base
-      - run: cargo publish --dry-run
+      - run: cargo publish --dry-run --locked
         working-directory: ./full-node
       - run: cargo login ${{ secrets.CRATES_IO_TOKEN }}
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - run: cargo publish
+      - run: cargo publish --no-verify
         working-directory: ./lib
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - run: cargo publish
+      - run: cargo publish --no-verify
         working-directory: ./light-base
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - run: cargo publish
+      - run: cargo publish --no-verify
         working-directory: ./full-node
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
