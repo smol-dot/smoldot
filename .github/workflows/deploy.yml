@@ -242,10 +242,37 @@ jobs:
       - run: git push origin ${{ steps.compute-tag.outputs.tag }}
         if: ${{ steps.check-tag-exists.outputs.num-existing == 0 && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+  crates-io-publish:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.71
+    steps:
+      - uses: actions/checkout@v3
+      - run: cargo publish --dry-run --locked
+        working-directory: ./lib
+      - run: cargo publish --dry-run --locked
+        working-directory: ./light-base
+      - run: cargo publish --dry-run --locked
+        working-directory: ./full-node
+      - run: cargo login ${{ secrets.CRATES_IO_TOKEN }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: cargo publish --no-verify
+        working-directory: ./lib
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+      - run: cargo publish --no-verify
+        working-directory: ./light-base
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+      - run: cargo publish --no-verify
+        working-directory: ./full-node
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish]
+    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
