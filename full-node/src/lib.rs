@@ -166,8 +166,7 @@ impl Client {
     }
 }
 
-/// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
-/// detected.
+/// Runs the node using the given configuration.
 // TODO: should return an error if something bad happens instead of panicking
 pub async fn start(mut config: Config<'_>) -> Client {
     let chain_spec = {
