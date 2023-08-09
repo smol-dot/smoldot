@@ -8,10 +8,7 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
 
-permissions:
-  checks: write
-  contents: read
-  issues: write
+permissions: write-all  # TODO: https://github.com/actions-rs/audit-check/issues/218
 
 jobs:
   audit:
