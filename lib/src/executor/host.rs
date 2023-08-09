@@ -910,6 +910,28 @@ impl ReadyToRun {
             }};
         }
 
+        macro_rules! expect_offchain_storage_kind {
+            ($num:expr) => {{
+                match &params[$num] {
+                    // `0` indicates `StorageKind::PERSISTENT`, the only kind of offchain
+                    // storage that is available.
+                    vm::WasmValue::I32(0) => true,
+                    // `1` indicates `StorageKind::LOCAL`, which is valid but has never been
+                    // implemented in Substrate.
+                    vm::WasmValue::I32(1) => false,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
+                }
+            }};
+        }
+
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
@@ -1791,51 +1813,73 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_set_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(2);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: None,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(2);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        old_value: None,
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                }
             }
             HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(3);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: Some((old_value_ptr, old_value_size)),
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(3);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        old_value: Some((old_value_ptr, old_value_size)),
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: Some(vm::WasmValue::I32(0)),
+                    })
+                }
             }
             HostFunction::ext_offchain_local_storage_get_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-
-                HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
-                    key_ptr,
-                    key_size,
-                    calling: id,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
+                        key_ptr,
+                        key_size,
+                        calling: id,
+                        inner: self.inner,
+                    })
+                } else {
+                    // Write a SCALE-encoded `None`.
+                    self.inner
+                        .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
+                }
             }
             HostFunction::ext_offchain_local_storage_clear_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: None,
-                    old_value: None,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: None,
+                        old_value: None,
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                }
             }
             HostFunction::ext_offchain_http_request_start_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_offchain_http_request_add_header_version_1 => {
