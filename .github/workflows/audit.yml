@@ -3,14 +3,12 @@ name: recurrent-audit
 on:
   schedule:
     - cron: '0 0 * * *'
-  push:
+  pull_request:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
 
-permissions:
-  contents: read
-  issues: write
+permissions: write-all  # TODO: https://github.com/actions-rs/audit-check/issues/218
 
 jobs:
   audit:
