@@ -49,6 +49,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
     from_foreground: async_channel::Receiver<ToBackground>,
+    network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
@@ -58,6 +59,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         block_number_bytes,
         relay_chain_block_number_bytes,
         parachain_id,
+        network_service,
         network_chain_index,
         from_network_service: from_network_service.fuse(),
         sync_sources: sources::AllForksSources::new(
@@ -116,6 +118,9 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
 
     /// Id of the parachain registered within the relay chain. Chosen by the user.
     parachain_id: u32,
+
+    /// Networking service connected to the peer-to-peer network of the parachain.
+    network_service: Arc<network_service::NetworkService<TPlat>>,
 
     /// Index of the chain within the associated network service.
     ///
@@ -924,6 +929,20 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     {
                         runtime_subscription.reported_best_parahead_hash = Some(parahash);
 
+                        // The networking service needs to be kept up to date with what the local
+                        // node considers as the best block.
+                        if let Ok(header) =
+                            header::decode(finalized_parahead, self.block_number_bytes)
+                        {
+                            self.network_service
+                                .set_local_best_block(
+                                    self.network_chain_index,
+                                    parahash,
+                                    header.number,
+                                )
+                                .await;
+                        }
+
                         log::debug!(
                             target: &self.log_target,
                             "Subscriptions <= BestBlockChanged(hash={})",
@@ -979,6 +998,20 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 != Some(&parahash)
                         {
                             runtime_subscription.reported_best_parahead_hash = Some(parahash);
+
+                            // The networking service needs to be kept up to date with what the
+                            // local node considers as the best block.
+                            if let Ok(header) =
+                                header::decode(finalized_parahead, self.block_number_bytes)
+                            {
+                                self.network_service
+                                    .set_local_best_block(
+                                        self.network_chain_index,
+                                        parahash,
+                                        header.number,
+                                    )
+                                    .await;
+                            }
 
                             log::debug!(
                                 target: &self.log_target,

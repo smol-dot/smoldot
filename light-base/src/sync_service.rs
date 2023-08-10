@@ -165,6 +165,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         config_parachain.relay_chain_block_number_bytes,
                         config_parachain.parachain_id,
                         from_foreground,
+                        config.network_service.0.clone(),
                         config.network_service.1,
                         config.network_events_receiver,
                     )),
