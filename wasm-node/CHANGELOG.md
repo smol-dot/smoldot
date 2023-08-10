@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The block announces substream handshake of a parachain peer-to-peer network now properly contains the block that smoldot thinks is the best. The genesis block was previously always reported.
+- The block announces substream handshake of a parachain peer-to-peer network now properly contains the block that smoldot thinks is the best. The genesis block was previously always reported. ([#1012](https://github.com/smol-dot/smoldot/pull/1012))
 
 ## 1.0.15 - 2023-08-08
 
