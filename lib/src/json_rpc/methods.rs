@@ -459,7 +459,6 @@ define_methods! {
     chainHead_unstable_follow(
         #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
-    chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
