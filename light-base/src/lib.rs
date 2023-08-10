@@ -713,7 +713,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             runtime_code_hint,
                             genesis_block_header,
                             chain_spec,
-                            relay_chain.as_ref().map(|(r, _)| r),
+                            match &relay_chain {
+                                Some((relay_chain, _)) => {
+                                    StartServicesChainTy::Parachain { relay_chain }
+                                }
+                                None => StartServicesChainTy::RelayChain,
+                            },
                             network_identify_agent_version,
                             network_noise_key,
                         )
@@ -1071,6 +1076,13 @@ pub enum AddChainError {
     MultipleRelayChains,
 }
 
+enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
+    RelayChain,
+    Parachain {
+        relay_chain: &'a ChainServices<TPlat>,
+    },
+}
+
 /// Starts all the services of the client.
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
@@ -1082,7 +1094,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
     runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
-    relay_chain: Option<&ChainServices<TPlat>>,
+    config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
     network_noise_key: connection::NoiseKey,
 ) -> ChainServices<TPlat> {
@@ -1124,91 +1136,94 @@ async fn start_services<TPlat: platform::PlatformRef>(
         })
         .await;
 
-    let (sync_service, runtime_service) = if let Some(relay_chain) = relay_chain {
-        // Chain is a parachain.
+    let (sync_service, runtime_service) = match config {
+        StartServicesChainTy::Parachain { relay_chain } => {
+            // Chain is a parachain.
 
-        // The sync service is leveraging the network service, downloads block headers,
-        // and verifies them, to determine what are the best and finalized blocks of the
-        // chain.
-        let sync_service = Arc::new(
-            sync_service::SyncService::new(sync_service::Config {
-                platform: platform.clone(),
-                log_name: log_name.clone(),
-                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
-                network_service: (network_service.clone(), 0),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
-                chain_type: sync_service::ConfigChainType::Parachain(
-                    sync_service::ConfigParachain {
-                        finalized_block_header: chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .scale_encoding_vec(usize::from(chain_spec.block_number_bytes())),
-                        parachain_id: chain_spec.relay_chain().unwrap().1,
-                        relay_chain_sync: relay_chain.runtime_service.clone(),
-                        relay_chain_block_number_bytes: relay_chain
-                            .sync_service
-                            .block_number_bytes(),
-                    },
-                ),
-            })
-            .await,
-        );
+            // The sync service is leveraging the network service, downloads block headers,
+            // and verifies them, to determine what are the best and finalized blocks of the
+            // chain.
+            let sync_service = Arc::new(
+                sync_service::SyncService::new(sync_service::Config {
+                    platform: platform.clone(),
+                    log_name: log_name.clone(),
+                    block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                    network_service: (network_service.clone(), 0),
+                    network_events_receiver: network_event_receivers.pop().unwrap(),
+                    chain_type: sync_service::ConfigChainType::Parachain(
+                        sync_service::ConfigParachain {
+                            finalized_block_header: chain_information
+                                .as_ref()
+                                .finalized_block_header
+                                .scale_encoding_vec(usize::from(chain_spec.block_number_bytes())),
+                            parachain_id: chain_spec.relay_chain().unwrap().1,
+                            relay_chain_sync: relay_chain.runtime_service.clone(),
+                            relay_chain_block_number_bytes: relay_chain
+                                .sync_service
+                                .block_number_bytes(),
+                        },
+                    ),
+                })
+                .await,
+            );
 
-        // The runtime service follows the runtime of the best block of the chain,
-        // and allows performing runtime calls.
-        let runtime_service = Arc::new(
-            runtime_service::RuntimeService::new(runtime_service::Config {
-                log_name: log_name.clone(),
-                platform: platform.clone(),
-                sync_service: sync_service.clone(),
-                genesis_block_scale_encoded_header,
-            })
-            .await,
-        );
+            // The runtime service follows the runtime of the best block of the chain,
+            // and allows performing runtime calls.
+            let runtime_service = Arc::new(
+                runtime_service::RuntimeService::new(runtime_service::Config {
+                    log_name: log_name.clone(),
+                    platform: platform.clone(),
+                    sync_service: sync_service.clone(),
+                    genesis_block_scale_encoded_header,
+                })
+                .await,
+            );
 
-        (sync_service, runtime_service)
-    } else {
-        // Chain is a relay chain.
+            (sync_service, runtime_service)
+        }
+        StartServicesChainTy::RelayChain => {
+            // Chain is a relay chain.
 
-        // The sync service is leveraging the network service, downloads block headers,
-        // and verifies them, to determine what are the best and finalized blocks of the
-        // chain.
-        let sync_service = Arc::new(
-            sync_service::SyncService::new(sync_service::Config {
-                log_name: log_name.clone(),
-                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
-                platform: platform.clone(),
-                network_service: (network_service.clone(), 0),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
-                chain_type: sync_service::ConfigChainType::RelayChain(
-                    sync_service::ConfigRelayChain {
-                        chain_information: chain_information.clone(),
-                        runtime_code_hint: runtime_code_hint.map(|hint| {
-                            sync_service::ConfigRelayChainRuntimeCodeHint {
-                                storage_value: hint.code,
-                                merkle_value: hint.code_merkle_value,
-                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
-                            }
-                        }),
-                    },
-                ),
-            })
-            .await,
-        );
+            // The sync service is leveraging the network service, downloads block headers,
+            // and verifies them, to determine what are the best and finalized blocks of the
+            // chain.
+            let sync_service = Arc::new(
+                sync_service::SyncService::new(sync_service::Config {
+                    log_name: log_name.clone(),
+                    block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                    platform: platform.clone(),
+                    network_service: (network_service.clone(), 0),
+                    network_events_receiver: network_event_receivers.pop().unwrap(),
+                    chain_type: sync_service::ConfigChainType::RelayChain(
+                        sync_service::ConfigRelayChain {
+                            chain_information: chain_information.clone(),
+                            runtime_code_hint: runtime_code_hint.map(|hint| {
+                                sync_service::ConfigRelayChainRuntimeCodeHint {
+                                    storage_value: hint.code,
+                                    merkle_value: hint.code_merkle_value,
+                                    closest_ancestor_excluding: hint.closest_ancestor_excluding,
+                                }
+                            }),
+                        },
+                    ),
+                })
+                .await,
+            );
 
-        // The runtime service follows the runtime of the best block of the chain,
-        // and allows performing runtime calls.
-        let runtime_service = Arc::new(
-            runtime_service::RuntimeService::new(runtime_service::Config {
-                log_name: log_name.clone(),
-                platform: platform.clone(),
-                sync_service: sync_service.clone(),
-                genesis_block_scale_encoded_header,
-            })
-            .await,
-        );
+            // The runtime service follows the runtime of the best block of the chain,
+            // and allows performing runtime calls.
+            let runtime_service = Arc::new(
+                runtime_service::RuntimeService::new(runtime_service::Config {
+                    log_name: log_name.clone(),
+                    platform: platform.clone(),
+                    sync_service: sync_service.clone(),
+                    genesis_block_scale_encoded_header,
+                })
+                .await,
+            );
 
-        (sync_service, runtime_service)
+            (sync_service, runtime_service)
+        }
     };
 
     // The transactions service lets one send transactions to the peer-to-peer network and watch
