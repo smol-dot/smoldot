@@ -117,14 +117,13 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
         match result {
             Ok(connection) => connection,
             Err((_, is_bad_addr)) => {
-                messages_tx
+                let _ = messages_tx
                     .send(ToBackground::ConnectionAttemptErr {
                         pending_id: start_connect.id,
                         expected_peer_id: start_connect.expected_peer_id,
                         is_bad_addr,
                     })
-                    .await
-                    .unwrap();
+                    .await;
 
                 // Stop the task.
                 return;
@@ -138,7 +137,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
     // is done by the user of the smoldot crate rather than by the smoldot crate itself.
     match socket {
         either::Left(connection) => {
-            messages_tx
+            let _ = messages_tx
                 .send(ToBackground::ConnectionAttemptOkSingleStream {
                     pending_id: start_connect.id,
                     connection,
@@ -146,8 +145,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     multiaddr: start_connect.multiaddr,
                     handshake_kind: service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                 })
-                .await
-                .unwrap();
+                .await;
         }
         either::Right(MultiStreamWebRtcConnection {
             connection,
@@ -163,7 +161,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                 .into_iter()
                 .chain(remote_tls_certificate_sha256.into_iter())
                 .collect();
-            messages_tx
+            let _ = messages_tx
                 .send(ToBackground::ConnectionAttemptOkMultiStream {
                     pending_id: start_connect.id,
                     connection,
@@ -174,8 +172,7 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                         remote_tls_certificate_multihash,
                     },
                 })
-                .await
-                .unwrap();
+                .await;
         }
     }
 }
