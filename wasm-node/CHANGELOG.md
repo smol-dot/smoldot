@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Removed the `chainHead_unstable_genesisHash` JSON-RPC function, in accordance with the latest changes in the JSON-RPC API specification. ([#1010](https://github.com/smol-dot/smoldot/pull/1010))
+
 ### Fixed
 
 - Fix panic when removing a chain while a networking connection is being opened. ([#1011](https://github.com/smol-dot/smoldot/pull/1011))

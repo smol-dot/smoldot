@@ -45,16 +45,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         ));
     }
 
-    /// Handles a call to [`methods::MethodCall::chainHead_unstable_genesisHash`].
-    pub(super) async fn chain_head_unstable_genesis_hash(
-        self: &Arc<Self>,
-        request: service::RequestProcess,
-    ) {
-        request.respond(methods::Response::chainHead_unstable_genesisHash(
-            methods::HashHexString(self.genesis_block_hash),
-        ));
-    }
-
     /// Handles a call to [`methods::MethodCall::chainSpec_v1_chainName`].
     pub(super) async fn chain_spec_unstable_chain_name(
         self: &Arc<Self>,
