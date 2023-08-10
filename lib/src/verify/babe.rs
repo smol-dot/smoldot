@@ -276,19 +276,11 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // Verify consistency of the configuration.
     if let Some(curr) = &config.parent_block_epoch {
-        assert_eq!(
-            curr.epoch_index.checked_add(1).unwrap(),
-            config.parent_block_next_epoch.epoch_index
-        );
         assert!(curr.start_slot_number.is_some());
         assert!(curr.start_slot_number <= parent_slot_number);
     } else {
         assert_eq!(config.parent_block_next_epoch.epoch_index, 0);
     }
-    assert!(config
-        .parent_block_next_epoch
-        .start_slot_number
-        .map_or(true, |n| n > parent_slot_number.unwrap()));
     assert_eq!(
         config.parent_block_next_epoch.epoch_index == 0,
         config.parent_block_next_epoch.start_slot_number.is_none()
@@ -322,16 +314,18 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         }
     };
 
+    // Check if the current slot number indicates that entire epochs have been skipped.
+    let skipped_epochs = block_epoch_info
+        .start_slot_number
+        .map_or(0, |start_slot_number| {
+            (slot_number - start_slot_number) / config.slots_per_epoch
+        });
+
     // Calculate the epoch index of the epoch of the block.
     // This is the vast majority of the time equal to `block_epoch_info.epoch_index`. However,
     // if no block has been produced for an entire epoch, the value needs to be increased by the
     // number of skipped epochs.
-    let block_epoch_index = block_epoch_info.epoch_index
-        + block_epoch_info
-            .start_slot_number
-            .map_or(0, |start_slot_number| {
-                (slot_number - start_slot_number) / config.slots_per_epoch
-            });
+    let block_epoch_index = block_epoch_info.epoch_index + skipped_epochs;
 
     // TODO: in case of epoch change, should also check the randomness value; while the runtime
     //       checks that the randomness value is correct, light clients in particular do not
@@ -360,37 +354,38 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // If the block contains an epoch transition, build the information about the new epoch.
     // This is done now, as the header is consumed below.
-    let epoch_transition_target = match config.header.digest.babe_epoch_information() {
-        None => None,
-        Some((info, None)) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_index.checked_add(1).unwrap(),
-            start_slot_number: Some(
-                block_epoch_info
-                    .start_slot_number
-                    .unwrap_or(slot_number)
-                    .checked_add(config.slots_per_epoch.get())
-                    .unwrap(),
-            ),
-            authorities: info.authorities.map(Into::into).collect(),
-            randomness: *info.randomness,
-            c: block_epoch_info.c,
-            allowed_slots: block_epoch_info.allowed_slots,
-        }),
-        Some((info, Some(epoch_cfg))) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_index.checked_add(1).unwrap(),
-            start_slot_number: Some(
-                block_epoch_info
-                    .start_slot_number
-                    .unwrap_or(slot_number)
-                    .checked_add(config.slots_per_epoch.get())
-                    .unwrap(),
-            ),
-            authorities: info.authorities.map(Into::into).collect(),
-            randomness: *info.randomness,
-            c: epoch_cfg.c,
-            allowed_slots: epoch_cfg.allowed_slots,
-        }),
-    };
+    let epoch_transition_target =
+        config
+            .header
+            .digest
+            .babe_epoch_information()
+            .map(|(info, maybe_config)| {
+                let start_slot_number = Some(
+                    block_epoch_info
+                        .start_slot_number
+                        .unwrap_or(slot_number)
+                        .checked_add(config.slots_per_epoch.get())
+                        .unwrap()
+                        // If some epochs have been skipped, we need to adjust the starting slot of
+                        // the next epoch.
+                        .checked_add(
+                            skipped_epochs
+                                .checked_mul(config.slots_per_epoch.get())
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                );
+                chain_information::BabeEpochInformation {
+                    epoch_index: block_epoch_index.checked_add(1).unwrap(),
+                    start_slot_number,
+                    authorities: info.authorities.map(Into::into).collect(),
+                    randomness: *info.randomness,
+                    c: maybe_config.map_or(block_epoch_info.c, |config| config.c),
+                    allowed_slots: maybe_config.map_or(block_epoch_info.allowed_slots, |config| {
+                        config.allowed_slots
+                    }),
+                }
+            });
 
     // Make sure that the header wouldn't put Babe in a non-sensical state.
     if let Some(epoch_transition_target) = &epoch_transition_target {

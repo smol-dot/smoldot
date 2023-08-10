@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fix panic when removing a chain while a networking connection is being opened. ([#1011](https://github.com/smol-dot/smoldot/pull/1011))
+- Fix epoch start slot calculation when epochs have been skipped. ([#1015](https://github.com/smol-dot/smoldot/pull/1015))
 
 ## 1.0.15 - 2023-08-08
 
