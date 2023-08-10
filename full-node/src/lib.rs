@@ -267,10 +267,23 @@ pub async fn start(mut config: Config<'_>) -> Client {
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
-                has_grandpa_protocol: matches!(
+                grandpa_protocol_finalized_block_height: if matches!(
                     genesis_chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ),
+                ) {
+                    Some({
+                        let block_number_bytes = chain_spec.block_number_bytes();
+                        database
+                            .with_database(move |database| {
+                                let hash = database.finalized_block_hash().unwrap();
+                                let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                header::decode(&header, block_number_bytes.into(),).unwrap().number
+                            })
+                            .await
+                    })
+                } else {
+                    None
+                },
                 genesis_block_hash,
                 best_block: {
                     let block_number_bytes = chain_spec.block_number_bytes();
@@ -316,10 +329,25 @@ pub async fn start(mut config: Config<'_>) -> Client {
                         fork_id: relay_chains_specs.fork_id().map(|n| n.to_owned()),
                         block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
-                        has_grandpa_protocol: matches!(
-                            relay_genesis_chain_information.as_ref().unwrap().as_ref().finality,
+                        grandpa_protocol_finalized_block_height: if matches!(
+                            genesis_chain_information.as_ref().finality,
                             chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                        ),
+                        ) {
+                            Some(relay_chain_database
+                                .as_ref()
+                                .unwrap()
+                                .with_database({
+                                    let block_number_bytes = chain_spec.block_number_bytes();
+                                    move |db| {
+                                        let hash = db.finalized_block_hash().unwrap();
+                                        let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                        header::decode(&header, block_number_bytes.into()).unwrap().number
+                                    }
+                                })
+                                .await)
+                        } else {
+                            None
+                        },
                         genesis_block_hash: relay_genesis_chain_information
                             .as_ref()
                             .unwrap()
