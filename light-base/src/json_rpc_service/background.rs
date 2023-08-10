@@ -345,7 +345,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_call { .. }
             | methods::MethodCall::chainHead_unstable_continue { .. }
             | methods::MethodCall::chainHead_unstable_follow { .. }
-            | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
             | methods::MethodCall::chainHead_unstable_stopOperation { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
@@ -453,9 +452,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_continue { .. } => {
                 self.chain_head_continue(request).await;
-            }
-            methods::MethodCall::chainHead_unstable_genesisHash {} => {
-                self.chain_head_unstable_genesis_hash(request).await;
             }
             methods::MethodCall::chainHead_unstable_storage { .. } => {
                 self.chain_head_storage(request).await;
@@ -619,7 +615,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::chainHead_unstable_call { .. }
             | methods::MethodCall::chainHead_unstable_continue { .. }
             | methods::MethodCall::chainHead_unstable_follow { .. }
-            | methods::MethodCall::chainHead_unstable_genesisHash { .. }
             | methods::MethodCall::chainHead_unstable_header { .. }
             | methods::MethodCall::chainHead_unstable_stopOperation { .. }
             | methods::MethodCall::chainHead_unstable_storage { .. }
