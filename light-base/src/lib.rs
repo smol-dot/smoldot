@@ -1105,14 +1105,17 @@ async fn start_services<TPlat: platform::PlatformRef>(
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),
-                has_grandpa_protocol: matches!(
+                grandpa_protocol_finalized_block_height: if matches!(
                     chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ),
+                ) {
+                    Some(chain_information.as_ref().finalized_block_header.number)
+                } else {
+                    None
+                },
                 genesis_block_hash: header::hash_from_scale_encoded_header(
                     &genesis_block_scale_encoded_header,
                 ),
-                finalized_block_height: chain_information.as_ref().finalized_block_header.number,
                 best_block: (
                     chain_information.as_ref().finalized_block_header.number,
                     chain_information

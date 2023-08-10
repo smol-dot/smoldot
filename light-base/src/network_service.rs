@@ -96,9 +96,6 @@ pub struct ConfigChain {
     /// >           in the chain.
     pub genesis_block_hash: [u8; 32],
 
-    /// Number of the finalized block at the time of the initialization.
-    pub finalized_block_height: u64,
-
     /// Number and hash of the current best block. Can later be updated with
     /// [`NetworkService::set_local_best_block`].
     pub best_block: (u64, [u8; 32]),
@@ -110,8 +107,9 @@ pub struct ConfigChain {
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
 
-    /// If true, the chain uses the GrandPa networking protocol.
-    pub has_grandpa_protocol: bool,
+    /// Must be `Some` if and only if the chain uses the GrandPa networking protocol. Contains the
+    /// number of the finalized block at the time of the initialization.
+    pub grandpa_protocol_finalized_block_height: Option<u64>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -145,10 +143,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chains.push(service::ChainConfig {
                 in_slots: 3,
                 out_slots: 4,
-                grandpa_protocol_config: if chain.has_grandpa_protocol {
+                grandpa_protocol_config: if let Some(commit_finalized_height) =
+                    chain.grandpa_protocol_finalized_block_height
+                {
                     // TODO: dummy values
                     Some(service::GrandpaState {
-                        commit_finalized_height: chain.finalized_block_height,
+                        commit_finalized_height,
                         round_number: 1,
                         set_id: 0,
                     })
