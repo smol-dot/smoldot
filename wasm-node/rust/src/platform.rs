@@ -544,16 +544,24 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     stream_inner.something_happened.listen()
                 };
 
-                listener
-                    .or(async {
-                        if let Some(when_wake_up) = stream.when_wake_up.as_mut() {
-                            when_wake_up.await;
-                            stream.when_wake_up = None;
-                        } else {
-                            future::pending().await
-                        }
-                    })
-                    .await
+                let timer_stop = async move {
+                    listener.await;
+                    false
+                }
+                .or(async {
+                    if let Some(when_wake_up) = stream.when_wake_up.as_mut() {
+                        when_wake_up.await;
+                        stream.when_wake_up = None;
+                        true
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .await;
+
+                if timer_stop {
+                    return;
+                }
             }
         })
     }
