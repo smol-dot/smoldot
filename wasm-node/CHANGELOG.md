@@ -12,6 +12,7 @@
 - The block announces substream handshake of a parachain peer-to-peer network now properly contains the block that smoldot thinks is the best. The genesis block was previously always reported. ([#1012](https://github.com/smol-dot/smoldot/pull/1012))
 - Fix panic when removing a chain while a networking connection is being opened. ([#1011](https://github.com/smol-dot/smoldot/pull/1011))
 - Fix epoch start slot calculation when epochs have been skipped. ([#1015](https://github.com/smol-dot/smoldot/pull/1015))
+- Fix timeouts not working properly in the networking.
 
 ## 1.0.15 - 2023-08-08
 

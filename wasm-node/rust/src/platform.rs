@@ -17,6 +17,8 @@
 
 use crate::{bindings, timers::Delay};
 
+use futures_lite::future::FutureExt as _;
+
 use smoldot_light::platform::{read_write, ConnectError, SubstreamDirection};
 
 use core::{future, iter, mem, ops, pin, str, task, time::Duration};
@@ -293,6 +295,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         writable_bytes: 0,
                         write_closable,
                         write_closed: false,
+                        when_wake_up: None,
                     })
                 }
                 ConnectionInner::Reset {
@@ -458,6 +461,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     writable_bytes: usize::try_from(initial_writable_bytes).unwrap(),
                     write_closable: false, // Note: this is currently hardcoded for WebRTC.
                     write_closed: false,
+                    when_wake_up: None,
                 },
                 direction,
             ))
@@ -540,7 +544,16 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     stream_inner.something_happened.listen()
                 };
 
-                listener.await
+                listener
+                    .or(async {
+                        if let Some(when_wake_up) = stream.when_wake_up.as_mut() {
+                            when_wake_up.await;
+                            stream.when_wake_up = None;
+                        } else {
+                            future::pending().await
+                        }
+                    })
+                    .await
             }
         })
     }
@@ -603,6 +616,11 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .get_mut(&(self.stream.connection_id, self.stream.stream_id))
             .unwrap();
 
+        self.stream.when_wake_up = self
+            .read_write
+            .wake_up_after
+            .map(|when| Delay::new_at(when));
+
         self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
 
         for buffer in self.read_write.write_buffers.drain(..) {
@@ -648,6 +666,8 @@ pub(crate) struct StreamWrapper {
     writable_bytes: usize,
     write_closable: bool,
     write_closed: bool,
+    /// The stream should wake up after this delay.
+    when_wake_up: Option<Delay>,
 }
 
 impl Drop for StreamWrapper {
