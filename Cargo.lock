@@ -2440,6 +2440,7 @@ version = "1.0.15"
 dependencies = [
  "async-executor",
  "async-task",
+ "derive_more",
  "event-listener",
  "fnv",
  "futures-util",
