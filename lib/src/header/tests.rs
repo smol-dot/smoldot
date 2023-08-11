@@ -49,14 +49,14 @@ fn decode_rococo() {
 fn decode_polkadot() {
     // Polkadot block #512271.
     // Has a GrandPa scheduled change.
-    super::decode(include_bytes!("./tests-header-polkadot-512271"), 4).unwrap();
+    super::decode(include_bytes!("./tests/header-polkadot-512271"), 4).unwrap();
 }
 
 #[test]
 fn decode_reencode_kusama_7472481() {
     // Kusama block #7472481.
     // Make sure that it encodes back to what is was decoded.
-    let expected = include_bytes!("./tests-header-kusama-7472481");
+    let expected = include_bytes!("./tests/header-kusama-7472481");
     let decoded = super::decode(expected, 4).unwrap();
     assert_eq!(decoded.scale_encoding_vec(4), expected);
 }
