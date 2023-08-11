@@ -385,48 +385,48 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ),
             ) {
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (Ok(genesis_ci), checkpoint, Ok(database_content))
-                    if database_content.genesis_block_hash
-                        == genesis_ci
-                            .as_ref()
-                            .finalized_block_header
-                            .hash(chain_spec.block_number_bytes().into())
-                        && checkpoint.as_ref().and_then(|r| r.as_ref().ok()).map_or(
-                            true,
-                            |cp| {
-                                cp.as_ref().finalized_block_header.number
-                                    < database_content
-                                        .chain_information
-                                        .as_ref()
-                                        .finalized_block_header
-                                        .number
-                            },
-                        ) =>
+                (
+                    Ok(genesis_ci),
+                    checkpoint,
+                    Ok(database::DatabaseContent {
+                        chain_information: Some(db_ci),
+                        genesis_block_hash: db_genesis_hash,
+                        known_nodes,
+                        runtime_code_hint,
+                    }),
+                ) if db_genesis_hash
+                    == genesis_ci
+                        .as_ref()
+                        .finalized_block_header
+                        .hash(chain_spec.block_number_bytes().into())
+                    && checkpoint
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .map_or(true, |cp| {
+                            cp.as_ref().finalized_block_header.number
+                                < db_ci.as_ref().finalized_block_header.number
+                        }) =>
                 {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (
-                        database_content.chain_information,
-                        genesis_header.into(),
-                        database_content.known_nodes,
-                        database_content.runtime_code_hint,
-                    )
+                    (db_ci, genesis_header.into(), known_nodes, runtime_code_hint)
                 }
 
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     checkpoint,
-                    Ok(database_content),
+                    Ok(database::DatabaseContent {
+                        chain_information: Some(chain_information),
+                        genesis_block_hash,
+                        known_nodes,
+                        runtime_code_hint,
+                    }),
                 ) if checkpoint
                     .as_ref()
                     .and_then(|r| r.as_ref().ok())
                     .map_or(true, |cp| {
                         cp.as_ref().finalized_block_header.number
-                            < database_content
-                                .chain_information
-                                .as_ref()
-                                .finalized_block_header
-                                .number
+                            < chain_information.as_ref().finalized_block_header.number
                     }) =>
                 {
                     let genesis_header = header::Header {
@@ -437,23 +437,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    if database_content.genesis_block_hash
+                    if genesis_block_hash
                         == genesis_header.hash(chain_spec.block_number_bytes().into())
                     {
                         (
-                            database_content.chain_information,
+                            chain_information,
                             genesis_header,
-                            database_content.known_nodes,
-                            database_content.runtime_code_hint,
+                            known_nodes,
+                            runtime_code_hint,
                         )
                     } else if let Some(Ok(checkpoint)) = checkpoint {
                         // Database is incorrect.
-                        (
-                            checkpoint,
-                            genesis_header,
-                            database_content.known_nodes,
-                            None,
-                        )
+                        (checkpoint, genesis_header, known_nodes, None)
                     } else {
                         // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
                         // TODO: is this relevant for parachains?
@@ -470,7 +465,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     Some(Ok(checkpoint)),
-                    _,
+                    database,
                 ) => {
                     let genesis_header = header::Header {
                         parent_hash: [0; 32],
@@ -480,14 +475,49 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (checkpoint, genesis_header, Default::default(), None)
+                    let mut checkpoint_nodes = Vec::new();
+                    let mut runtime_cache_hint = None;
+
+                    if let Ok(database) = database {
+                        if database.genesis_block_hash
+                            == genesis_header.hash(chain_spec.block_number_bytes().into())
+                        {
+                            checkpoint_nodes = database.known_nodes.clone();
+                            runtime_cache_hint = database.runtime_code_hint.clone();
+                        }
+                    }
+
+                    (
+                        checkpoint,
+                        genesis_header,
+                        checkpoint_nodes,
+                        runtime_cache_hint,
+                    )
                 }
 
                 (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
 
-                (Ok(genesis_ci), Some(Ok(checkpoint)), _) => {
+                (Ok(genesis_ci), Some(Ok(checkpoint)), database) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (checkpoint, genesis_header.into(), Default::default(), None)
+
+                    let mut checkpoint_nodes = Vec::new();
+                    let mut runtime_cache_hint = None;
+
+                    if let Ok(database) = database {
+                        if database.genesis_block_hash
+                            == genesis_header.hash(chain_spec.block_number_bytes().into())
+                        {
+                            checkpoint_nodes = database.known_nodes.clone();
+                            runtime_cache_hint = database.runtime_code_hint.clone();
+                        }
+                    }
+
+                    (
+                        checkpoint,
+                        genesis_header.into(),
+                        checkpoint_nodes,
+                        runtime_cache_hint,
+                    )
                 }
 
                 (
@@ -496,11 +526,28 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     | Some(Err(
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
-                    _,
+                    database,
                 ) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
-                    (genesis_ci, genesis_header, Default::default(), None)
+                    let mut checkpoint_nodes = Vec::new();
+                    let mut runtime_cache_hint = None;
+
+                    if let Ok(database) = database {
+                        if database.genesis_block_hash
+                            == genesis_header.hash(chain_spec.block_number_bytes().into())
+                        {
+                            checkpoint_nodes = database.known_nodes.clone();
+                            runtime_cache_hint = database.runtime_code_hint.clone();
+                        }
+                    }
+
+                    (
+                        genesis_ci,
+                        genesis_header,
+                        checkpoint_nodes,
+                        runtime_cache_hint,
+                    )
                 }
 
                 (_, Some(Err(err)), _) => {
