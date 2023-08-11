@@ -2443,6 +2443,7 @@ dependencies = [
  "derive_more",
  "event-listener",
  "fnv",
+ "futures-lite",
  "futures-util",
  "hashbrown 0.14.0",
  "log",
