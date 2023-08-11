@@ -13,6 +13,7 @@
 - Fix panic when removing a chain while a networking connection is being opened. ([#1011](https://github.com/smol-dot/smoldot/pull/1011))
 - Fix epoch start slot calculation when epochs have been skipped. ([#1015](https://github.com/smol-dot/smoldot/pull/1015))
 - Fix timeouts not working properly in the networking. ([#1023](https://github.com/smol-dot/smoldot/pull/1023))
+- Fix panic when calling `Chain.remove` while `Chain.nextJsonRpcResponse` is in progress. ([#1025](https://github.com/smol-dot/smoldot/pull/1025))
 
 ## 1.0.15 - 2023-08-08
 
