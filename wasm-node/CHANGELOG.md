@@ -5,6 +5,7 @@
 ### Changed
 
 - Removed the `chainHead_unstable_genesisHash` JSON-RPC function, in accordance with the latest changes in the JSON-RPC API specification. ([#1010](https://github.com/smol-dot/smoldot/pull/1010))
+- The database of a parachain now contains a list of known peer-to-peer nodes and a cache of the runtime code of the parachain, similar to the database of a relay chain. The database of a parachain was previously always empty. ([#1018](https://github.com/smol-dot/smoldot/pull/1018))
 
 ### Fixed
 
