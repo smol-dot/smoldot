@@ -51,7 +51,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     type StreamConnectFuture =
         pin::Pin<Box<dyn future::Future<Output = Result<Self::Stream, ConnectError>> + Send>>;
     type ReadWriteAccess<'a> = ReadWriteAccess<'a>;
-    type StreamErrorRef<'a> = String;
+    type StreamErrorRef<'a> = StreamError;
     type MultiStreamConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
@@ -552,7 +552,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let stream = stream.get_mut();
 
         if stream.is_reset {
-            todo!()
+            return Err(StreamError {});
         }
 
         Ok(ReadWriteAccess {
@@ -741,6 +741,10 @@ impl Drop for MultiStreamWrapper {
         }
     }
 }
+
+#[derive(Debug, derive_more::Display, Clone)]
+#[display(fmt = "stream error")]
+pub(crate) struct StreamError;
 
 static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
     next_connection_id: 0,
