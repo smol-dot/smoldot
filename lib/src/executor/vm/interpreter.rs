@@ -172,7 +172,7 @@ impl InterpreterPrototype {
 
         let instance = linker
             .instantiate(&mut store, &base_components.module)
-            .map_err(|err| NewErr::Other(err.to_string()))?
+            .map_err(|err| NewErr::Instantiation(err.to_string()))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 

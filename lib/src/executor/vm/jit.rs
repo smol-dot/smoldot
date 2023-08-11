@@ -298,7 +298,7 @@ impl JitPrototype {
         let instance = wasmtime::Instance::new_async(&mut store, &base_components.module, &imports)
             .now_or_never()
             .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
-            .map_err(|err| NewErr::Other(err.to_string()))?;
+            .map_err(|err| NewErr::Instantiation(err.to_string()))?;
 
         // Now that we are passed the `start` stage, update the state of execution.
         *shared.lock().unwrap() = Shared::Poisoned;
