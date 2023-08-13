@@ -547,12 +547,11 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                     }
                 },
                 nextJsonRpcResponse: async () => {
-                    if (!state.chains.has(chainId))
-                        throw new AlreadyDestroyedError();
-                    if (options.disableJsonRpc)
-                        return Promise.reject(new JsonRpcDisabledError());
-
                     while (true) {
+                        if (!state.chains.has(chainId))
+                            throw new AlreadyDestroyedError();
+                        if (options.disableJsonRpc)
+                            return Promise.reject(new JsonRpcDisabledError());
                         if (state.instance.status === "destroyed")
                             throw state.instance.error;
                         if (state.instance.status !== "ready")
