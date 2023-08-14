@@ -251,7 +251,6 @@ where
                             unreachable!();
                         }
                         Poll::Ready(Ok(mut n)) => {
-                            pending = false;
                             *this.flush_pending = true;
                             while n > 0 {
                                 let first_buf = this.write_buffers.first_mut().unwrap();
@@ -265,6 +264,10 @@ where
                                     break;
                                 }
                             }
+                            // Wake up if the write buffers switch from non-empty to empty.
+                            if this.write_buffers.is_empty() {
+                                pending = false;
+                            }
                         }
                         Poll::Ready(Err(err)) => {
                             *this.error = Some(err);
@@ -276,7 +279,6 @@ where
                     match AsyncWrite::poll_flush(this.socket.as_mut(), cx) {
                         Poll::Ready(Ok(())) => {
                             *this.flush_pending = false;
-                            pending = false;
                         }
                         Poll::Ready(Err(err)) => {
                             *this.error = Some(err);
@@ -379,10 +381,15 @@ impl<'a> Drop for ReadWriteAccess<'a> {
         }
 
         *self.read_write_wake_up_after = self.read_write.wake_up_after.take();
+
         // If the consumer has advanced its reading or writing sides, we make the next call to
         // `read_write_access` return immediately by setting `wake_up_after`.
-        if self.read_buffer_len_before != self.read_buffer.len()
-            || self.write_buffers_len_before != self.write_buffers.len()
+        if (self.read_buffer_len_before != self.read_buffer.len()
+            && self
+                .read_write
+                .expected_incoming_bytes
+                .map_or(false, |b| b <= self.read_buffer.len()))
+            || (self.write_buffers_len_before != self.write_buffers.len() && !*self.write_closed)
         {
             *self.read_write_wake_up_after = Some(self.read_write.now.clone());
         }

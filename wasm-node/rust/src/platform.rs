@@ -522,6 +522,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         while let Some(msg) = stream_inner.messages_queue.pop_front() {
                             // TODO: could be optimized by reworking the bindings
                             stream.read_buffer.extend_from_slice(&msg);
+                            // TODO: only wake up if `read_bytes >= expected_incoming_bytes`
                             shall_return = true;
                         }
 
@@ -623,6 +624,14 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .streams
             .get_mut(&(self.stream.connection_id, self.stream.stream_id))
             .unwrap();
+
+        // TODO: only wake up if `read_bytes >= expected_incoming_bytes`
+        if (self.read_write.read_bytes != 0 && !self.read_write.incoming_buffer.is_empty())
+            || (self.read_write.write_bytes_queued != 0
+                && self.read_write.write_bytes_queueable.is_some())
+        {
+            self.read_write.wake_up_asap();
+        }
 
         self.stream.when_wake_up = self
             .read_write
