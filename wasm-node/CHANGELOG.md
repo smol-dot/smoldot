@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.16 - 2023-08-14
+
 ### Changed
 
 - Removed the `chainHead_unstable_genesisHash` JSON-RPC function, in accordance with the latest changes in the JSON-RPC API specification. ([#1010](https://github.com/smol-dot/smoldot/pull/1010))
