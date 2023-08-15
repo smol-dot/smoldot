@@ -124,7 +124,7 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     ///
     /// > **Note**: This information is normally found in the chain specification of the
     /// >           parachain.
-    pub parachain_id: u32,
+    pub para_id: u32,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -163,7 +163,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         config.block_number_bytes,
                         config_parachain.relay_chain_sync.clone(),
                         config_parachain.relay_chain_block_number_bytes,
-                        config_parachain.parachain_id,
+                        config_parachain.para_id,
                         from_foreground,
                         config.network_service.0.clone(),
                         config.network_service.1,
