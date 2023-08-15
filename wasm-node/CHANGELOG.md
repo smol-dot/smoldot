@@ -4,7 +4,7 @@
 
 ### Changed
 
-- It is now possible for parachain chain specifications to include just a `genesis.stateRootHash` field (and no `genesis.raw` field). A warning in the logs is now printed for all chain specifications that include a `genesis.raw` field.
+- It is now possible for parachain chain specifications to include just a `genesis.stateRootHash` field (and no `genesis.raw` field). A warning in the logs is now printed for all chain specifications that include a `genesis.raw` field. ([#1034](https://github.com/smol-dot/smoldot/pull/1034))
 
 ## 1.0.16 - 2023-08-14
 
