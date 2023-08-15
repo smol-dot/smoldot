@@ -517,7 +517,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // in the list of potential relay chains passed by the user.
         // If no relay chain can be found, the chain creation fails. Exactly one matching relay
         // chain must be found. If there are multiple ones, the creation fails as well.
-        let relay_chain_id = if let Some((relay_chain_id, _para_id)) = chain_spec.relay_chain() {
+        let relay_chain_id = if let Some((relay_chain_id, para_id)) = chain_spec.relay_chain() {
             let chain = config
                 .potential_relay_chains
                 .filter(|c| {
@@ -528,7 +528,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 .exactly_one();
 
             match chain {
-                Ok(c) => Some(c),
+                Ok(c) => Some((c, para_id)),
                 Err(mut iter) => {
                     // `iter` here is identical to the iterator above before `exactly_one` is
                     // called. This lets us know what failed.
@@ -589,7 +589,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // were considered identical while they're in reality not identical.
         let new_chain_key = ChainKey {
             genesis_block_hash,
-            relay_chain: relay_chain_id.map(|ck| {
+            relay_chain: relay_chain_id.map(|(ck, _)| {
                 (
                     Box::new(self.public_api_chains.get(ck.0).unwrap().key.clone()),
                     chain_spec.relay_chain().unwrap().1,
@@ -606,8 +606,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // relay chain services.
         //
         // This could in principle be done later on, but doing so raises borrow checker errors.
-        let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, String)> =
-            relay_chain_id.map(|relay_chain| {
+        let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, u32, String)> =
+            relay_chain_id.map(|(relay_chain, para_id)| {
                 let relay_chain = &chains_by_key
                     .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
@@ -618,7 +618,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     future::MaybeDone::Gone => unreachable!(),
                 };
 
-                (future, relay_chain.log_name.clone())
+                (future, para_id, relay_chain.log_name.clone())
             });
 
         // Determinate the name under which the chain will be identified in the logs.
@@ -691,7 +691,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 // yields a `ChainServices`.
                 let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
                     let platform = self.platform.clone();
-                    let chain_spec = chain_spec.clone(); // TODO: quite expensive
+                    let fork_id = chain_spec.fork_id().map(|f| f.to_owned());
+                    let chain_name = chain_spec.name().to_owned();
+                    let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
                     let log_name = log_name.clone();
                     let block_number_bytes = usize::from(chain_spec.block_number_bytes());
                     let starting_block_number = chain_information
@@ -708,40 +710,40 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
                     let future = async move {
                         // Wait until the relay chain has finished initializing, if necessary.
-                        let relay_chain =
-                            if let Some((mut relay_chain_ready_future, relay_chain_log_name)) =
-                                relay_chain_ready_future
-                            {
-                                (&mut relay_chain_ready_future).await;
-                                let running_relay_chain =
-                                    pin::Pin::new(&mut relay_chain_ready_future)
-                                        .take_output()
-                                        .unwrap();
-                                Some((running_relay_chain, relay_chain_log_name))
-                            } else {
-                                None
-                            };
-
-                        // TODO: avoid cloning here
-                        let chain_name = chain_spec.name().to_owned();
-                        let relay_chain_para_id = chain_spec.relay_chain().map(|(_, id)| id);
-                        let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
+                        let relay_chain = if let Some((
+                            mut relay_chain_ready_future,
+                            para_id,
+                            relay_chain_log_name,
+                        )) = relay_chain_ready_future
+                        {
+                            (&mut relay_chain_ready_future).await;
+                            let running_relay_chain = pin::Pin::new(&mut relay_chain_ready_future)
+                                .take_output()
+                                .unwrap();
+                            Some((running_relay_chain, para_id, relay_chain_log_name))
+                        } else {
+                            None
+                        };
 
                         let running_chain = {
                             let config = match (&relay_chain, chain_information) {
-                                (Some((relay_chain, _)), Some(chain_information)) => {
+                                (Some((relay_chain, para_id, _)), Some(chain_information)) => {
                                     StartServicesChainTy::Parachain {
                                         relay_chain,
                                         finalized_block_header: chain_information
                                             .as_ref()
                                             .finalized_block_header
                                             .scale_encoding_vec(block_number_bytes),
+                                        para_id: *para_id,
                                     }
                                 }
-                                (Some((relay_chain, _)), None) => StartServicesChainTy::Parachain {
-                                    relay_chain,
-                                    finalized_block_header: genesis_block_header.clone(),
-                                },
+                                (Some((relay_chain, para_id, _)), None) => {
+                                    StartServicesChainTy::Parachain {
+                                        relay_chain,
+                                        finalized_block_header: genesis_block_header.clone(),
+                                        para_id: *para_id,
+                                    }
+                                }
                                 (None, Some(chain_information)) => {
                                     StartServicesChainTy::RelayChain { chain_information }
                                 }
@@ -756,7 +758,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 &platform,
                                 runtime_code_hint,
                                 genesis_block_header,
-                                chain_spec,
+                                block_number_bytes,
+                                fork_id,
                                 config,
                                 network_identify_agent_version,
                                 network_noise_key,
@@ -766,7 +769,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
-                        if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
+                        if let Some((_, para_id, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
                                 target: "smoldot",
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
@@ -776,7 +779,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 HashDisplay(&genesis_block_hash),
                                 running_chain.network_identity,
                                 relay_chain_log_name,
-                                relay_chain_para_id.unwrap(),
+                                para_id,
                             );
                         } else {
                             log::info!(
@@ -1127,6 +1130,7 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
         finalized_block_header: Vec<u8>,
+        para_id: u32,
     },
 }
 
@@ -1139,7 +1143,8 @@ async fn start_services<TPlat: platform::PlatformRef>(
     platform: &TPlat,
     runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
-    chain_spec: chain_spec::ChainSpec,
+    block_number_bytes: usize,
+    fork_id: Option<String>,
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
     network_noise_key: connection::NoiseKey,
@@ -1183,16 +1188,15 @@ async fn start_services<TPlat: platform::PlatformRef>(
                         chain_information
                             .as_ref()
                             .finalized_block_header
-                            .hash(chain_spec.block_number_bytes().into()),
+                            .hash(block_number_bytes),
                     ),
                     StartServicesChainTy::Parachain {
                         finalized_block_header,
                         ..
                     } => {
-                        if let Ok(decoded) = header::decode(
-                            finalized_block_header,
-                            usize::from(chain_spec.block_number_bytes()),
-                        ) {
+                        if let Ok(decoded) =
+                            header::decode(finalized_block_header, usize::from(block_number_bytes))
+                        {
                             (
                                 decoded.number,
                                 header::hash_from_scale_encoded_header(&finalized_block_header),
@@ -1207,8 +1211,8 @@ async fn start_services<TPlat: platform::PlatformRef>(
                         }
                     }
                 },
-                fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
-                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                fork_id,
+                block_number_bytes: usize::from(block_number_bytes),
             }],
         })
         .await;
@@ -1217,6 +1221,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
         StartServicesChainTy::Parachain {
             relay_chain,
             finalized_block_header,
+            para_id,
             ..
         } => {
             // Chain is a parachain.
@@ -1228,13 +1233,13 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 sync_service::SyncService::new(sync_service::Config {
                     platform: platform.clone(),
                     log_name: log_name.clone(),
-                    block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                    block_number_bytes,
                     network_service: (network_service.clone(), 0),
                     network_events_receiver: network_event_receivers.pop().unwrap(),
                     chain_type: sync_service::ConfigChainType::Parachain(
                         sync_service::ConfigParachain {
                             finalized_block_header,
-                            parachain_id: chain_spec.relay_chain().unwrap().1,
+                            para_id,
                             relay_chain_sync: relay_chain.runtime_service.clone(),
                             relay_chain_block_number_bytes: relay_chain
                                 .sync_service
@@ -1268,7 +1273,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
             let sync_service = Arc::new(
                 sync_service::SyncService::new(sync_service::Config {
                     log_name: log_name.clone(),
-                    block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                    block_number_bytes,
                     platform: platform.clone(),
                     network_service: (network_service.clone(), 0),
                     network_events_receiver: network_event_receivers.pop().unwrap(),
