@@ -293,14 +293,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 case 16: {
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
-                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 3);
+                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
                     address = { ty: "webrtc", ipVersion: '4', remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
                 case 17: {
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
-                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 3);
+                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
                     address = { ty: "webrtc", ipVersion: '6', remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
