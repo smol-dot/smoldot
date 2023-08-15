@@ -443,7 +443,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ) if db_ci.as_ref().finalized_block_header.number
                     >= checkpoint.as_ref().finalized_block_header.number =>
                 {
-                    (db_ci, true, known_nodes, runtime_code_hint)
+                    (Some(db_ci), true, known_nodes, runtime_code_hint)
                 }
 
                 // Otherwise, use the chain spec checkpoint.
@@ -455,18 +455,23 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         runtime_code_hint,
                         ..
                     }),
-                ) => (checkpoint, false, known_nodes, runtime_code_hint),
-                (_, Some(Ok(checkpoint)), None) => (checkpoint, false, Vec::new(), None),
+                ) => (Some(checkpoint), false, known_nodes, runtime_code_hint),
+                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new(), None),
 
                 // If neither the genesis chain information nor the checkpoint chain information
                 // is available, we could in principle use the database, but for API reasons we
                 // don't want users to be able to rely on just a database (as we reserve the right
                 // to break the database at any point) and thus return an error.
-                (None, None, _) => {
-                    // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    // TODO: https://github.com/smol-dot/smoldot/issues/908
-                    return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
-                }
+                (
+                    None,
+                    None,
+                    Some(database::DatabaseContent {
+                        known_nodes,
+                        runtime_code_hint,
+                        ..
+                    }),
+                ) => (None, false, known_nodes, runtime_code_hint),
+                (None, None, None) => (None, false, Vec::new(), None),
 
                 // Use the genesis block if no checkpoint is available.
                 (
@@ -480,7 +485,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         runtime_code_hint,
                         ..
                     }),
-                ) => (genesis_ci, false, known_nodes, runtime_code_hint),
+                ) => (Some(genesis_ci), false, known_nodes, runtime_code_hint),
                 (
                     Some(genesis_ci),
                     None
@@ -488,7 +493,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     None,
-                ) => (genesis_ci, false, Vec::new(), None),
+                ) => (Some(genesis_ci), false, Vec::new(), None),
 
                 // If the checkpoint format is invalid, we return an error no matter whether the
                 // genesis chain information could be used.
@@ -678,6 +683,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     let platform = self.platform.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
                     let log_name = log_name.clone();
+                    let block_number_bytes = usize::from(chain_spec.block_number_bytes());
+                    let starting_block_number = chain_information
+                        .as_ref()
+                        .map(|ci| ci.as_ref().finalized_block_header.number)
+                        .unwrap_or(0);
+                    let starting_block_hash = chain_information
+                        .as_ref()
+                        .map(|ci| ci.as_ref().finalized_block_header.hash(block_number_bytes))
+                        .unwrap_or(genesis_block_hash);
+                    if let (None, None) = (&relay_chain_ready_future, &chain_information) {
+                        return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
+                    }
 
                     let future = async move {
                         // Wait until the relay chain has finished initializing, if necessary.
@@ -698,35 +715,44 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         // TODO: avoid cloning here
                         let chain_name = chain_spec.name().to_owned();
                         let relay_chain_para_id = chain_spec.relay_chain().map(|(_, id)| id);
-                        let starting_block_number =
-                            chain_information.as_ref().finalized_block_header.number;
-                        let block_number_bytes = usize::from(chain_spec.block_number_bytes());
-                        let starting_block_hash = chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .hash(block_number_bytes);
                         let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
 
-                        let running_chain = start_services(
-                            log_name.clone(),
-                            &platform,
-                            runtime_code_hint,
-                            genesis_block_header,
-                            chain_spec,
-                            match &relay_chain {
-                                Some((relay_chain, _)) => StartServicesChainTy::Parachain {
+                        let running_chain = {
+                            let config = match (&relay_chain, chain_information) {
+                                (Some((relay_chain, _)), Some(chain_information)) => {
+                                    StartServicesChainTy::Parachain {
+                                        relay_chain,
+                                        finalized_block_header: chain_information
+                                            .as_ref()
+                                            .finalized_block_header
+                                            .scale_encoding_vec(block_number_bytes),
+                                    }
+                                }
+                                (Some((relay_chain, _)), None) => StartServicesChainTy::Parachain {
                                     relay_chain,
-                                    finalized_block_header: chain_information
-                                        .as_ref()
-                                        .finalized_block_header
-                                        .scale_encoding_vec(block_number_bytes),
+                                    finalized_block_header: genesis_block_header.clone(),
                                 },
-                                None => StartServicesChainTy::RelayChain { chain_information },
-                            },
-                            network_identify_agent_version,
-                            network_noise_key,
-                        )
-                        .await;
+                                (None, Some(chain_information)) => {
+                                    StartServicesChainTy::RelayChain { chain_information }
+                                }
+                                (None, None) => {
+                                    // Checked above.
+                                    unreachable!()
+                                }
+                            };
+
+                            start_services(
+                                log_name.clone(),
+                                &platform,
+                                runtime_code_hint,
+                                genesis_block_header,
+                                chain_spec,
+                                config,
+                                network_identify_agent_version,
+                                network_noise_key,
+                            )
+                            .await
+                        };
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
