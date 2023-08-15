@@ -839,7 +839,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 };
 
                 let platform = self.platform.clone();
-                let known_nodes = known_nodes.clone();
 
                 async move {
                     // Wait for the chain to finish initializing to proceed.
