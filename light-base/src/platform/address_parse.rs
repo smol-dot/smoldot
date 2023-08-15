@@ -107,7 +107,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
         ) => {
             // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
             let multihash = multihash::MultihashRef::from_bytes(&hash).unwrap();
-            if multihash.hash_algorithm_code() != 12 {
+            if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
             let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data())
@@ -129,7 +129,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
         ) => {
             // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
             let multihash = multihash::MultihashRef::from_bytes(&hash).unwrap();
-            if multihash.hash_algorithm_code() != 12 {
+            if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
             let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data())
