@@ -370,7 +370,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Build the genesis block, its hash, and information about the chain.
-        let (genesis_chain_information, genesis_block_header, genesis_block_state_root) = {
+        let (
+            genesis_chain_information,
+            genesis_block_header,
+            genesis_root_in_chain_spec,
+            genesis_block_state_root,
+        ) = {
             // TODO: don't build the chain information if only the genesis hash is needed: https://github.com/smol-dot/smoldot/issues/1017
             let genesis_chain_information = chain_spec.to_chain_information().map(|(ci, _)| ci); // TODO: don't just throw away the runtime;
 
@@ -380,7 +385,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     let state_root = *header.state_root;
                     let scale_encoded =
                         header.scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
-                    (Some(genesis_chain_information), scale_encoded, state_root)
+                    (
+                        Some(genesis_chain_information),
+                        scale_encoded,
+                        false,
+                        state_root,
+                    )
                 }
                 Err(chain_spec::FromGenesisStorageError::UnknownStorageItems) => {
                     let state_root = *chain_spec.genesis_storage().into_trie_root_hash().unwrap();
@@ -392,7 +402,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     }
                     .scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
-                    (None, header, state_root)
+                    (None, header, true, state_root)
                 }
                 Err(err) => return Err(AddChainError::InvalidGenesisStorage(err)),
             }
@@ -443,7 +453,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 ) if db_ci.as_ref().finalized_block_header.number
                     >= checkpoint.as_ref().finalized_block_header.number =>
                 {
-                    (db_ci, true, known_nodes, runtime_code_hint)
+                    (Some(db_ci), true, known_nodes, runtime_code_hint)
                 }
 
                 // Otherwise, use the chain spec checkpoint.
@@ -455,18 +465,23 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         runtime_code_hint,
                         ..
                     }),
-                ) => (checkpoint, false, known_nodes, runtime_code_hint),
-                (_, Some(Ok(checkpoint)), None) => (checkpoint, false, Vec::new(), None),
+                ) => (Some(checkpoint), false, known_nodes, runtime_code_hint),
+                (_, Some(Ok(checkpoint)), None) => (Some(checkpoint), false, Vec::new(), None),
 
                 // If neither the genesis chain information nor the checkpoint chain information
                 // is available, we could in principle use the database, but for API reasons we
                 // don't want users to be able to rely on just a database (as we reserve the right
                 // to break the database at any point) and thus return an error.
-                (None, None, _) => {
-                    // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    // TODO: https://github.com/smol-dot/smoldot/issues/908
-                    return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
-                }
+                (
+                    None,
+                    None,
+                    Some(database::DatabaseContent {
+                        known_nodes,
+                        runtime_code_hint,
+                        ..
+                    }),
+                ) => (None, false, known_nodes, runtime_code_hint),
+                (None, None, None) => (None, false, Vec::new(), None),
 
                 // Use the genesis block if no checkpoint is available.
                 (
@@ -480,7 +495,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         runtime_code_hint,
                         ..
                     }),
-                ) => (genesis_ci, false, known_nodes, runtime_code_hint),
+                ) => (Some(genesis_ci), false, known_nodes, runtime_code_hint),
                 (
                     Some(genesis_ci),
                     None
@@ -488,7 +503,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
                     None,
-                ) => (genesis_ci, false, Vec::new(), None),
+                ) => (Some(genesis_ci), false, Vec::new(), None),
 
                 // If the checkpoint format is invalid, we return an error no matter whether the
                 // genesis chain information could be used.
@@ -678,6 +693,18 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     let platform = self.platform.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
                     let log_name = log_name.clone();
+                    let block_number_bytes = usize::from(chain_spec.block_number_bytes());
+                    let starting_block_number = chain_information
+                        .as_ref()
+                        .map(|ci| ci.as_ref().finalized_block_header.number)
+                        .unwrap_or(0);
+                    let starting_block_hash = chain_information
+                        .as_ref()
+                        .map(|ci| ci.as_ref().finalized_block_header.hash(block_number_bytes))
+                        .unwrap_or(genesis_block_hash);
+                    if let (None, None) = (&relay_chain_ready_future, &chain_information) {
+                        return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
+                    }
 
                     let future = async move {
                         // Wait until the relay chain has finished initializing, if necessary.
@@ -698,42 +725,55 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         // TODO: avoid cloning here
                         let chain_name = chain_spec.name().to_owned();
                         let relay_chain_para_id = chain_spec.relay_chain().map(|(_, id)| id);
-                        let starting_block_number =
-                            chain_information.as_ref().finalized_block_header.number;
-                        let starting_block_hash = chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .hash(chain_spec.block_number_bytes().into());
                         let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
 
-                        let running_chain = start_services(
-                            log_name.clone(),
-                            &platform,
-                            chain_information,
-                            runtime_code_hint,
-                            genesis_block_header,
-                            chain_spec,
-                            relay_chain.as_ref().map(|(r, _)| r),
-                            network_identify_agent_version,
-                            network_noise_key,
-                        )
-                        .await;
+                        let running_chain = {
+                            let config = match (&relay_chain, chain_information) {
+                                (Some((relay_chain, _)), Some(chain_information)) => {
+                                    StartServicesChainTy::Parachain {
+                                        relay_chain,
+                                        finalized_block_header: chain_information
+                                            .as_ref()
+                                            .finalized_block_header
+                                            .scale_encoding_vec(block_number_bytes),
+                                    }
+                                }
+                                (Some((relay_chain, _)), None) => StartServicesChainTy::Parachain {
+                                    relay_chain,
+                                    finalized_block_header: genesis_block_header.clone(),
+                                },
+                                (None, Some(chain_information)) => {
+                                    StartServicesChainTy::RelayChain { chain_information }
+                                }
+                                (None, None) => {
+                                    // Checked above.
+                                    unreachable!()
+                                }
+                            };
+
+                            start_services(
+                                log_name.clone(),
+                                &platform,
+                                runtime_code_hint,
+                                genesis_block_header,
+                                chain_spec,
+                                config,
+                                network_identify_agent_version,
+                                network_noise_key,
+                            )
+                            .await
+                        };
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
-                        //
-                        // The state root hash is printed in order to make it easy to put it
-                        // in the chain specification.
                         if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
                                 target: "smoldot",
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. State root hash: 0x{}. Network identity: {}. Relay \
-                                chain: {} (id: {})",
+                                hash: {}. Network identity: {}. Relay chain: {} (id: {})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
                                 relay_chain_log_name,
                                 relay_chain_para_id.unwrap(),
@@ -742,17 +782,26 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log::info!(
                                 target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. State root hash: 0x{}. Network identity: {}. {} \
-                                starting at: {} (#{})",
+                                hash: {}. Network identity: {}. {} starting at: {} (#{})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
                                 if used_database_chain_information { "Database" } else { "Chain specification" },
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number
                             );
+                        }
+
+                        if !genesis_root_in_chain_spec {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain specification of {} contains a `genesis.raw` item. It is \
+                                possible to significantly improve the initialization time by \
+                                replacing the `\"raw\": ...` field with \
+                                `\"stateRootHash\": \"0x{}\"`",
+                                log_name, hex::encode(genesis_block_state_root)
+                            )
                         }
 
                         // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
@@ -1071,6 +1120,16 @@ pub enum AddChainError {
     MultipleRelayChains,
 }
 
+enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
+    RelayChain {
+        chain_information: chain::chain_information::ValidChainInformation,
+    },
+    Parachain {
+        relay_chain: &'a ChainServices<TPlat>,
+        finalized_block_header: Vec<u8>,
+    },
+}
+
 /// Starts all the services of the client.
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
@@ -1078,11 +1137,10 @@ pub enum AddChainError {
 async fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
-    chain_information: chain::chain_information::ValidChainInformation,
     runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
-    relay_chain: Option<&ChainServices<TPlat>>,
+    config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
     network_noise_key: connection::NoiseKey,
 ) -> ChainServices<TPlat> {
@@ -1100,115 +1158,150 @@ async fn start_services<TPlat: platform::PlatformRef>(
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),
-                grandpa_protocol_finalized_block_height: if matches!(
-                    chain_information.as_ref().finality,
-                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ) {
-                    Some(chain_information.as_ref().finalized_block_header.number)
+                grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
+                    chain_information,
+                } = &config
+                {
+                    if matches!(
+                        chain_information.as_ref().finality,
+                        chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+                    ) {
+                        Some(chain_information.as_ref().finalized_block_header.number)
+                    } else {
+                        None
+                    }
                 } else {
+                    // Parachains never use GrandPa.
                     None
                 },
                 genesis_block_hash: header::hash_from_scale_encoded_header(
                     &genesis_block_scale_encoded_header,
                 ),
-                best_block: (
-                    chain_information.as_ref().finalized_block_header.number,
-                    chain_information
-                        .as_ref()
-                        .finalized_block_header
-                        .hash(chain_spec.block_number_bytes().into()),
-                ),
+                best_block: match &config {
+                    StartServicesChainTy::RelayChain { chain_information } => (
+                        chain_information.as_ref().finalized_block_header.number,
+                        chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .hash(chain_spec.block_number_bytes().into()),
+                    ),
+                    StartServicesChainTy::Parachain {
+                        finalized_block_header,
+                        ..
+                    } => {
+                        if let Ok(decoded) = header::decode(
+                            finalized_block_header,
+                            usize::from(chain_spec.block_number_bytes()),
+                        ) {
+                            (
+                                decoded.number,
+                                header::hash_from_scale_encoded_header(&finalized_block_header),
+                            )
+                        } else {
+                            (
+                                0,
+                                header::hash_from_scale_encoded_header(
+                                    &genesis_block_scale_encoded_header,
+                                ),
+                            )
+                        }
+                    }
+                },
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
             }],
         })
         .await;
 
-    let (sync_service, runtime_service) = if let Some(relay_chain) = relay_chain {
-        // Chain is a parachain.
+    let (sync_service, runtime_service) = match config {
+        StartServicesChainTy::Parachain {
+            relay_chain,
+            finalized_block_header,
+            ..
+        } => {
+            // Chain is a parachain.
 
-        // The sync service is leveraging the network service, downloads block headers,
-        // and verifies them, to determine what are the best and finalized blocks of the
-        // chain.
-        let sync_service = Arc::new(
-            sync_service::SyncService::new(sync_service::Config {
-                platform: platform.clone(),
-                log_name: log_name.clone(),
-                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
-                network_service: (network_service.clone(), 0),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
-                chain_type: sync_service::ConfigChainType::Parachain(
-                    sync_service::ConfigParachain {
-                        finalized_block_header: chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .scale_encoding_vec(usize::from(chain_spec.block_number_bytes())),
-                        parachain_id: chain_spec.relay_chain().unwrap().1,
-                        relay_chain_sync: relay_chain.runtime_service.clone(),
-                        relay_chain_block_number_bytes: relay_chain
-                            .sync_service
-                            .block_number_bytes(),
-                    },
-                ),
-            })
-            .await,
-        );
+            // The sync service is leveraging the network service, downloads block headers,
+            // and verifies them, to determine what are the best and finalized blocks of the
+            // chain.
+            let sync_service = Arc::new(
+                sync_service::SyncService::new(sync_service::Config {
+                    platform: platform.clone(),
+                    log_name: log_name.clone(),
+                    block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                    network_service: (network_service.clone(), 0),
+                    network_events_receiver: network_event_receivers.pop().unwrap(),
+                    chain_type: sync_service::ConfigChainType::Parachain(
+                        sync_service::ConfigParachain {
+                            finalized_block_header,
+                            parachain_id: chain_spec.relay_chain().unwrap().1,
+                            relay_chain_sync: relay_chain.runtime_service.clone(),
+                            relay_chain_block_number_bytes: relay_chain
+                                .sync_service
+                                .block_number_bytes(),
+                        },
+                    ),
+                })
+                .await,
+            );
 
-        // The runtime service follows the runtime of the best block of the chain,
-        // and allows performing runtime calls.
-        let runtime_service = Arc::new(
-            runtime_service::RuntimeService::new(runtime_service::Config {
-                log_name: log_name.clone(),
-                platform: platform.clone(),
-                sync_service: sync_service.clone(),
-                genesis_block_scale_encoded_header,
-            })
-            .await,
-        );
+            // The runtime service follows the runtime of the best block of the chain,
+            // and allows performing runtime calls.
+            let runtime_service = Arc::new(
+                runtime_service::RuntimeService::new(runtime_service::Config {
+                    log_name: log_name.clone(),
+                    platform: platform.clone(),
+                    sync_service: sync_service.clone(),
+                    genesis_block_scale_encoded_header,
+                })
+                .await,
+            );
 
-        (sync_service, runtime_service)
-    } else {
-        // Chain is a relay chain.
+            (sync_service, runtime_service)
+        }
+        StartServicesChainTy::RelayChain { chain_information } => {
+            // Chain is a relay chain.
 
-        // The sync service is leveraging the network service, downloads block headers,
-        // and verifies them, to determine what are the best and finalized blocks of the
-        // chain.
-        let sync_service = Arc::new(
-            sync_service::SyncService::new(sync_service::Config {
-                log_name: log_name.clone(),
-                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
-                platform: platform.clone(),
-                network_service: (network_service.clone(), 0),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
-                chain_type: sync_service::ConfigChainType::RelayChain(
-                    sync_service::ConfigRelayChain {
-                        chain_information: chain_information.clone(),
-                        runtime_code_hint: runtime_code_hint.map(|hint| {
-                            sync_service::ConfigRelayChainRuntimeCodeHint {
-                                storage_value: hint.code,
-                                merkle_value: hint.code_merkle_value,
-                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
-                            }
-                        }),
-                    },
-                ),
-            })
-            .await,
-        );
+            // The sync service is leveraging the network service, downloads block headers,
+            // and verifies them, to determine what are the best and finalized blocks of the
+            // chain.
+            let sync_service = Arc::new(
+                sync_service::SyncService::new(sync_service::Config {
+                    log_name: log_name.clone(),
+                    block_number_bytes: usize::from(chain_spec.block_number_bytes()),
+                    platform: platform.clone(),
+                    network_service: (network_service.clone(), 0),
+                    network_events_receiver: network_event_receivers.pop().unwrap(),
+                    chain_type: sync_service::ConfigChainType::RelayChain(
+                        sync_service::ConfigRelayChain {
+                            chain_information: chain_information.clone(),
+                            runtime_code_hint: runtime_code_hint.map(|hint| {
+                                sync_service::ConfigRelayChainRuntimeCodeHint {
+                                    storage_value: hint.code,
+                                    merkle_value: hint.code_merkle_value,
+                                    closest_ancestor_excluding: hint.closest_ancestor_excluding,
+                                }
+                            }),
+                        },
+                    ),
+                })
+                .await,
+            );
 
-        // The runtime service follows the runtime of the best block of the chain,
-        // and allows performing runtime calls.
-        let runtime_service = Arc::new(
-            runtime_service::RuntimeService::new(runtime_service::Config {
-                log_name: log_name.clone(),
-                platform: platform.clone(),
-                sync_service: sync_service.clone(),
-                genesis_block_scale_encoded_header,
-            })
-            .await,
-        );
+            // The runtime service follows the runtime of the best block of the chain,
+            // and allows performing runtime calls.
+            let runtime_service = Arc::new(
+                runtime_service::RuntimeService::new(runtime_service::Config {
+                    log_name: log_name.clone(),
+                    platform: platform.clone(),
+                    sync_service: sync_service.clone(),
+                    genesis_block_scale_encoded_header,
+                })
+                .await,
+            );
 
-        (sync_service, runtime_service)
+            (sync_service, runtime_service)
+        }
     };
 
     // The transactions service lets one send transactions to the peer-to-peer network and watch
