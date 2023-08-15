@@ -370,7 +370,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Build the genesis block, its hash, and information about the chain.
-        let (genesis_chain_information, genesis_block_header, genesis_block_state_root) = {
+        let (
+            genesis_chain_information,
+            genesis_block_header,
+            genesis_root_in_chain_spec,
+            genesis_block_state_root,
+        ) = {
             // TODO: don't build the chain information if only the genesis hash is needed: https://github.com/smol-dot/smoldot/issues/1017
             let genesis_chain_information = chain_spec.to_chain_information().map(|(ci, _)| ci); // TODO: don't just throw away the runtime;
 
@@ -380,7 +385,12 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     let state_root = *header.state_root;
                     let scale_encoded =
                         header.scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
-                    (Some(genesis_chain_information), scale_encoded, state_root)
+                    (
+                        Some(genesis_chain_information),
+                        scale_encoded,
+                        false,
+                        state_root,
+                    )
                 }
                 Err(chain_spec::FromGenesisStorageError::UnknownStorageItems) => {
                     let state_root = *chain_spec.genesis_storage().into_trie_root_hash().unwrap();
@@ -392,7 +402,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     }
                     .scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
-                    (None, header, state_root)
+                    (None, header, true, state_root)
                 }
                 Err(err) => return Err(AddChainError::InvalidGenesisStorage(err)),
             }
@@ -756,19 +766,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
-                        //
-                        // The state root hash is printed in order to make it easy to put it
-                        // in the chain specification.
                         if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
                                 target: "smoldot",
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. State root hash: 0x{}. Network identity: {}. Relay \
-                                chain: {} (id: {})",
+                                hash: {}. Network identity: {}. Relay chain: {} (id: {})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
                                 relay_chain_log_name,
                                 relay_chain_para_id.unwrap(),
@@ -777,17 +782,26 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log::info!(
                                 target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. State root hash: 0x{}. Network identity: {}. {} \
-                                starting at: {} (#{})",
+                                hash: {}. Network identity: {}. {} starting at: {} (#{})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
                                 if used_database_chain_information { "Database" } else { "Chain specification" },
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number
                             );
+                        }
+
+                        if !genesis_root_in_chain_spec {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain specification of {} contains a `genesis.raw` item. It is \
+                                possible to significantly improve the initialization time by \
+                                replacing the `\"raw\": ...` field with \
+                                `\"stateTrieRoot\": \"0x{}\"`",
+                                log_name, hex::encode(genesis_block_state_root)
+                            )
                         }
 
                         // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
