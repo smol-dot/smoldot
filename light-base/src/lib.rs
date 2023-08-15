@@ -799,7 +799,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 "Chain specification of {} contains a `genesis.raw` item. It is \
                                 possible to significantly improve the initialization time by \
                                 replacing the `\"raw\": ...` field with \
-                                `\"stateTrieRoot\": \"0x{}\"`",
+                                `\"stateRootHash\": \"0x{}\"`",
                                 log_name, hex::encode(genesis_block_state_root)
                             )
                         }
