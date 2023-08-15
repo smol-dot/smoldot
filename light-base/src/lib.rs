@@ -369,187 +369,129 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             }
         };
 
-        // Load the information about the chain from the chain spec. If a light sync state (also
-        // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
-        // the finalized block it describes.
-        // TODO: clean up that block
-        let (chain_information, genesis_block_header, checkpoint_nodes, runtime_code_hint) = {
-            match (
-                chain_spec.to_chain_information().map(|(ci, _)| ci), // TODO: don't just throw away the runtime
-                chain_spec
-                    .light_sync_state()
-                    .map(|s| s.to_chain_information()),
-                database::decode_database(
-                    config.database_content,
-                    chain_spec.block_number_bytes().into(),
-                ),
-            ) {
-                // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (
-                    Ok(genesis_ci),
-                    checkpoint,
-                    Ok(database::DatabaseContent {
-                        chain_information: Some(db_ci),
-                        genesis_block_hash: db_genesis_hash,
-                        known_nodes,
-                        runtime_code_hint,
-                    }),
-                ) if db_genesis_hash
-                    == genesis_ci
-                        .as_ref()
-                        .finalized_block_header
-                        .hash(chain_spec.block_number_bytes().into())
-                    && checkpoint
-                        .as_ref()
-                        .and_then(|r| r.as_ref().ok())
-                        .map_or(true, |cp| {
-                            cp.as_ref().finalized_block_header.number
-                                < db_ci.as_ref().finalized_block_header.number
-                        }) =>
-                {
-                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (db_ci, genesis_header.into(), known_nodes, runtime_code_hint)
-                }
+        // Build the genesis block, its hash, and information about the chain.
+        let (genesis_chain_information, genesis_block_header, genesis_block_state_root) = {
+            // TODO: don't build the chain information if only the genesis hash is needed: https://github.com/smol-dot/smoldot/issues/1017
+            let genesis_chain_information = chain_spec.to_chain_information().map(|(ci, _)| ci); // TODO: don't just throw away the runtime;
 
-                // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (
-                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
-                    checkpoint,
-                    Ok(database::DatabaseContent {
-                        chain_information: Some(chain_information),
-                        genesis_block_hash,
-                        known_nodes,
-                        runtime_code_hint,
-                    }),
-                ) if checkpoint
-                    .as_ref()
-                    .and_then(|r| r.as_ref().ok())
-                    .map_or(true, |cp| {
-                        cp.as_ref().finalized_block_header.number
-                            < chain_information.as_ref().finalized_block_header.number
-                    }) =>
-                {
-                    let genesis_header = header::Header {
+            match genesis_chain_information {
+                Ok(genesis_chain_information) => {
+                    let header = genesis_chain_information.as_ref().finalized_block_header;
+                    let state_root = *header.state_root;
+                    let scale_encoded =
+                        header.scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
+                    (Some(genesis_chain_information), scale_encoded, state_root)
+                }
+                Err(chain_spec::FromGenesisStorageError::UnknownStorageItems) => {
+                    let state_root = *chain_spec.genesis_storage().into_trie_root_hash().unwrap();
+                    let header = header::Header {
                         parent_hash: [0; 32],
                         number: 0,
-                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        state_root,
                         extrinsics_root: smoldot::trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
                         digest: header::DigestRef::empty().into(),
-                    };
-
-                    if genesis_block_hash
-                        == genesis_header.hash(chain_spec.block_number_bytes().into())
-                    {
-                        (
-                            chain_information,
-                            genesis_header,
-                            known_nodes,
-                            runtime_code_hint,
-                        )
-                    } else if let Some(Ok(checkpoint)) = checkpoint {
-                        // Database is incorrect.
-                        (checkpoint, genesis_header, known_nodes, None)
-                    } else {
-                        // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                        // TODO: is this relevant for parachains?
-                        return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
                     }
+                    .scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
+                    (None, header, state_root)
+                }
+                Err(err) => return Err(AddChainError::InvalidGenesisStorage(err)),
+            }
+        };
+        let genesis_block_hash = header::hash_from_scale_encoded_header(&genesis_block_header);
+
+        // Decode the database and make sure that it matches the chain by comparing the finalized
+        // block header in it with the actual one.
+        let (database, database_was_wrong_chain) = {
+            let mut maybe_database = database::decode_database(
+                config.database_content,
+                chain_spec.block_number_bytes().into(),
+            )
+            .ok();
+            let mut database_was_wrong = false;
+            if maybe_database
+                .as_ref()
+                .map_or(false, |db| db.genesis_block_hash != genesis_block_hash)
+            {
+                maybe_database = None;
+                database_was_wrong = true;
+            }
+            (maybe_database, database_was_wrong)
+        };
+
+        // Load the information about the chain. If a light sync state (also known as a checkpoint)
+        // is present in the chain spec, it is possible to start syncing at the finalized block
+        // it describes.
+        // At the same time, we deconstruct the database into `known_nodes`
+        // and `runtime_code_hint`.
+        let (chain_information, used_database_chain_information, known_nodes, runtime_code_hint) = {
+            let checkpoint = chain_spec
+                .light_sync_state()
+                .map(|s| s.to_chain_information());
+
+            match (genesis_chain_information, checkpoint, database) {
+                // Use the database if it contains a more recent block than the
+                // chain spec checkpoint.
+                (
+                    _,
+                    Some(Ok(checkpoint)),
+                    Some(database::DatabaseContent {
+                        chain_information: Some(db_ci),
+                        known_nodes,
+                        runtime_code_hint,
+                        ..
+                    }),
+                ) if db_ci.as_ref().finalized_block_header.number
+                    >= checkpoint.as_ref().finalized_block_header.number =>
+                {
+                    (db_ci, true, known_nodes, runtime_code_hint)
                 }
 
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
+                // Otherwise, use the chain spec checkpoint.
+                (
+                    _,
+                    Some(Ok(checkpoint)),
+                    Some(database::DatabaseContent {
+                        known_nodes,
+                        runtime_code_hint,
+                        ..
+                    }),
+                ) => (checkpoint, false, known_nodes, runtime_code_hint),
+                (_, Some(Ok(checkpoint)), None) => (checkpoint, false, Vec::new(), None),
+
+                // If neither the genesis chain information nor the checkpoint chain information
+                // is available, we could in principle use the database, but for API reasons we
+                // don't want users to be able to rely on just a database (as we reserve the right
+                // to break the database at any point) and thus return an error.
+                (None, None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    // TODO: is this relevant for parachains?
+                    // TODO: https://github.com/smol-dot/smoldot/issues/908
                     return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
                 }
 
+                // Use the genesis block if no checkpoint is available.
                 (
-                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
-                    Some(Ok(checkpoint)),
-                    database,
-                ) => {
-                    let genesis_header = header::Header {
-                        parent_hash: [0; 32],
-                        number: 0,
-                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
-                        extrinsics_root: smoldot::trie::EMPTY_BLAKE2_TRIE_MERKLE_VALUE,
-                        digest: header::DigestRef::empty().into(),
-                    };
-
-                    let mut checkpoint_nodes = Vec::new();
-                    let mut runtime_cache_hint = None;
-
-                    if let Ok(database) = database {
-                        if database.genesis_block_hash
-                            == genesis_header.hash(chain_spec.block_number_bytes().into())
-                        {
-                            checkpoint_nodes = database.known_nodes.clone();
-                            runtime_cache_hint = database.runtime_code_hint.clone();
-                        }
-                    }
-
-                    (
-                        checkpoint,
-                        genesis_header,
-                        checkpoint_nodes,
-                        runtime_cache_hint,
-                    )
-                }
-
-                (Err(err), _, _) => return Err(AddChainError::InvalidGenesisStorage(err)),
-
-                (Ok(genesis_ci), Some(Ok(checkpoint)), database) => {
-                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-
-                    let mut checkpoint_nodes = Vec::new();
-                    let mut runtime_cache_hint = None;
-
-                    if let Ok(database) = database {
-                        if database.genesis_block_hash
-                            == genesis_header.hash(chain_spec.block_number_bytes().into())
-                        {
-                            checkpoint_nodes = database.known_nodes.clone();
-                            runtime_cache_hint = database.runtime_code_hint.clone();
-                        }
-                    }
-
-                    (
-                        checkpoint,
-                        genesis_header.into(),
-                        checkpoint_nodes,
-                        runtime_cache_hint,
-                    )
-                }
-
-                (
-                    Ok(genesis_ci),
+                    Some(genesis_ci),
                     None
                     | Some(Err(
                         chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
                     )),
-                    database,
-                ) => {
-                    let genesis_header =
-                        header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
-                    let mut checkpoint_nodes = Vec::new();
-                    let mut runtime_cache_hint = None;
+                    Some(database::DatabaseContent {
+                        known_nodes,
+                        runtime_code_hint,
+                        ..
+                    }),
+                ) => (genesis_ci, false, known_nodes, runtime_code_hint),
+                (
+                    Some(genesis_ci),
+                    None
+                    | Some(Err(
+                        chain_spec::CheckpointToChainInformationError::GenesisBlockCheckpoint,
+                    )),
+                    None,
+                ) => (genesis_ci, false, Vec::new(), None),
 
-                    if let Ok(database) = database {
-                        if database.genesis_block_hash
-                            == genesis_header.hash(chain_spec.block_number_bytes().into())
-                        {
-                            checkpoint_nodes = database.known_nodes.clone();
-                            runtime_cache_hint = database.runtime_code_hint.clone();
-                        }
-                    }
-
-                    (
-                        genesis_ci,
-                        genesis_header,
-                        checkpoint_nodes,
-                        runtime_cache_hint,
-                    )
-                }
-
+                // If the checkpoint format is invalid, we return an error no matter whether the
+                // genesis chain information could be used.
                 (_, Some(Err(err)), _) => {
                     return Err(AddChainError::InvalidCheckpoint(err));
                 }
@@ -620,11 +562,9 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         // All the checks are performed above. Adding the chain can't fail anymore at this point.
 
-        // Grab a couple of fields from the chain specification for later, as the chain
-        // specification is consumed below.
+        // Grab this field from the chain specification for later, as the chain specification is
+        // consumed below.
         let chain_spec_chain_id = chain_spec.id().to_owned();
-        let genesis_block_hash = genesis_block_header.hash(chain_spec.block_number_bytes().into());
-        let genesis_block_state_root = genesis_block_header.state_root;
 
         // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
         // having the same key will use the same services.
@@ -771,8 +711,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             &platform,
                             chain_information,
                             runtime_code_hint,
-                            genesis_block_header
-                                .scale_encoding_vec(chain_spec.block_number_bytes().into()),
+                            genesis_block_header,
                             chain_spec,
                             relay_chain.as_ref().map(|(r, _)| r),
                             network_identify_agent_version,
@@ -803,13 +742,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log::info!(
                                 target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. State root hash: 0x{}. Network identity: {}. Chain \
-                                specification or database starting at: {} (#{})",
+                                hash: {}. State root hash: 0x{}. Network identity: {}. {} \
+                                starting at: {} (#{})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
                                 hex::encode(genesis_block_state_root),
                                 running_chain.network_identity,
+                                if used_database_chain_information { "Database" } else { "Chain specification" },
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number
                             );
@@ -829,6 +769,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 - For parachains: if the bad blocks have a block number inferior \
                                 to the current parachain finalized block.", log_name
                             );
+                        }
+
+                        if database_was_wrong_chain {
+                            log::warn!(
+                                target: "smoldot",
+                                "Ignore database of {} because its genesis hash didn't match the \
+                                genesis hash of the chain.", log_name
+                            )
                         }
 
                         running_chain
@@ -891,6 +839,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 };
 
                 let platform = self.platform.clone();
+                let known_nodes = known_nodes.clone();
 
                 async move {
                     // Wait for the chain to finish initializing to proceed.
@@ -900,7 +849,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         .unwrap();
                     running_chain
                         .network_service
-                        .discover(&platform.now(), 0, checkpoint_nodes, false)
+                        .discover(&platform.now(), 0, known_nodes, false)
                         .await;
                     running_chain
                         .network_service
