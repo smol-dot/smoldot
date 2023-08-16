@@ -373,7 +373,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         let (
             genesis_chain_information,
             genesis_block_header,
-            genesis_root_in_chain_spec,
+            print_warning_genesis_root_chainspec,
             genesis_block_state_root,
         ) = {
             // TODO: don't build the chain information if only the genesis hash is needed: https://github.com/smol-dot/smoldot/issues/1017
@@ -388,7 +388,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     (
                         Some(genesis_chain_information),
                         scale_encoded,
-                        false,
+                        chain_spec.light_sync_state().is_some()
+                            || chain_spec.relay_chain().is_some(),
                         state_root,
                     )
                 }
@@ -402,7 +403,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         digest: header::DigestRef::empty().into(),
                     }
                     .scale_encoding_vec(usize::from(chain_spec.block_number_bytes()));
-                    (None, header, true, state_root)
+                    (None, header, false, state_root)
                 }
                 Err(err) => return Err(AddChainError::InvalidGenesisStorage(err)),
             }
@@ -796,8 +797,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             );
                         }
 
-                        if !genesis_root_in_chain_spec {
-                            log::warn!(
+                        if print_warning_genesis_root_chainspec {
+                            log::info!(
                                 target: "smoldot",
                                 "Chain specification of {} contains a `genesis.raw` item. It is \
                                 possible to significantly improve the initialization time by \
