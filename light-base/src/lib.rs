@@ -388,7 +388,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     (
                         Some(genesis_chain_information),
                         scale_encoded,
-                        chain_spec.light_sync_state().is_some(),
+                        chain_spec.light_sync_state().is_some()
+                            || chain_spec.relay_chain().is_some(),
                         state_root,
                     )
                 }
