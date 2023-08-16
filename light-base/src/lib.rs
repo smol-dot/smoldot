@@ -798,7 +798,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         }
 
                         if print_warning_genesis_root_chainspec {
-                            log::warn!(
+                            log::info!(
                                 target: "smoldot",
                                 "Chain specification of {} contains a `genesis.raw` item. It is \
                                 possible to significantly improve the initialization time by \
