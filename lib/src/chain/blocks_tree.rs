@@ -59,7 +59,6 @@
 //! verify the correctness of a [justification](crate::finality::justification).
 
 // TODO: expand this doc ^
-// TODO: this module is an essential part of the code and needs clean up and testing
 
 use crate::{
     chain::{chain_information, fork_tree},
@@ -71,6 +70,7 @@ use core::{cmp, fmt, mem, num::NonZeroU64, ops, time::Duration};
 use hashbrown::HashMap;
 
 mod finality;
+mod tests;
 mod verify;
 
 pub use self::finality::*;
