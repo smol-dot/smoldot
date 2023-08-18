@@ -266,9 +266,11 @@ pub struct Success<TSrc, TRq> {
     /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code` itself.
     pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
 
-    /// The list of sources that were added to the state machine.
+    /// The list of sources that were added to the state machine, with their finalized block
+    /// height and user data.
     /// The list is ordered by [`SourceId`].
-    pub sources_ordered: Vec<(SourceId, TSrc)>,
+    // TODO: use a struct?
+    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -527,10 +529,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     }
 
     /// Add a source to the list of sources.
+    ///
+    /// The source has a finalized block height of 0, which should later be updated using
+    /// [`InProgressWarpSync::set_source_finality_state`].
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         SourceId(self.sources.insert(Source {
             user_data,
             already_tried: false,
+            finalized_block_height: 0,
         }))
     }
 
@@ -599,6 +605,16 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }
 
         (removed, obsolete_requests.into_iter())
+    }
+
+    /// Sets the finalized block height of the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn set_source_finality_state(&mut self, source_id: SourceId, finalized_block_height: u64) {
+        self.sources[source_id.0].finalized_block_height = finalized_block_height;
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
@@ -1051,6 +1067,7 @@ struct Source<TSrc> {
     /// `true` if this source has been in a past warp sync request and we should try a different
     /// source.
     already_tried: bool,
+    finalized_block_height: u64,
 }
 
 /// Information about a request that the warp sync state machine would like to start.
@@ -1466,7 +1483,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             ),
                             sources_ordered: mem::take(&mut self.inner.sources)
                                 .into_iter()
-                                .map(|(id, source)| (SourceId(id), source.user_data))
+                                .map(|(id, source)| {
+                                    (
+                                        SourceId(id),
+                                        source.finalized_block_height,
+                                        source.user_data,
+                                    )
+                                })
                                 .collect(),
                             in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
                                 .into_iter()
@@ -1624,7 +1647,13 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                             downloaded_runtime.closest_ancestor_excluding,
                                         sources_ordered: mem::take(&mut self.inner.sources)
                                             .into_iter()
-                                            .map(|(id, source)| (SourceId(id), source.user_data))
+                                            .map(|(id, source)| {
+                                                (
+                                                    SourceId(id),
+                                                    source.finalized_block_height,
+                                                    source.user_data,
+                                                )
+                                            })
                                             .collect(),
                                         in_progress_requests: mem::take(
                                             &mut self.inner.in_progress_requests,
