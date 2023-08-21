@@ -64,9 +64,9 @@ pub enum CliOptionsCommand {
 
 #[derive(Debug, clap::Parser)]
 pub struct CliOptionsRun {
-    /// Path of a file containing the specification of the chain to connect to.
+    /// Path to a file containing the specification of the chain to connect to.
     #[arg(long)]
-    pub chain: PathBuf,
+    pub path_to_chain_spec: PathBuf,
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[arg(long, default_value = "auto")]
     pub output: Output,
