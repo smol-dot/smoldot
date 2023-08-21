@@ -190,7 +190,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
         cli::Output::Auto => unreachable!(), // Handled above.
     };
 
-    let chain_spec = fs::read(&cli_options.chain).expect("Failed to read chain specification");
+    let chain_spec =
+        fs::read(&cli_options.path_to_chain_spec).expect("Failed to read chain specification");
     let parsed_chain_spec = {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&chain_spec)
             .expect("Failed to decode chain specification")
@@ -231,7 +232,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
         if let Some((relay_chain_name, _parachain_id)) = parsed_chain_spec.relay_chain() {
             let spec_json = {
                 let relay_chain_path = cli_options
-                    .chain
+                    .path_to_chain_spec
                     .parent()
                     .unwrap()
                     .join(format!("{relay_chain_name}.json"));
