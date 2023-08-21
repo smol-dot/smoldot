@@ -311,9 +311,11 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
 pub struct InProgressWarpSync<TSrc, TRq> {
     /// See [`Phase`].
     phase: Phase,
-    /// Finalized block of the chain we warp synced to.
+    /// Finalized block of the chain we warp synced to. Initially identical to the value in
+    /// [`InProgressWarpSync::start_chain_information`].
     warped_header: Header,
     /// Information about the finality of the chain at the point where we warp synced to.
+    /// Initially identical to the value in [`InProgressWarpSync::start_chain_information`].
     warped_finality: ChainInformationFinality,
     /// See [`Config::code_trie_node_hint`].
     code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
