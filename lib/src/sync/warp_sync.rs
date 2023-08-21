@@ -1447,17 +1447,12 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let chain_info_builder = chain_information::build::ChainInformationBuild::new(
                 chain_information::build::Config {
-                    finalized_block_header: if header.number == 0 {
-                        chain_information::build::ConfigFinalizedBlockHeader::Genesis {
-                            state_trie_root_hash: header.state_root,
-                        }
-                    } else {
-                        chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
+                    finalized_block_header:
+                        chain_information::build::ConfigFinalizedBlockHeader::Any {
                             scale_encoded_header: header
                                 .scale_encoding_vec(self.inner.block_number_bytes),
                             known_finality: Some(chain_information_finality.clone()),
-                        }
-                    },
+                        },
                     block_number_bytes: self.inner.block_number_bytes,
                     runtime,
                 },
