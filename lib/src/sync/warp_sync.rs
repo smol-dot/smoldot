@@ -1310,19 +1310,14 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let chain_info_builder = chain_information::build::ChainInformationBuild::new(
                 chain_information::build::Config {
-                    finalized_block_header: if self.inner.warped_header.number == 0 {
-                        chain_information::build::ConfigFinalizedBlockHeader::Genesis {
-                            state_trie_root_hash: self.inner.warped_header.state_root,
-                        }
-                    } else {
-                        chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
+                    finalized_block_header:
+                        chain_information::build::ConfigFinalizedBlockHeader::Any {
                             scale_encoded_header: self
                                 .inner
                                 .warped_header
                                 .scale_encoding_vec(self.inner.block_number_bytes),
                             known_finality: Some((&self.inner.warped_finality).clone()),
-                        }
-                    },
+                        },
                     block_number_bytes: self.inner.block_number_bytes,
                     runtime,
                 },
