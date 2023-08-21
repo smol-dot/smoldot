@@ -110,7 +110,7 @@ jobs:
     - uses: baptiste0928/cargo-install@v2  # This action ensures that the compilation is cached.
       with:
         crate: cargo-fuzz
-        locked: false   # TODO: `cargo-fuzz fails to compile with --locked because its Cargo.lock contains very old dependencies`
+        locked: false   # TODO: `cargo-fuzz` fails to compile with --locked because its Cargo.lock contains very old dependencies
     - uses: Swatinem/rust-cache@v2
       with:
         workspaces: |
