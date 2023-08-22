@@ -328,7 +328,6 @@ pub struct InProgressWarpSync<TSrc, TRq> {
     /// List of requests that have been added using [`InProgressWarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
     /// List of requests that have been added using [`InProgressWarpSync::add_request`].
-    // TODO: is the RequestDetail needed after we've cached the request_ids directly in the phase?
     in_progress_requests: slab::Slab<(SourceId, TRq, RequestDetail)>,
 }
 
