@@ -299,14 +299,13 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             HashDisplay(&finalized_block_hash),
                         );
                     }
-                    all::Status::WarpSyncFragments { source: Some((_, (peer_id, _))), finalized_block_hash, finalized_block_number } |
-                    all::Status::WarpSyncChainInformation { source: (_, (peer_id, _)), finalized_block_hash, finalized_block_number } => {
+                    all::Status::WarpSyncFragments { source: Some(_), finalized_block_hash, finalized_block_number } |
+                    all::Status::WarpSyncChainInformation { finalized_block_hash, finalized_block_number } => {
                         log::warn!(
                             target: &task.log_target,
-                            "GrandPa warp sync in progress. Block: #{} (0x{}). Peer attempt: {}.",
+                            "GrandPa warp sync in progress. Block: #{} (0x{}).",
                             finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
-                            peer_id
+                            HashDisplay(&finalized_block_hash)
                         );
                     },
                 };

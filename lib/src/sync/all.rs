@@ -157,8 +157,6 @@ pub enum Status<'a, TSrc> {
     /// Warp syncing algorithm has reached the head of the finalized chain and is downloading and
     /// building the chain information.
     WarpSyncChainInformation {
-        /// Source from which the chain information is being downloaded.
-        source: (SourceId, &'a TSrc),
         /// Hash of the highest block that is proven to be finalized.
         ///
         /// This isn't necessarily the same block as returned by
@@ -283,11 +281,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_block_number,
                 },
                 warp_sync::Status::ChainInformation {
-                    source: (_, user_data),
                     finalized_block_hash,
                     finalized_block_number,
                 } => Status::WarpSyncChainInformation {
-                    source: (user_data.outer_source_id, &user_data.user_data),
                     finalized_block_hash,
                     finalized_block_number,
                 },
