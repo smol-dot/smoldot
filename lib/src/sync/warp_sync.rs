@@ -382,7 +382,7 @@ enum Phase {
         /// downloaded yet.
         calls: hashbrown::HashMap<
             chain_information::build::RuntimeCall,
-            Option<Vec<u8>>,
+            CallProof,
             fnv::FnvBuildHasher,
         >,
     },
@@ -397,6 +397,12 @@ struct DownloadedRuntime {
     code_merkle_value: Option<Vec<u8>>,
     /// Closest ancestor of the `:code` key except for `:code` itself.
     closest_ancestor_excluding: Option<Vec<Nibble>>,
+}
+
+enum CallProof {
+    NotStarted,
+    Downloading(RequestId),
+    Downloaded(Vec<u8>),
 }
 
 /// See [`InProgressWarpSync::status`].
@@ -578,6 +584,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                         *runtime_download = None;
                     }
                 }
+                Phase::ChainInformationDownload { calls, .. } => {
+                    for call in calls.values_mut() {
+                        if matches!(call, CallProof::Downloading(rq_id) if *rq_id == RequestId(index))
+                        {
+                            *call = CallProof::NotStarted;
+                        }
+                    }
+                }
                 _ => {}
             }
             obsolete_requests.push((RequestId(index), user_data));
@@ -678,31 +692,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         } = &self.phase
         {
             either::Left(
-                // TODO: O(n)
                 calls
                     .iter()
-                    .filter(|(_, v)| v.is_none())
-                    .filter_map(|(call, _)| {
-                        if self.in_progress_requests.iter().any(
-                            |(_, (_, _, detail))| match detail {
-                                RequestDetail::RuntimeCallMerkleProof {
-                                    function_name,
-                                    parameter_vectored,
-                                    ..
-                                } => {
-                                    function_name == call.function_name()
-                                        && parameters_equal(
-                                            parameter_vectored,
-                                            call.parameter_vectored(),
-                                        )
-                                }
-                                _ => false,
-                            },
-                        ) {
-                            return None;
-                        }
-
-                        Some((
+                    .filter(|(_, v)| matches!(v, CallProof::NotStarted))
+                    .map(|(call, _)| {
+                        (
                             *warp_sync_source_id,
                             &self.sources[warp_sync_source_id.0].user_data,
                             DesiredRequest::RuntimeCallMerkleProof {
@@ -710,7 +704,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                                 function_name: call.function_name().into(),
                                 parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
                             },
-                        ))
+                        )
                     }),
             )
         } else {
@@ -783,6 +777,25 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     *runtime_download = Some(request_id);
                 }
             }
+            (
+                RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+                Phase::ChainInformationDownload { calls, .. },
+            ) => {
+                for (info, status) in calls {
+                    if matches!(status, CallProof::NotStarted)
+                        && *block_hash == self.warped_header.hash(self.block_number_bytes)
+                        && function_name == info.function_name()
+                        && parameters_equal(parameter_vectored, info.parameter_vectored())
+                    {
+                        *status = CallProof::Downloading(request_id);
+                        break;
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -811,6 +824,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             } => {
                 if *runtime_download == Some(id) {
                     *runtime_download = None;
+                }
+            }
+            Phase::ChainInformationDownload { calls, .. } => {
+                for call in calls.values_mut() {
+                    if matches!(call, CallProof::Downloading(rq_id) if *rq_id == id) {
+                        *call = CallProof::NotStarted;
+                    }
                 }
             }
             _ => {}
@@ -915,23 +935,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             self.in_progress_requests.remove(request_id.0),
             &mut self.phase,
         ) {
-            (
-                (
-                    _,
-                    user_data,
-                    RequestDetail::RuntimeCallMerkleProof {
-                        block_hash,
-                        function_name,
-                        parameter_vectored,
-                    },
-                ),
-                Phase::ChainInformationDownload { ref mut calls, .. },
-            ) if block_hash == self.warped_header.hash(self.block_number_bytes) => {
-                for (call, value) in calls.iter_mut() {
-                    if function_name == call.function_name()
-                        && parameters_equal(&parameter_vectored, call.parameter_vectored())
-                    {
-                        *value = Some(response);
+            ((_, user_data, _), Phase::ChainInformationDownload { ref mut calls, .. }) => {
+                for call in calls.values_mut() {
+                    if matches!(call, CallProof::Downloading(rq_id) if *rq_id == request_id) {
+                        *call = CallProof::Downloaded(response);
                         break;
                     }
                 }
@@ -1009,7 +1016,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         if let Phase::ChainInformationDownload { calls, .. } = &self.phase {
             // If we've downloaded everything that was needed, switch to "build chain information"
             // mode.
-            if calls.values().all(Option::is_some) {
+            if calls
+                .values()
+                .all(|c| matches!(c, CallProof::Downloaded(_)))
+            {
                 return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
             }
         }
@@ -1450,7 +1460,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
                     let calls = in_progress
                         .remaining_calls()
-                        .map(|call| (call, None))
+                        .map(|call| (call, CallProof::NotStarted))
                         .collect();
                     (calls, in_progress)
                 }
@@ -1495,7 +1505,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             ..
         } = &mut self.inner.phase
         {
-            debug_assert!(calls.values().all(Option::is_some));
+            debug_assert!(calls
+                .values()
+                .all(|c| matches!(c, CallProof::Downloaded(_))));
 
             // Decode all the Merkle proofs that have been received.
             let calls = {
@@ -1505,7 +1517,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 );
 
                 for (call, proof) in calls {
-                    let proof = proof.take().unwrap();
+                    let CallProof::Downloaded(proof) = mem::replace(proof, CallProof::NotStarted)
+                        else { unreachable!() };
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
                             proof: proof.into_iter(),
