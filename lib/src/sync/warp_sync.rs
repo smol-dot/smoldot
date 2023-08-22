@@ -107,6 +107,7 @@ use crate::{
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
+    collections::BTreeSet,
     vec,
     vec::Vec,
 };
@@ -221,6 +222,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         code_trie_node_hint: config.code_trie_node_hint,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
+        sources_by_finalized_height: BTreeSet::new(),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
     })
 }
@@ -327,6 +329,9 @@ pub struct InProgressWarpSync<TSrc, TRq> {
     block_number_bytes: usize,
     /// List of requests that have been added using [`InProgressWarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
+    /// Same entries as [`InProgressWarpSync::sources`], but indexed by
+    /// [`Source::finalized_block_height`].
+    sources_by_finalized_height: BTreeSet<(u64, SourceId)>,
     /// List of requests that have been added using [`InProgressWarpSync::add_request`].
     in_progress_requests: slab::Slab<(SourceId, TRq, RequestDetail)>,
 }
@@ -509,11 +514,17 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// The source has a finalized block height of 0, which should later be updated using
     /// [`InProgressWarpSync::set_source_finality_state`].
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
-        SourceId(self.sources.insert(Source {
+        let source_id = SourceId(self.sources.insert(Source {
             user_data,
             already_tried: false,
             finalized_block_height: 0,
-        }))
+        }));
+
+        let _inserted = self.sources_by_finalized_height.insert((0, source_id));
+        debug_assert!(_inserted);
+        debug_assert_eq!(self.sources.len(), self.sources_by_finalized_height.len());
+
+        source_id
     }
 
     /// Removes a source from the list of sources. In addition to the user data associated to this
@@ -529,7 +540,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         to_remove: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         debug_assert!(self.sources.contains(to_remove.0));
-        let removed = self.sources.remove(to_remove.0).user_data;
+        let removed = self.sources.remove(to_remove.0);
+
+        let _was_in = self
+            .sources_by_finalized_height
+            .remove(&(removed.finalized_block_height, to_remove));
+        debug_assert!(_was_in);
+        debug_assert_eq!(self.sources.len(), self.sources_by_finalized_height.len());
 
         if let Phase::RuntimeDownload {
             warp_sync_source_id,
@@ -596,7 +613,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             obsolete_requests.push((RequestId(index), user_data));
         }
 
-        (removed, obsolete_requests.into_iter())
+        (removed.user_data, obsolete_requests.into_iter())
     }
 
     /// Sets the finalized block height of the given source.
@@ -606,7 +623,22 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Panics if `source_id` is invalid.
     ///
     pub fn set_source_finality_state(&mut self, source_id: SourceId, finalized_block_height: u64) {
-        self.sources[source_id.0].finalized_block_height = finalized_block_height;
+        let stored_height = &mut self.sources[source_id.0].finalized_block_height;
+
+        if *stored_height == finalized_block_height {
+            return;
+        }
+
+        let _was_in = self
+            .sources_by_finalized_height
+            .remove(&(*stored_height, source_id));
+        debug_assert!(_was_in);
+        let _inserted = self
+            .sources_by_finalized_height
+            .insert((finalized_block_height, source_id));
+        debug_assert!(_inserted);
+
+        *stored_height = finalized_block_height;
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
