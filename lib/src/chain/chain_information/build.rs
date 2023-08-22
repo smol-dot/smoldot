@@ -189,22 +189,20 @@ impl ChainInformationBuild {
     /// decoded.
     ///
     pub fn new(config: Config) -> Self {
-        // TODO: also check version numbers?
-        let apis_versions = config
+        let [aura_version, babe_version, grandpa_version] = config
             .runtime
             .runtime_version()
             .decode()
             .apis
             .find_versions(["AuraApi", "BabeApi", "GrandpaApi"]);
-        let runtime_has_aura = apis_versions[0].map_or(false, |version_number| version_number == 1);
-        let runtime_babeapi_is_v1 =
-            apis_versions[1].and_then(|version_number| match version_number {
-                1 => Some(true),
-                2 => Some(false),
-                _ => None,
-            });
+        let runtime_has_aura = aura_version.map_or(false, |version_number| version_number == 1);
+        let runtime_babeapi_is_v1 = babe_version.and_then(|version_number| match version_number {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        });
         let runtime_grandpa_supports_currentsetid =
-            apis_versions[2].and_then(|version_number| match version_number {
+            grandpa_version.and_then(|version_number| match version_number {
                 // Version 1 is from 2019 and isn't used by any chain in production, so we don't
                 // care about it.
                 2 => Some(false),
