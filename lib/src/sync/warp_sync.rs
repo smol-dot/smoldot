@@ -1133,17 +1133,17 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     /// Returns the source that has sent the fragments that we are about to verify, and its user
     /// data.
     pub fn proof_sender(&self) -> (SourceId, &TSrc) {
-        if let Phase::PendingVerify {
+        let Phase::PendingVerify {
             downloaded_source, ..
         } = &self.inner.phase
-        {
-            (
-                *downloaded_source,
-                &self.inner.sources[downloaded_source.0].user_data,
-            )
-        } else {
+        else {
             unreachable!()
-        }
+        };
+
+        (
+            *downloaded_source,
+            &self.inner.sources[downloaded_source.0].user_data,
+        )
     }
 
     /// Verify one warp sync fragment.
@@ -1155,70 +1155,70 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         mut self,
         randomness_seed: [u8; 32],
     ) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
-        if let Phase::PendingVerify {
+        let Phase::PendingVerify {
             verifier,
             final_set_of_fragments,
             downloaded_source,
             ..
         } = &mut self.inner.phase
-        {
-            match verifier.take().unwrap().next(randomness_seed) {
-                Ok(verifier::Next::NotFinished(next_verifier)) => {
-                    *verifier = Some(next_verifier);
-                }
-                Ok(verifier::Next::EmptyProof) => {
-                    self.inner.warped_header = self
-                        .inner
-                        .start_chain_information
-                        .as_ref()
-                        .finalized_block_header
+        else {
+            unreachable!()
+        };
+
+        match verifier.take().unwrap().next(randomness_seed) {
+            Ok(verifier::Next::NotFinished(next_verifier)) => {
+                *verifier = Some(next_verifier);
+            }
+            Ok(verifier::Next::EmptyProof) => {
+                self.inner.warped_header = self
+                    .inner
+                    .start_chain_information
+                    .as_ref()
+                    .finalized_block_header
+                    .into();
+                self.inner.warped_finality =
+                    self.inner.start_chain_information.as_ref().finality.into();
+                self.inner.phase = Phase::RuntimeDownload {
+                    runtime_download: None,
+                    warp_sync_source_id: *downloaded_source,
+                    downloaded_runtime: None,
+                    hint_doesnt_match: false,
+                };
+            }
+            Ok(verifier::Next::Success {
+                scale_encoded_header,
+                chain_information_finality,
+            }) => {
+                // As the verification of the fragment has succeeded, we are sure that the header
+                // is valid and can decode it.
+                self.inner.warped_header =
+                    header::decode(&scale_encoded_header, self.inner.block_number_bytes)
+                        .unwrap()
                         .into();
-                    self.inner.warped_finality =
-                        self.inner.start_chain_information.as_ref().finality.into();
+                self.inner.warped_finality = chain_information_finality;
+
+                if *final_set_of_fragments {
                     self.inner.phase = Phase::RuntimeDownload {
                         runtime_download: None,
                         warp_sync_source_id: *downloaded_source,
                         downloaded_runtime: None,
                         hint_doesnt_match: false,
                     };
-                }
-                Ok(verifier::Next::Success {
-                    scale_encoded_header,
-                    chain_information_finality,
-                }) => {
-                    // As the verification of the fragment has succeeded, we are sure that the header
-                    // is valid and can decode it.
-                    self.inner.warped_header =
-                        header::decode(&scale_encoded_header, self.inner.block_number_bytes)
-                            .unwrap()
-                            .into();
-                    self.inner.warped_finality = chain_information_finality;
-
-                    if *final_set_of_fragments {
-                        self.inner.phase = Phase::RuntimeDownload {
-                            runtime_download: None,
-                            warp_sync_source_id: *downloaded_source,
-                            downloaded_runtime: None,
-                            hint_doesnt_match: false,
-                        };
-                    } else {
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                    }
-                }
-                Err(error) => {
+                } else {
                     self.inner.phase = Phase::DownloadFragments {
                         warp_sync_fragments_download: None,
                     };
-                    return (self.inner, Some(error));
                 }
             }
-
-            (self.inner, None)
-        } else {
-            unreachable!()
+            Err(error) => {
+                self.inner.phase = Phase::DownloadFragments {
+                    warp_sync_fragments_download: None,
+                };
+                return (self.inner, Some(error));
+            }
         }
+
+        (self.inner, None)
     }
 }
 
@@ -1241,248 +1241,237 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
-        if let Phase::RuntimeDownload {
+        let Phase::RuntimeDownload {
             downloaded_runtime,
             warp_sync_source_id,
             hint_doesnt_match,
             ..
         } = &mut self.inner.phase
-        {
-            let downloaded_runtime = downloaded_runtime.take().unwrap();
-            let decoded_downloaded_runtime =
-                match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                    proof: &downloaded_runtime[..],
-                }) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                        return (
-                            WarpSync::InProgress(self.inner),
-                            Some(Error::InvalidMerkleProof(err)),
-                        );
-                    }
-                };
+        else {
+            unreachable!()
+        };
 
-            let (
-                finalized_storage_code_merkle_value,
-                finalized_storage_code_closest_ancestor_excluding,
-            ) = {
-                let code_nibbles =
-                    trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
-                match decoded_downloaded_runtime.closest_ancestor_in_proof(
-                    &self.inner.warped_header.state_root,
-                    &code_nibbles[..code_nibbles.len() - 1],
-                ) {
-                    Ok(Some(closest_ancestor_key)) => {
-                        let next_nibble = code_nibbles[closest_ancestor_key.len()];
-                        let merkle_value = decoded_downloaded_runtime
-                            .trie_node_info(
-                                &self.inner.warped_header.state_root,
-                                closest_ancestor_key,
-                            )
-                            .unwrap()
-                            .children
-                            .child(next_nibble)
-                            .merkle_value();
-
-                        match merkle_value {
-                            Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
-                            None => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    warp_sync_fragments_download: None,
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::MissingCode),
-                                );
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                        return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
-                    }
-                    Err(proof_decode::IncompleteProofError { .. }) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                        return (
-                            WarpSync::InProgress(self.inner),
-                            Some(Error::MerkleProofEntriesMissing),
-                        );
-                    }
-                }
-            };
-
-            let finalized_storage_code = if let (false, Some(hint)) =
-                (*hint_doesnt_match, self.inner.code_trie_node_hint.as_ref())
-            {
-                if hint.merkle_value == finalized_storage_code_merkle_value {
-                    &hint.storage_value
-                } else {
-                    *hint_doesnt_match = true;
-                    return (WarpSync::InProgress(self.inner), None);
-                }
-            } else {
-                match decoded_downloaded_runtime
-                    .storage_value(&self.inner.warped_header.state_root, b":code")
-                {
-                    Ok(Some((code, _))) => code,
-                    Ok(None) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                        return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
-                    }
-                    Err(proof_decode::IncompleteProofError { .. }) => {
-                        return (
-                            WarpSync::InProgress(self.inner),
-                            Some(Error::MerkleProofEntriesMissing),
-                        );
-                    }
-                }
-            };
-
-            let finalized_storage_heappages = match decoded_downloaded_runtime
-                .storage_value(&self.inner.warped_header.state_root, b":heappages")
-            {
-                Ok(val) => val.map(|(v, _)| v),
-                Err(proof_decode::IncompleteProofError { .. }) => {
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::MerkleProofEntriesMissing),
-                    );
-                }
-            };
-
-            let decoded_heap_pages =
-                match executor::storage_heap_pages_to_value(finalized_storage_heappages) {
-                    Ok(hp) => hp,
-                    Err(err) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                        return (
-                            WarpSync::InProgress(self.inner),
-                            Some(Error::InvalidHeapPages(err)),
-                        );
-                    }
-                };
-
-            let runtime = match HostVmPrototype::new(host::Config {
-                module: &finalized_storage_code,
-                heap_pages: decoded_heap_pages,
-                exec_hint,
-                allow_unresolved_imports,
+        let downloaded_runtime = downloaded_runtime.take().unwrap();
+        let decoded_downloaded_runtime =
+            match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                proof: &downloaded_runtime[..],
             }) {
-                Ok(runtime) => runtime,
+                Ok(p) => p,
                 Err(err) => {
                     self.inner.phase = Phase::DownloadFragments {
                         warp_sync_fragments_download: None,
                     };
                     return (
                         WarpSync::InProgress(self.inner),
-                        Some(Error::RuntimeBuild(err)),
+                        Some(Error::InvalidMerkleProof(err)),
                     );
                 }
             };
 
-            let chain_info_builder = chain_information::build::ChainInformationBuild::new(
-                chain_information::build::Config {
-                    finalized_block_header:
-                        chain_information::build::ConfigFinalizedBlockHeader::Any {
-                            scale_encoded_header: self
-                                .inner
-                                .warped_header
-                                .scale_encoding_vec(self.inner.block_number_bytes),
-                            known_finality: Some((&self.inner.warped_finality).clone()),
-                        },
-                    block_number_bytes: self.inner.block_number_bytes,
-                    runtime,
-                },
-            );
+        let (
+            finalized_storage_code_merkle_value,
+            finalized_storage_code_closest_ancestor_excluding,
+        ) = {
+            let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
+            match decoded_downloaded_runtime.closest_ancestor_in_proof(
+                &self.inner.warped_header.state_root,
+                &code_nibbles[..code_nibbles.len() - 1],
+            ) {
+                Ok(Some(closest_ancestor_key)) => {
+                    let next_nibble = code_nibbles[closest_ancestor_key.len()];
+                    let merkle_value = decoded_downloaded_runtime
+                        .trie_node_info(&self.inner.warped_header.state_root, closest_ancestor_key)
+                        .unwrap()
+                        .children
+                        .child(next_nibble)
+                        .merkle_value();
 
-            let (calls, chain_info_builder) = match chain_info_builder {
-                chain_information::build::ChainInformationBuild::Finished {
-                    result: Ok(chain_information),
-                    virtual_machine,
-                } => {
-                    return (
-                        WarpSync::Finished(Success {
-                            chain_information,
-                            finalized_runtime: virtual_machine,
-                            finalized_storage_code: Some(finalized_storage_code.to_owned()),
-                            finalized_storage_heap_pages: finalized_storage_heappages
-                                .map(|v| v.to_vec()),
-                            finalized_storage_code_merkle_value: Some(
-                                finalized_storage_code_merkle_value,
-                            ),
-                            finalized_storage_code_closest_ancestor_excluding: Some(
-                                finalized_storage_code_closest_ancestor_excluding,
-                            ),
-                            sources_ordered: mem::take(&mut self.inner.sources)
-                                .into_iter()
-                                .map(|(id, source)| {
-                                    (
-                                        SourceId(id),
-                                        source.finalized_block_height,
-                                        source.user_data,
-                                    )
-                                })
-                                .collect(),
-                            in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
-                                .into_iter()
-                                .map(|(id, (src_id, user_data, detail))| {
-                                    (src_id, RequestId(id), user_data, detail)
-                                })
-                                .collect(),
-                        }),
-                        None,
-                    );
+                    match merkle_value {
+                        Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
+                        None => {
+                            self.inner.phase = Phase::DownloadFragments {
+                                warp_sync_fragments_download: None,
+                            };
+                            return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                        }
+                    }
                 }
-                chain_information::build::ChainInformationBuild::Finished {
-                    result: Err(err),
-                    ..
-                } => {
+                Ok(None) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        warp_sync_fragments_download: None,
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                }
+                Err(proof_decode::IncompleteProofError { .. }) => {
                     self.inner.phase = Phase::DownloadFragments {
                         warp_sync_fragments_download: None,
                     };
                     return (
                         WarpSync::InProgress(self.inner),
-                        Some(Error::ChainInformationBuild(err)),
+                        Some(Error::MerkleProofEntriesMissing),
                     );
                 }
-                chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
-                    let calls = in_progress
-                        .remaining_calls()
-                        .map(|call| (call, CallProof::NotStarted))
-                        .collect();
-                    (calls, in_progress)
+            }
+        };
+
+        let finalized_storage_code = if let (false, Some(hint)) =
+            (*hint_doesnt_match, self.inner.code_trie_node_hint.as_ref())
+        {
+            if hint.merkle_value == finalized_storage_code_merkle_value {
+                &hint.storage_value
+            } else {
+                *hint_doesnt_match = true;
+                return (WarpSync::InProgress(self.inner), None);
+            }
+        } else {
+            match decoded_downloaded_runtime
+                .storage_value(&self.inner.warped_header.state_root, b":code")
+            {
+                Ok(Some((code, _))) => code,
+                Ok(None) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        warp_sync_fragments_download: None,
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                }
+                Err(proof_decode::IncompleteProofError { .. }) => {
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::MerkleProofEntriesMissing),
+                    );
+                }
+            }
+        };
+
+        let finalized_storage_heappages = match decoded_downloaded_runtime
+            .storage_value(&self.inner.warped_header.state_root, b":heappages")
+        {
+            Ok(val) => val.map(|(v, _)| v),
+            Err(proof_decode::IncompleteProofError { .. }) => {
+                return (
+                    WarpSync::InProgress(self.inner),
+                    Some(Error::MerkleProofEntriesMissing),
+                );
+            }
+        };
+
+        let decoded_heap_pages =
+            match executor::storage_heap_pages_to_value(finalized_storage_heappages) {
+                Ok(hp) => hp,
+                Err(err) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        warp_sync_fragments_download: None,
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::InvalidHeapPages(err)),
+                    );
                 }
             };
 
-            self.inner.phase = Phase::ChainInformationDownload {
-                warp_sync_source_id: *warp_sync_source_id,
-                downloaded_runtime: Some(DownloadedRuntime {
-                    storage_code: Some(finalized_storage_code.to_vec()),
-                    storage_heap_pages: finalized_storage_heappages.map(|v| v.to_vec()),
-                    code_merkle_value: Some(finalized_storage_code_merkle_value),
-                    closest_ancestor_excluding: Some(
-                        finalized_storage_code_closest_ancestor_excluding,
-                    ),
-                }),
-                chain_info_builder: Some(chain_info_builder),
-                calls,
-            };
+        let runtime = match HostVmPrototype::new(host::Config {
+            module: &finalized_storage_code,
+            heap_pages: decoded_heap_pages,
+            exec_hint,
+            allow_unresolved_imports,
+        }) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                self.inner.phase = Phase::DownloadFragments {
+                    warp_sync_fragments_download: None,
+                };
+                return (
+                    WarpSync::InProgress(self.inner),
+                    Some(Error::RuntimeBuild(err)),
+                );
+            }
+        };
 
-            (WarpSync::InProgress(self.inner), None)
-        } else {
-            unreachable!()
-        }
+        let chain_info_builder = chain_information::build::ChainInformationBuild::new(
+            chain_information::build::Config {
+                finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
+                    scale_encoded_header: self
+                        .inner
+                        .warped_header
+                        .scale_encoding_vec(self.inner.block_number_bytes),
+                    known_finality: Some((&self.inner.warped_finality).clone()),
+                },
+                block_number_bytes: self.inner.block_number_bytes,
+                runtime,
+            },
+        );
+
+        let (calls, chain_info_builder) = match chain_info_builder {
+            chain_information::build::ChainInformationBuild::Finished {
+                result: Ok(chain_information),
+                virtual_machine,
+            } => {
+                return (
+                    WarpSync::Finished(Success {
+                        chain_information,
+                        finalized_runtime: virtual_machine,
+                        finalized_storage_code: Some(finalized_storage_code.to_owned()),
+                        finalized_storage_heap_pages: finalized_storage_heappages
+                            .map(|v| v.to_vec()),
+                        finalized_storage_code_merkle_value: Some(
+                            finalized_storage_code_merkle_value,
+                        ),
+                        finalized_storage_code_closest_ancestor_excluding: Some(
+                            finalized_storage_code_closest_ancestor_excluding,
+                        ),
+                        sources_ordered: mem::take(&mut self.inner.sources)
+                            .into_iter()
+                            .map(|(id, source)| {
+                                (
+                                    SourceId(id),
+                                    source.finalized_block_height,
+                                    source.user_data,
+                                )
+                            })
+                            .collect(),
+                        in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
+                            .into_iter()
+                            .map(|(id, (src_id, user_data, detail))| {
+                                (src_id, RequestId(id), user_data, detail)
+                            })
+                            .collect(),
+                    }),
+                    None,
+                );
+            }
+            chain_information::build::ChainInformationBuild::Finished {
+                result: Err(err), ..
+            } => {
+                self.inner.phase = Phase::DownloadFragments {
+                    warp_sync_fragments_download: None,
+                };
+                return (
+                    WarpSync::InProgress(self.inner),
+                    Some(Error::ChainInformationBuild(err)),
+                );
+            }
+            chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
+                let calls = in_progress
+                    .remaining_calls()
+                    .map(|call| (call, CallProof::NotStarted))
+                    .collect();
+                (calls, in_progress)
+            }
+        };
+
+        self.inner.phase = Phase::ChainInformationDownload {
+            warp_sync_source_id: *warp_sync_source_id,
+            downloaded_runtime: Some(DownloadedRuntime {
+                storage_code: Some(finalized_storage_code.to_vec()),
+                storage_heap_pages: finalized_storage_heappages.map(|v| v.to_vec()),
+                code_merkle_value: Some(finalized_storage_code_merkle_value),
+                closest_ancestor_excluding: Some(finalized_storage_code_closest_ancestor_excluding),
+            }),
+            chain_info_builder: Some(chain_info_builder),
+            calls,
+        };
+
+        (WarpSync::InProgress(self.inner), None)
     }
 }
 
@@ -1497,144 +1486,146 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
     /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
     // TODO: refactor this error or explain what it is
     pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
-        if let Phase::ChainInformationDownload {
+        let Phase::ChainInformationDownload {
             chain_info_builder,
             downloaded_runtime,
             calls,
             ..
         } = &mut self.inner.phase
-        {
-            debug_assert!(calls
-                .values()
-                .all(|c| matches!(c, CallProof::Downloaded(_))));
+        else {
+            unreachable!()
+        };
 
-            // Decode all the Merkle proofs that have been received.
-            let calls = {
-                let mut decoded_proofs = hashbrown::HashMap::with_capacity_and_hasher(
-                    calls.len(),
-                    fnv::FnvBuildHasher::default(),
-                );
+        debug_assert!(calls
+            .values()
+            .all(|c| matches!(c, CallProof::Downloaded(_))));
 
-                for (call, proof) in calls {
-                    let CallProof::Downloaded(proof) = mem::replace(proof, CallProof::NotStarted)
-                        else { unreachable!() };
-                    let decoded_proof =
-                        match proof_decode::decode_and_verify_proof(proof_decode::Config {
-                            proof: proof.into_iter(),
-                        }) {
-                            Ok(d) => d,
-                            Err(err) => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    warp_sync_fragments_download: None,
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::InvalidMerkleProof(err)),
-                                );
-                            }
-                        };
-                    decoded_proofs.insert(*call, decoded_proof);
-                }
+        // Decode all the Merkle proofs that have been received.
+        let calls = {
+            let mut decoded_proofs = hashbrown::HashMap::with_capacity_and_hasher(
+                calls.len(),
+                fnv::FnvBuildHasher::default(),
+            );
 
-                decoded_proofs
-            };
+            for (call, proof) in calls {
+                let CallProof::Downloaded(proof) = mem::replace(proof, CallProof::NotStarted)
+                else {
+                    unreachable!()
+                };
+                let decoded_proof =
+                    match proof_decode::decode_and_verify_proof(proof_decode::Config {
+                        proof: proof.into_iter(),
+                    }) {
+                        Ok(d) => d,
+                        Err(err) => {
+                            self.inner.phase = Phase::DownloadFragments {
+                                warp_sync_fragments_download: None,
+                            };
+                            return (
+                                WarpSync::InProgress(self.inner),
+                                Some(Error::InvalidMerkleProof(err)),
+                            );
+                        }
+                    };
+                decoded_proofs.insert(*call, decoded_proof);
+            }
 
-            let mut chain_info_builder = chain_info_builder.take().unwrap();
+            decoded_proofs
+        };
 
-            loop {
-                match chain_info_builder {
-                    chain_information::build::InProgress::StorageGet(get) => {
-                        // TODO: child tries not supported
-                        let proof = calls.get(&get.call_in_progress()).unwrap();
-                        let value = match proof
-                            .storage_value(&self.inner.warped_header.state_root, get.key().as_ref())
-                        {
-                            Ok(v) => v,
-                            Err(proof_decode::IncompleteProofError { .. }) => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    warp_sync_fragments_download: None,
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::MerkleProofEntriesMissing),
-                                );
-                            }
-                        };
+        let mut chain_info_builder = chain_info_builder.take().unwrap();
 
-                        match get.inject_value(value.map(|(val, ver)| (iter::once(val), ver))) {
-                            chain_information::build::ChainInformationBuild::Finished {
-                                result: Ok(chain_information),
-                                virtual_machine,
-                            } => {
-                                let downloaded_runtime = downloaded_runtime.take().unwrap();
+        loop {
+            match chain_info_builder {
+                chain_information::build::InProgress::StorageGet(get) => {
+                    // TODO: child tries not supported
+                    let proof = calls.get(&get.call_in_progress()).unwrap();
+                    let value = match proof
+                        .storage_value(&self.inner.warped_header.state_root, get.key().as_ref())
+                    {
+                        Ok(v) => v,
+                        Err(proof_decode::IncompleteProofError { .. }) => {
+                            self.inner.phase = Phase::DownloadFragments {
+                                warp_sync_fragments_download: None,
+                            };
+                            return (
+                                WarpSync::InProgress(self.inner),
+                                Some(Error::MerkleProofEntriesMissing),
+                            );
+                        }
+                    };
 
-                                return (
-                                    WarpSync::Finished(Success {
-                                        chain_information,
-                                        finalized_runtime: virtual_machine,
-                                        finalized_storage_code: downloaded_runtime.storage_code,
-                                        finalized_storage_heap_pages: downloaded_runtime
-                                            .storage_heap_pages,
-                                        finalized_storage_code_merkle_value: downloaded_runtime
-                                            .code_merkle_value,
-                                        finalized_storage_code_closest_ancestor_excluding:
-                                            downloaded_runtime.closest_ancestor_excluding,
-                                        sources_ordered: mem::take(&mut self.inner.sources)
-                                            .into_iter()
-                                            .map(|(id, source)| {
-                                                (
-                                                    SourceId(id),
-                                                    source.finalized_block_height,
-                                                    source.user_data,
-                                                )
-                                            })
-                                            .collect(),
-                                        in_progress_requests: mem::take(
-                                            &mut self.inner.in_progress_requests,
-                                        )
+                    match get.inject_value(value.map(|(val, ver)| (iter::once(val), ver))) {
+                        chain_information::build::ChainInformationBuild::Finished {
+                            result: Ok(chain_information),
+                            virtual_machine,
+                        } => {
+                            let downloaded_runtime = downloaded_runtime.take().unwrap();
+
+                            return (
+                                WarpSync::Finished(Success {
+                                    chain_information,
+                                    finalized_runtime: virtual_machine,
+                                    finalized_storage_code: downloaded_runtime.storage_code,
+                                    finalized_storage_heap_pages: downloaded_runtime
+                                        .storage_heap_pages,
+                                    finalized_storage_code_merkle_value: downloaded_runtime
+                                        .code_merkle_value,
+                                    finalized_storage_code_closest_ancestor_excluding:
+                                        downloaded_runtime.closest_ancestor_excluding,
+                                    sources_ordered: mem::take(&mut self.inner.sources)
                                         .into_iter()
-                                        .map(|(id, (src_id, user_data, detail))| {
-                                            (src_id, RequestId(id), user_data, detail)
+                                        .map(|(id, source)| {
+                                            (
+                                                SourceId(id),
+                                                source.finalized_block_height,
+                                                source.user_data,
+                                            )
                                         })
                                         .collect(),
-                                    }),
-                                    None,
-                                );
-                            }
-                            chain_information::build::ChainInformationBuild::Finished {
-                                result: Err(err),
-                                ..
-                            } => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    warp_sync_fragments_download: None,
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::ChainInformationBuild(err)),
-                                );
-                            }
-                            chain_information::build::ChainInformationBuild::InProgress(
-                                in_progress,
-                            ) => {
-                                chain_info_builder = in_progress;
-                            }
+                                    in_progress_requests: mem::take(
+                                        &mut self.inner.in_progress_requests,
+                                    )
+                                    .into_iter()
+                                    .map(|(id, (src_id, user_data, detail))| {
+                                        (src_id, RequestId(id), user_data, detail)
+                                    })
+                                    .collect(),
+                                }),
+                                None,
+                            );
+                        }
+                        chain_information::build::ChainInformationBuild::Finished {
+                            result: Err(err),
+                            ..
+                        } => {
+                            self.inner.phase = Phase::DownloadFragments {
+                                warp_sync_fragments_download: None,
+                            };
+                            return (
+                                WarpSync::InProgress(self.inner),
+                                Some(Error::ChainInformationBuild(err)),
+                            );
+                        }
+                        chain_information::build::ChainInformationBuild::InProgress(
+                            in_progress,
+                        ) => {
+                            chain_info_builder = in_progress;
                         }
                     }
-                    chain_information::build::InProgress::NextKey(_)
-                    | chain_information::build::InProgress::ClosestDescendantMerkleValue(_) => {
-                        // TODO: implement
-                        self.inner.phase = Phase::DownloadFragments {
-                            warp_sync_fragments_download: None,
-                        };
-                        return (
-                            WarpSync::InProgress(self.inner),
-                            Some(Error::NextKeyUnimplemented),
-                        );
-                    }
+                }
+                chain_information::build::InProgress::NextKey(_)
+                | chain_information::build::InProgress::ClosestDescendantMerkleValue(_) => {
+                    // TODO: implement
+                    self.inner.phase = Phase::DownloadFragments {
+                        warp_sync_fragments_download: None,
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::NextKeyUnimplemented),
+                    );
                 }
             }
-        } else {
-            unreachable!()
         }
     }
 }
