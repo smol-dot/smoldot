@@ -311,6 +311,24 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
     }
 }
 
+impl<TSrc, TRq> ops::Index<RequestId> for InProgressWarpSync<TSrc, TRq> {
+    type Output = TRq;
+
+    #[track_caller]
+    fn index(&self, request_id: RequestId) -> &TRq {
+        debug_assert!(self.in_progress_requests.contains(request_id.0));
+        &self.in_progress_requests[request_id.0].1
+    }
+}
+
+impl<TSrc, TRq> ops::IndexMut<RequestId> for InProgressWarpSync<TSrc, TRq> {
+    #[track_caller]
+    fn index_mut(&mut self, request_id: RequestId) -> &mut TRq {
+        debug_assert!(self.in_progress_requests.contains(request_id.0));
+        &mut self.in_progress_requests[request_id.0].1
+    }
+}
+
 /// Warp syncing process now obtaining the chain information.
 pub struct InProgressWarpSync<TSrc, TRq> {
     /// See [`Phase`].
