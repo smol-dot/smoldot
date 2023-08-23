@@ -598,6 +598,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             return;
         }
 
+        // Note that if the new finalized block is below the former one, we should in principle
+        // cancel the requests targeting that source that require a specific block height. In
+        // practice, however, we don't care as this isn't supposed to ever happen. Ongoing requests
+        // will continue and might succeed or fail as normal.
+
         let _was_in = self
             .sources_by_finalized_height
             .remove(&(*stored_height, source_id));
