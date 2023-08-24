@@ -137,8 +137,6 @@ enum ToBackground {
 pub enum InitError {
     /// Error accessing the database.
     DatabaseAccess(full_sqlite::AccessError),
-    /// Error accessing the storage of the finalized block.
-    FinalizedStorageAccess(full_sqlite::StorageAccessError),
     /// Error parsing the header of a block in the database.
     InvalidHeader(header::Error),
     /// `:code` key is missing from the finalized block storage.
@@ -187,26 +185,41 @@ impl ConsensusService {
                     )
                     .map_err(InitError::InvalidHeader)?
                     .number;
-                    let finalized_chain_information = database
-                        .to_chain_information(&finalized_block_hash)
-                        .map_err(InitError::FinalizedStorageAccess)?;
-                    let finalized_code = database
-                        .block_storage_get(
-                            &finalized_block_hash,
-                            iter::empty::<iter::Empty<_>>(),
-                            trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
-                        )
-                        .map_err(InitError::FinalizedStorageAccess)?
-                        .ok_or(InitError::FinalizedCodeMissing)?
-                        .0;
-                    let finalized_heap_pages = database
-                        .block_storage_get(
-                            &finalized_block_hash,
-                            iter::empty::<iter::Empty<_>>(),
-                            trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
-                        )
-                        .map_err(InitError::FinalizedStorageAccess)?
-                        .map(|(hp, _)| hp);
+                    let finalized_chain_information =
+                        match database.to_chain_information(&finalized_block_hash) {
+                            Ok(info) => info,
+                            Err(full_sqlite::StorageAccessError::Access(err)) => {
+                                return Err(InitError::DatabaseAccess(err))
+                            }
+                            Err(full_sqlite::StorageAccessError::Pruned)
+                            | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                        };
+                    let finalized_code = match database.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                    ) {
+                        Ok(Some((code, _))) => code,
+                        Ok(None) => return Err(InitError::FinalizedCodeMissing),
+                        Err(full_sqlite::StorageAccessError::Access(err)) => {
+                            return Err(InitError::DatabaseAccess(err))
+                        }
+                        Err(full_sqlite::StorageAccessError::Pruned)
+                        | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                    };
+                    let finalized_heap_pages = match database.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                    ) {
+                        Ok(Some((hp, _))) => Some(hp),
+                        Ok(None) => None,
+                        Err(full_sqlite::StorageAccessError::Access(err)) => {
+                            return Err(InitError::DatabaseAccess(err))
+                        }
+                        Err(full_sqlite::StorageAccessError::Pruned)
+                        | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                    };
                     Ok((
                         finalized_block_number,
                         finalized_heap_pages,
