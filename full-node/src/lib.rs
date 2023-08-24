@@ -435,7 +435,8 @@ pub async fn start(mut config: Config<'_>) -> Client {
         jaeger_service: jaeger_service.clone(),
         slot_duration_author_ratio: 43691_u16,
     })
-    .await;
+    .await
+    .unwrap();
 
     let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
         Some(
@@ -477,7 +478,8 @@ pub async fn start(mut config: Config<'_>) -> Client {
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
             })
-            .await,
+            .await
+            .unwrap(),
         )
     } else {
         None
