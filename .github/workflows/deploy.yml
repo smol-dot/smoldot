@@ -180,11 +180,6 @@ jobs:
         with:
           # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 16
-      - uses: actions-rs/toolchain@v1
-        with:
-          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: stable
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - run: npm install
         working-directory: ./wasm-node/javascript
@@ -201,6 +196,8 @@ jobs:
 
   deno-publish:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.71
     permissions:
       contents: write   # Necessary in order to push tags.
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
@@ -215,11 +212,6 @@ jobs:
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
-      - uses: actions-rs/toolchain@v1
-        with:
-          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: stable
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
         run: echo "tag=light-js-deno-v`jq -r .version ./wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
