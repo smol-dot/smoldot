@@ -98,15 +98,14 @@ jobs:
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.71
     steps:
     - uses: actions/checkout@v3
-    - uses: actions-rs/toolchain@v1
-      with:
-        # Since build artifacts are specific to a nightly version, we pin the specific nightly
-        # version to use in order to not invalidate the build cache every day. The exact version
-        # is completely arbitrary.
-        toolchain: nightly-2023-07-15
-        override: true
+      # Since build artifacts are specific to a nightly version, we pin the specific nightly
+      # version to use in order to not invalidate the build cache every day. The exact version
+      # is completely arbitrary.
+    - run: rustup default nightly-2023-07-15
     - uses: baptiste0928/cargo-install@v2  # This action ensures that the compilation is cached.
       with:
         crate: cargo-fuzz
@@ -128,13 +127,11 @@ jobs:
 
   fmt:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.71
     steps:
       # Checks `rustfmt` formatting
       - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
       - run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
@@ -149,13 +146,14 @@ jobs:
   # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.71
     steps:
       - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-            toolchain: nightly
-            components: clippy
-            override: true
+        # Since build artifacts are specific to a nightly version, we pin the specific nightly
+        # version to use in order to not invalidate the build cache every day. The exact version
+        # is completely arbitrary.
+      - run: rustup default nightly-2023-07-15
       - uses: Swatinem/rust-cache@v2  # Note that this is done after switching the compiler version to nightly
       - uses: actions-rs/clippy@master
         with:
@@ -189,12 +187,11 @@ jobs:
 
   wasm-node-versions-match:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1.71
     steps:
       - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - run: apt-get update && apt install -y jq
       # Compares whether the version in `package.json` matches the version in `Cargo.toml`.
       - id: js-version
         run: echo "version=`jq .version ./wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
