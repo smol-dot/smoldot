@@ -98,6 +98,24 @@ fn chain_spec_v1_properties() {
 }
 
 #[test]
+fn system_chain() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client
+            .send_json_rpc_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"system_chain","params":[]}"#
+                    .to_owned(),
+            )
+            .unwrap();
+
+        let response_raw = client.next_json_rpc_response().await;
+        // TODO: actually parse the response properly
+        assert!(response_raw.contains("Local Testnet"));
+    });
+}
+
+#[test]
 fn system_name() {
     smol::block_on(async move {
         let client = start_client().await;
@@ -111,6 +129,24 @@ fn system_name() {
         let response_raw = client.next_json_rpc_response().await;
         // TODO: actually parse the response properly
         assert!(response_raw.contains("smoldot-full-node"));
+    });
+}
+
+#[test]
+fn system_properties() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client
+            .send_json_rpc_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"system_properties","params":[]}"#
+                    .to_owned(),
+            )
+            .unwrap();
+
+        let response_raw = client.next_json_rpc_response().await;
+        // TODO: actually parse the response properly
+        assert!(response_raw.contains("\"result\""));
     });
 }
 
