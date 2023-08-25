@@ -42,6 +42,8 @@ mod json_rpc_service;
 mod network_service;
 mod util;
 
+pub use json_rpc_service::RequestParseError as JsonRpcRequestParseError;
+
 pub struct Config<'a> {
     /// Chain to connect to.
     pub chain: ChainConfig<'a>,
@@ -164,6 +166,35 @@ impl Client {
             None
         }
     }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint of the chain.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    ///
+    /// Returns an error if the JSON-RPC request is malformed or if [`Config::json_rpc`] was
+    /// `None`.
+    pub fn send_json_rpc_request(&self, request: String) -> Result<(), SendJsonRpcRequestError> {
+        match &self.json_rpc_service {
+            Some(s) => s
+                .send_request(request)
+                .map_err(SendJsonRpcRequestError::ParseError),
+            None => Err(SendJsonRpcRequestError::NoJsonRpcService),
+        }
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`Client::send_json_rpc_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    ///
+    /// If [`Config::json_rpc`] was `None`, then this function waits forever and never returns.
+    pub async fn next_json_rpc_response(&self) -> String {
+        match &self.json_rpc_service {
+            Some(s) => s.next_response().await,
+            None => future::pending().await,
+        }
+    }
 }
 
 /// Error potentially returned by [`start`].
@@ -189,6 +220,15 @@ pub enum StartError {
     RelayChainKeystoreInit(io::Error),
     /// Error initializing the Jaeger service.
     JaegerInit(io::Error),
+}
+
+/// Error potentially returned by [`Client::send_json_rpc_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum SendJsonRpcRequestError {
+    /// Failed to parse the JSON-RPC request.
+    ParseError(JsonRpcRequestParseError),
+    /// No JSON-RPC service was started.
+    NoJsonRpcService,
 }
 
 /// Runs the node using the given configuration.
