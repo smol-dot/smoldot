@@ -196,15 +196,11 @@ jobs:
 
   deno-publish:
     runs-on: ubuntu-latest
-    container:
-      image: rust:1.71
     permissions:
       contents: write   # Necessary in order to push tags.
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
-      - run: apt-get update && apt install -y jq
-      - run: apt upgrade -y git
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
@@ -214,6 +210,12 @@ jobs:
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
+      # TODO: do not use `actions-rs/toolchain` but instead use `image: rust:...` like all the other stages; unfortunately this causes incomprehensible `detected dubious ownership in repository` git errors
+      - uses: actions-rs/toolchain@v1
+        with:
+          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
+          toolchain: stable
+          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
         run: echo "tag=light-js-deno-v`jq -r .version ./wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
@@ -225,10 +227,6 @@ jobs:
         working-directory: ./wasm-node/javascript
       - run: cp ./README.md ./dist/mjs
         working-directory: ./wasm-node/javascript
-      - run: pwd
-      - run: ls -al
-        # TODO: bypasses a `detected dubious ownership in repository` issue with older versions of git
-      - run: git status
       - run: |
           git add --force ./wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
