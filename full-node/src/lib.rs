@@ -33,7 +33,7 @@ use smoldot::{
     },
     trie,
 };
-use std::{array, borrow::Cow, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{array, borrow::Cow, io, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod consensus_service;
 mod database_thread;
@@ -166,26 +166,62 @@ impl Client {
     }
 }
 
+/// Error potentially returned by [`start`].
+#[derive(Debug, derive_more::Display)]
+pub enum StartError {
+    /// Failed to parse the chain specification.
+    ChainSpecParse(chain_spec::ParseError),
+    /// Error building the chain information of the genesis block.
+    InvalidGenesisInformation(chain_spec::FromGenesisStorageError),
+    /// Failed to parse the chain specification of the relay chain.
+    RelayChainSpecParse(chain_spec::ParseError),
+    /// Error building the chain information of the genesis block of the relay chain.
+    InvalidRelayGenesisInformation(chain_spec::FromGenesisStorageError),
+    /// Error initializing the networking service.
+    NetworkInit(network_service::InitError),
+    /// Error initializing the JSON-RPC service.
+    JsonRpcServiceInit(json_rpc_service::InitError),
+    ConsensusServiceInit(consensus_service::InitError),
+    RelayChainConsensusServiceInit(consensus_service::InitError),
+    /// Error initializing the keystore of the chain.
+    KeystoreInit(io::Error),
+    /// Error initializing the keystore of the relay chain.
+    RelayChainKeystoreInit(io::Error),
+    /// Error initializing the Jaeger service.
+    JaegerInit(io::Error),
+}
+
 /// Runs the node using the given configuration.
-// TODO: should return an error if something bad happens instead of panicking
-pub async fn start(mut config: Config<'_>) -> Client {
+// TODO: this function has several code paths that panic instead of returning an error; it is especially unclear what to do in case of database corruption, given that a database corruption would crash the node later on anyway
+pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     let chain_spec = {
-        smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
-            .expect("Failed to decode chain specs")
+        chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
+            .map_err(StartError::ChainSpecParse)?
     };
 
-    // TODO: don't unwrap?
-    let genesis_chain_information = chain_spec.to_chain_information().unwrap().0;
+    // TODO: don't just throw away the runtime
+    let genesis_chain_information = chain_spec
+        .to_chain_information()
+        .map_err(StartError::InvalidGenesisInformation)?
+        .0;
 
-    let relay_chain_spec = config.relay_chain.as_ref().map(|rc| {
-        smoldot::chain_spec::ChainSpec::from_json_bytes(&rc.chain_spec)
-            .expect("Failed to decode relay chain chain specs")
-    });
+    let relay_chain_spec = match &config.relay_chain {
+        Some(cfg) => Some(
+            chain_spec::ChainSpec::from_json_bytes(&cfg.chain_spec)
+                .map_err(StartError::RelayChainSpecParse)?,
+        ),
+        None => None,
+    };
 
-    // TODO: don't unwrap?
-    let relay_genesis_chain_information = relay_chain_spec
-        .as_ref()
-        .map(|relay_chain_spec| relay_chain_spec.to_chain_information().unwrap().0);
+    // TODO: don't just throw away the runtime
+    let relay_genesis_chain_information = match &relay_chain_spec {
+        Some(r) => Some(
+            r.to_chain_information()
+                .map_err(StartError::InvalidRelayGenesisInformation)?
+                .0,
+        ),
+        None => None,
+    };
 
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
@@ -257,7 +293,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
         jaeger_agent: config.jaeger_agent,
     })
     .await
-    .unwrap();
+    .map_err(StartError::JaegerInit)?;
 
     let (network_service, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
@@ -304,14 +340,21 @@ pub async fn start(mut config: Config<'_>) -> Client {
                     for node in chain_spec.boot_nodes() {
                         match node {
                             chain_spec::Bootnode::UnrecognizedFormat(raw) => {
-                                panic!("Failed to parse bootnode in chain specification: {raw}")
+                                config.log_callback.log(
+                                    LogLevel::Warn,
+                                    format!("bootnode-unrecognized-addr; value={:?}", raw),
+                                );
                             }
                             chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
                                 let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
                                     Ok(a) => a,
-                                    Err(_) => panic!(
-                                        "Failed to parse bootnode in chain specification: {multiaddr}"
-                                    ),
+                                    Err(_) => {
+                                        config.log_callback.log(
+                                            LogLevel::Warn,
+                                            format!("bootnode-unrecognized-addr; value={:?}", multiaddr),
+                                        );
+                                        continue;
+                                    },
                                 };
                                 let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
                                 list.push((peer_id, multiaddr));
@@ -372,14 +415,21 @@ pub async fn start(mut config: Config<'_>) -> Client {
                             for node in relay_chains_specs.boot_nodes() {
                                 match node {
                                     chain_spec::Bootnode::UnrecognizedFormat(raw) => {
-                                        panic!("Failed to parse bootnode in chain specification: {raw}")
+                                        config.log_callback.log(
+                                            LogLevel::Warn,
+                                            format!("relay-chain-bootnode-unrecognized-addr; value={:?}", raw),
+                                        );
                                     }
                                     chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
                                         let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
                                             Ok(a) => a,
-                                            Err(_) => panic!(
-                                                "Failed to parse bootnode in chain specification: {multiaddr}"
-                                            ),
+                                            Err(_) => {
+                                                config.log_callback.log(
+                                                    LogLevel::Warn,
+                                                    format!("relay-chain-bootnode-unrecognized-addr; value={:?}", multiaddr),
+                                                );
+                                                continue;
+                                            }
                                         };
                                         let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
                                         list.push((peer_id, multiaddr));
@@ -405,14 +455,14 @@ pub async fn start(mut config: Config<'_>) -> Client {
             jaeger_service: jaeger_service.clone(),
         })
         .await
-        .unwrap();
+        .map_err(StartError::NetworkInit)?;
 
     let mut network_events_receivers = network_events_receivers.into_iter();
 
     let keystore = Arc::new({
         let mut keystore = keystore::Keystore::new(config.chain.keystore_path, rand::random())
             .await
-            .unwrap();
+            .map_err(StartError::KeystoreInit)?;
         for mut private_key in config.chain.keystore_memory {
             keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
             zeroize::Zeroize::zeroize(&mut *private_key);
@@ -436,7 +486,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
         slot_duration_author_ratio: 43691_u16,
     })
     .await
-    .unwrap();
+    .map_err(StartError::ConsensusServiceInit)?;
 
     let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
         Some(
@@ -466,7 +516,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
                         rand::random(),
                     )
                     .await
-                    .unwrap();
+                    .map_err(StartError::RelayChainKeystoreInit)?;
                     for mut private_key in
                         mem::take(&mut config.relay_chain.as_mut().unwrap().keystore_memory)
                     {
@@ -479,7 +529,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
                 slot_duration_author_ratio: 43691_u16,
             })
             .await
-            .unwrap(),
+            .map_err(StartError::RelayChainConsensusServiceInit)?,
         )
     } else {
         None
@@ -510,7 +560,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
 
         Some(match result {
             Ok(service) => service,
-            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {err}"),
+            Err(err) => return Err(StartError::JsonRpcServiceInit(err)),
         })
     } else {
         None
@@ -579,13 +629,13 @@ pub async fn start(mut config: Config<'_>) -> Client {
     );
 
     debug_assert!(network_events_receivers.next().is_none());
-    Client {
+    Ok(Client {
         consensus_service,
         relay_chain_consensus_service,
         json_rpc_service,
         network_service,
         network_known_best,
-    }
+    })
 }
 
 /// Opens the database from the file system, or create a new database if none is found.

@@ -40,7 +40,8 @@ fn basic_block_generated() {
             log_callback: Arc::new(move |_, _| {}),
             jaeger_agent: None,
         })
-        .await;
+        .await
+        .unwrap();
 
         loop {
             smol::Timer::after(Duration::from_secs(1)).await;
