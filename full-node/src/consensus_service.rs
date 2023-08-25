@@ -124,9 +124,16 @@ pub struct ConsensusService {
     /// Used to communicate with the background task. Also used for the background task to detect
     /// a shutdown.
     to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
+
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 }
 
 enum ToBackground {
+    SubscribeAll {
+        buffer_size: usize,
+        result_tx: oneshot::Sender<SubscribeAll>,
+    },
     GetSyncState {
         result_tx: oneshot::Sender<SyncState>,
     },
@@ -307,6 +314,7 @@ impl ConsensusService {
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
             to_background_rx,
+            blocks_notifications: Vec::with_capacity(8),
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
@@ -320,8 +328,14 @@ impl ConsensusService {
         background_sync.start();
 
         Ok(Arc::new(ConsensusService {
+            block_number_bytes: config.block_number_bytes,
             to_background_tx: Mutex::new(to_background_tx),
         }))
+    }
+
+    /// Returns the value that was provided through [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.block_number_bytes
     }
 
     /// Returns a summary of the state of the service.
@@ -338,6 +352,114 @@ impl ConsensusService {
             .await;
         result_rx.await.unwrap()
     }
+
+    /// Subscribes to the state of the chain: the current state and the new blocks.
+    ///
+    /// Only up to `buffer_size` notifications are buffered in the channel. If the channel is full
+    /// when a new notification is attempted to be pushed, the channel gets closed.
+    ///
+    /// All the blocks being reported are guaranteed to be present in the database associated to
+    /// this [`ConsensusService`].
+    ///
+    /// See [`SubscribeAll`] for information about the return value.
+    ///
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
+    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::SubscribeAll {
+                buffer_size,
+                result_tx,
+            })
+            .await;
+        result_rx.await.unwrap()
+    }
+}
+
+/// Return value of [`ConsensusService::subscribe_all`].
+pub struct SubscribeAll {
+    /// SCALE-encoded header of the finalized block at the time of the subscription.
+    pub finalized_block_scale_encoded_header: Vec<u8>,
+
+    /// List of all known non-finalized blocks at the time of subscription.
+    ///
+    /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
+    ///
+    /// The blocks are guaranteed to be ordered so that parents are always found before their
+    /// children.
+    pub non_finalized_blocks_ancestry_order: Vec<BlockNotification>,
+
+    /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
+    /// block needs to be reported.
+    pub new_blocks: async_channel::Receiver<Notification>,
+}
+
+/// Notification about a new block or a new finalized block.
+///
+/// See [`ConsensusService::subscribe_all`].
+#[derive(Debug, Clone)]
+pub enum Notification {
+    /// A non-finalized block has been finalized.
+    Finalized {
+        /// BLAKE2 hash of the block that has been finalized.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
+        ///
+        /// It is, however, not guaranteed that this block is a child of the previously-finalized
+        /// block. In other words, if multiple blocks are finalized at the same time, only one
+        /// [`Notification::Finalized`] is generated and contains the highest finalized block.
+        hash: [u8; 32],
+
+        /// Hash of the best block after the finalization.
+        ///
+        /// If the newly-finalized block is an ancestor of the current best block, then this field
+        /// contains the hash of this current best block. Otherwise, the best block is now
+        /// the non-finalized block with the given hash.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
+        best_block_hash: [u8; 32],
+    },
+
+    /// A new block has been added to the list of unfinalized blocks.
+    Block(BlockNotification),
+}
+
+/// Notification about a new block.
+///
+/// See [`ConsensusService::subscribe_all`].
+#[derive(Debug, Clone)]
+pub struct BlockNotification {
+    /// True if this block is considered as the best block of the chain.
+    pub is_new_best: bool,
+
+    /// SCALE-encoded header of the block.
+    pub scale_encoded_header: Vec<u8>,
+
+    /// BLAKE2 hash of the header of the parent of this block.
+    ///
+    ///
+    /// A block with this hash is guaranteed to have earlier been reported in a
+    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`] or
+    /// in a [`Notification::Block`].
+    ///
+    /// > **Note**: The header of a block contains the hash of its parent. When it comes to
+    /// >           consensus algorithms such as Babe or Aura, the syncing code verifies that this
+    /// >           hash, stored in the header, actually corresponds to a valid block. However,
+    /// >           when it comes to parachain consensus, no such verification is performed.
+    /// >           Contrary to the hash stored in the header, the value of this field is
+    /// >           guaranteed to refer to a block that is known by the syncing service. This
+    /// >           allows a subscriber of the state of the chain to precisely track the hierarchy
+    /// >           of blocks, without risking to run into a problem in case of a block with an
+    /// >           invalid header.
+    pub parent_hash: [u8; 32],
 }
 
 struct SyncBackground {
@@ -395,6 +517,9 @@ struct SyncBackground {
 
     /// Used to receive messages from the frontend service, and to detect when it shuts down.
     to_background_rx: mpsc::Receiver<ToBackground>,
+
+    /// List of senders to report events to when they happen.
+    blocks_notifications: Vec<async_channel::Sender<Notification>>,
 
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
@@ -598,6 +723,37 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
+                        Some(ToBackground::SubscribeAll { buffer_size, result_tx }) => {
+                            let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+
+                            let non_finalized_blocks_ancestry_order = {
+                                let best_hash = self.sync.best_block_hash();
+                                self.sync
+                                    .non_finalized_blocks_ancestry_order()
+                                    .map(|h| {
+                                        let scale_encoding =
+                                            h.scale_encoding_vec(self.sync.block_number_bytes());
+                                        BlockNotification {
+                                            is_new_best: header::hash_from_scale_encoded_header(
+                                                &scale_encoding,
+                                            ) == best_hash,
+                                            scale_encoded_header: scale_encoding,
+                                            parent_hash: *h.parent_hash,
+                                        }
+                                    })
+                                    .collect()
+                            };
+
+                            self.blocks_notifications.push(tx);
+                            let _ = result_tx.send(SubscribeAll {
+                                finalized_block_scale_encoded_header: self
+                                    .sync
+                                    .finalized_block_header()
+                                    .scale_encoding_vec(self.sync.block_number_bytes()),
+                                non_finalized_blocks_ancestry_order,
+                                new_blocks,
+                            });
+                        },
                         Some(ToBackground::GetSyncState { result_tx }) => {
                             let _ = result_tx.send(SyncState {
                                 best_block_hash: self.sync.best_block_hash(),
@@ -1305,7 +1461,7 @@ impl SyncBackground {
                                 LogLevel::Warn,
                                 format!(
                                     "failed-block-verification; hash={}; height={}; \
-                                total_duration={:?}; error={}",
+                                    total_duration={:?}; error={}",
                                     HashDisplay(&hash_to_verify),
                                     header_verification_success.height(),
                                     when_verification_started.elapsed(),
@@ -1399,8 +1555,8 @@ impl SyncBackground {
                                 LogLevel::Debug,
                                 format!(
                                     "block-verification-success; hash={}; height={}; \
-                                total_duration={:?}; database_accesses_duration={:?}; \
-                                runtime_build_duration={:?}; is_new_best={:?}",
+                                    total_duration={:?}; database_accesses_duration={:?}; \
+                                    runtime_build_duration={:?}; is_new_best={:?}",
                                     HashDisplay(&hash_to_verify),
                                     height,
                                     when_verification_started.elapsed(),
@@ -1409,6 +1565,25 @@ impl SyncBackground {
                                     is_new_best
                                 ),
                             );
+
+                            // Notify the subscribers.
+                            // Elements in `blocks_notifications` are removed one by one and
+                            // inserted back if the channel is still open.
+                            for index in (0..self.blocks_notifications.len()).rev() {
+                                let subscription = self.blocks_notifications.swap_remove(index);
+                                if subscription
+                                    .try_send(Notification::Block(BlockNotification {
+                                        is_new_best,
+                                        scale_encoded_header: scale_encoded_header.clone(),
+                                        parent_hash,
+                                    }))
+                                    .is_err()
+                                {
+                                    continue;
+                                }
+
+                                self.blocks_notifications.push(subscription);
+                            }
 
                             // Processing has made a step forward.
 
@@ -1654,6 +1829,22 @@ impl SyncBackground {
                                 database.set_finalized(&new_finalized_hash).unwrap();
                             })
                             .await;
+                        // Elements in `blocks_notifications` are removed one by one and inserted
+                        // back if the channel is still open.
+                        for index in (0..self.blocks_notifications.len()).rev() {
+                            let subscription = self.blocks_notifications.swap_remove(index);
+                            if subscription
+                                .try_send(Notification::Finalized {
+                                    hash: new_finalized_hash,
+                                    best_block_hash: self.sync.best_block_hash(),
+                                })
+                                .is_err()
+                            {
+                                continue;
+                            }
+
+                            self.blocks_notifications.push(subscription);
+                        }
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {

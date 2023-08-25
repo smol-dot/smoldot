@@ -555,6 +555,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 .as_ref()
                 .finalized_block_header
                 .hash(usize::from(chain_spec.block_number_bytes())),
+            consensus_service: consensus_service.clone(),
         })
         .await;
 

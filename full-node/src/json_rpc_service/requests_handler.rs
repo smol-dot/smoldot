@@ -19,6 +19,8 @@ use smol::stream::StreamExt as _;
 use smoldot::json_rpc::{methods, service};
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use crate::consensus_service;
+
 pub struct Config {
     /// Function that can be used to spawn background tasks.
     ///
@@ -34,7 +36,11 @@ pub struct Config {
     pub chain_properties_json: String,
 
     /// Hash of the genesis block.
+    // TODO: load from database maybe?
     pub genesis_block_hash: [u8; 32],
+
+    /// Consensus service of the chain.
+    pub consensus_service: Arc<consensus_service::ConsensusService>,
 }
 
 pub enum Message {
@@ -43,7 +49,8 @@ pub enum Message {
 }
 
 pub fn spawn_requests_handler(mut config: Config) {
-    (config.tasks_executor)(Box::pin(async move {
+    let tasks_executor = config.tasks_executor.clone();
+    tasks_executor(Box::pin(async move {
         loop {
             match config.receiver.next().await {
                 Some(Message::Request(request)) => match request.request() {
@@ -87,9 +94,57 @@ pub fn spawn_requests_handler(mut config: Config) {
                         "Not implemented in smoldot yet",
                     )),
                 },
-                Some(Message::SubscriptionStart(request)) => request.fail(
-                    service::ErrorResponse::ServerError(-32000, "Not implemented in smoldot yet"),
-                ),
+                Some(Message::SubscriptionStart(request)) => match request.request() {
+                    methods::MethodCall::chain_subscribeAllHeads {} => {
+                        // TODO: consider extracting to separate function
+                        let consensus_service = config.consensus_service.clone();
+                        (config.tasks_executor)(Box::pin(async move {
+                            let mut subscription = request.accept();
+                            let subscription_id = subscription.subscription_id().to_owned();
+
+                            loop {
+                                let mut subscribe_all = consensus_service.subscribe_all(32).await;
+                                loop {
+                                    match subscribe_all.new_blocks.next().await {
+                                        None => break,
+                                        Some(consensus_service::Notification::Block(block)) => {
+                                            let json_rpc_header =
+                                                match methods::Header::from_scale_encoded_header(
+                                                    &block.scale_encoded_header,
+                                                    consensus_service.block_number_bytes(),
+                                                ) {
+                                                    Ok(h) => h,
+                                                    Err(_) => {
+                                                        // TODO: consider reporting to logs
+                                                        continue;
+                                                    }
+                                                };
+
+                                            subscription
+                                                .send_notification(
+                                                    methods::ServerToClient::chain_allHead {
+                                                        subscription: (&subscription_id).into(),
+                                                        result: json_rpc_header.clone(),
+                                                    },
+                                                )
+                                                .await
+                                        }
+                                        Some(consensus_service::Notification::Finalized {
+                                            ..
+                                        }) => {
+                                            // Ignore event.
+                                        }
+                                    }
+                                }
+                            }
+                        }));
+                    }
+
+                    _ => request.fail(service::ErrorResponse::ServerError(
+                        -32000,
+                        "Not implemented in smoldot yet",
+                    )),
+                },
                 None => return,
             }
         }
