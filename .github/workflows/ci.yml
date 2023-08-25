@@ -191,6 +191,7 @@ jobs:
       image: rust:1.71
     steps:
       - uses: actions/checkout@v3
+    - run: sudo apt-get update && sudo apt install -y jq
       # Compares whether the version in `package.json` matches the version in `Cargo.toml`.
       - id: js-version
         run: echo "version=`jq .version ./wasm-node/javascript/package.json`" >> $GITHUB_OUTPUT
