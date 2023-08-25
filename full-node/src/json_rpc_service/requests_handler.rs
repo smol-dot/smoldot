@@ -71,9 +71,18 @@ pub fn spawn_requests_handler(mut config: Config) {
                         ));
                     }
 
+                    methods::MethodCall::system_chain {} => {
+                        request
+                            .respond(methods::Response::system_chain((&config.chain_name).into()));
+                    }
                     methods::MethodCall::system_name {} => {
                         request.respond(methods::Response::system_version(
                             env!("CARGO_PKG_NAME").into(),
+                        ));
+                    }
+                    methods::MethodCall::system_properties {} => {
+                        request.respond(methods::Response::system_properties(
+                            serde_json::from_str(&config.chain_properties_json).unwrap(),
                         ));
                     }
                     methods::MethodCall::system_version {} => {
