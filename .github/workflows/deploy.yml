@@ -204,6 +204,7 @@ jobs:
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
       - run: apt-get update && apt install -y jq
+      - run: apt upgrade -y git
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
@@ -227,7 +228,7 @@ jobs:
       - run: pwd
       - run: ls -al
         # TODO: bypasses a `detected dubious ownership in repository` issue with older versions of git
-      - run: git config --add safe.directory *  --global
+      - run: git status
       - run: |
           git add --force ./wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
