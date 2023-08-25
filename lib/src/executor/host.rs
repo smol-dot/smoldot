@@ -1663,12 +1663,11 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                let Some(outcome) = self.inner.signatures_batch_verification.take()
-                else {
+                let Some(outcome) = self.inner.signatures_batch_verification.take() else {
                     return HostVm::Error {
                         error: Error::NoBatchVerify,
                         prototype: self.inner.into_prototype(),
-                    }
+                    };
                 };
 
                 HostVm::ReadyToRun(ReadyToRun {

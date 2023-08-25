@@ -1517,7 +1517,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
 
                 for (call, proof) in calls {
                     let CallProof::Downloaded(proof) = mem::replace(proof, CallProof::NotStarted)
-                        else { unreachable!() };
+                    else {
+                        unreachable!()
+                    };
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
                             proof: proof.into_iter(),
