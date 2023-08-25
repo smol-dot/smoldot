@@ -104,8 +104,7 @@ fn system_chain() {
 
         client
             .send_json_rpc_request(
-                r#"{"jsonrpc":"2.0","id":1,"method":"system_chain","params":[]}"#
-                    .to_owned(),
+                r#"{"jsonrpc":"2.0","id":1,"method":"system_chain","params":[]}"#.to_owned(),
             )
             .unwrap();
 
@@ -139,8 +138,7 @@ fn system_properties() {
 
         client
             .send_json_rpc_request(
-                r#"{"jsonrpc":"2.0","id":1,"method":"system_properties","params":[]}"#
-                    .to_owned(),
+                r#"{"jsonrpc":"2.0","id":1,"method":"system_properties","params":[]}"#.to_owned(),
             )
             .unwrap();
 
