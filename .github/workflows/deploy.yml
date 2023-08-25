@@ -223,6 +223,8 @@ jobs:
         working-directory: ./wasm-node/javascript
       - run: cp ./README.md ./dist/mjs
         working-directory: ./wasm-node/javascript
+      - run: pwd
+      - run: ls -al
         # TODO: bypasses a `detected dubious ownership in repository` issue with older versions of git
       - run: git config --add safe.directory *  --global
       - run: |
