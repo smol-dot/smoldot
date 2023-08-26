@@ -68,7 +68,6 @@ use rand_chacha::{
 pub use header::GoAwayErrorCode;
 
 mod header;
-mod tests;
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
@@ -402,6 +401,7 @@ impl<TNow, TSub> Yamux<TNow, TSub> {
 
         self.inner.num_inbound
     }
+
     /// Returns `Some` if a [`IncomingDataDetail::GoAway`] event has been generated in the past,
     /// in which case the code is returned.
     ///
@@ -487,6 +487,8 @@ where
     /// This method only modifies the state of `self` and reserves an identifier. No message needs
     /// to be sent to the remote before data is actually being sent on the substream.
     ///
+    /// The substream will be automatically processed by [`Yamux::read_write`] in the future.
+    ///
     /// > **Note**: Importantly, the remote will not be notified of the substream being open
     /// >           before the local side sends data on this substream. As such, protocols where
     /// >           the remote is expected to send data in response to a substream being open,
@@ -535,9 +537,30 @@ where
         );
         debug_assert!(_prev_value.is_none());
 
+        // The substream is added to `substreams_wake_up` rather than `substreams_write_ready`,
+        // in case the substream processing does some magic such as generate events before having
+        // even done anything.
         self.inner.substreams_wake_up.insert((None, substream_id));
 
         Ok(SubstreamId(substream_id))
+    }
+
+    /// Marks the given substream as being ready to write out data.
+    ///
+    /// Calling this function is necessary in situations where a substream didn't write any data
+    /// in the past, but some sort of manual state update will make it write data in the future.
+    ///
+    /// Has no effect if the substream has been reset or closed.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid.
+    ///
+    pub fn substream_write_ready(&mut self, substream_id: SubstreamId) {
+        assert!(self.inner.substreams.contains_key(&substream_id.0));
+        if !self.inner.dead_substreams.contains(&substream_id.0) {
+            self.inner.substreams_write_ready.insert(substream_id.0);
+        }
     }
 
     /// Feeds data coming from a socket and outputs data to write to the socket.

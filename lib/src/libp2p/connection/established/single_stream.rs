@@ -622,6 +622,7 @@ where
         substream.accept_inbound(ty);
         debug_assert!(ud.is_none());
         *ud = Some(user_data);
+        self.inner.yamux.substream_write_ready(substream_id);
     }
 
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
@@ -645,6 +646,7 @@ where
             .unwrap();
         substream.reject_inbound();
         debug_assert!(ud.is_none());
+        self.inner.yamux.substream_write_ready(substream_id);
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -672,6 +674,7 @@ where
             .unwrap()
             .0
             .accept_in_notifications_substream(handshake, max_notification_size);
+        self.inner.yamux.substream_write_ready(substream_id);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
@@ -694,6 +697,7 @@ where
             .unwrap()
             .0
             .reject_in_notifications_substream();
+        self.inner.yamux.substream_write_ready(substream_id);
     }
 
     /// Queues a notification to be written out on the given substream.
@@ -730,6 +734,7 @@ where
             .unwrap()
             .0
             .write_notification_unbounded(notification);
+        self.inner.yamux.substream_write_ready(substream_id);
     }
 
     /// Returns the number of bytes waiting to be sent out on that substream.
@@ -791,6 +796,7 @@ where
             .unwrap()
             .0
             .close_notifications_substream();
+        self.inner.yamux.substream_write_ready(substream_id);
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -819,7 +825,9 @@ where
             .as_mut()
             .unwrap()
             .0
-            .respond_in_request(response)
+            .respond_in_request(response)?;
+        self.inner.yamux.substream_write_ready(substream_id);
+        Ok(())
     }
 }
 
