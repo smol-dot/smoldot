@@ -98,6 +98,35 @@ fn chain_spec_v1_properties() {
 }
 
 #[test]
+fn chain_get_block_hash() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client
+            .send_json_rpc_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[0]}"#.to_owned(),
+            )
+            .unwrap();
+        let response_raw = client.next_json_rpc_response().await;
+        // TODO: actually parse the response properly
+        assert!(response_raw
+            .contains("0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"));
+
+        client
+            .send_json_rpc_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[10000]}"#
+                    .to_owned(),
+            )
+            .unwrap();
+        let response_raw = client.next_json_rpc_response().await;
+        // TODO: actually parse the response properly
+        assert!(response_raw.contains("null"));
+
+        // TODO: test for a non-zero block?
+    });
+}
+
+#[test]
 fn system_chain() {
     smol::block_on(async move {
         let client = start_client().await;

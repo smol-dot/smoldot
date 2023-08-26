@@ -519,7 +519,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
-        database,
+        database: database.clone(),
         block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
         jaeger_service: jaeger_service.clone(),
@@ -586,6 +586,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
             tasks_executor: config.tasks_executor.clone(),
             log_callback: config.log_callback.clone(),
+            database,
             bind_address: json_rpc_config.address,
             max_parallel_requests: 32,
             max_json_rpc_clients: json_rpc_config.max_json_rpc_clients,

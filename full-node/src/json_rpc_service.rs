@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{LogCallback, LogLevel};
+use crate::{database_thread, LogCallback, LogLevel};
 use futures_util::FutureExt;
 use smol::{
     future,
@@ -48,6 +48,9 @@ pub struct Config {
 
     /// Function called in order to notify of something.
     pub log_callback: Arc<dyn LogCallback + Send + Sync>,
+
+    /// Database to access blocks.
+    pub database: Arc<database_thread::DatabaseThread>,
 
     /// Where to bind the WebSocket server.
     pub bind_address: SocketAddr,
@@ -132,6 +135,8 @@ impl JsonRpcService {
         for _ in 0..config.max_parallel_requests {
             requests_handler::spawn_requests_handler(requests_handler::Config {
                 tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback.clone(),
+                database: config.database.clone(),
                 receiver: from_background.clone(),
                 chain_name: config.chain_name.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),
