@@ -68,6 +68,7 @@ use rand_chacha::{
 pub use header::GoAwayErrorCode;
 
 mod header;
+mod tests;
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
