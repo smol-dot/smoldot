@@ -181,6 +181,15 @@ impl SqliteFullDatabase {
         Ok(result.into_iter())
     }
 
+    /// Returns the hash of the block of the best chain given a block number.
+    pub fn best_block_hash_by_number(
+        &self,
+        block_number: u64,
+    ) -> Result<Option<[u8; 32]>, AccessError> {
+        // TODO: not implemented properly
+        Ok(self.block_hash_by_number(block_number)?.next())
+    }
+
     /// Returns a [`chain_information::ChainInformation`] struct containing the information about
     /// the current finalized state of the chain.
     ///
