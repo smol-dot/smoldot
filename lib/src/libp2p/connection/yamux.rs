@@ -1174,6 +1174,7 @@ where
                                         remote_write_closed,
                                         remote_allowed_window,
                                         remote_syn_acked,
+                                        substreams_wake_up_key,
                                         ..
                                     },
                                 ..
@@ -1192,6 +1193,25 @@ where
 
                                 if fin {
                                     *remote_write_closed = true;
+
+                                    // Wake up the substream.
+                                    match substreams_wake_up_key {
+                                        Some(Some(when)) if *when <= outer_read_write.now => {}
+                                        Some(None) => {}
+                                        Some(Some(when)) => {
+                                            let _was_removed = self
+                                                .inner
+                                                .substreams_wake_up
+                                                .remove(&(Some(when.clone()), stream_id));
+                                            debug_assert!(_was_removed);
+                                            self.inner.substreams_wake_up.insert((None, stream_id));
+                                            *substreams_wake_up_key = Some(None);
+                                        }
+                                        _ => {
+                                            self.inner.substreams_wake_up.insert((None, stream_id));
+                                            *substreams_wake_up_key = Some(None);
+                                        }
+                                    }
                                 }
 
                                 // Check whether the remote has the right to send that much data.
