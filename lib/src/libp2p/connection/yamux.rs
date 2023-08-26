@@ -556,7 +556,7 @@ where
     ///
     /// Panics if the [`SubstreamId`] is invalid.
     ///
-    pub fn substream_write_ready(&mut self, substream_id: SubstreamId) {
+    pub fn mark_substream_write_ready(&mut self, substream_id: SubstreamId) {
         assert!(self.inner.substreams.contains_key(&substream_id.0));
         if !self.inner.dead_substreams.contains(&substream_id.0) {
             self.inner.substreams_write_ready.insert(substream_id.0);
