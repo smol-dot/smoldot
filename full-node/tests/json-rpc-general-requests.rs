@@ -144,6 +144,23 @@ fn system_chain() {
 }
 
 #[test]
+fn system_local_peer_id() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client
+            .send_json_rpc_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"system_localPeerId","params":[]}"#.to_owned(),
+            )
+            .unwrap();
+
+        let response_raw = client.next_json_rpc_response().await;
+        // TODO: actually parse the response properly
+        assert!(response_raw.contains("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"));
+    });
+}
+
+#[test]
 fn system_name() {
     smol::block_on(async move {
         let client = start_client().await;
