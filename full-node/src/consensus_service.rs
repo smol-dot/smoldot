@@ -132,9 +132,24 @@ enum ToBackground {
     },
 }
 
+/// Potential error when calling [`ConsensusService::new`].
+#[derive(Debug, derive_more::Display)]
+pub enum InitError {
+    /// Error accessing the database.
+    DatabaseAccess(full_sqlite::AccessError),
+    /// Error parsing the header of a block in the database.
+    InvalidHeader(header::Error),
+    /// `:code` key is missing from the finalized block storage.
+    FinalizedCodeMissing,
+    /// Error parsing the `:heappages` of the finalized block.
+    FinalizedHeapPagesInvalid(executor::InvalidHeapPagesError),
+    /// Error initializing the runtime of the finalized block.
+    FinalizedRuntimeInit(executor::host::NewErr),
+}
+
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config) -> Arc<Self> {
+    pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_number,
@@ -148,57 +163,74 @@ impl ConsensusService {
             .with_database({
                 let block_number_bytes = config.block_number_bytes;
                 move |database| {
-                    let finalized_block_hash = database.finalized_block_hash().unwrap();
+                    let finalized_block_hash = database
+                        .finalized_block_hash()
+                        .map_err(InitError::DatabaseAccess)?;
                     let finalized_block_number = header::decode(
                         &database
                             .block_scale_encoded_header(&finalized_block_hash)
-                            .unwrap()
-                            .unwrap(),
+                            .map_err(InitError::DatabaseAccess)?
+                            .unwrap(), // A panic here would indicate a bug in the database code.
                         block_number_bytes,
                     )
-                    .unwrap()
+                    .map_err(InitError::InvalidHeader)?
                     .number;
                     let best_block_hash = database.best_block_hash().unwrap();
                     let best_block_number = header::decode(
                         &database
                             .block_scale_encoded_header(&best_block_hash)
-                            .unwrap()
-                            .unwrap(),
+                            .map_err(InitError::DatabaseAccess)?
+                            .unwrap(), // A panic here would indicate a bug in the database code.
                         block_number_bytes,
                     )
-                    .unwrap()
+                    .map_err(InitError::InvalidHeader)?
                     .number;
-                    let finalized_chain_information = database
-                        .to_chain_information(&finalized_block_hash)
-                        .unwrap();
-                    let finalized_code = database
-                        .block_storage_get(
-                            &finalized_block_hash,
-                            iter::empty::<iter::Empty<_>>(),
-                            trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
-                        )
-                        .unwrap()
-                        .unwrap() // TODO: better error?
-                        .0;
-                    let finalized_heap_pages = database
-                        .block_storage_get(
-                            &finalized_block_hash,
-                            iter::empty::<iter::Empty<_>>(),
-                            trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
-                        )
-                        .unwrap() // TODO: better error?
-                        .map(|(hp, _)| hp);
-                    (
+                    let finalized_chain_information =
+                        match database.to_chain_information(&finalized_block_hash) {
+                            Ok(info) => info,
+                            Err(full_sqlite::StorageAccessError::Access(err)) => {
+                                return Err(InitError::DatabaseAccess(err))
+                            }
+                            Err(full_sqlite::StorageAccessError::Pruned)
+                            | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                        };
+                    let finalized_code = match database.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                    ) {
+                        Ok(Some((code, _))) => code,
+                        Ok(None) => return Err(InitError::FinalizedCodeMissing),
+                        Err(full_sqlite::StorageAccessError::Access(err)) => {
+                            return Err(InitError::DatabaseAccess(err))
+                        }
+                        Err(full_sqlite::StorageAccessError::Pruned)
+                        | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                    };
+                    let finalized_heap_pages = match database.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                    ) {
+                        Ok(Some((hp, _))) => Some(hp),
+                        Ok(None) => None,
+                        Err(full_sqlite::StorageAccessError::Access(err)) => {
+                            return Err(InitError::DatabaseAccess(err))
+                        }
+                        Err(full_sqlite::StorageAccessError::Pruned)
+                        | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                    };
+                    Ok((
                         finalized_block_number,
                         finalized_heap_pages,
                         finalized_code,
                         best_block_hash,
                         best_block_number,
                         finalized_chain_information,
-                    )
+                    ))
                 }
             })
-            .await;
+            .await?;
 
         // The Kusama chain contains a fork hardcoded in the official Polkadot client.
         // See <https://github.com/paritytech/polkadot/blob/93f45f996a3d5592a57eba02f91f2fc2bc5a07cf/node/service/src/grandpa_support.rs#L111-L216>
@@ -248,15 +280,15 @@ impl ConsensusService {
             // Builds the runtime of the finalized block.
             // Assumed to always be valid, otherwise the block wouldn't have been
             // saved in the database, hence the large number of unwraps here.
-            let heap_pages =
-                executor::storage_heap_pages_to_value(finalized_heap_pages.as_deref()).unwrap(); // TODO: better error message?
+            let heap_pages = executor::storage_heap_pages_to_value(finalized_heap_pages.as_deref())
+                .map_err(InitError::FinalizedHeapPagesInvalid)?;
             executor::host::HostVmPrototype::new(executor::host::Config {
                 module: finalized_code,
                 heap_pages,
                 exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
                 allow_unresolved_imports: false,
             })
-            .unwrap() // TODO: better error message?
+            .map_err(InitError::FinalizedRuntimeInit)?
         };
 
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
@@ -287,9 +319,9 @@ impl ConsensusService {
 
         background_sync.start();
 
-        Arc::new(ConsensusService {
+        Ok(Arc::new(ConsensusService {
             to_background_tx: Mutex::new(to_background_tx),
-        })
+        }))
     }
 
     /// Returns a summary of the state of the service.

@@ -35,6 +35,8 @@ use std::{
     time::Duration,
 };
 
+pub use service::ParseError as RequestParseError;
+
 mod requests_handler;
 
 /// Configuration for a [`JsonRpcService`].
@@ -67,12 +69,18 @@ pub struct Config {
 }
 
 /// Running JSON-RPC service. Holds a server open for as long as it is alive.
+///
+/// In addition to a TCP/IP server, this service also provides a virtual JSON-RPC endpoint that
+/// can be used through [`JsonRpcService::send_request`] and [`JsonRpcService::next_response`].
 pub struct JsonRpcService {
     /// This events listener is notified when the service is dropped.
     service_dropped: event_listener::Event,
 
     /// Address the server is listening on. Not necessarily equal to [`Config::bind_address`].
     listen_addr: SocketAddr,
+
+    /// I/O for the virtual endpoint.
+    virtual_client_io: service::SerializedRequestsIo,
 }
 
 impl Drop for JsonRpcService {
@@ -108,6 +116,19 @@ impl JsonRpcService {
         let on_service_dropped = service_dropped.listen();
 
         let (to_requests_handlers, from_background) = async_channel::bounded(8);
+
+        let (virtual_client_main_task, virtual_client_io) =
+            service::client_main_task(service::Config {
+                max_active_subscriptions: u32::max_value(),
+                max_pending_requests: NonZeroU32::new(u32::max_value()).unwrap(),
+            });
+
+        spawn_client_main_task(
+            &config.tasks_executor,
+            to_requests_handlers.clone(),
+            virtual_client_main_task,
+        );
+
         for _ in 0..config.max_parallel_requests {
             requests_handler::spawn_requests_handler(requests_handler::Config {
                 tasks_executor: config.tasks_executor.clone(),
@@ -133,6 +154,7 @@ impl JsonRpcService {
         Ok(JsonRpcService {
             service_dropped,
             listen_addr,
+            virtual_client_io,
         })
     }
 
@@ -140,6 +162,34 @@ impl JsonRpcService {
     /// to [`Config::bind_address`].
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen_addr.clone()
+    }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    ///
+    /// Returns an error if the JSON-RPC request is malformed.
+    pub fn send_request(&self, request: String) -> Result<(), RequestParseError> {
+        match self.virtual_client_io.try_send_request(request) {
+            Ok(()) => Ok(()),
+            Err(err) => match err.cause {
+                service::TrySendRequestErrorCause::MalformedJson(err) => return Err(err),
+                service::TrySendRequestErrorCause::TooManyPendingRequests
+                | service::TrySendRequestErrorCause::ClientMainTaskDestroyed => unreachable!(),
+            },
+        }
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`JsonRpcService::send_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    pub async fn next_response(&self) -> String {
+        match self.virtual_client_io.wait_next_response().await {
+            Ok(r) => r,
+            Err(service::WaitNextResponseError::ClientMainTaskDestroyed) => unreachable!(),
+        }
     }
 }
 

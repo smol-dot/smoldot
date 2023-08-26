@@ -482,7 +482,10 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             hash % authorities_len
         };
 
-        if u32::try_from(expected_authority_index).map_or(true, |v| v != authority_index) {
+        if expected_authority_index
+            .to_u32()
+            .map_or(true, |v| v != authority_index)
+        {
             return Err(VerifyError::BadSecondarySlotAuthor);
         }
     }

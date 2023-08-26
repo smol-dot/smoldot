@@ -53,8 +53,8 @@ pub enum ConfigFinalizedBlockHeader {
         /// Hash of the root of the state trie of the genesis.
         state_trie_root_hash: [u8; 32],
     },
-    /// The block is not the genesis block of the chain.
-    NonGenesis {
+    /// The block can any block, genesis block of the chain or not.
+    Any {
         /// Header of the block.
         scale_encoded_header: Vec<u8>,
         /// Can be used to pass information about the finality of the chain, if already known.
@@ -185,42 +185,24 @@ impl ChainInformationBuild {
     ///
     /// # Panic
     ///
-    /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header can't
-    /// be decoded.
-    /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header has
-    /// number 0.
+    /// Panics if a [`ConfigFinalizedBlockHeader::Any`] is provided, and the header can't be
+    /// decoded.
     ///
     pub fn new(config: Config) -> Self {
-        // TODO: document
-        if let ConfigFinalizedBlockHeader::NonGenesis {
-            scale_encoded_header: header,
-            ..
-        } = &config.finalized_block_header
-        {
-            assert_ne!(
-                header::decode(header, config.block_number_bytes)
-                    .unwrap()
-                    .number,
-                0
-            );
-        }
-
-        // TODO: also check version numbers?
-        let apis_versions = config
+        let [aura_version, babe_version, grandpa_version] = config
             .runtime
             .runtime_version()
             .decode()
             .apis
             .find_versions(["AuraApi", "BabeApi", "GrandpaApi"]);
-        let runtime_has_aura = apis_versions[0].map_or(false, |version_number| version_number == 1);
-        let runtime_babeapi_is_v1 =
-            apis_versions[1].and_then(|version_number| match version_number {
-                1 => Some(true),
-                2 => Some(false),
-                _ => None,
-            });
+        let runtime_has_aura = aura_version.map_or(false, |version_number| version_number == 1);
+        let runtime_babeapi_is_v1 = babe_version.and_then(|version_number| match version_number {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        });
         let runtime_grandpa_supports_currentsetid =
-            apis_versions[2].and_then(|version_number| match version_number {
+            grandpa_version.and_then(|version_number| match version_number {
                 // Version 1 is from 2019 and isn't used by any chain in production, so we don't
                 // care about it.
                 2 => Some(false),
@@ -420,9 +402,12 @@ impl ChainInformationBuild {
                 None
             };
 
-        let babe_current_epoch = if !matches!(
+        let babe_current_epoch = if matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::Genesis { .. }
+            ConfigFinalizedBlockHeader::Any {
+                ref scale_encoded_header,
+                ..
+            } if header::decode(scale_encoded_header, inner.block_number_bytes).unwrap().number != 0
         ) && inner.runtime_babeapi_is_v1.is_some()
             && inner.babe_current_epoch_call_output.is_none()
         {
@@ -431,9 +416,12 @@ impl ChainInformationBuild {
             None
         };
 
-        let babe_next_epoch = if !matches!(
+        let babe_next_epoch = if matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::Genesis { .. }
+            ConfigFinalizedBlockHeader::Any {
+                ref scale_encoded_header,
+                ..
+            } if header::decode(scale_encoded_header, inner.block_number_bytes).unwrap().number != 0
         ) && inner.runtime_babeapi_is_v1.is_some()
             && inner.babe_next_epoch_call_output.is_none()
         {
@@ -452,7 +440,7 @@ impl ChainInformationBuild {
 
         let grandpa_authorities = if !matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::NonGenesis {
+            ConfigFinalizedBlockHeader::Any {
                 known_finality: Some(chain_information::ChainInformationFinality::Grandpa { .. }),
                 ..
             },
@@ -469,10 +457,11 @@ impl ChainInformationBuild {
         // always 0.
         let grandpa_current_set_id = if matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::NonGenesis {
+            ConfigFinalizedBlockHeader::Any {
+                ref scale_encoded_header,
                 known_finality: None,
                 ..
-            },
+            } if header::decode(scale_encoded_header, inner.block_number_bytes).unwrap().number != 0,
         ) && inner.runtime_grandpa_supports_currentsetid
             == Some(true)
             && inner.grandpa_current_set_id_call_output.is_none()
@@ -537,7 +526,18 @@ impl ChainInformationBuild {
                     }
                 }
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
-                (false, Some(_), ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
+                (
+                    false,
+                    Some(_),
+                    ConfigFinalizedBlockHeader::Any {
+                        scale_encoded_header,
+                        ..
+                    },
+                ) if header::decode(scale_encoded_header, inner.block_number_bytes)
+                    .unwrap()
+                    .number
+                    != 0 =>
+                {
                     chain_information::ChainInformationConsensus::Babe {
                         finalized_block_epoch_information: Some(Box::new(
                             inner.babe_current_epoch_call_output.take().unwrap(),
@@ -552,7 +552,7 @@ impl ChainInformationBuild {
                             .slots_per_epoch,
                     }
                 }
-                (false, Some(_), ConfigFinalizedBlockHeader::Genesis { .. }) => {
+                (false, Some(_), _) => {
                     let config = inner.babe_configuration_call_output.take().unwrap();
                     chain_information::ChainInformationConsensus::Babe {
                         slots_per_epoch: config.slots_per_epoch,
@@ -592,7 +592,7 @@ impl ChainInformationBuild {
 
                     (header, None)
                 }
-                ConfigFinalizedBlockHeader::NonGenesis {
+                ConfigFinalizedBlockHeader::Any {
                     scale_encoded_header: header,
                     known_finality,
                 } => (header, known_finality),

@@ -132,10 +132,9 @@ impl<TNow> ReadWrite<TNow> {
     pub fn incoming_bytes_take_array<const N: usize>(
         &mut self,
     ) -> Result<Option<[u8; N]>, IncomingBytesTakeError> {
-        let Some(vec) = self.incoming_bytes_take(N)?
-            else {
-                return Ok(None)
-            };
+        let Some(vec) = self.incoming_bytes_take(N)? else {
+            return Ok(None);
+        };
 
         let bytes = <&[u8; N]>::try_from(&vec[..]).unwrap();
         Ok(Some(*bytes))

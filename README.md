@@ -26,7 +26,12 @@ This repository contains the following components:
 
 - `smoldot-full-node` (`/full-node`): A work-in-progress prototype of a full node binary that can connect to Substrate-base chains. Doesn't yet support many features that the official client supports.
   - 🐳 <https://github.com/smol-dot/smoldot/pkgs/container/full-node>
+  - 📦 `cargo install --locked smoldot-full-node`
   - Has semi-stable CLI commands that might change occasionally in minor ways.
+  - Can also be used as a library to be embedded in other programs:
+    - 📦 <https://crates.io/crates/smoldot-full-node>
+    - 📚 <https://docs.rs/smoldot-full-node> (latest published version)
+    - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_full_node/index.html> (latest commit)
 
 # Frequently asked questions
 
