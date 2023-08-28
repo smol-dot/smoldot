@@ -19,7 +19,7 @@ use smol::stream::StreamExt as _;
 use smoldot::json_rpc::{methods, parse, service};
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::{database_thread, LogCallback, LogLevel};
+use crate::{database_thread, network_service, LogCallback, LogLevel};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
@@ -34,6 +34,9 @@ pub struct Config {
 
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
+
+    /// Access to the peer-to-peer networking.
+    pub network_service: Arc<network_service::NetworkService>,
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -101,6 +104,10 @@ pub fn spawn_requests_handler(mut config: Config) {
                     methods::MethodCall::system_chain {} => {
                         request
                             .respond(methods::Response::system_chain((&config.chain_name).into()));
+                    }
+                    methods::MethodCall::system_localPeerId {} => {
+                        let peer_id = config.network_service.local_peer_id().to_base58();
+                        request.respond(methods::Response::system_localPeerId(peer_id.into()));
                     }
                     methods::MethodCall::system_name {} => {
                         request.respond(methods::Response::system_version(
