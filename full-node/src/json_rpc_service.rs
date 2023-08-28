@@ -55,8 +55,8 @@ pub struct Config {
     /// Access to the peer-to-peer networking.
     pub network_service: Arc<network_service::NetworkService>,
 
-    /// Where to bind the WebSocket server.
-    pub bind_address: SocketAddr,
+    /// Where to bind the WebSocket server. If `None`, no TCP server is started.
+    pub bind_address: Option<SocketAddr>,
 
     /// Maximum number of requests to process in parallel.
     pub max_parallel_requests: u32,
@@ -74,7 +74,9 @@ pub struct Config {
     pub genesis_block_hash: [u8; 32],
 }
 
-/// Running JSON-RPC service. Holds a server open for as long as it is alive.
+/// Running JSON-RPC service.
+///
+/// If [`Config::bind_address`] is `Some`, holds a TCP server open for as long as it is alive.
 ///
 /// In addition to a TCP/IP server, this service also provides a virtual JSON-RPC endpoint that
 /// can be used through [`JsonRpcService::send_request`] and [`JsonRpcService::next_response`].
@@ -83,7 +85,7 @@ pub struct JsonRpcService {
     service_dropped: event_listener::Event,
 
     /// Address the server is listening on. Not necessarily equal to [`Config::bind_address`].
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
 
     /// I/O for the virtual endpoint.
     virtual_client_io: service::SerializedRequestsIo,
@@ -98,24 +100,29 @@ impl Drop for JsonRpcService {
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
     pub async fn new(config: Config) -> Result<Self, InitError> {
-        let tcp_listener = match TcpListener::bind(&config.bind_address).await {
-            Ok(s) => s,
-            Err(error) => {
-                return Err(InitError::ListenError {
-                    bind_address: config.bind_address,
-                    error,
-                })
-            }
-        };
+        let (tcp_listener, listen_addr) = match &config.bind_address {
+            Some(addr) => match TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    let listen_addr = match listener.local_addr() {
+                        Ok(addr) => addr,
+                        Err(error) => {
+                            return Err(InitError::ListenError {
+                                bind_address: addr.clone(),
+                                error,
+                            })
+                        }
+                    };
 
-        let listen_addr = match tcp_listener.local_addr() {
-            Ok(addr) => addr,
-            Err(error) => {
-                return Err(InitError::ListenError {
-                    bind_address: config.bind_address,
-                    error,
-                })
-            }
+                    (Some(listener), Some(listen_addr))
+                }
+                Err(error) => {
+                    return Err(InitError::ListenError {
+                        bind_address: addr.clone(),
+                        error,
+                    })
+                }
+            },
+            None => (None, None),
         };
 
         let service_dropped = event_listener::Event::new();
@@ -148,17 +155,19 @@ impl JsonRpcService {
             });
         }
 
-        let background = JsonRpcBackground {
-            tcp_listener,
-            on_service_dropped,
-            tasks_executor: config.tasks_executor.clone(),
-            log_callback: config.log_callback,
-            to_requests_handlers,
-            num_json_rpc_clients: Arc::new(AtomicU32::new(0)),
-            max_json_rpc_clients: config.max_json_rpc_clients,
-        };
+        if let Some(tcp_listener) = tcp_listener {
+            let background = JsonRpcBackground {
+                tcp_listener,
+                on_service_dropped,
+                tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback,
+                to_requests_handlers,
+                num_json_rpc_clients: Arc::new(AtomicU32::new(0)),
+                max_json_rpc_clients: config.max_json_rpc_clients,
+            };
 
-        (config.tasks_executor)(Box::pin(async move { background.run().await }));
+            (config.tasks_executor)(Box::pin(async move { background.run().await }));
+        }
 
         Ok(JsonRpcService {
             service_dropped,
@@ -167,9 +176,11 @@ impl JsonRpcService {
         })
     }
 
-    /// Returns the address the server is listening on. Not necessarily equal
-    /// to [`Config::bind_address`].
-    pub fn listen_addr(&self) -> SocketAddr {
+    /// Returns the address the server is listening on.
+    ///
+    /// Returns `None` if and only if [`Config::bind_address`] was `None`. However, if `Some`,
+    /// the address is not necessarily equal to the one in [`Config::bind_address`].
+    pub fn listen_addr(&self) -> Option<SocketAddr> {
         self.listen_addr.clone()
     }
 

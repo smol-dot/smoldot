@@ -30,10 +30,7 @@ async fn start_client() -> smoldot_full_node::Client {
         relay_chain: None,
         libp2p_key: Box::new([0; 32]),
         listen_addresses: Vec::new(),
-        json_rpc: Some(smoldot_full_node::JsonRpcConfig {
-            address: "127.0.0.1:0".parse().unwrap(),
-            max_json_rpc_clients: 0,
-        }),
+        json_rpc_listen: None,
         tasks_executor: Arc::new(|task| smol::spawn(task).detach()),
         log_callback: Arc::new(move |_, _| {}),
         jaeger_agent: None,
