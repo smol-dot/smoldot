@@ -1292,19 +1292,38 @@ fn set_best_chain(
     let current_best = meta_get_blob(&database, "best")?
         .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
 
+    // Two recursive tables are used. The first contains the list of all blocks that are not
+    // common between the old and the new best chains, plus the one block in common between the
+    // two chains. In order to build this, we descend the two chains using `ORDER BY number DESC`
+    // and use `UNION` rather than `UNION ALL` in order to stop iterating once we insert the
+    // same block a second time. The second recursive table iterates a second time the exact same
+    // way, but keeps track of whether each block being iterated is in the new or the old best
+    // chain. When building the second table, only blocks found in the first table are kept (which
+    // is the entire purpose of the first table). Because the first table also contains the one
+    // block in common, we keep blocks whose parent hash (rather than hash) is in the first table.
     database
         .prepare_cached(
             r#"
         WITH RECURSIVE
+            blocks_not_in_common(hash, parent_hash, number) AS (
+                SELECT hash, parent_hash, number FROM blocks WHERE hash = :current_best AND hash != :new_best
+                UNION
+                SELECT hash, parent_hash, number FROM blocks WHERE hash = :new_best AND hash != :current_best
+                UNION
+                SELECT blocks.hash, blocks.parent_hash, blocks.number
+                    FROM blocks_not_in_common
+                    INNER JOIN blocks ON blocks.hash = blocks_not_in_common.parent_hash
+                ORDER BY number DESC
+            ),
             changes(hash, parent_hash, in_new_best_chain) AS (
-                SELECT hash, parent_hash, FALSE FROM blocks WHERE hash = :current_best AND hash != :new_best
+                SELECT hash, parent_hash, FALSE FROM blocks WHERE parent_hash IN (SELECT hash FROM blocks_not_in_common)
                 UNION ALL
-                SELECT hash, parent_hash, TRUE FROM blocks WHERE hash = :new_best AND hash != :new_best
+                SELECT hash, parent_hash, TRUE FROM blocks WHERE parent_hash IN (SELECT hash FROM blocks_not_in_common)
                 UNION ALL
                 SELECT blocks.hash, blocks.parent_hash, changes.in_new_best_chain
                     FROM changes
-                    JOIN blocks ON blocks.hash = changes.parent_hash
-                    WHERE blocks.is_best_chain != changes.in_new_best_chain
+                    INNER JOIN blocks ON blocks.hash = changes.parent_hash
+                    INNER JOIN blocks_not_in_common ON blocks_not_in_common.hash = blocks.parent_hash
             )
         UPDATE blocks SET is_best_chain = changes.in_new_best_chain
         FROM changes
