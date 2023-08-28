@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{database_thread, LogCallback, LogLevel};
+use crate::{database_thread, network_service, LogCallback, LogLevel};
 use futures_util::FutureExt;
 use smol::{
     future,
@@ -51,6 +51,9 @@ pub struct Config {
 
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
+
+    /// Access to the peer-to-peer networking.
+    pub network_service: Arc<network_service::NetworkService>,
 
     /// Where to bind the WebSocket server. If `None`, no TCP server is started.
     pub bind_address: Option<SocketAddr>,
@@ -144,6 +147,7 @@ impl JsonRpcService {
                 tasks_executor: config.tasks_executor.clone(),
                 log_callback: config.log_callback.clone(),
                 database: config.database.clone(),
+                network_service: config.network_service.clone(),
                 receiver: from_background.clone(),
                 chain_name: config.chain_name.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),

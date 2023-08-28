@@ -566,6 +566,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         tasks_executor: config.tasks_executor.clone(),
         log_callback: config.log_callback.clone(),
         database,
+        network_service: network_service.clone(),
         bind_address: config
             .json_rpc_listen
             .as_ref()
