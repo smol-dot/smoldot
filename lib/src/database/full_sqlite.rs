@@ -186,8 +186,27 @@ impl SqliteFullDatabase {
         &self,
         block_number: u64,
     ) -> Result<Option<[u8; 32]>, AccessError> {
-        // TODO: not implemented properly
-        Ok(self.block_hash_by_number(block_number)?.next())
+        let connection = self.database.lock();
+
+        let block_number = match i64::try_from(block_number) {
+            Ok(n) => n,
+            Err(_) => return Ok(None),
+        };
+
+        let result = connection
+            .prepare_cached(r#"SELECT hash FROM blocks WHERE number = ? AND is_best_chain = TRUE"#)
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .query_row((block_number,), |row| row.get::<_, Vec<u8>>(0))
+            .optional()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
+            .and_then(|value| {
+                let Some(value) = value else { return Ok(None) };
+                Ok(Some(<[u8; 32]>::try_from(&value[..]).map_err(|_| {
+                    AccessError::Corrupted(CorruptedError::InvalidBlockHashLen)
+                })?))
+            })?;
+
+        Ok(result)
     }
 
     /// Returns a [`chain_information::ChainInformation`] struct containing the information about
@@ -354,7 +373,7 @@ impl SqliteFullDatabase {
 
         transaction
             .prepare_cached(
-                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, justification) VALUES (?, ?, ?, ?, ?, NULL)",
+                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, is_best_chain, justification) VALUES (?, ?, ?, ?, ?, FALSE, NULL)",
             )
             .unwrap()
             .execute((
@@ -390,9 +409,9 @@ impl SqliteFullDatabase {
         )
         .map_err(InsertError::Access)?;
 
-        // Various other updates.
+        // Change the best chain to be the new block.
         if is_new_best {
-            meta_set_blob(&transaction, "best", &block_hash)?;
+            set_best_chain(&transaction, &block_hash)?;
         }
 
         // If everything is successful, we commit.
@@ -1263,6 +1282,44 @@ fn block_header(
         .query_row((&hash[..],), |row| row.get::<_, Vec<u8>>(0))
         .optional()
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
+}
+
+fn set_best_chain(
+    database: &rusqlite::Connection,
+    new_best_block_hash: &[u8],
+) -> Result<(), AccessError> {
+    // TODO: can this not be embedded in the SQL statement below?
+    let current_best = meta_get_blob(&database, "best")?
+        .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
+
+    database
+        .prepare_cached(
+            r#"
+        WITH RECURSIVE
+            changes(hash, parent_hash, in_new_best_chain) AS (
+                SELECT hash, parent_hash, FALSE FROM blocks WHERE hash = :current_best AND hash != :new_best
+                UNION ALL
+                SELECT hash, parent_hash, TRUE FROM blocks WHERE hash = :new_best AND hash != :new_best
+                UNION ALL
+                SELECT blocks.hash, blocks.parent_hash, changes.in_new_best_chain
+                    FROM changes
+                    JOIN blocks ON blocks.hash = changes.parent_hash
+                    WHERE blocks.is_best_chain != changes.in_new_best_chain
+            )
+        UPDATE blocks SET is_best_chain = changes.in_new_best_chain
+        FROM changes
+        WHERE blocks.hash = changes.hash;
+            "#,
+        )
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute(rusqlite::named_params! {
+            ":current_best": current_best,
+            ":new_best": new_best_block_hash
+        })
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+    meta_set_blob(&database, "best", new_best_block_hash)?;
+    Ok(())
 }
 
 // TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
