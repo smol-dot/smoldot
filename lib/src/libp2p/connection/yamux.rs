@@ -295,7 +295,7 @@ enum OutgoingGoAway {
     /// A `GoAway` frame has been queued into [`YamuxInner::outgoing`] in the past.
     Queued,
 
-    /// A `GoAway` frame has been extracted through [`Yamux::extract_next`].
+    /// A `GoAway` frame has been extracted through [`Yamux::read_write`].
     Sent,
 }
 
