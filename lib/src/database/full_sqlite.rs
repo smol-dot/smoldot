@@ -1292,23 +1292,48 @@ fn set_best_chain(
     let current_best = meta_get_blob(&database, "best")?
         .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
 
+    // TODO: untested except in the most basic situation
+    // In the SQL below, the temporary table `changes` is built by walking down (highest to lowest
+    // block number) the new best chain and old best chain. While walking down, the iteration
+    // keeps track of the block hashes and their number. If the new best chain has a higher number
+    // than the old best chain, then only the new best chain is iterated, and vice versa. If the
+    // new and old best chain have the same number, they are both iterated, and it is possible to
+    // compare the block hashes in order to know when to stop iterating. In the context of this
+    // algorithm, a `NULL` block hash represents "one past the new/old best block", which allows
+    // to not include the new/old best block in the temporary table until it needs to be included.
     database
         .prepare_cached(
             r#"
         WITH RECURSIVE
-            changes(hash, parent_hash, in_new_best_chain) AS (
-                SELECT hash, parent_hash, FALSE FROM blocks WHERE hash = :current_best AND hash != :new_best
-                UNION ALL
-                SELECT hash, parent_hash, TRUE FROM blocks WHERE hash = :new_best AND hash != :new_best
-                UNION ALL
-                SELECT blocks.hash, blocks.parent_hash, changes.in_new_best_chain
-                    FROM changes
-                    JOIN blocks ON blocks.hash = changes.parent_hash
-                    WHERE blocks.is_best_chain != changes.in_new_best_chain
+            changes(block_to_include, block_to_retract, block_to_include_number, block_to_retract_number) AS (
+                SELECT NULL, NULL, blocks_inc.number + 1, blocks_ret.number + 1
+                FROM blocks AS blocks_inc, blocks as blocks_ret
+                WHERE blocks_inc.hash = :new_best AND blocks_ret.hash = :current_best
+            UNION ALL
+                SELECT
+                    CASE WHEN changes.block_to_include_number >= changes.block_to_retract_number THEN
+                        COALESCE(blocks_inc.parent_hash, :new_best)
+                    ELSE
+                        changes.block_to_include
+                    END,
+                    CASE WHEN changes.block_to_retract_number >= changes.block_to_include_number THEN
+                        COALESCE(blocks_ret.parent_hash, :current_best)
+                    ELSE
+                        changes.block_to_retract
+                    END,
+                    CASE WHEN changes.block_to_include_number >= block_to_retract_number THEN changes.block_to_include_number - 1
+                    ELSE changes.block_to_include_number END,
+                    CASE WHEN changes.block_to_retract_number >= changes.block_to_include_number THEN changes.block_to_retract_number - 1
+                    ELSE changes.block_to_retract_number END
+                FROM changes
+                LEFT JOIN blocks AS blocks_inc ON blocks_inc.hash = changes.block_to_include
+                LEFT JOIN blocks AS blocks_ret ON blocks_ret.hash = changes.block_to_retract
+                WHERE changes.block_to_include_number != changes.block_to_retract_number
+                    OR COALESCE(blocks_inc.parent_hash, :new_best) != COALESCE(blocks_ret.parent_hash, :current_best)
             )
-        UPDATE blocks SET is_best_chain = changes.in_new_best_chain
+        UPDATE blocks SET is_best_chain = (blocks.hash = changes.block_to_include)
         FROM changes
-        WHERE blocks.hash = changes.hash;
+        WHERE blocks.hash = changes.block_to_include OR blocks.hash = changes.block_to_retract;
             "#,
         )
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
