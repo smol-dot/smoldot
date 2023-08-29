@@ -16,10 +16,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use smol::stream::StreamExt as _;
-use smoldot::json_rpc::{methods, service};
+use smoldot::json_rpc::{methods, parse, service};
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::consensus_service;
+use crate::{database_thread, network_service, LogCallback, LogLevel};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
@@ -27,7 +27,16 @@ pub struct Config {
     /// The tasks passed as parameter must be executed until they shut down.
     pub tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
 
+    /// Function called in order to notify of something.
+    pub log_callback: Arc<dyn LogCallback + Send + Sync>,
+
     pub receiver: async_channel::Receiver<Message>,
+
+    /// Database to access blocks.
+    pub database: Arc<database_thread::DatabaseThread>,
+
+    /// Access to the peer-to-peer networking.
+    pub network_service: Arc<network_service::NetworkService>,
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -78,9 +87,41 @@ pub fn spawn_requests_handler(mut config: Config) {
                         ));
                     }
 
+                    methods::MethodCall::chain_getBlockHash { height } => {
+                        let outcome = config
+                            .database
+                            .with_database(move |database| match height {
+                                Some(height) => database.best_block_hash_by_number(height),
+                                None => database.best_block_hash().map(Some),
+                            })
+                            .await;
+                        match outcome {
+                            Ok(Some(hash)) => request.respond(
+                                methods::Response::chain_getBlockHash(methods::HashHexString(hash)),
+                            ),
+                            Ok(None) => request.respond_null(),
+                            Err(error) => {
+                                config.log_callback.log(LogLevel::Warn, format!("json-rpc; request=chain_getBlockHash; height={:?}; database_error={}", height, error));
+                                request.fail(parse::ErrorResponse::InternalError)
+                            }
+                        }
+                    }
+                    methods::MethodCall::system_chain {} => {
+                        request
+                            .respond(methods::Response::system_chain((&config.chain_name).into()));
+                    }
+                    methods::MethodCall::system_localPeerId {} => {
+                        let peer_id = config.network_service.local_peer_id().to_base58();
+                        request.respond(methods::Response::system_localPeerId(peer_id.into()));
+                    }
                     methods::MethodCall::system_name {} => {
                         request.respond(methods::Response::system_version(
                             env!("CARGO_PKG_NAME").into(),
+                        ));
+                    }
+                    methods::MethodCall::system_properties {} => {
+                        request.respond(methods::Response::system_properties(
+                            serde_json::from_str(&config.chain_properties_json).unwrap(),
                         ));
                     }
                     methods::MethodCall::system_version {} => {

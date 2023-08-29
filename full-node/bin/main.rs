@@ -377,8 +377,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
         relay_chain,
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
-        json_rpc: if let Some(address) = cli_options.json_rpc_address.0 {
-            Some(smoldot_full_node::JsonRpcConfig {
+        json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
+            Some(smoldot_full_node::JsonRpcListenConfig {
                 address,
                 max_json_rpc_clients: cli_options.json_rpc_max_clients,
             })

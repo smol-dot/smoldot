@@ -543,6 +543,11 @@ impl NetworkService {
         Ok((network_service, receivers))
     }
 
+    /// Returns the peer ID of the local node.
+    pub fn local_peer_id(&self) -> &PeerId {
+        &self.local_peer_id
+    }
+
     /// Returns the number of established TCP connections, both incoming and outgoing.
     pub async fn num_established_connections(&self) -> usize {
         let (result_tx, result_rx) = oneshot::channel();

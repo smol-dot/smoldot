@@ -42,6 +42,8 @@ mod json_rpc_service;
 mod network_service;
 mod util;
 
+pub use json_rpc_service::RequestParseError as JsonRpcRequestParseError;
+
 pub struct Config<'a> {
     /// Chain to connect to.
     pub chain: ChainConfig<'a>,
@@ -52,8 +54,8 @@ pub struct Config<'a> {
     pub libp2p_key: Box<[u8; 32]>,
     /// List of addresses to listen on.
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
-    /// Configuration of the JSON-RPC server. If `None`, no server is started.
-    pub json_rpc: Option<JsonRpcConfig>,
+    /// Configuration of the JSON-RPC server. If `None`, no TCP server is started.
+    pub json_rpc_listen: Option<JsonRpcListenConfig>,
     /// Function that can be used to spawn background tasks.
     ///
     /// The tasks passed as parameter must be executed until they shut down.
@@ -64,8 +66,8 @@ pub struct Config<'a> {
     pub jaeger_agent: Option<SocketAddr>,
 }
 
-/// See [`Config::json_rpc`].
-pub struct JsonRpcConfig {
+/// See [`Config::json_rpc_listen`].
+pub struct JsonRpcListenConfig {
     /// Bind point of the JSON-RPC server.
     pub address: SocketAddr,
     /// Maximum number of JSON-RPC clients that can be connected at the same time.
@@ -120,7 +122,7 @@ pub struct ChainConfig<'a> {
 /// Running client. As long as this object is alive, the client reads/writes the database and has
 /// a JSON-RPC server open.
 pub struct Client {
-    json_rpc_service: Option<json_rpc_service::JsonRpcService>,
+    json_rpc_service: json_rpc_service::JsonRpcService,
     consensus_service: Arc<consensus_service::ConsensusService>,
     relay_chain_consensus_service: Option<Arc<consensus_service::ConsensusService>>,
     network_service: Arc<network_service::NetworkService>,
@@ -130,9 +132,9 @@ pub struct Client {
 impl Client {
     /// Returns the address the JSON-RPC server is listening on.
     ///
-    /// Returns `None` if and only if [`Config::json_rpc`] was `None`.
+    /// Returns `None` if and only if [`Config::json_rpc_listen`] was `None`.
     pub fn json_rpc_server_addr(&self) -> Option<SocketAddr> {
-        self.json_rpc_service.as_ref().map(|j| j.listen_addr())
+        self.json_rpc_service.listen_addr()
     }
 
     /// Returns the best block according to the networking.
@@ -163,6 +165,24 @@ impl Client {
         } else {
             None
         }
+    }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint of the chain.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    ///
+    /// Returns an error if the JSON-RPC request is malformed.
+    pub fn send_json_rpc_request(&self, request: String) -> Result<(), JsonRpcRequestParseError> {
+        self.json_rpc_service.send_request(request)
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`Client::send_json_rpc_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    pub async fn next_json_rpc_response(&self) -> String {
+        self.json_rpc_service.next_response().await
     }
 }
 
@@ -479,7 +499,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
-        database,
+        database: database.clone(),
         block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
         jaeger_service: jaeger_service.clone(),
@@ -538,34 +558,32 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     // Start the JSON-RPC service.
     // It only needs to be kept alive in order to function.
     //
-    // Note that initialization can panic if, for example, the port is already occupied. It is
+    // Note that initialization can fail if, for example, the port is already occupied. It is
     // preferable to fail to start the node altogether rather than make the user believe that they
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
-    let json_rpc_service = if let Some(json_rpc_config) = config.json_rpc {
-        let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-            tasks_executor: config.tasks_executor.clone(),
-            log_callback: config.log_callback.clone(),
-            bind_address: json_rpc_config.address,
-            max_parallel_requests: 32,
-            max_json_rpc_clients: json_rpc_config.max_json_rpc_clients,
-            chain_name: chain_spec.name().to_owned(),
-            chain_properties_json: chain_spec.properties().to_owned(),
-            genesis_block_hash: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(usize::from(chain_spec.block_number_bytes())),
-            consensus_service: consensus_service.clone(),
-        })
-        .await;
-
-        Some(match result {
-            Ok(service) => service,
-            Err(err) => return Err(StartError::JsonRpcServiceInit(err)),
-        })
-    } else {
-        None
-    };
+    let json_rpc_service = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+        tasks_executor: config.tasks_executor.clone(),
+        log_callback: config.log_callback.clone(),
+        database,
+        network_service: network_service.clone(),
+        bind_address: config
+            .json_rpc_listen
+            .as_ref()
+            .map(|cfg| cfg.address.clone()),
+        max_parallel_requests: 32,
+        max_json_rpc_clients: config
+            .json_rpc_listen
+            .map_or(0, |cfg| cfg.max_json_rpc_clients),
+        chain_name: chain_spec.name().to_owned(),
+        chain_properties_json: chain_spec.properties().to_owned(),
+        genesis_block_hash: genesis_chain_information
+            .as_ref()
+            .finalized_block_header
+            .hash(usize::from(chain_spec.block_number_bytes())),
+    })
+    .await
+    .map_err(StartError::JsonRpcServiceInit)?;
 
     // Spawn the task printing the informant.
     // This is not just a dummy task that just prints on the output, but is actually the main

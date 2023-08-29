@@ -170,6 +170,12 @@ impl ConsensusService {
             .with_database({
                 let block_number_bytes = config.block_number_bytes;
                 move |database| {
+                    // If the previous run of the full node crashed, the database will contain
+                    // blocks that are no longer useful in any way. We purge them all here.
+                    database
+                        .purge_finality_orphans()
+                        .map_err(InitError::DatabaseAccess)?;
+
                     let finalized_block_hash = database
                         .finalized_block_hash()
                         .map_err(InitError::DatabaseAccess)?;
