@@ -206,8 +206,9 @@ impl<TNow> ReadWrite<TNow> {
     ///
     /// This function is recommended only if the `Vec` is small.
     pub fn write_from_vec(&mut self, data: &mut Vec<u8>) {
-        let Some(queueable) = self.write_bytes_queueable.as_mut()
-            else { return };
+        let Some(queueable) = self.write_bytes_queueable.as_mut() else {
+            return;
+        };
 
         let to_copy = cmp::min(data.len(), *queueable);
         if to_copy == 0 {

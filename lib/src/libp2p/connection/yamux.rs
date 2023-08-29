@@ -30,20 +30,10 @@
 //! The [`Yamux`] object holds the state of all yamux-specific information, and the list of
 //! all currently-open substreams.
 //!
-//! Call [`Yamux::incoming_data`] when data is available on the socket. This function parses
-//! the received data, updates the internal state machine, and possibly returns an
-//! [`IncomingDataDetail`].
-//! Call [`Yamux::extract_next`] when the remote is ready to accept more data.
-//!
 //! The generic parameter of [`Yamux`] is an opaque "user data" associated to each substream.
 //!
-//! When [`Yamux::write`] is called, the buffer of data to send out is stored within the
-//! [`Yamux`] object. This data will then be progressively returned by [`Yamux::extract_next`].
-//!
-//! It is the responsibility of the user to enforce a bound to the amount of enqueued data, as
-//! the [`Yamux`] itself doesn't enforce any limit. Enforcing such a bound must be done based
-//! on the logic of the higher-level protocols. Failing to do so might lead to potential DoS
-//! attack vectors.
+
+// TODO: more documentation
 
 use crate::{
     libp2p::read_write::{self, ReadWrite},
@@ -403,7 +393,7 @@ impl<TNow, TSub> Yamux<TNow, TSub> {
         self.inner.num_inbound
     }
 
-    /// Returns `Some` if a [`IncomingDataDetail::GoAway`] event has been generated in the past,
+    /// Returns `Some` if a [`ReadWriteOutcome::GoAway`] event has been generated in the past,
     /// in which case the code is returned.
     ///
     /// If `Some` is returned, it is forbidden to open new outbound substreams.
@@ -498,7 +488,7 @@ where
     /// >           protocol, all substreams in the context of libp2p start with a
     /// >           multistream-select negotiation, and this scenario can therefore never happen.
     ///
-    /// Returns an error if a [`IncomingDataDetail::GoAway`] event has been generated. This can
+    /// Returns an error if a [`ReadWriteOutcome::GoAway`] event has been generated. This can
     /// also be checked by calling [`Yamux::received_goaway`].
     ///
     /// Returns an error if all possible substream IDs are already taken. This happen if there
@@ -1570,7 +1560,7 @@ where
     /// [`Yamux::reject_pending_substream`].
     ///
     /// All follow-up requests for new substreams from the remote are automatically rejected.
-    /// [`IncomingDataDetail::IncomingSubstream`] events can no longer happen.
+    /// [`ReadWriteOutcome::IncomingSubstream`] events can no longer happen.
     ///
     pub fn send_goaway(&mut self, code: GoAwayErrorCode) -> Result<(), SendGoAwayError> {
         match self.inner.outgoing_goaway {
@@ -1665,9 +1655,9 @@ where
     /// Accepts an incoming substream.
     ///
     /// Either [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be
-    /// called after [`IncomingDataDetail::IncomingSubstream`] is returned.
+    /// called after [`ReadWriteOutcome::IncomingSubstream`] is returned.
     ///
-    /// Note that there is no expiration window after [`IncomingDataDetail::IncomingSubstream`]
+    /// Note that there is no expiration window after [`ReadWriteOutcome::IncomingSubstream`]
     /// is returned until the substream is no longer valid. However, reading will be blocked until
     /// the substream is either accepted or rejected. This function should thus be called as
     /// soon as possible.
@@ -1726,9 +1716,9 @@ where
     /// Rejects an incoming substream.
     ///
     /// Either [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be
-    /// called after [`IncomingDataDetail::IncomingSubstream`] is returned.
+    /// called after [`ReadWriteOutcome::IncomingSubstream`] is returned.
     ///
-    /// Note that there is no expiration window after [`IncomingDataDetail::IncomingSubstream`]
+    /// Note that there is no expiration window after [`ReadWriteOutcome::IncomingSubstream`]
     /// is returned until the substream is no longer valid. However, reading will be blocked until
     /// the substream is either accepted or rejected. This function should thus be called as
     /// soon as possible.
@@ -1845,7 +1835,7 @@ where
         code: GoAwayErrorCode,
         /// List of all outgoing substreams that haven't been acknowledged by the remote yet.
         /// These substreams are considered as reset, similar to
-        /// [`IncomingDataDetail::StreamReset`].
+        /// [`ReadWriteOutcome::StreamReset`].
         reset_substreams: Vec<SubstreamId>,
     },
 
