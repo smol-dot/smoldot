@@ -565,14 +565,22 @@ where
                         match read_write.incoming_bytes_take_leb128(handshake_in_max_size) {
                             Ok(Some(s)) => handshake_in_size = Some(s),
                             Ok(None) => {}
-                            Err(error) => {
-                                return (
-                                    None,
-                                    Some(Event::Response {
-                                        response: Err(RequestError::ResponseLebError(error)),
+                            Err(error) => return (
+                                None,
+                                Some(Event::Response {
+                                    response: Err(match error {
+                                        read_write::IncomingBytesTakeLeb128Error::InvalidLeb128 => {
+                                            RequestError::ResponseInvalidLeb128
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::ReadClosed => {
+                                            RequestError::SubstreamClosed
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::TooLarge => {
+                                            RequestError::ResponseTooLarge
+                                        }
                                     }),
-                                )
-                            }
+                                }),
+                            ),
                         }
                     }
                 }
@@ -720,14 +728,22 @@ where
                         match read_write.incoming_bytes_take_leb128(response_max_size) {
                             Ok(Some(s)) => response_size = Some(s),
                             Ok(None) => {}
-                            Err(error) => {
-                                return (
-                                    None,
-                                    Some(Event::Response {
-                                        response: Err(RequestError::ResponseLebError(error)),
+                            Err(error) => return (
+                                None,
+                                Some(Event::Response {
+                                    response: Err(match error {
+                                        read_write::IncomingBytesTakeLeb128Error::InvalidLeb128 => {
+                                            RequestError::ResponseInvalidLeb128
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::ReadClosed => {
+                                            RequestError::SubstreamClosed
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::TooLarge => {
+                                            RequestError::ResponseTooLarge
+                                        }
                                     }),
-                                )
-                            }
+                                }),
+                            ),
                         }
                     }
                 }
@@ -1492,9 +1508,10 @@ pub enum RequestError {
     /// Error during protocol negotiation.
     #[display(fmt = "Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
-    /// Error while receiving the response.
-    #[display(fmt = "Error while receiving response: {_0}")]
-    ResponseLebError(read_write::IncomingBytesTakeLeb128Error),
+    /// Invalid LEB128 number when receiving the response.
+    ResponseInvalidLeb128,
+    /// Number of bytes decoded is larger than expected when receiving the response.
+    ResponseTooLarge,
 }
 
 impl RequestError {
@@ -1507,7 +1524,8 @@ impl RequestError {
             RequestError::SubstreamClosed => false,
             RequestError::SubstreamReset => true,
             RequestError::NegotiationError(_) => true,
-            RequestError::ResponseLebError(_) => true,
+            RequestError::ResponseInvalidLeb128 => true,
+            RequestError::ResponseTooLarge => true,
         }
     }
 }

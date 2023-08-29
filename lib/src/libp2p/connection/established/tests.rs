@@ -403,10 +403,7 @@ fn refused_request() {
     match event {
         either::Left(Event::Response { id, response, .. }) => {
             assert_eq!(id, substream_id);
-            assert!(matches!(
-                response,
-                Err(RequestError::SubstreamClosed | RequestError::SubstreamReset) // TODO: SubstreamReset is slightly wrong, it happens because the sender doesn't close the substream before the receiver receives the response, but this is a very low priority problem
-            ));
+            assert!(matches!(response, Err(RequestError::SubstreamClosed)));
         }
         _ev => unreachable!("{:?}", _ev),
     }
