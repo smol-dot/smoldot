@@ -457,13 +457,13 @@ impl<TNow, TSub> Yamux<TNow, TSub> {
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past.
     ///
     /// In other words, returns `true` if a `GoAway` frame has been either queued for sending
-    /// (and is available through [`Yamux::extract_next`]) or has already been sent out.
+    /// (and is available through [`Yamux::read_write`]) or has already been sent out.
     pub fn goaway_queued_or_sent(&self) -> bool {
         !matches!(self.inner.outgoing_goaway, OutgoingGoAway::NotRequired)
     }
 
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past and that this
-    /// `GoAway` frame has been extracted through [`Yamux::extract_next`].
+    /// `GoAway` frame has been extracted through [`Yamux::read_write`].
     pub fn goaway_sent(&self) -> bool {
         matches!(self.inner.outgoing_goaway, OutgoingGoAway::Sent)
     }
@@ -1800,8 +1800,7 @@ where
     ///
     /// After this has been received, either [`Yamux::accept_pending_substream`] or
     /// [`Yamux::reject_pending_substream`] needs to be called in order to accept or reject
-    /// this substream. Calling [`Yamux::incoming_data`] before this is done will lead to a
-    /// panic.
+    /// this substream. [`Yamux::read_write`] will stop reading incoming data before this is done.
     ///
     /// Note that this can never happen after [`Yamux::send_goaway`] has been called, as all
     /// substreams are then automatically rejected.
