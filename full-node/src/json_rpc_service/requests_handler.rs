@@ -17,9 +17,9 @@
 
 use smol::stream::StreamExt as _;
 use smoldot::json_rpc::{methods, parse, service};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
 
-use crate::{database_thread, network_service, LogCallback, LogLevel};
+use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
@@ -144,11 +144,23 @@ pub fn spawn_requests_handler(mut config: Config) {
                             let subscription_id = subscription.subscription_id().to_owned();
 
                             loop {
-                                let mut subscribe_all = consensus_service.subscribe_all(32).await;
+                                let mut subscribe_all = consensus_service
+                                    .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                                    .await;
+
+                                // TODO: unpin initial blocks
+
                                 loop {
                                     match subscribe_all.new_blocks.next().await {
                                         None => break,
                                         Some(consensus_service::Notification::Block(block)) => {
+                                            consensus_service
+                                                .unpin_block(
+                                                    subscribe_all.id,
+                                                    &block.scale_encoded_header, // TODO: no lol
+                                                )
+                                                .await;
+
                                             let json_rpc_header =
                                                 match methods::Header::from_scale_encoded_header(
                                                     &block.scale_encoded_header,

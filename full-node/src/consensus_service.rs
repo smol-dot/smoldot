@@ -48,7 +48,7 @@ use std::{
     array,
     borrow::Cow,
     iter, mem,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -132,6 +132,7 @@ pub struct ConsensusService {
 enum ToBackground {
     SubscribeAll {
         buffer_size: usize,
+        max_pinned_blocks: NonZeroUsize,
         result_tx: oneshot::Sender<SubscribeAll>,
     },
     GetSyncState {
@@ -364,6 +365,13 @@ impl ConsensusService {
     /// Only up to `buffer_size` notifications are buffered in the channel. If the channel is full
     /// when a new notification is attempted to be pushed, the channel gets closed.
     ///
+    /// A maximum number of finalized or non-canonical (i.e. not part of the finalized chain)
+    /// pinned blocks must be passed, indicating the maximum number of blocks that are finalized
+    /// or non-canonical that the consensus service will pin at the same time for this
+    /// subscription. If this maximum is reached, the channel will get closed. In situations
+    /// where the subscriber is guaranteed to always properly unpin blocks, a value of
+    /// `usize::max_value()` can be passed in order to ignore this maximum.
+    ///
     /// All the blocks being reported are guaranteed to be present in the database associated to
     /// this [`ConsensusService`].
     ///
@@ -371,7 +379,11 @@ impl ConsensusService {
     ///
     /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
     /// CPU operations are performed.
-    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
+    pub async fn subscribe_all(
+        &self,
+        buffer_size: usize,
+        max_pinned_blocks: NonZeroUsize,
+    ) -> SubscribeAll {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
             .to_background_tx
@@ -379,15 +391,24 @@ impl ConsensusService {
             .await
             .send(ToBackground::SubscribeAll {
                 buffer_size,
+                max_pinned_blocks,
                 result_tx,
             })
             .await;
         result_rx.await.unwrap()
     }
+
+    /// Unpins a block that was provided as part of a subscription.
+    pub async fn unpin_block(&self, id: SubscriptionId, block_hash: &[u8; 32]) {
+        // TODO:
+    }
 }
 
 /// Return value of [`ConsensusService::subscribe_all`].
 pub struct SubscribeAll {
+    /// Identifier of this subscription.
+    pub id: SubscriptionId,
+
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
@@ -403,6 +424,10 @@ pub struct SubscribeAll {
     /// block needs to be reported.
     pub new_blocks: async_channel::Receiver<Notification>,
 }
+
+/// Identifier of a subscription returned by [`ConsensusService::subscribe_all`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubscriptionId(u64);
 
 /// Notification about a new block or a new finalized block.
 ///
@@ -729,7 +754,7 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
-                        Some(ToBackground::SubscribeAll { buffer_size, result_tx }) => {
+                        Some(ToBackground::SubscribeAll { buffer_size, max_pinned_blocks, result_tx }) => {
                             let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                             let non_finalized_blocks_ancestry_order = {

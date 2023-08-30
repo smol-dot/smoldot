@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{database_thread, network_service, LogCallback, LogLevel};
+use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
 use futures_util::FutureExt;
 use smol::{
     future,
