@@ -136,7 +136,7 @@ enum ToBackground {
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
     /// Error accessing the database.
-    DatabaseAccess(full_sqlite::AccessError),
+    DatabaseAccess(full_sqlite::CorruptedError),
     /// Error parsing the header of a block in the database.
     InvalidHeader(header::Error),
     /// `:code` key is missing from the finalized block storage.
@@ -194,10 +194,10 @@ impl ConsensusService {
                     let finalized_chain_information =
                         match database.to_chain_information(&finalized_block_hash) {
                             Ok(info) => info,
-                            Err(full_sqlite::StorageAccessError::Access(err)) => {
+                            Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                                 return Err(InitError::DatabaseAccess(err))
                             }
-                            Err(full_sqlite::StorageAccessError::Pruned)
+                            Err(full_sqlite::StorageAccessError::StoragePruned)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                         };
                     let finalized_code = match database.block_storage_get(
@@ -207,10 +207,10 @@ impl ConsensusService {
                     ) {
                         Ok(Some((code, _))) => code,
                         Ok(None) => return Err(InitError::FinalizedCodeMissing),
-                        Err(full_sqlite::StorageAccessError::Access(err)) => {
+                        Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseAccess(err))
                         }
-                        Err(full_sqlite::StorageAccessError::Pruned)
+                        Err(full_sqlite::StorageAccessError::StoragePruned)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     let finalized_heap_pages = match database.block_storage_get(
@@ -220,10 +220,10 @@ impl ConsensusService {
                     ) {
                         Ok(Some((hp, _))) => Some(hp),
                         Ok(None) => None,
-                        Err(full_sqlite::StorageAccessError::Access(err)) => {
+                        Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseAccess(err))
                         }
-                        Err(full_sqlite::StorageAccessError::Pruned)
+                        Err(full_sqlite::StorageAccessError::StoragePruned)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     Ok((
