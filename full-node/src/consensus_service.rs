@@ -135,8 +135,8 @@ enum ToBackground {
 /// Potential error when calling [`ConsensusService::new`].
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
-    /// Error accessing the database.
-    DatabaseAccess(full_sqlite::CorruptedError),
+    /// Database is corrupted.
+    DatabaseCorruption(full_sqlite::CorruptedError),
     /// Error parsing the header of a block in the database.
     InvalidHeader(header::Error),
     /// `:code` key is missing from the finalized block storage.
@@ -167,15 +167,15 @@ impl ConsensusService {
                     // blocks that are no longer useful in any way. We purge them all here.
                     database
                         .purge_finality_orphans()
-                        .map_err(InitError::DatabaseAccess)?;
+                        .map_err(InitError::DatabaseCorruption)?;
 
                     let finalized_block_hash = database
                         .finalized_block_hash()
-                        .map_err(InitError::DatabaseAccess)?;
+                        .map_err(InitError::DatabaseCorruption)?;
                     let finalized_block_number = header::decode(
                         &database
                             .block_scale_encoded_header(&finalized_block_hash)
-                            .map_err(InitError::DatabaseAccess)?
+                            .map_err(InitError::DatabaseCorruption)?
                             .unwrap(), // A panic here would indicate a bug in the database code.
                         block_number_bytes,
                     )
@@ -185,7 +185,7 @@ impl ConsensusService {
                     let best_block_number = header::decode(
                         &database
                             .block_scale_encoded_header(&best_block_hash)
-                            .map_err(InitError::DatabaseAccess)?
+                            .map_err(InitError::DatabaseCorruption)?
                             .unwrap(), // A panic here would indicate a bug in the database code.
                         block_number_bytes,
                     )
@@ -195,7 +195,7 @@ impl ConsensusService {
                         match database.to_chain_information(&finalized_block_hash) {
                             Ok(info) => info,
                             Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                                return Err(InitError::DatabaseAccess(err))
+                                return Err(InitError::DatabaseCorruption(err))
                             }
                             Err(full_sqlite::StorageAccessError::StoragePruned)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -208,7 +208,7 @@ impl ConsensusService {
                         Ok(Some((code, _))) => code,
                         Ok(None) => return Err(InitError::FinalizedCodeMissing),
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                            return Err(InitError::DatabaseAccess(err))
+                            return Err(InitError::DatabaseCorruption(err))
                         }
                         Err(full_sqlite::StorageAccessError::StoragePruned)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
@@ -221,7 +221,7 @@ impl ConsensusService {
                         Ok(Some((hp, _))) => Some(hp),
                         Ok(None) => None,
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
-                            return Err(InitError::DatabaseAccess(err))
+                            return Err(InitError::DatabaseCorruption(err))
                         }
                         Err(full_sqlite::StorageAccessError::StoragePruned)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
