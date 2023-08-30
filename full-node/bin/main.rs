@@ -361,7 +361,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
             .to_string(),
     );
 
-    let client = smoldot_full_node::start(smoldot_full_node::Config {
+    let client_init_result = smoldot_full_node::start(smoldot_full_node::Config {
         chain: smoldot_full_node::ChainConfig {
             chain_spec: chain_spec.into(),
             additional_bootnodes: cli_options
@@ -377,8 +377,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
         relay_chain,
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
-        json_rpc: if let Some(address) = cli_options.json_rpc_address.0 {
-            Some(smoldot_full_node::JsonRpcConfig {
+        json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
+            Some(smoldot_full_node::JsonRpcListenConfig {
                 address,
                 max_json_rpc_clients: cli_options.json_rpc_max_clients,
             })
@@ -393,6 +393,17 @@ async fn run(cli_options: cli::CliOptionsRun) {
         jaeger_agent: cli_options.jaeger,
     })
     .await;
+
+    let client = match client_init_result {
+        Ok(c) => c,
+        Err(err) => {
+            log_callback.log(
+                smoldot_full_node::LogLevel::Error,
+                format!("Failed to initialize client: {}", err),
+            );
+            panic!("Failed to initialize client: {}", err);
+        }
+    };
 
     if let Some(addr) = client.json_rpc_server_addr() {
         log_callback.log(

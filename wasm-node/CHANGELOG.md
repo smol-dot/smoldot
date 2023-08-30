@@ -4,8 +4,13 @@
 
 ### Changed
 
-- It is now possible for parachain chain specifications to include just a `genesis.stateRootHash` field (and no `genesis.raw` field). A warning in the logs is now printed for all chain specifications that include a `genesis.raw` field. ([#1034](https://github.com/smol-dot/smoldot/pull/1034))
 - During the warp syncing process, smoldot will now download the runtime and call proofs from any peer whose finalized block is superior or equal to the target block, rather than always the peer that was used to download the warp sync fragments.
+
+## 1.0.17 - 2023-08-25
+
+### Changed
+
+- It is now possible for parachain chain specifications to include just a `genesis.stateRootHash` field (and no `genesis.raw` field). A warning in the logs is now printed for all chain specifications that include a `genesis.raw` field. ([#1034](https://github.com/smol-dot/smoldot/pull/1034))
 
 ### Fixed
 

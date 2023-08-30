@@ -110,10 +110,9 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
-            let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data())
-                else {
-                    return Err(Error::InvalidMultihashLength);
-                };
+            let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data()) else {
+                return Err(Error::InvalidMultihashLength);
+            };
             AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
                 ip: IpAddr::V4(ip),
                 port,
@@ -132,10 +131,9 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
-            let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data())
-                else {
-                    return Err(Error::InvalidMultihashLength);
-                };
+            let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data()) else {
+                return Err(Error::InvalidMultihashLength);
+            };
             AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
                 ip: IpAddr::V6(ip),
                 port,

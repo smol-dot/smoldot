@@ -202,6 +202,7 @@ CREATE TABLE blocks(
     number INTEGER NOT NULL,
     header BLOB NOT NULL,
     justification BLOB,
+    is_best_chain BOOLEAN NOT NULL,
     UNIQUE(number, hash),
     FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
     FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE SET NULL
@@ -209,6 +210,7 @@ CREATE TABLE blocks(
 CREATE INDEX blocks_by_number ON blocks(number);
 CREATE INDEX blocks_by_parent ON blocks(parent_hash);
 CREATE INDEX blocks_by_state_trie_root_hash ON blocks(state_trie_root_hash);
+CREATE INDEX blocks_by_best ON blocks(number, is_best_chain);
 
 /*
 Each block has a body made from 0+ extrinsics (in practice, there's always at least one extrinsic,
@@ -384,7 +386,7 @@ impl DatabaseEmpty {
 
         transaction
             .prepare_cached(
-                "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, justification) VALUES(?, ?, ?, ?, ?, ?)",
+                "INSERT INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, is_best_chain, justification) VALUES(?, ?, ?, ?, ?, TRUE, ?)",
             )
             .unwrap()
             .execute((

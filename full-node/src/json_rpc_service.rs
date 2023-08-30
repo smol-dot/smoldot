@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{LogCallback, LogLevel};
+use crate::{database_thread, network_service, LogCallback, LogLevel};
 use futures_util::FutureExt;
 use smol::{
     future,
@@ -35,6 +35,8 @@ use std::{
     time::Duration,
 };
 
+pub use service::ParseError as RequestParseError;
+
 mod requests_handler;
 
 /// Configuration for a [`JsonRpcService`].
@@ -47,8 +49,14 @@ pub struct Config {
     /// Function called in order to notify of something.
     pub log_callback: Arc<dyn LogCallback + Send + Sync>,
 
-    /// Where to bind the WebSocket server.
-    pub bind_address: SocketAddr,
+    /// Database to access blocks.
+    pub database: Arc<database_thread::DatabaseThread>,
+
+    /// Access to the peer-to-peer networking.
+    pub network_service: Arc<network_service::NetworkService>,
+
+    /// Where to bind the WebSocket server. If `None`, no TCP server is started.
+    pub bind_address: Option<SocketAddr>,
 
     /// Maximum number of requests to process in parallel.
     pub max_parallel_requests: u32,
@@ -66,13 +74,21 @@ pub struct Config {
     pub genesis_block_hash: [u8; 32],
 }
 
-/// Running JSON-RPC service. Holds a server open for as long as it is alive.
+/// Running JSON-RPC service.
+///
+/// If [`Config::bind_address`] is `Some`, holds a TCP server open for as long as it is alive.
+///
+/// In addition to a TCP/IP server, this service also provides a virtual JSON-RPC endpoint that
+/// can be used through [`JsonRpcService::send_request`] and [`JsonRpcService::next_response`].
 pub struct JsonRpcService {
     /// This events listener is notified when the service is dropped.
     service_dropped: event_listener::Event,
 
     /// Address the server is listening on. Not necessarily equal to [`Config::bind_address`].
-    listen_addr: SocketAddr,
+    listen_addr: Option<SocketAddr>,
+
+    /// I/O for the virtual endpoint.
+    virtual_client_io: service::SerializedRequestsIo,
 }
 
 impl Drop for JsonRpcService {
@@ -84,33 +100,54 @@ impl Drop for JsonRpcService {
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
     pub async fn new(config: Config) -> Result<Self, InitError> {
-        let tcp_listener = match TcpListener::bind(&config.bind_address).await {
-            Ok(s) => s,
-            Err(error) => {
-                return Err(InitError::ListenError {
-                    bind_address: config.bind_address,
-                    error,
-                })
-            }
-        };
+        let (tcp_listener, listen_addr) = match &config.bind_address {
+            Some(addr) => match TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    let listen_addr = match listener.local_addr() {
+                        Ok(addr) => addr,
+                        Err(error) => {
+                            return Err(InitError::ListenError {
+                                bind_address: addr.clone(),
+                                error,
+                            })
+                        }
+                    };
 
-        let listen_addr = match tcp_listener.local_addr() {
-            Ok(addr) => addr,
-            Err(error) => {
-                return Err(InitError::ListenError {
-                    bind_address: config.bind_address,
-                    error,
-                })
-            }
+                    (Some(listener), Some(listen_addr))
+                }
+                Err(error) => {
+                    return Err(InitError::ListenError {
+                        bind_address: addr.clone(),
+                        error,
+                    })
+                }
+            },
+            None => (None, None),
         };
 
         let service_dropped = event_listener::Event::new();
         let on_service_dropped = service_dropped.listen();
 
         let (to_requests_handlers, from_background) = async_channel::bounded(8);
+
+        let (virtual_client_main_task, virtual_client_io) =
+            service::client_main_task(service::Config {
+                max_active_subscriptions: u32::max_value(),
+                max_pending_requests: NonZeroU32::new(u32::max_value()).unwrap(),
+            });
+
+        spawn_client_main_task(
+            &config.tasks_executor,
+            to_requests_handlers.clone(),
+            virtual_client_main_task,
+        );
+
         for _ in 0..config.max_parallel_requests {
             requests_handler::spawn_requests_handler(requests_handler::Config {
                 tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback.clone(),
+                database: config.database.clone(),
+                network_service: config.network_service.clone(),
                 receiver: from_background.clone(),
                 chain_name: config.chain_name.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),
@@ -118,28 +155,61 @@ impl JsonRpcService {
             });
         }
 
-        let background = JsonRpcBackground {
-            tcp_listener,
-            on_service_dropped,
-            tasks_executor: config.tasks_executor.clone(),
-            log_callback: config.log_callback,
-            to_requests_handlers,
-            num_json_rpc_clients: Arc::new(AtomicU32::new(0)),
-            max_json_rpc_clients: config.max_json_rpc_clients,
-        };
+        if let Some(tcp_listener) = tcp_listener {
+            let background = JsonRpcBackground {
+                tcp_listener,
+                on_service_dropped,
+                tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback,
+                to_requests_handlers,
+                num_json_rpc_clients: Arc::new(AtomicU32::new(0)),
+                max_json_rpc_clients: config.max_json_rpc_clients,
+            };
 
-        (config.tasks_executor)(Box::pin(async move { background.run().await }));
+            (config.tasks_executor)(Box::pin(async move { background.run().await }));
+        }
 
         Ok(JsonRpcService {
             service_dropped,
             listen_addr,
+            virtual_client_io,
         })
     }
 
-    /// Returns the address the server is listening on. Not necessarily equal
-    /// to [`Config::bind_address`].
-    pub fn listen_addr(&self) -> SocketAddr {
+    /// Returns the address the server is listening on.
+    ///
+    /// Returns `None` if and only if [`Config::bind_address`] was `None`. However, if `Some`,
+    /// the address is not necessarily equal to the one in [`Config::bind_address`].
+    pub fn listen_addr(&self) -> Option<SocketAddr> {
         self.listen_addr.clone()
+    }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    ///
+    /// Returns an error if the JSON-RPC request is malformed.
+    pub fn send_request(&self, request: String) -> Result<(), RequestParseError> {
+        match self.virtual_client_io.try_send_request(request) {
+            Ok(()) => Ok(()),
+            Err(err) => match err.cause {
+                service::TrySendRequestErrorCause::MalformedJson(err) => return Err(err),
+                service::TrySendRequestErrorCause::TooManyPendingRequests
+                | service::TrySendRequestErrorCause::ClientMainTaskDestroyed => unreachable!(),
+            },
+        }
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`JsonRpcService::send_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    pub async fn next_response(&self) -> String {
+        match self.virtual_client_io.wait_next_response().await {
+            Ok(r) => r,
+            Err(service::WaitNextResponseError::ClientMainTaskDestroyed) => unreachable!(),
+        }
     }
 }
 

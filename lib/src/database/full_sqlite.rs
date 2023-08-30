@@ -181,6 +181,34 @@ impl SqliteFullDatabase {
         Ok(result.into_iter())
     }
 
+    /// Returns the hash of the block of the best chain given a block number.
+    pub fn best_block_hash_by_number(
+        &self,
+        block_number: u64,
+    ) -> Result<Option<[u8; 32]>, AccessError> {
+        let connection = self.database.lock();
+
+        let block_number = match i64::try_from(block_number) {
+            Ok(n) => n,
+            Err(_) => return Ok(None),
+        };
+
+        let result = connection
+            .prepare_cached(r#"SELECT hash FROM blocks WHERE number = ? AND is_best_chain = TRUE"#)
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .query_row((block_number,), |row| row.get::<_, Vec<u8>>(0))
+            .optional()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
+            .and_then(|value| {
+                let Some(value) = value else { return Ok(None) };
+                Ok(Some(<[u8; 32]>::try_from(&value[..]).map_err(|_| {
+                    AccessError::Corrupted(CorruptedError::InvalidBlockHashLen)
+                })?))
+            })?;
+
+        Ok(result)
+    }
+
     /// Returns a [`chain_information::ChainInformation`] struct containing the information about
     /// the current finalized state of the chain.
     ///
@@ -289,6 +317,10 @@ impl SqliteFullDatabase {
     ///
     /// Blocks must be inserted in the correct order. An error is returned if the parent of the
     /// newly-inserted block isn't present in the database.
+    ///
+    /// > **Note**: It is not necessary for the newly-inserted block to be a descendant of the
+    /// >           finalized block, unless `is_new_best` is true.
+    ///
     pub fn insert<'a>(
         &self,
         scale_encoded_header: &[u8],
@@ -325,13 +357,6 @@ impl SqliteFullDatabase {
             return Err(InsertError::MissingParent);
         }
 
-        // If the height of the block to insert is <= the latest finalized, it doesn't
-        // belong to the finalized chain and would be pruned.
-        // TODO: what if we don't immediately insert the entire finalized chain, but populate it later? should that not be a use case?
-        if header.number <= finalized_num(&transaction)? {
-            return Err(InsertError::FinalizedNephew);
-        }
-
         // Temporarily disable foreign key checks in order to make the insertion easier, as we
         // don't have to make sure that trie nodes are sorted.
         // Note that this is immediately disabled again when we `COMMIT` later down below.
@@ -345,7 +370,7 @@ impl SqliteFullDatabase {
 
         transaction
             .prepare_cached(
-                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, justification) VALUES (?, ?, ?, ?, ?, NULL)",
+                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, is_best_chain, justification) VALUES (?, ?, ?, ?, ?, FALSE, NULL)",
             )
             .unwrap()
             .execute((
@@ -381,9 +406,15 @@ impl SqliteFullDatabase {
         )
         .map_err(InsertError::Access)?;
 
-        // Various other updates.
+        // Change the best chain to be the new block.
         if is_new_best {
-            meta_set_blob(&transaction, "best", &block_hash)?;
+            // It would be illegal to change the best chain to not overlay with the
+            // finalized chain.
+            if header.number <= finalized_num(&transaction)? {
+                return Err(InsertError::BestNotInFinalizedChain);
+            }
+
+            set_best_chain(&transaction, &block_hash)?;
         }
 
         // If everything is successful, we commit.
@@ -398,8 +429,8 @@ impl SqliteFullDatabase {
 
     /// Changes the finalized block to the given one.
     ///
-    /// The block must have been previously inserted using [`SqliteFullDatabase::insert`], otherwise
-    /// an error is returned.
+    /// The block must have been previously inserted using [`SqliteFullDatabase::insert`],
+    /// otherwise an error is returned.
     ///
     /// Blocks are expected to be valid in context of the chain. Inserting an invalid block can
     /// result in the database being corrupted.
@@ -407,6 +438,10 @@ impl SqliteFullDatabase {
     /// The block must be a descendant of the current finalized block. Reverting finalization is
     /// forbidden, as the database intentionally discards some information when finality is
     /// applied.
+    ///
+    /// > **Note**: This function doesn't remove any block from the database but simply moves
+    /// >           the finalized block "cursor".
+    ///
     pub fn set_finalized(
         &self,
         new_finalized_block_hash: &[u8; 32],
@@ -436,6 +471,7 @@ impl SqliteFullDatabase {
         // the finalized chain, and that the presence of the block to finalize in
         // the database has already been verified, it is guaranteed that the block
         // to finalize is already the one already finalized.
+        // TODO: this comment is obsolete ^, should also compare the block hashes
         if new_finalized_header.number == current_finalized {
             return Ok(());
         }
@@ -451,83 +487,7 @@ impl SqliteFullDatabase {
         // Update the finalized block in meta.
         meta_set_number(&transaction, "finalized", new_finalized_header.number)?;
 
-        // Take each block height between `header.number` and `current_finalized + 1`
-        // and remove blocks that aren't an ancestor of the new finalized block.
-        {
-            // For each block height between the old finalized and new finalized,
-            // remove all blocks except the one whose hash is `expected_hash`.
-            // `expected_hash` always designates a block in the finalized chain.
-            let mut expected_hash = *new_finalized_block_hash;
-
-            for height in (current_finalized + 1..=new_finalized_header.number).rev() {
-                let blocks_list = block_hashes_by_number(&transaction, height)?;
-
-                let mut expected_block_found = false;
-                for hash_at_height in blocks_list {
-                    if hash_at_height == expected_hash {
-                        expected_block_found = true;
-                        continue;
-                    }
-
-                    // Remove the block from the database.
-                    purge_block(&transaction, &hash_at_height)?;
-                }
-
-                // `expected_hash` not found in the list of blocks with this number.
-                if !expected_block_found {
-                    return Err(SetFinalizedError::Access(AccessError::Corrupted(
-                        CorruptedError::BrokenChain,
-                    )));
-                }
-
-                // Update `expected_hash` to point to the parent of the current
-                // `expected_hash`.
-                expected_hash = {
-                    let header = block_header(&transaction, &expected_hash)?.ok_or(
-                        SetFinalizedError::Access(AccessError::Corrupted(
-                            CorruptedError::BrokenChain,
-                        )),
-                    )?;
-                    let header = header::decode(&header, self.block_number_bytes)
-                        .map_err(CorruptedError::BlockHeaderCorrupted)
-                        .map_err(AccessError::Corrupted)
-                        .map_err(SetFinalizedError::Access)?;
-                    *header.parent_hash
-                };
-            }
-        }
-
-        // Take each block height starting from `header.number + 1` and remove blocks
-        // that aren't a descendant of the newly-finalized block.
-        let mut allowed_parents = vec![*new_finalized_block_hash];
-        for height in new_finalized_header.number + 1.. {
-            let mut next_iter_allowed_parents = Vec::with_capacity(allowed_parents.len());
-
-            let blocks_list = block_hashes_by_number(&transaction, height)?;
-            if blocks_list.is_empty() {
-                break;
-            }
-
-            for block_hash in blocks_list {
-                let header = block_header(&transaction, &block_hash)?
-                    .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
-                let header = header::decode(&header, self.block_number_bytes)
-                    .map_err(CorruptedError::BlockHeaderCorrupted)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(SetFinalizedError::Access)?;
-                if allowed_parents.iter().any(|p| *p == *header.parent_hash) {
-                    next_iter_allowed_parents.push(block_hash);
-                    continue;
-                }
-
-                purge_block(&transaction, &block_hash)?;
-            }
-
-            allowed_parents = next_iter_allowed_parents;
-        }
-
         // Now update the finalized block storage.
-        // TODO: prune the storage of old blocks?
         for height in current_finalized + 1..=new_finalized_header.number {
             let block_hash =
                 {
@@ -644,6 +604,49 @@ impl SqliteFullDatabase {
                 InternalError(err),
             )))
         })?;
+
+        Ok(())
+    }
+
+    /// Removes from the database all blocks that aren't a descendant of the current finalized
+    /// block.
+    pub fn purge_finality_orphans(&self) -> Result<(), AccessError> {
+        let mut database = self.database.lock();
+
+        // TODO: untested
+
+        let transaction = database
+            .transaction()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+        // Temporarily disable foreign key checks in order to make the insertion easier, as we
+        // don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT` later down below.
+        // TODO: is this really necessary?
+        transaction
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+        let current_finalized = finalized_num(&transaction)?;
+
+        let blocks = transaction
+            .prepare_cached(
+                r#"SELECT hash FROM blocks WHERE number <= ? AND is_best_chain = FALSE"#,
+            )
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .query_map((current_finalized,), |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+        for block in blocks {
+            purge_block(&transaction, &block)?;
+        }
+
+        // If everything went well up to this point, commit the transaction.
+        transaction
+            .commit()
+            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         Ok(())
     }
@@ -1075,8 +1078,8 @@ pub enum InsertError {
     BadHeader(header::Error),
     /// Parent of the block to insert isn't in the database.
     MissingParent,
-    /// Block isn't a descendant of the latest finalized block.
-    FinalizedNephew,
+    /// The new best block would be outside of the finalized chain.
+    BestNotInFinalizedChain,
 }
 
 /// Error while calling [`SqliteFullDatabase::set_finalized`].
@@ -1256,6 +1259,69 @@ fn block_header(
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
 }
 
+fn set_best_chain(
+    database: &rusqlite::Connection,
+    new_best_block_hash: &[u8],
+) -> Result<(), AccessError> {
+    // TODO: can this not be embedded in the SQL statement below?
+    let current_best = meta_get_blob(&database, "best")?
+        .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
+
+    // TODO: untested except in the most basic situation
+    // In the SQL below, the temporary table `changes` is built by walking down (highest to lowest
+    // block number) the new best chain and old best chain. While walking down, the iteration
+    // keeps track of the block hashes and their number. If the new best chain has a higher number
+    // than the old best chain, then only the new best chain is iterated, and vice versa. If the
+    // new and old best chain have the same number, they are both iterated, and it is possible to
+    // compare the block hashes in order to know when to stop iterating. In the context of this
+    // algorithm, a `NULL` block hash represents "one past the new/old best block", which allows
+    // to not include the new/old best block in the temporary table until it needs to be included.
+    database
+        .prepare_cached(
+            r#"
+        WITH RECURSIVE
+            changes(block_to_include, block_to_retract, block_to_include_number, block_to_retract_number) AS (
+                SELECT NULL, NULL, blocks_inc.number + 1, blocks_ret.number + 1
+                FROM blocks AS blocks_inc, blocks as blocks_ret
+                WHERE blocks_inc.hash = :new_best AND blocks_ret.hash = :current_best
+            UNION ALL
+                SELECT
+                    CASE WHEN changes.block_to_include_number >= changes.block_to_retract_number THEN
+                        COALESCE(blocks_inc.parent_hash, :new_best)
+                    ELSE
+                        changes.block_to_include
+                    END,
+                    CASE WHEN changes.block_to_retract_number >= changes.block_to_include_number THEN
+                        COALESCE(blocks_ret.parent_hash, :current_best)
+                    ELSE
+                        changes.block_to_retract
+                    END,
+                    CASE WHEN changes.block_to_include_number >= block_to_retract_number THEN changes.block_to_include_number - 1
+                    ELSE changes.block_to_include_number END,
+                    CASE WHEN changes.block_to_retract_number >= changes.block_to_include_number THEN changes.block_to_retract_number - 1
+                    ELSE changes.block_to_retract_number END
+                FROM changes
+                LEFT JOIN blocks AS blocks_inc ON blocks_inc.hash = changes.block_to_include
+                LEFT JOIN blocks AS blocks_ret ON blocks_ret.hash = changes.block_to_retract
+                WHERE changes.block_to_include_number != changes.block_to_retract_number
+                    OR COALESCE(blocks_inc.parent_hash, :new_best) != COALESCE(blocks_ret.parent_hash, :current_best)
+            )
+        UPDATE blocks SET is_best_chain = (blocks.hash = changes.block_to_include)
+        FROM changes
+        WHERE blocks.hash = changes.block_to_include OR blocks.hash = changes.block_to_retract;
+            "#,
+        )
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .execute(rusqlite::named_params! {
+            ":current_best": current_best,
+            ":new_best": new_best_block_hash
+        })
+        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+    meta_set_blob(&database, "best", new_best_block_hash)?;
+    Ok(())
+}
+
 // TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
 fn insert_storage<'a>(
     database: &rusqlite::Connection,
@@ -1407,7 +1473,7 @@ fn insert_storage<'a>(
     Ok(())
 }
 
-fn purge_block(database: &rusqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {
+fn purge_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<(), AccessError> {
     purge_block_storage(database, hash)?;
     database
         .prepare_cached("DELETE FROM blocks_body WHERE hash = ?")
@@ -1422,10 +1488,7 @@ fn purge_block(database: &rusqlite::Connection, hash: &[u8; 32]) -> Result<(), A
     Ok(())
 }
 
-fn purge_block_storage(
-    database: &rusqlite::Connection,
-    hash: &[u8; 32],
-) -> Result<(), AccessError> {
+fn purge_block_storage(database: &rusqlite::Connection, hash: &[u8]) -> Result<(), AccessError> {
     // TODO: untested
 
     let state_trie_root_hash = database
@@ -1455,19 +1518,19 @@ fn purge_block_storage(
                 to_delete(node_hash) AS (
                     SELECT trie_node.hash
                         FROM trie_node
-                        LEFT JOIN blocks ON blocks.hash != :block_hash AND blocks.state_trie_root_hash = trie_node.state_trie_root_hash
-                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = trie_node.node_hash
+                        LEFT JOIN blocks ON blocks.hash != :block_hash AND blocks.state_trie_root_hash = trie_node.hash
+                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = trie_node.hash
                         WHERE trie_node.hash = :state_trie_root_hash AND blocks.hash IS NULL AND trie_node_storage.node_hash IS NULL
                     UNION ALL
                     SELECT trie_node_child.child_hash
                         FROM to_delete
                         JOIN trie_node_child ON trie_node_child.hash = to_delete.node_hash
                         LEFT JOIN blocks ON blocks.state_trie_root_hash = trie_node_child.child_hash
-                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = child_hash.node_hash
+                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = to_delete.node_hash
                         WHERE blocks.hash IS NULL AND trie_node_storage.node_hash IS NULL
                 )
             DELETE FROM trie_node
-            SELECT node_hash FROM to_delete
+            WHERE hash IN (SELECT node_hash FROM to_delete)
         "#)
         .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
         .execute(rusqlite::named_params! {

@@ -56,7 +56,7 @@ jobs:
   build-js-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.71
+      image: rust:1.72
     steps:
       - uses: actions/checkout@v3
         with:
@@ -82,7 +82,7 @@ jobs:
   build-rust-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.71
+      image: rust:1.72
     steps:
       - uses: actions/checkout@v3
         with:
@@ -103,7 +103,7 @@ jobs:
   build-tests-coverage:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.71
+      image: rust:1.72
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
@@ -173,18 +173,13 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.71
+      image: rust:1.72
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3.8.1
         with:
           # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 16
-      - uses: actions-rs/toolchain@v1
-        with:
-          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: stable
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - run: npm install
         working-directory: ./wasm-node/javascript
@@ -215,10 +210,11 @@ jobs:
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
+      # TODO: do not use `actions-rs/toolchain` but instead use `image: rust:...` like all the other stages; unfortunately this causes incomprehensible `detected dubious ownership in repository` git errors
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: stable
+          toolchain: 1.72
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
@@ -245,7 +241,7 @@ jobs:
   crates-io-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.71
+      image: rust:1.72
     steps:
       - uses: actions/checkout@v3
       - run: cargo publish --dry-run --locked
