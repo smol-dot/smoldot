@@ -138,6 +138,13 @@ enum ToBackground {
     GetSyncState {
         result_tx: oneshot::Sender<SyncState>,
     },
+    Unpin {
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+        /// Sends back `()` if the unpinning was successful or the subscription no longer exists.
+        /// The sender is silently destroyed if the block hash was invalid.
+        result_tx: oneshot::Sender<()>,
+    },
 }
 
 /// Potential error when calling [`ConsensusService::new`].
@@ -398,9 +405,28 @@ impl ConsensusService {
         result_rx.await.unwrap()
     }
 
-    /// Unpins a block that was provided as part of a subscription.
-    pub async fn unpin_block(&self, id: SubscriptionId, block_hash: &[u8; 32]) {
-        // TODO:
+    /// Unpins a block that was reported as part of a subscription.
+    ///
+    /// Has no effect if the [`SubscriptionId`] is not or no longer valid (as the consensus service
+    /// can kill any subscription at any moment).
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block hash has not been reported or has already been unpinned.
+    ///
+    pub async fn unpin_block(&self, subscription_id: SubscriptionId, block_hash: [u8; 32]) {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::Unpin {
+                subscription_id,
+                block_hash,
+                result_tx,
+            })
+            .await;
+        result_rx.await.unwrap()
     }
 }
 
@@ -411,6 +437,9 @@ pub struct SubscribeAll {
 
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
+
+    /// Hash of the finalized block, to provide to [`ConsensusService::unpin_block`].
+    pub finalized_block_hash: [u8; 32],
 
     /// List of all known non-finalized blocks at the time of subscription.
     ///
@@ -473,6 +502,9 @@ pub struct BlockNotification {
 
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
+
+    /// Hash of the block, to provide to [`ConsensusService::unpin_block`].
+    pub block_hash: [u8; 32],
 
     /// BLAKE2 hash of the header of the parent of this block.
     ///
@@ -768,6 +800,7 @@ impl SyncBackground {
                                             is_new_best: header::hash_from_scale_encoded_header(
                                                 &scale_encoding,
                                             ) == best_hash,
+                                            block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
                                             scale_encoded_header: scale_encoding,
                                             parent_hash: *h.parent_hash,
                                         }
@@ -776,11 +809,14 @@ impl SyncBackground {
                             };
 
                             self.blocks_notifications.push(tx);
+                            let finalized_block_scale_encoded_header = self
+                                .sync
+                                .finalized_block_header()
+                                .scale_encoding_vec(self.sync.block_number_bytes());
                             let _ = result_tx.send(SubscribeAll {
-                                finalized_block_scale_encoded_header: self
-                                    .sync
-                                    .finalized_block_header()
-                                    .scale_encoding_vec(self.sync.block_number_bytes()),
+                                id: SubscriptionId(0), // TODO:
+                                finalized_block_hash: header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header),
+                                finalized_block_scale_encoded_header,
                                 non_finalized_blocks_ancestry_order,
                                 new_blocks,
                             });
@@ -792,6 +828,10 @@ impl SyncBackground {
                                 finalized_block_hash: self.sync.finalized_block_header().hash(self.sync.block_number_bytes()),
                                 finalized_block_number: self.sync.finalized_block_header().number,
                             });
+                        },
+                        Some(ToBackground::Unpin { subscription_id, block_hash, result_tx }) => {
+                            // TODO:
+                            let _ = result_tx.send(());
                         },
                         None => {
                             // Shutdown.
@@ -1606,6 +1646,7 @@ impl SyncBackground {
                                     .try_send(Notification::Block(BlockNotification {
                                         is_new_best,
                                         scale_encoded_header: scale_encoded_header.clone(),
+                                        block_hash: header_verification_success.hash(),
                                         parent_hash,
                                     }))
                                     .is_err()

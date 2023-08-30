@@ -148,17 +148,25 @@ pub fn spawn_requests_handler(mut config: Config) {
                                     .subscribe_all(32, NonZeroUsize::new(32).unwrap())
                                     .await;
 
-                                // TODO: unpin initial blocks
+                                consensus_service
+                                    .unpin_block(
+                                        subscribe_all.id,
+                                        subscribe_all.finalized_block_hash,
+                                    )
+                                    .await;
+
+                                for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                                    consensus_service
+                                        .unpin_block(subscribe_all.id, block.block_hash)
+                                        .await;
+                                }
 
                                 loop {
                                     match subscribe_all.new_blocks.next().await {
                                         None => break,
                                         Some(consensus_service::Notification::Block(block)) => {
                                             consensus_service
-                                                .unpin_block(
-                                                    subscribe_all.id,
-                                                    &block.scale_encoded_header, // TODO: no lol
-                                                )
+                                                .unpin_block(subscribe_all.id, block.block_hash)
                                                 .await;
 
                                             let json_rpc_header =
