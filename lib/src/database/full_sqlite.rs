@@ -218,7 +218,7 @@ impl SqliteFullDatabase {
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`StorageAccessError::Pruned`] error is returned.
+    /// [`StorageAccessError::StoragePruned`] error is returned.
     pub fn to_chain_information(
         &self,
         finalized_block_hash: &[u8; 32],
