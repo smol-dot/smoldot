@@ -1409,7 +1409,7 @@ async fn blocks_request_response(
     database: &database_thread::DatabaseThread,
     block_number_bytes: usize,
     config: protocol::BlocksRequestConfig,
-) -> Result<Vec<protocol::BlockData>, full_sqlite::AccessError> {
+) -> Result<Vec<protocol::BlockData>, full_sqlite::CorruptedError> {
     database
         .with_database(move |database| {
             let num_blocks = cmp::min(
