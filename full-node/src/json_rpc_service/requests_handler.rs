@@ -17,9 +17,12 @@
 
 use smol::stream::StreamExt as _;
 use smoldot::json_rpc::{methods, parse, service};
-use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
+use crate::{
+    consensus_service, database_thread, json_rpc_service::legacy_api_subscriptions,
+    network_service, LogCallback, LogLevel,
+};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
@@ -137,66 +140,37 @@ pub fn spawn_requests_handler(mut config: Config) {
                 },
                 Some(Message::SubscriptionStart(request)) => match request.request() {
                     methods::MethodCall::chain_subscribeAllHeads {} => {
-                        // TODO: consider extracting to separate function
-                        let consensus_service = config.consensus_service.clone();
+                        let block_number_bytes = config.consensus_service.block_number_bytes();
+                        let mut blocks_to_report = legacy_api_subscriptions::SubscribeAllHeads::new(
+                            config.consensus_service.clone(),
+                        );
+
                         (config.tasks_executor)(Box::pin(async move {
                             let mut subscription = request.accept();
                             let subscription_id = subscription.subscription_id().to_owned();
 
                             loop {
-                                let mut subscribe_all = consensus_service
-                                    .subscribe_all(32, NonZeroUsize::new(32).unwrap())
-                                    .await;
+                                let scale_encoded_header =
+                                    blocks_to_report.next_scale_encoded_header().await;
 
-                                consensus_service
-                                    .unpin_block(
-                                        subscribe_all.id,
-                                        subscribe_all.finalized_block_hash,
-                                    )
-                                    .await;
-
-                                for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                                    consensus_service
-                                        .unpin_block(subscribe_all.id, block.block_hash)
-                                        .await;
-                                }
-
-                                loop {
-                                    match subscribe_all.new_blocks.next().await {
-                                        None => break,
-                                        Some(consensus_service::Notification::Block(block)) => {
-                                            consensus_service
-                                                .unpin_block(subscribe_all.id, block.block_hash)
-                                                .await;
-
-                                            let json_rpc_header =
-                                                match methods::Header::from_scale_encoded_header(
-                                                    &block.scale_encoded_header,
-                                                    consensus_service.block_number_bytes(),
-                                                ) {
-                                                    Ok(h) => h,
-                                                    Err(_) => {
-                                                        // TODO: consider reporting to logs
-                                                        continue;
-                                                    }
-                                                };
-
-                                            subscription
-                                                .send_notification(
-                                                    methods::ServerToClient::chain_allHead {
-                                                        subscription: (&subscription_id).into(),
-                                                        result: json_rpc_header.clone(),
-                                                    },
-                                                )
-                                                .await
+                                let json_rpc_header =
+                                    match methods::Header::from_scale_encoded_header(
+                                        &scale_encoded_header,
+                                        block_number_bytes,
+                                    ) {
+                                        Ok(h) => h,
+                                        Err(_) => {
+                                            // TODO: consider reporting to logs
+                                            continue;
                                         }
-                                        Some(consensus_service::Notification::Finalized {
-                                            ..
-                                        }) => {
-                                            // Ignore event.
-                                        }
-                                    }
-                                }
+                                    };
+
+                                subscription
+                                    .send_notification(methods::ServerToClient::chain_allHead {
+                                        subscription: (&subscription_id).into(),
+                                        result: json_rpc_header.clone(),
+                                    })
+                                    .await
                             }
                         }));
                     }

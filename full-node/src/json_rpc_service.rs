@@ -37,6 +37,7 @@ use std::{
 
 pub use service::ParseError as RequestParseError;
 
+mod legacy_api_subscriptions;
 mod requests_handler;
 
 /// Configuration for a [`JsonRpcService`].
