@@ -786,7 +786,7 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
-                        Some(ToBackground::SubscribeAll { buffer_size, max_pinned_blocks, result_tx }) => {
+                        Some(ToBackground::SubscribeAll { buffer_size, max_pinned_blocks: _, result_tx }) => {
                             let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                             let non_finalized_blocks_ancestry_order = {
@@ -829,8 +829,8 @@ impl SyncBackground {
                                 finalized_block_number: self.sync.finalized_block_header().number,
                             });
                         },
-                        Some(ToBackground::Unpin { subscription_id, block_hash, result_tx }) => {
-                            // TODO:
+                        Some(ToBackground::Unpin { result_tx, .. }) => {
+                            // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
                             let _ = result_tx.send(());
                         },
                         None => {
