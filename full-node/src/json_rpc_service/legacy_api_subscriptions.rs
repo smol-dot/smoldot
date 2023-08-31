@@ -20,8 +20,12 @@ use std::{iter, num::NonZeroUsize, sync::Arc};
 
 use crate::consensus_service;
 
+/// Helper that provides the blocks of a `chain_subscribeAllHeads` subscription.
 pub struct SubscribeAllHeads {
     consensus_service: Arc<consensus_service::ConsensusService>,
+
+    /// Active subscription to the consensus service blocks. `None` if not subscribed yet or if
+    /// the subscription has stopped.
     subscription: Option<SubscribeAllHeadsSubscription>,
 }
 
@@ -32,6 +36,7 @@ struct SubscribeAllHeadsSubscription {
 }
 
 impl SubscribeAllHeads {
+    /// Builds a new [`SubscribeAllHeads`].
     pub fn new(consensus_service: Arc<consensus_service::ConsensusService>) -> Self {
         SubscribeAllHeads {
             consensus_service,
@@ -39,6 +44,7 @@ impl SubscribeAllHeads {
         }
     }
 
+    /// Returns the SCALE-encoded header of the next block to provide as part of the subscription.
     pub async fn next_scale_encoded_header(&mut self) -> Vec<u8> {
         loop {
             let subscription = match &mut self.subscription {
@@ -75,7 +81,10 @@ impl SubscribeAllHeads {
 
             loop {
                 match subscription.new_blocks.next().await {
-                    None => break,
+                    None => {
+                        self.subscription = None;
+                        break;
+                    }
                     Some(consensus_service::Notification::Block(block)) => {
                         subscription.blocks_to_unpin.push(block.block_hash);
                         return block.scale_encoded_header;
