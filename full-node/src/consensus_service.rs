@@ -132,15 +132,18 @@ pub struct ConsensusService {
 enum ToBackground {
     SubscribeAll {
         buffer_size: usize,
-        max_pinned_blocks: NonZeroUsize,
+        // TODO: unused field
+        _max_pinned_blocks: NonZeroUsize,
         result_tx: oneshot::Sender<SubscribeAll>,
     },
     GetSyncState {
         result_tx: oneshot::Sender<SyncState>,
     },
     Unpin {
-        subscription_id: SubscriptionId,
-        block_hash: [u8; 32],
+        // TODO: unused field
+        _subscription_id: SubscriptionId,
+        // TODO: unused field
+        _block_hash: [u8; 32],
         /// Sends back `()` if the unpinning was successful or the subscription no longer exists.
         /// The sender is silently destroyed if the block hash was invalid.
         result_tx: oneshot::Sender<()>,
@@ -398,7 +401,7 @@ impl ConsensusService {
             .await
             .send(ToBackground::SubscribeAll {
                 buffer_size,
-                max_pinned_blocks,
+                _max_pinned_blocks: max_pinned_blocks,
                 result_tx,
             })
             .await;
@@ -421,8 +424,8 @@ impl ConsensusService {
             .lock()
             .await
             .send(ToBackground::Unpin {
-                subscription_id,
-                block_hash,
+                _subscription_id: subscription_id,
+                _block_hash: block_hash,
                 result_tx,
             })
             .await;
@@ -786,7 +789,7 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
-                        Some(ToBackground::SubscribeAll { buffer_size, max_pinned_blocks: _, result_tx }) => {
+                        Some(ToBackground::SubscribeAll { buffer_size, _max_pinned_blocks: _, result_tx }) => {
                             let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                             let non_finalized_blocks_ancestry_order = {
