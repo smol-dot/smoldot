@@ -82,6 +82,16 @@ pub fn spawn_requests_handler(mut config: Config) {
                         ));
                     }
 
+                    methods::MethodCall::chain_getBlockHash { height: Some(0) } => {
+                        // In the case where the database was populated through a warp sync, it
+                        // might not store block 0 in it. However, the hash of block 0 is
+                        // particularly important for JSON-RPC clients, and as such we make sure
+                        // to always respond successfully to block 0 requests, even if it isn't
+                        // in the database.
+                        request.respond(methods::Response::chain_getBlockHash(
+                            methods::HashHexString(config.genesis_block_hash),
+                        ))
+                    }
                     methods::MethodCall::chain_getBlockHash { height } => {
                         let outcome = config
                             .database
