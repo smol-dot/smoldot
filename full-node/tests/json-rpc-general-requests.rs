@@ -207,3 +207,5 @@ fn system_version() {
         assert!(response_raw.contains("\"result\""));
     });
 }
+
+// TODO: add tests for `chain_subscribeAllHeads`
