@@ -1013,6 +1013,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ) if *warp_sync_fragments_download == Some(request_id) => {
                 // TODO: why this?
                 self.sources[rq_source_id.0].already_tried = true;
+                *warp_sync_fragments_download = None;
 
                 let verifier = verifier::Verifier::new(
                     (&self.warped_finality).into(),
