@@ -123,6 +123,20 @@ impl Verifier {
         }
     }
 
+    pub fn remaining_fragments(&self) -> usize {
+        self.fragments.len() - self.index
+    }
+
+    /// Returns the header of the last fragment in the list to verify.
+    ///
+    /// In other words, this will be the value in [`Next::Success::scale_encoded_header`] if the
+    /// verification is successful.
+    ///
+    /// Returns `None` if and only if there is no fragment to verify.
+    pub fn last_unverified_scale_encoded_header(&self) -> Option<&[u8]> {
+        self.fragments.last().map(|f| &f.scale_encoded_header[..])
+    }
+
     pub fn next(mut self, randomness_seed: [u8; 32]) -> Result<Next, Error> {
         if self.wrong_chain_algorithm {
             return Err(Error::WrongChainAlgorithm);

@@ -167,6 +167,13 @@ pub struct Config {
     /// instead of downloading it. If the hint doesn't match, an extra round-trip will be needed,
     /// but if the hint matches it saves a big download.
     pub code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
+
+    /// Number of warp sync fragments after which the state machine will stop downloading new
+    /// ones.
+    ///
+    /// A too low value will cause stalls, while a high value will use more memory and runs the
+    /// risk of wasting more bandwidth in case the downloaded fragments need to be thrown away.
+    pub num_download_ahead_fragments: usize,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -221,6 +228,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         warped_finality: config.start_chain_information.as_ref().finality.into(),
         start_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
+        num_download_ahead_fragments: config.num_download_ahead_fragments,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
@@ -344,7 +352,9 @@ pub struct InProgressWarpSync<TSrc, TRq> {
     code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
     /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
     start_chain_information: ValidChainInformation,
-    /// Number of bytes used to encode the block number in headers.
+    /// See [`Config::num_download_ahead_fragments`].
+    num_download_ahead_fragments: usize,
+    /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// List of requests that have been added using [`InProgressWarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
@@ -648,12 +658,20 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             verify_queue,
         } = &self.phase
         {
-            // TODO: parallelize requests
-            if verify_queue.is_empty() {
+            // TODO: consider also checking whether the verifier is not at the final set of fragments
+            if verify_queue
+                .iter()
+                .fold(0, |sum, entry| sum + entry.verifier.remaining_fragments())
+                < self.num_download_ahead_fragments
+            {
                 // TODO: it feels like a hack to try again sources that have failed in the past; also, this means that the already_tried mechanism only works once
                 let all_sources_already_tried = self.sources.iter().all(|(_, s)| s.already_tried);
 
-                let start_block_hash = self.warped_header.hash(self.block_number_bytes);
+                let start_block_hash = verify_queue
+                    .back()
+                    .and_then(|entry| entry.verifier.last_unverified_scale_encoded_header())
+                    .map(|header| header::hash_from_scale_encoded_header(&header))
+                    .unwrap_or_else(|| self.warped_header.hash(self.block_number_bytes));
 
                 // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
@@ -787,8 +805,12 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     warp_sync_fragments_download: warp_sync_fragments_download @ None,
                     verify_queue,
                 },
-            ) if verify_queue.is_empty()
-                && *block_hash == self.warped_header.hash(self.block_number_bytes) =>
+            ) if *block_hash
+                == verify_queue
+                    .back()
+                    .and_then(|entry| entry.verifier.last_unverified_scale_encoded_header())
+                    .map(|header| header::hash_from_scale_encoded_header(&header))
+                    .unwrap_or_else(|| self.warped_header.hash(self.block_number_bytes)) =>
             {
                 *warp_sync_fragments_download = Some(request_id);
             }

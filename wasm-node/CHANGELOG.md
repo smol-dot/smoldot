@@ -5,6 +5,7 @@
 ### Changed
 
 - During the warp syncing process, smoldot will now download the runtime and call proofs from any peer whose finalized block is superior or equal to the target block, rather than always the peer that was used to download the warp sync fragments.
+- During the warp syncing process, smoldot will now download warp sync fragments in parallel of verifying previously-downloaded fragments. This is expected to speed up the warp syncing process.
 
 ## 1.0.17 - 2023-08-25
 
