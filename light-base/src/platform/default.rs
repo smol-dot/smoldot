@@ -30,6 +30,7 @@ use smoldot::libp2p::websocket;
 use std::{
     io,
     net::SocketAddr,
+    thread,
     time::{Instant, UNIX_EPOCH},
 };
 
@@ -37,14 +38,41 @@ use std::{
 pub struct DefaultPlatform {
     client_name: String,
     client_version: String,
+    tasks_executor: smol::Executor<'static>,
 }
 
 impl DefaultPlatform {
+    /// Creates a new [`DefaultPlatform`]. Spawns threads to executor background tasks.
+    ///
+    /// # Panic
+    ///
+    /// Panics if it wasn't possible to spawn background threads to execute background tasks.
+    ///
     pub fn new(client_name: String, client_version: String) -> Arc<Self> {
-        Arc::new(DefaultPlatform {
+        let platform = Arc::new(DefaultPlatform {
             client_name,
             client_version,
-        })
+            tasks_executor: smol::Executor::new(),
+        });
+
+        for n in 0..thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+        {
+            let platform = platform.clone();
+
+            let spawn_result = thread::Builder::new()
+                .name(format!("tasks-pool-{}", n))
+                .spawn(move || {
+                    smol::block_on(platform.tasks_executor.run(future::pending::<()>()))
+                });
+
+            if let Err(err) = spawn_result {
+                panic!("Failed to spawn execution thread: {err}");
+            }
+        }
+
+        platform
     }
 }
 
@@ -89,7 +117,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         _task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
     ) {
-        smol::spawn(task).detach();
+        self.tasks_executor.spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {
