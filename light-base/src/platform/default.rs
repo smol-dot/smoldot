@@ -38,7 +38,8 @@ use std::{
 pub struct DefaultPlatform {
     client_name: String,
     client_version: String,
-    tasks_executor: smol::Executor<'static>,
+    tasks_executor: Arc<smol::Executor<'static>>,
+    shutdown_notify: event_listener::Event,
 }
 
 impl DefaultPlatform {
@@ -49,30 +50,33 @@ impl DefaultPlatform {
     /// Panics if it wasn't possible to spawn background threads to execute background tasks.
     ///
     pub fn new(client_name: String, client_version: String) -> Arc<Self> {
-        let platform = Arc::new(DefaultPlatform {
-            client_name,
-            client_version,
-            tasks_executor: smol::Executor::new(),
-        });
+        let tasks_executor = Arc::new(smol::Executor::new());
+        let shutdown_notify = event_listener::Event::new();
 
         for n in 0..thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
         {
-            let platform = platform.clone();
+            // Note that `listen()` must be called here (and not in the thread being spawned), as
+            // it might be notified as soon as `DefaultPlatform::new` returns.
+            let on_shutdown = shutdown_notify.listen();
+            let tasks_executor = tasks_executor.clone();
 
             let spawn_result = thread::Builder::new()
                 .name(format!("tasks-pool-{}", n))
-                .spawn(move || {
-                    smol::block_on(platform.tasks_executor.run(future::pending::<()>()))
-                });
+                .spawn(move || smol::block_on(tasks_executor.run(on_shutdown)));
 
             if let Err(err) = spawn_result {
                 panic!("Failed to spawn execution thread: {err}");
             }
         }
 
-        platform
+        Arc::new(DefaultPlatform {
+            client_name,
+            client_version,
+            tasks_executor,
+            shutdown_notify,
+        })
     }
 }
 
@@ -251,6 +255,12 @@ impl PlatformRef for Arc<DefaultPlatform> {
         Box::pin(stream.0.wait_read_write_again(|when| async move {
             smol::Timer::at(when).await;
         }))
+    }
+}
+
+impl Drop for DefaultPlatform {
+    fn drop(&mut self) {
+        self.shutdown_notify.notify(usize::max_value());
     }
 }
 
