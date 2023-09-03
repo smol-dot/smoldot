@@ -606,14 +606,16 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     pub fn set_source_finality_state(&mut self, source_id: SourceId, finalized_block_height: u64) {
         let stored_height = &mut self.sources[source_id.0].finalized_block_height;
 
+        // Small optimization. No need to do anything more if the block doesn't actuall change.
         if *stored_height == finalized_block_height {
             return;
         }
 
-        // Note that if the new finalized block is below the former one, we should in principle
-        // cancel the requests targeting that source that require a specific block height. In
-        // practice, however, we don't care as this isn't supposed to ever happen. Ongoing requests
-        // will continue and might succeed or fail as normal.
+        // Note that if the new finalized block is below the former one (which is not something
+        // that is ever supposed to happen), we should in principle cancel the requests targeting
+        // that source that require a specific block height. In practice, however, we don't care
+        // as again this isn't supposed to ever happen. While ongoing requests might fail as a
+        // result, this is handled the same way as a regular request failure.
 
         let _was_in = self
             .sources_by_finalized_height
