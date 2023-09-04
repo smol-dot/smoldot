@@ -836,7 +836,7 @@ pub enum TransactionWatchEvent<'a> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransactionWatchEventBlock {
     pub hash: HashHexString,
-    pub index: NumberAsString,
+    pub index: u32,
 }
 
 /// Unstable event.
@@ -925,34 +925,6 @@ pub enum NetworkEvent<'a> {
         substream_id: u32,
         reason: Cow<'a, str>,
     },
-}
-
-#[derive(Debug, Clone)]
-pub struct NumberAsString(pub u32);
-
-impl serde::Serialize for NumberAsString {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.to_string().serialize(serializer)
-    }
-}
-
-impl<'a> serde::Deserialize<'a> for NumberAsString {
-    fn deserialize<D>(deserializer: D) -> Result<NumberAsString, D::Error>
-    where
-        D: serde::Deserializer<'a>,
-    {
-        let string = String::deserialize(deserializer)?;
-        match string.parse() {
-            Ok(num) => Ok(NumberAsString(num)),
-            Err(_) => Err(<D::Error as serde::de::Error>::invalid_value(
-                serde::de::Unexpected::Other("invalid number string"),
-                &"a valid number",
-            )),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
