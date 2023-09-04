@@ -1300,7 +1300,7 @@ impl Subscription {
     /// >           this function, otherwise it might never return.
     // TODO: with stronger typing we could automatically fill the subscription_id
     pub async fn send_notification(&mut self, notification: methods::ServerToClient<'_>) {
-        let serialized = notification.to_json_call_object_parameters(None);
+        let serialized = notification.to_json_request_object_parameters(None);
 
         // Wait until there is space in the queue or that the subscription is dead.
         // Note that this is intentionally racy.

@@ -125,19 +125,21 @@ pub fn parse_response(response_json: &str) -> Result<Response, ParseError> {
 
 /// Builds a JSON request.
 ///
-/// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
+/// `method` must be the name of the method to request. `params_json` must be the JSON-formatted
 /// object or array containing the parameters of the request.
 ///
 /// # Panic
 ///
 /// Panics if the [`Request::id_json`] or [`Request::params_json`] isn't valid JSON.
 ///
-pub fn build_request(call: &Request) -> String {
+pub fn build_request(request: &Request) -> String {
     serde_json::to_string(&SerdeRequest {
         jsonrpc: SerdeVersion::V2,
-        id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
-        method: call.method,
-        params: call.params_json.map(|p| serde_json::from_str(p).unwrap()),
+        id: request.id_json.map(|id| serde_json::from_str(id).unwrap()),
+        method: request.method,
+        params: request
+            .params_json
+            .map(|p| serde_json::from_str(p).unwrap()),
     })
     .unwrap()
 }
@@ -210,7 +212,7 @@ impl<'a> Response<'a> {
     }
 }
 
-/// Error while parsing a call.
+/// Error while parsing a request.
 #[derive(Debug, derive_more::Display)]
 pub struct ParseError(serde_json::Error);
 
@@ -464,9 +466,9 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#,
         )
         .unwrap();
-        assert_eq!(call.id_json.unwrap(), "5");
-        assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, Some("[5,true, \"hello\"]"));
+        assert_eq!(request.id_json.unwrap(), "5");
+        assert_eq!(request.method, "foo");
+        assert_eq!(request.params_json, Some("[5,true, \"hello\"]"));
     }
 
     #[test]
@@ -521,9 +523,9 @@ mod tests {
     fn parse_request_missing_id() {
         let request =
             super::parse_request(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
-        assert!(call.id_json.is_none());
-        assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, Some("[]"));
+        assert!(request.id_json.is_none());
+        assert_eq!(request.method, "foo");
+        assert_eq!(request.params_json, Some("[]"));
     }
 
     #[test]
@@ -531,9 +533,9 @@ mod tests {
         let request =
             super::parse_request(r#"{"jsonrpc":"2.0","id":"hello","method":"foo","params":[]}"#)
                 .unwrap();
-        assert_eq!(call.id_json.unwrap(), "\"hello\"");
-        assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, Some("[]"));
+        assert_eq!(request.id_json.unwrap(), "\"hello\"");
+        assert_eq!(request.method, "foo");
+        assert_eq!(request.params_json, Some("[]"));
     }
 
     #[test]
@@ -541,9 +543,9 @@ mod tests {
         let request =
             super::parse_request(r#"{"jsonrpc":"2.0","id":"extern:\"health-checker:0\"","method":"system_health","params":[]}"#)
                 .unwrap();
-        assert_eq!(call.id_json.unwrap(), r#""extern:\"health-checker:0\"""#);
-        assert_eq!(call.method, "system_health");
-        assert_eq!(call.params_json, Some("[]"));
+        assert_eq!(request.id_json.unwrap(), r#""extern:\"health-checker:0\"""#);
+        assert_eq!(request.method, "system_health");
+        assert_eq!(request.params_json, Some("[]"));
     }
 
     #[test]
@@ -561,9 +563,9 @@ mod tests {
     #[test]
     fn request_missing_params() {
         let request = super::parse_request(r#"{"jsonrpc":"2.0","id":2,"method":"foo"}"#).unwrap();
-        assert_eq!(call.id_json.unwrap(), r#"2"#);
-        assert_eq!(call.method, "foo");
-        assert_eq!(call.params_json, None);
+        assert_eq!(request.id_json.unwrap(), r#"2"#);
+        assert_eq!(request.method, "foo");
+        assert_eq!(request.params_json, None);
     }
 
     #[test]
@@ -608,20 +610,20 @@ mod tests {
     }
 
     #[test]
-    fn build_call() {
+    fn build_request() {
         let request = super::Request {
             id_json: Some("5"),
             method: "test",
             params_json: Some("{}"),
         };
 
-        let encoded = super::build_request(&call);
-        assert_eq!(super::parse_request(&encoded).unwrap(), call);
+        let encoded = super::build_request(&request);
+        assert_eq!(super::parse_request(&encoded).unwrap(), request);
     }
 
     #[test]
     #[should_panic]
-    fn build_call_panics_invalid_id() {
+    fn build_request_panics_invalid_id() {
         super::build_request(&super::Request {
             id_json: Some("test"),
             method: "test",
@@ -631,7 +633,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn build_call_panics_invalid_params() {
+    fn build_request_panics_invalid_params() {
         super::build_request(&super::Request {
             id_json: Some("5"),
             method: "test",

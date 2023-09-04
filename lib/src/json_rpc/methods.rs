@@ -102,7 +102,7 @@ pub enum ParseNotificationError<'a> {
 /// Panics if the `id_json` isn't valid JSON.
 ///
 pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
-    method.to_json_call_object_parameters(id_json)
+    method.to_json_request_object_parameters(id_json)
 }
 
 /// See [`ParseClientToServerError::Method`] or [`ParseNotificationError::Method`].
@@ -232,13 +232,13 @@ macro_rules! define_methods {
                 }
             }
 
-            /// Builds a JSON call, to send it to a JSON-RPC server.
+            /// Builds a JSON request, to send it to a JSON-RPC server.
             ///
             /// # Panic
             ///
             /// Panics if the `id_json` isn't valid JSON.
             ///
-            pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
+            pub fn to_json_request_object_parameters(&self, id_json: Option<&str>) -> String {
                 parse::build_request(&parse::Request {
                     id_json,
                     method: self.name(),
