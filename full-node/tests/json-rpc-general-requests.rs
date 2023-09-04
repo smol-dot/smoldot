@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use smoldot::json_rpc;
 use std::sync::Arc;
 
 async fn start_client() -> smoldot_full_node::Client {
@@ -52,8 +53,14 @@ fn chain_spec_v1_chain_name() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("Local Testnet"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "Local Testnet"
+        );
     });
 }
 
@@ -70,9 +77,14 @@ fn chain_spec_v1_genesis_hash() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw
-            .contains("0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"
+        );
     });
 }
 
@@ -89,8 +101,11 @@ fn chain_spec_v1_properties() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("\"result\""));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(result_json, r#"{"tokenDecimals": 15}"#);
     });
 }
 
@@ -105,9 +120,14 @@ fn chain_get_block_hash() {
             )
             .unwrap();
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw
-            .contains("0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"
+        );
 
         client
             .send_json_rpc_request(
@@ -116,8 +136,11 @@ fn chain_get_block_hash() {
             )
             .unwrap();
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("null"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(result_json, "null");
 
         // TODO: test for a non-zero block?
     });
@@ -135,8 +158,14 @@ fn system_chain() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("Local Testnet"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "Local Testnet"
+        );
     });
 }
 
@@ -152,8 +181,14 @@ fn system_local_peer_id() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+        );
     });
 }
 
@@ -169,8 +204,14 @@ fn system_name() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("smoldot-full-node"));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "smoldot-full-node"
+        );
     });
 }
 
@@ -186,8 +227,11 @@ fn system_properties() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("\"result\""));
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(result_json, r#"{"tokenDecimals": 15}"#);
     });
 }
 
@@ -203,8 +247,11 @@ fn system_version() {
             .unwrap();
 
         let response_raw = client.next_json_rpc_response().await;
-        // TODO: actually parse the response properly
-        assert!(response_raw.contains("\"result\""));
+        // Note: we don't check the actual result, as the version changes pretty often.
+        json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
     });
 }
 
