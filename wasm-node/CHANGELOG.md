@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The `index` field of `bestChainBlockIncluded` events of `chainHead_unstable_follow` subscriptions is now a number rather than a string, in accordance with the latest changes in the JSON-RPC API specification. ([#1010](https://github.com/smol-dot/smoldot/pull/1010))
+- The `index` field of `bestChainBlockIncluded` events of `chainHead_unstable_follow` subscriptions is now a number rather than a string, in accordance with the latest changes in the JSON-RPC API specification. ([#1097](https://github.com/smol-dot/smoldot/pull/1097))
 
 ## 1.0.17 - 2023-08-25
 
