@@ -244,7 +244,7 @@ impl<T> NonFinalizedTree<T> {
         (
             fork_tree::NodeIndex,
             u64,
-            impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_,
+            impl Iterator<Item = &'_ [u8]> + Clone + '_,
         ),
         FinalityVerifyError,
     > {
@@ -317,7 +317,7 @@ impl<T> NonFinalizedTree<T> {
                 Ok((
                     block_index,
                     *after_finalized_block_authorities_set_id,
-                    authorities_list.iter().map(|a| a.public_key),
+                    authorities_list.iter().map(|a| &a.public_key[..]),
                 ))
             }
         }
