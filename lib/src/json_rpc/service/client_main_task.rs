@@ -342,30 +342,32 @@ impl ClientMainTask {
                 }
             };
 
-            let (request_id, parsed_request) = match methods::parse_json_call(&new_request) {
-                Ok((request_id, method)) => (request_id, method),
-                Err(methods::ParseCallError::Method { request_id, error }) => {
-                    let response = error.to_json_error(request_id);
-                    let mut responses_queue = self.inner.serialized_io.responses_queue.lock().await;
-                    let pos = responses_queue
-                        .pending_serialized_responses
-                        .insert((response, true));
-                    responses_queue
-                        .pending_serialized_responses_queue
-                        .push_back(pos);
-                    self.inner
-                        .serialized_io
-                        .on_response_pushed_or_task_destroyed
-                        .notify(usize::max_value());
-                    continue;
-                }
-                Err(methods::ParseCallError::UnknownNotification(_)) => continue,
-                Err(methods::ParseCallError::JsonRpcParse(_)) => {
-                    // The `SerializedRequestsIo` makes sure that requests are valid before
-                    // sending them.
-                    unreachable!()
-                }
-            };
+            let (request_id, parsed_request) =
+                match methods::parse_jsonrpc_client_to_server(&new_request) {
+                    Ok((request_id, method)) => (request_id, method),
+                    Err(methods::ParseClientToServerError::Method { request_id, error }) => {
+                        let response = error.to_json_error(request_id);
+                        let mut responses_queue =
+                            self.inner.serialized_io.responses_queue.lock().await;
+                        let pos = responses_queue
+                            .pending_serialized_responses
+                            .insert((response, true));
+                        responses_queue
+                            .pending_serialized_responses_queue
+                            .push_back(pos);
+                        self.inner
+                            .serialized_io
+                            .on_response_pushed_or_task_destroyed
+                            .notify(usize::max_value());
+                        continue;
+                    }
+                    Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
+                    Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
+                        // The `SerializedRequestsIo` makes sure that requests are valid before
+                        // sending them.
+                        unreachable!()
+                    }
+                };
 
             // There exists three types of requests:
             //
@@ -824,7 +826,8 @@ impl SerializedRequestsIo {
     pub async fn send_request(&self, request: String) -> Result<(), SendRequestError> {
         // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
         // requests that can't be parsed.
-        if let Err(methods::ParseCallError::JsonRpcParse(err)) = methods::parse_json_call(&request)
+        if let Err(methods::ParseClientToServerError::JsonRpcParse(err)) =
+            methods::parse_jsonrpc_client_to_server(&request)
         {
             return Err(SendRequestError {
                 request,
@@ -879,7 +882,8 @@ impl SerializedRequestsIo {
     pub fn try_send_request(&self, request: String) -> Result<(), TrySendRequestError> {
         // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
         // requests that can't be parsed.
-        if let Err(methods::ParseCallError::JsonRpcParse(err)) = methods::parse_json_call(&request)
+        if let Err(methods::ParseClientToServerError::JsonRpcParse(err)) =
+            methods::parse_jsonrpc_client_to_server(&request)
         {
             return Err(TrySendRequestError {
                 request,
@@ -1005,14 +1009,18 @@ impl RequestProcess {
     /// The request is guaranteed to not be related to subscriptions in any way.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
     pub fn request(&self) -> methods::MethodCall {
-        methods::parse_json_call(&self.request).unwrap().1
+        methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .1
     }
 
     /// Indicate the response to the request to the [`ClientMainTask`].
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn respond(mut self, response: methods::Response<'_>) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = response.to_json_response(request_id);
         self.responses_notifications_queue
             .queue
@@ -1028,7 +1036,9 @@ impl RequestProcess {
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     // TODO: the necessity for this function is basically a hack
     pub fn respond_null(mut self) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_success_response(request_id, "null");
         self.responses_notifications_queue
             .queue
@@ -1043,7 +1053,9 @@ impl RequestProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn fail(mut self, error: ErrorResponse) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_error_response(request_id, error, None);
         self.responses_notifications_queue
             .queue
@@ -1061,7 +1073,9 @@ impl RequestProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn fail_with_attached_json(mut self, error: ErrorResponse, json: &str) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_error_response(request_id, error, Some(json));
         self.responses_notifications_queue
             .queue
@@ -1082,7 +1096,9 @@ impl fmt::Debug for RequestProcess {
 impl Drop for RequestProcess {
     fn drop(&mut self) {
         if !self.has_sent_response {
-            let request_id = methods::parse_json_call(&self.request).unwrap().0;
+            let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+                .unwrap()
+                .0;
             let serialized =
                 parse::build_error_response(request_id, ErrorResponse::InternalError, None);
             self.responses_notifications_queue
@@ -1120,7 +1136,9 @@ impl SubscriptionStartProcess {
     /// The request is guaranteed to be a request that starts a subscription.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
     pub fn request(&self) -> methods::MethodCall {
-        methods::parse_json_call(&self.request).unwrap().1
+        methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .1
     }
 
     /// Indicate to the [`ClientMainTask`] that the subscription is accepted.
@@ -1129,7 +1147,8 @@ impl SubscriptionStartProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn accept(mut self) -> Subscription {
-        let (request_id, parsed_request) = methods::parse_json_call(&self.request).unwrap();
+        let (request_id, parsed_request) =
+            methods::parse_jsonrpc_client_to_server(&self.request).unwrap();
 
         let serialized_response = match parsed_request {
             methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
@@ -1193,7 +1212,9 @@ impl SubscriptionStartProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn fail(mut self, error: ErrorResponse) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_error_response(request_id, error, None);
         self.responses_notifications_queue
             .queue
@@ -1219,7 +1240,9 @@ impl fmt::Debug for SubscriptionStartProcess {
 impl Drop for SubscriptionStartProcess {
     fn drop(&mut self) {
         if !self.has_sent_response {
-            let request_id = methods::parse_json_call(&self.request).unwrap().0;
+            let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+                .unwrap()
+                .0;
             let serialized =
                 parse::build_error_response(request_id, ErrorResponse::InternalError, None);
             self.responses_notifications_queue
@@ -1277,7 +1300,7 @@ impl Subscription {
     /// >           this function, otherwise it might never return.
     // TODO: with stronger typing we could automatically fill the subscription_id
     pub async fn send_notification(&mut self, notification: methods::ServerToClient<'_>) {
-        let serialized = notification.to_json_call_object_parameters(None);
+        let serialized = notification.to_json_request_object_parameters(None);
 
         // Wait until there is space in the queue or that the subscription is dead.
         // Note that this is intentionally racy.
