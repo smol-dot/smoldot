@@ -38,7 +38,7 @@ use hashbrown::HashMap;
 pub fn parse_jsonrpc_client_to_server(
     message: &str,
 ) -> Result<(&str, MethodCall), ParseClientToServerError> {
-    let call_def = parse::parse_call(message).map_err(ParseClientToServerError::JsonRpcParse)?;
+    let call_def = parse::parse_request(message).map_err(ParseClientToServerError::JsonRpcParse)?;
 
     // No notification is supported by this server. If the `id` field is missing in the request,
     // assuming that this is a notification and return an appropriate error.
@@ -78,7 +78,7 @@ pub enum ParseClientToServerError<'a> {
 
 /// Parses a JSON notification.
 pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotificationError> {
-    let call_def = parse::parse_call(message).map_err(ParseNotificationError::JsonRpcParse)?;
+    let call_def = parse::parse_request(message).map_err(ParseNotificationError::JsonRpcParse)?;
     let call = ServerToClient::from_defs(call_def.method, call_def.params_json)
         .map_err(ParseNotificationError::Method)?;
     Ok(call)
@@ -239,7 +239,7 @@ macro_rules! define_methods {
             /// Panics if the `id_json` isn't valid JSON.
             ///
             pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
-                parse::build_call(&parse::Call {
+                parse::build_request(&parse::Request {
                     id_json,
                     method: self.name(),
                     // Note that we never skip the `params` field, even if empty. This is an

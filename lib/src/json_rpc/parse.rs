@@ -20,10 +20,10 @@
 use alloc::{borrow::Cow, string::String};
 
 /// Parses a JSON-encoded RPC method call or notification.
-pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
-    let serde_call: SerdeCall = serde_json::from_str(call_json).map_err(ParseError)?;
+pub fn parse_request(request_json: &str) -> Result<Request, ParseError> {
+    let serde_request: SerdeRequest = serde_json::from_str(request_json).map_err(ParseError)?;
 
-    if let Some(id) = &serde_call.id {
+    if let Some(id) = &serde_request.id {
         // Because of https://github.com/serde-rs/json/issues/742, we can't use ̀`&str`.
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -38,10 +38,10 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
         }
     }
 
-    Ok(Call {
-        id_json: serde_call.id.map(|v| v.get()),
-        method: serde_call.method,
-        params_json: serde_call.params.map(|p| p.get()),
+    Ok(Request {
+        id_json: serde_request.id.map(|v| v.get()),
+        method: serde_request.method,
+        params_json: serde_request.params.map(|p| p.get()),
     })
 }
 
@@ -123,17 +123,17 @@ pub fn parse_response(response_json: &str) -> Result<Response, ParseError> {
     }
 }
 
-/// Builds a JSON call.
+/// Builds a JSON request.
 ///
 /// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
-/// object or array containing the parameters of the call.
+/// object or array containing the parameters of the request.
 ///
 /// # Panic
 ///
-/// Panics if the [`Call::id_json`] or [`Call::params_json`] isn't valid JSON.
+/// Panics if the [`Request::id_json`] or [`Request::params_json`] isn't valid JSON.
 ///
-pub fn build_call(call: &Call) -> String {
-    serde_json::to_string(&SerdeCall {
+pub fn build_request(call: &Request) -> String {
+    serde_json::to_string(&SerdeRequest {
         jsonrpc: SerdeVersion::V2,
         id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
         method: call.method,
@@ -142,9 +142,9 @@ pub fn build_call(call: &Call) -> String {
     .unwrap()
 }
 
-/// Decoded JSON-RPC call.
+/// Decoded JSON-RPC request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Call<'a> {
+pub struct Request<'a> {
     /// JSON-formatted identifier of the request. `None` for notifications.
     pub id_json: Option<&'a str>,
     /// Name of the method that is being called.
@@ -216,7 +216,7 @@ pub struct ParseError(serde_json::Error);
 
 /// Builds a JSON response.
 ///
-/// `id_json` must be the JSON-formatted identifier of the request, found in [`Call::id_json`].
+/// `id_json` must be the JSON-formatted identifier of the request, found in [`Request::id_json`].
 /// `result_json` must be the JSON-formatted result of the request.
 ///
 /// # Example
@@ -244,7 +244,7 @@ pub fn build_success_response(id_json: &str, result_json: &str) -> String {
 
 /// Builds a JSON response.
 ///
-/// `id_json` must be the JSON-formatted identifier of the request, found in [`Call::id_json`].
+/// `id_json` must be the JSON-formatted identifier of the request, found in [`Request::id_json`].
 ///
 /// # Example
 ///
@@ -334,7 +334,7 @@ pub enum ErrorResponse<'a> {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct SerdeCall<'a> {
+struct SerdeRequest<'a> {
     jsonrpc: SerdeVersion,
     #[serde(borrow, skip_serializing_if = "Option::is_none")]
     id: Option<&'a serde_json::value::RawValue>,
@@ -460,7 +460,7 @@ impl serde::Serialize for SerdeErrorCode {
 mod tests {
     #[test]
     fn parse_request_basic_works() {
-        let call = super::parse_call(
+        let request = super::parse_request(
             r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#,
         )
         .unwrap();
@@ -519,7 +519,8 @@ mod tests {
 
     #[test]
     fn parse_request_missing_id() {
-        let call = super::parse_call(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
+        let request =
+            super::parse_request(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
         assert!(call.id_json.is_none());
         assert_eq!(call.method, "foo");
         assert_eq!(call.params_json, Some("[]"));
@@ -527,8 +528,8 @@ mod tests {
 
     #[test]
     fn parse_request_id_string() {
-        let call =
-            super::parse_call(r#"{"jsonrpc":"2.0","id":"hello","method":"foo","params":[]}"#)
+        let request =
+            super::parse_request(r#"{"jsonrpc":"2.0","id":"hello","method":"foo","params":[]}"#)
                 .unwrap();
         assert_eq!(call.id_json.unwrap(), "\"hello\"");
         assert_eq!(call.method, "foo");
@@ -537,8 +538,8 @@ mod tests {
 
     #[test]
     fn parse_request_id_string_escaped() {
-        let call =
-            super::parse_call(r#"{"jsonrpc":"2.0","id":"extern:\"health-checker:0\"","method":"system_health","params":[]}"#)
+        let request =
+            super::parse_request(r#"{"jsonrpc":"2.0","id":"extern:\"health-checker:0\"","method":"system_health","params":[]}"#)
                 .unwrap();
         assert_eq!(call.id_json.unwrap(), r#""extern:\"health-checker:0\"""#);
         assert_eq!(call.method, "system_health");
@@ -559,7 +560,7 @@ mod tests {
 
     #[test]
     fn request_missing_params() {
-        let call = super::parse_call(r#"{"jsonrpc":"2.0","id":2,"method":"foo"}"#).unwrap();
+        let request = super::parse_request(r#"{"jsonrpc":"2.0","id":2,"method":"foo"}"#).unwrap();
         assert_eq!(call.id_json.unwrap(), r#"2"#);
         assert_eq!(call.method, "foo");
         assert_eq!(call.params_json, None);
@@ -568,7 +569,7 @@ mod tests {
     #[test]
     fn parse_request_wrong_jsonrpc() {
         assert!(
-            super::parse_call(r#"{"jsonrpc":"2.1","id":5,"method":"foo","params":[]}"#).is_err()
+            super::parse_request(r#"{"jsonrpc":"2.1","id":5,"method":"foo","params":[]}"#).is_err()
         );
     }
 
@@ -580,7 +581,8 @@ mod tests {
     #[test]
     fn parse_request_bad_id() {
         assert!(
-            super::parse_call(r#"{"jsonrpc":"2.0","id":{},"method":"foo","params":[]}"#).is_err()
+            super::parse_request(r#"{"jsonrpc":"2.0","id":{},"method":"foo","params":[]}"#)
+                .is_err()
         );
     }
 
@@ -607,20 +609,20 @@ mod tests {
 
     #[test]
     fn build_call() {
-        let call = super::Call {
+        let request = super::Request {
             id_json: Some("5"),
             method: "test",
             params_json: Some("{}"),
         };
 
-        let encoded = super::build_call(&call);
-        assert_eq!(super::parse_call(&encoded).unwrap(), call);
+        let encoded = super::build_request(&call);
+        assert_eq!(super::parse_request(&encoded).unwrap(), call);
     }
 
     #[test]
     #[should_panic]
     fn build_call_panics_invalid_id() {
-        super::build_call(&super::Call {
+        super::build_request(&super::Request {
             id_json: Some("test"),
             method: "test",
             params_json: None,
@@ -630,7 +632,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn build_call_panics_invalid_params() {
-        super::build_call(&super::Call {
+        super::build_request(&super::Request {
             id_json: Some("5"),
             method: "test",
             params_json: Some("invalid"),
