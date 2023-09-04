@@ -45,6 +45,51 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     })
 }
 
+/// Parses a JSON-encoded RPC response.
+pub fn parse_response(call_json: &str) -> Result<Response, ParseError> {
+    let serde_output: SerdeOutput = serde_json::from_str(call_json).map_err(ParseError)?;
+
+    match serde_output {
+        SerdeOutput::Success(SerdeSuccess {
+            jsonrpc: _,
+            id,
+            result,
+        }) => Ok(Response::Success {
+            id_json: id.get(),
+            result_json: result.get(),
+        }),
+        SerdeOutput::Failure(SerdeFailure {
+            jsonrpc: _,
+            id: Some(id),
+            error:
+                SerdeError {
+                    code,
+                    message,
+                    data,
+                },
+        }) => Ok(Response::Error {
+            id_json: id.get(),
+            error_code: code.to_num(),
+            error_message: message,
+            error_data_json: data.map(|d| d.get()),
+        }),
+        SerdeOutput::Failure(SerdeFailure {
+            jsonrpc: _,
+            id: None,
+            error:
+                SerdeError {
+                    code,
+                    message,
+                    data,
+                },
+        }) => Ok(Response::ParseError {
+            error_code: code.to_num(),
+            error_message: message,
+            error_data_json: data.map(|d| d.get()),
+        }),
+    }
+}
+
 /// Builds a JSON call.
 ///
 /// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
@@ -73,6 +118,46 @@ pub struct Call<'a> {
     pub method: &'a str,
     /// JSON-formatted list of parameters. `None` iff the `params` field is missing.
     pub params_json: Option<&'a str>,
+}
+
+/// Decoded JSON-RPC response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Response<'a> {
+    /// Successful request.
+    Success {
+        /// JSON-formatted identifier of the request the response corresponds to.
+        id_json: &'a str,
+        /// JSON-formatted result.
+        result_json: &'a str,
+    },
+
+    /// Request has failed.
+    Error {
+        /// JSON-formatted identifier of the request the response corresponds to.
+        id_json: &'a str,
+        /// Integer indicating the nature of the error.
+        ///
+        /// See [the JSON-RPC specification](https://www.jsonrpc.org/specification#error_object)
+        /// for reference.
+        error_code: i64,
+        /// Short description of the error.
+        error_message: &'a str,
+        /// JSON-formatted data associated with the response. `None` if omitted.
+        error_data_json: Option<&'a str>,
+    },
+
+    /// The JSON-RPC server indicates that it couldn't parse a request.
+    ParseError {
+        /// Integer indicating the nature of the error.
+        ///
+        /// See [the JSON-RPC specification](https://www.jsonrpc.org/specification#error_object)
+        /// for reference.
+        error_code: i64,
+        /// Short description of the error.
+        error_message: &'a str,
+        /// JSON-formatted data associated with the response. `None` if omitted.
+        error_data_json: Option<&'a str>,
+    },
 }
 
 /// Error while parsing a call.
@@ -252,7 +337,7 @@ struct SerdeSuccess<'a> {
 struct SerdeFailure<'a> {
     jsonrpc: SerdeVersion,
     #[serde(borrow)]
-    id: &'a serde_json::value::RawValue,
+    id: Option<&'a serde_json::value::RawValue>,
     error: SerdeError<'a>,
 }
 
@@ -266,14 +351,14 @@ enum SerdeOutput<'a> {
     Failure(SerdeFailure<'a>),
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerdeError<'a> {
     code: SerdeErrorCode,
     #[serde(borrow)]
     message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<serde_json::Value>,
+    data: Option<&'a serde_json::value::RawValue>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -285,6 +370,20 @@ enum SerdeErrorCode {
     InternalError,
     ServerError(i64),
     MethodError(i64),
+}
+
+impl SerdeErrorCode {
+    fn to_num(&self) -> i64 {
+        match *self {
+            SerdeErrorCode::ParseError => -32700,
+            SerdeErrorCode::InvalidRequest => -32600,
+            SerdeErrorCode::MethodNotFound => -32601,
+            SerdeErrorCode::InvalidParams => -32602,
+            SerdeErrorCode::InternalError => -32603,
+            SerdeErrorCode::ServerError(code) => code,
+            SerdeErrorCode::MethodError(code) => code,
+        }
+    }
 }
 
 impl<'a> serde::Deserialize<'a> for SerdeErrorCode {
@@ -311,17 +410,7 @@ impl serde::Serialize for SerdeErrorCode {
     where
         S: serde::Serializer,
     {
-        let code = match *self {
-            SerdeErrorCode::ParseError => -32700,
-            SerdeErrorCode::InvalidRequest => -32600,
-            SerdeErrorCode::MethodNotFound => -32601,
-            SerdeErrorCode::InvalidParams => -32602,
-            SerdeErrorCode::InternalError => -32603,
-            SerdeErrorCode::ServerError(code) => code,
-            SerdeErrorCode::MethodError(code) => code,
-        };
-
-        serializer.serialize_i64(code)
+        serializer.serialize_i64(self.to_num())
     }
 }
 
@@ -419,4 +508,6 @@ mod tests {
             params_json: Some("invalid"),
         });
     }
+
+    // TODO: tests for parsing response
 }
