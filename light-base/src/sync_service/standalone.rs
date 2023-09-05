@@ -24,7 +24,7 @@ use crate::{network_service, platform::PlatformRef, util};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    string::String,
+    string::{String, ToString as _},
     sync::Arc,
     vec::Vec,
 };
