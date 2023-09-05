@@ -21,7 +21,13 @@ use super::{
 };
 use crate::{network_service, platform::PlatformRef, util};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned as _},
+    boxed::Box,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     iter,
     num::{NonZeroU32, NonZeroU64},
@@ -688,7 +694,10 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                 // Grandpa warp sync fragment to verify.
-                let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
+                let sender_peer_id = verify
+                    .proof_sender()
+                    .map(|(_, (peer_id, _))| Cow::Owned(peer_id.to_string())) // TODO: unnecessary cloning most of the time
+                    .unwrap_or(Cow::Borrowed("<disconnected>"));
 
                 let (sync, result) = verify.perform({
                     let mut seed = [0; 32];

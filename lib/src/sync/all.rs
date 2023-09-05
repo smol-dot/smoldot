@@ -2800,9 +2800,11 @@ pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     /// Returns the identifier and user data of the source that has sent the fragment to be
     /// verified.
-    pub fn proof_sender(&self) -> (SourceId, &TSrc) {
-        let (_, ud) = self.inner.proof_sender();
-        (ud.outer_source_id, &ud.user_data)
+    ///
+    /// Returns `None` if the source has been removed since the fragments have been downloaded.
+    pub fn proof_sender(&self) -> Option<(SourceId, &TSrc)> {
+        let (_, ud) = self.inner.proof_sender()?;
+        Some((ud.outer_source_id, &ud.user_data))
     }
 
     /// Perform the verification.

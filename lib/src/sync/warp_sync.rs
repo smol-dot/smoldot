@@ -396,8 +396,8 @@ enum RuntimeDownload {
 }
 
 struct PendingVerify {
-    /// Source the fragments have been obtained from.
-    downloaded_source: SourceId,
+    /// Source the fragments have been obtained from. `None` if the source has been removed.
+    downloaded_source: Option<SourceId>,
     /// `true` if the source has indicated that there is no more fragment afterwards, in other
     /// words that the last fragment corresponds to the current finalized block of the chain.
     final_set_of_fragments: bool,
@@ -486,7 +486,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                                 .0,
                         )
                     } else {
-                        self.verify_queue.back().map(|f| f.downloaded_source)
+                        self.verify_queue.back().and_then(|f| f.downloaded_source)
                     };
 
                 Status::Fragments {
@@ -547,16 +547,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         debug_assert_eq!(self.sources.len(), self.sources_by_finalized_height.len());
 
         // We make sure to not leave invalid source IDs in the state of `self`.
-        // While it is a waste of bandwidth to completely remove a proof that has already
-        // been downloaded if the source disconnects, it is in practice not something that is
-        // supposed to happen.
-        // TODO: consider not actually doing that and verify the fragments anyway
-        if let Some(position) = self
-            .verify_queue
-            .iter()
-            .position(|f| f.downloaded_source == to_remove)
-        {
-            self.verify_queue.truncate(position);
+        for item in &mut self.verify_queue {
+            if item.downloaded_source == Some(to_remove) {
+                item.downloaded_source = None;
+            }
         }
 
         let obsolete_requests_indices = self
@@ -1004,6 +998,8 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             (_, _, _) => panic!(),
         };
 
+        debug_assert!(self.sources.contains(rq_source_id.0));
+
         if self.warp_sync_fragments_download == Some(request_id) {
             // TODO: why this?
             self.sources[rq_source_id.0].already_tried = true;
@@ -1018,7 +1014,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 
             self.verify_queue.push_back(PendingVerify {
                 final_set_of_fragments,
-                downloaded_source: rq_source_id,
+                downloaded_source: Some(rq_source_id),
                 verifier,
             });
         }
@@ -1146,13 +1142,12 @@ pub struct VerifyWarpSyncFragment<TSrc, TRq> {
 impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     /// Returns the source that has sent the fragments that we are about to verify, and its user
     /// data.
-    pub fn proof_sender(&self) -> (SourceId, &TSrc) {
+    ///
+    /// Returns `None` if the source has been removed since the fragments have been downloaded.
+    pub fn proof_sender(&self) -> Option<(SourceId, &TSrc)> {
         let entry_to_verify = self.inner.verify_queue.front().unwrap();
-
-        (
-            entry_to_verify.downloaded_source,
-            &self.inner.sources[entry_to_verify.downloaded_source.0].user_data,
-        )
+        let source_id = entry_to_verify.downloaded_source?;
+        Some((source_id, &self.inner.sources[source_id.0].user_data))
     }
 
     /// Verify one warp sync fragment.
