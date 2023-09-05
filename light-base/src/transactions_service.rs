@@ -146,26 +146,28 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = mpsc::channel(8);
 
-        config.platform.spawn_task(
-            log_target.clone().into(),
-            Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
-                log_target,
-                platform: config.platform.clone(),
-                sync_service: config.sync_service,
-                runtime_service: config.runtime_service,
-                network_service: config.network_service.0,
-                network_chain_index: config.network_service.1,
-                from_foreground,
-                max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
-                    .unwrap_or(usize::max_value()),
-                max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
-                    .unwrap_or(usize::max_value()),
-                max_concurrent_validations: usize::try_from(
-                    config.max_concurrent_validations.get(),
-                )
+        let task = Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
+            log_target: log_target.clone(),
+            platform: config.platform.clone(),
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
+            network_service: config.network_service.0,
+            network_chain_index: config.network_service.1,
+            from_foreground,
+            max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
-            })),
-        );
+            max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
+                .unwrap_or(usize::max_value()),
+            max_concurrent_validations: usize::try_from(config.max_concurrent_validations.get())
+                .unwrap_or(usize::max_value()),
+        }));
+
+        config
+            .platform
+            .spawn_task(log_target.clone().into(), async move {
+                task.await;
+                log::debug!(target: &log_target, "Shutdown");
+            });
 
         TransactionsService {
             to_background: Mutex::new(to_background),

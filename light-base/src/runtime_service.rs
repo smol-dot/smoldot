@@ -166,11 +166,18 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
             let platform = config.platform.clone();
-            let (abortable, abort) = future::abortable(async move {
-                run_background(log_target, platform, sync_service, guarded).await;
-            });
+            let (abortable, abort) = future::abortable(run_background(
+                log_target.clone(),
+                platform,
+                sync_service,
+                guarded,
+            ));
             background_task_abort = abort;
-            abortable.map(|_| ()).boxed()
+            abortable
+                .map(move |_| {
+                    log::debug!(target: &log_target, "Shutdown");
+                })
+                .boxed()
         });
 
         RuntimeService {
