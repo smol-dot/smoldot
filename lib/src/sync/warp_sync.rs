@@ -101,7 +101,9 @@ use crate::{
         host::{self, HostVmPrototype},
         vm::ExecHint,
     },
+    finality::justification,
     header::{self, Header},
+    informant::HashDisplay,
     trie::{self, proof_decode},
 };
 
@@ -111,12 +113,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{iter, mem, ops};
+use core::{fmt, iter, mem, ops};
 
 pub use trie::Nibble;
-pub use verifier::{Error as FragmentError, WarpSyncFragment};
-
-mod verifier;
 
 /// Problem encountered during a call to [`start_warp_sync()`].
 #[derive(Debug, derive_more::Display)]
@@ -139,6 +138,58 @@ pub enum Error {
     /// Merkle proof is missing the necessary entries.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum
     MerkleProofEntriesMissing,
+}
+
+/// Fragment to be verified.
+#[derive(Debug)]
+pub struct WarpSyncFragment {
+    /// Header of a block in the chain.
+    pub scale_encoded_header: Vec<u8>,
+
+    /// Justification that proves the finality of [`WarpSyncFragment::scale_encoded_header`].
+    pub scale_encoded_justification: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub enum FragmentError {
+    Verify(justification::verify::Error),
+    TargetHashMismatch {
+        justification_target_hash: [u8; 32],
+        justification_target_height: u64,
+        header_hash: [u8; 32],
+    },
+    NonMinimalProof,
+    EmptyProof,
+    InvalidHeader(header::Error),
+    InvalidJustification(justification::decode::Error),
+}
+
+impl fmt::Display for FragmentError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FragmentError::Verify(err) => fmt::Display::fmt(err, f),
+            FragmentError::TargetHashMismatch {
+                justification_target_hash,
+                justification_target_height,
+                header_hash,
+            } => {
+                write!(
+                    f,
+                    "Justification target hash ({}, height: {}) doesn't match the hash of the associated header ({})",
+                    HashDisplay(justification_target_hash),
+                    justification_target_height,
+                    HashDisplay(header_hash)
+                )
+            }
+            FragmentError::NonMinimalProof => write!(
+                f,
+                "Warp sync proof fragment doesn't contain an authorities list change"
+            ),
+            FragmentError::EmptyProof => write!(f, "Warp sync proof is empty"),
+            FragmentError::InvalidHeader(_) => write!(f, "Failed to decode header"),
+            FragmentError::InvalidJustification(_) => write!(f, "Failed to decode justification"),
+        }
+    }
 }
 
 /// The configuration for [`start_warp_sync()`].
@@ -193,7 +244,11 @@ pub fn start_warp_sync<TSrc, TRq>(
     config: Config,
 ) -> Result<InProgressWarpSync<TSrc, TRq>, (ValidChainInformation, WarpSyncInitError)> {
     match config.start_chain_information.as_ref().finality {
-        ChainInformationFinalityRef::Grandpa { .. } => {}
+        // TODO: we make sure that `finalized_scheduled_change` is `None` because it seems complicated to support, but ideally it would be supported
+        ChainInformationFinalityRef::Grandpa {
+            finalized_scheduled_change: None,
+            ..
+        } => {}
         _ => {
             return Err((
                 config.start_chain_information,
@@ -398,10 +453,12 @@ struct PendingVerify {
     /// `true` if the source has indicated that there is no more fragment afterwards, in other
     /// words that the last fragment corresponds to the current finalized block of the chain.
     final_set_of_fragments: bool,
-    /// Contains the downloaded fragments.
-    /// Always `Some`, but wrapped within an `Option` in order to permit extracting
-    /// temporarily.
-    verifier: verifier::Verifier,
+    /// List of fragments to verify. Can be empty.
+    fragments: Vec<WarpSyncFragment>,
+    /// Number of fragments at the start of [`PendingVerify::fragments`] that have already been
+    /// verified. Must always be strictly inferior to `fragments.len()`, unless the list of
+    /// fragments is empty.
+    next_fragment_to_verify_index: usize,
 }
 
 struct DownloadedRuntime {
@@ -631,11 +688,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         // If we are in the fragments download phase, return a fragments download request.
         let warp_sync_request = if self.warp_sync_fragments_download.is_none() {
             // TODO: consider also checking whether the verifier is not at the final set of fragments
-            if self
-                .verify_queue
-                .iter()
-                .fold(0, |sum, entry| sum + entry.verifier.remaining_fragments())
-                < self.num_download_ahead_fragments
+            if self.verify_queue.iter().fold(0, |sum, entry| {
+                sum + entry.fragments.len() - entry.next_fragment_to_verify_index
+            }) < self.num_download_ahead_fragments
             {
                 // TODO: it feels like a hack to try again sources that have failed in the past; also, this means that the already_tried mechanism only works once
                 let all_sources_already_tried = self.sources.iter().all(|(_, s)| s.already_tried);
@@ -643,8 +698,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 let start_block_hash = self
                     .verify_queue
                     .back()
-                    .and_then(|entry| entry.verifier.last_unverified_scale_encoded_header())
-                    .map(|header| header::hash_from_scale_encoded_header(&header))
+                    .and_then(|entry| entry.fragments.last())
+                    .map(|fragment| {
+                        header::hash_from_scale_encoded_header(&fragment.scale_encoded_header)
+                    })
                     .unwrap_or_else(|| self.warped_header.hash(self.block_number_bytes));
 
                 // Combine the request with every single available source.
@@ -778,8 +835,12 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                         == self
                             .verify_queue
                             .back()
-                            .and_then(|entry| entry.verifier.last_unverified_scale_encoded_header())
-                            .map(|header| header::hash_from_scale_encoded_header(&header))
+                            .and_then(|entry| entry.fragments.last())
+                            .map(|fragment| {
+                                header::hash_from_scale_encoded_header(
+                                    &fragment.scale_encoded_header,
+                                )
+                            })
                             .unwrap_or_else(|| {
                                 self.warped_header.hash(self.block_number_bytes)
                             }) =>
@@ -1002,17 +1063,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             self.sources[rq_source_id.0].already_tried = true;
             self.warp_sync_fragments_download = None;
 
-            let verifier = verifier::Verifier::new(
-                (&self.warped_finality).into(), // TODO: wrong /!\ as the verify queue can be non empty
-                self.block_number_bytes,
-                fragments,
-                final_set_of_fragments,
-            );
-
             self.verify_queue.push_back(PendingVerify {
                 final_set_of_fragments,
                 downloaded_source: Some(rq_source_id),
-                verifier,
+                fragments,
+                next_fragment_to_verify_index: 0,
             });
         }
 
@@ -1156,49 +1211,147 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         mut self,
         randomness_seed: [u8; 32],
     ) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
+        // A `VerifyWarpSyncFragment` is only ever created if `verify_queue` is non-empty.
         debug_assert!(!self.inner.verify_queue.is_empty());
-        let mut fragments_to_verify = self.inner.verify_queue.pop_front().unwrap();
+        let fragments_to_verify = self
+            .inner
+            .verify_queue
+            .front_mut()
+            .unwrap_or_else(|| unreachable!());
 
-        match fragments_to_verify.verifier.next(randomness_seed) {
-            Ok(verifier::Next::NotFinished(next_verifier)) => {
-                fragments_to_verify.verifier = next_verifier;
-                self.inner.verify_queue.push_front(fragments_to_verify)
-            }
-            Ok(verifier::Next::EmptyProof) => {
-                self.inner.warped_header = self
-                    .inner
-                    .start_chain_information
-                    .as_ref()
-                    .finalized_block_header
-                    .into();
-                self.inner.warped_finality =
-                    self.inner.start_chain_information.as_ref().finality.into();
-                self.inner.runtime_download = RuntimeDownload::NotStarted {
-                    hint_doesnt_match: false,
-                };
-            }
-            Ok(verifier::Next::Success {
-                scale_encoded_header,
-                chain_information_finality,
-            }) => {
-                // As the verification of the fragment has succeeded, we are sure that the header
-                // is valid and can decode it.
-                self.inner.warped_header =
-                    header::decode(&scale_encoded_header, self.inner.block_number_bytes)
-                        .unwrap()
-                        .into();
-                self.inner.warped_finality = chain_information_finality;
+        // The source has sent an empty list of fragments.
+        if fragments_to_verify.fragments.is_empty() {
+            let final_set_of_fragments = fragments_to_verify.final_set_of_fragments;
+            self.inner.verify_queue.pop_front().unwrap();
 
-                // TODO: try another peer that is further ahead maybe
-                self.inner.runtime_download = RuntimeDownload::NotStarted {
-                    hint_doesnt_match: false,
-                };
+            // It is acceptable to send an empty list of fragments only if `final_set_of_fragments`
+            // is `true`, meaning that the source has no further data.
+            if final_set_of_fragments {
+                return (self.inner, None);
+            } else {
+                return (self.inner, Some(FragmentError::EmptyProof));
             }
-            Err(error) => {
+        }
+
+        // Given that the list of fragments is non-empty, we are assuming that there are still
+        // fragments to verify, otherwise this entry should have been removed in a previous
+        // iteration.
+        let fragment_to_verify = fragments_to_verify
+            .fragments
+            .get(fragments_to_verify.next_fragment_to_verify_index)
+            .unwrap_or_else(|| unreachable!());
+
+        // It has been checked at the warp sync initialization that the finality algorithm is
+        // indeed Grandpa.
+        let chain_information::ChainInformationFinality::Grandpa {
+            after_finalized_block_authorities_set_id,
+            finalized_triggered_authorities,
+            .. // TODO: support finalized_scheduled_change? difficult to implement
+        } = &mut self.inner.warped_finality
+        else {
+            unreachable!()
+        };
+
+        // Decode the header and justification of the fragment.
+        let fragment_header_hash =
+            header::hash_from_scale_encoded_header(&fragment_to_verify.scale_encoded_header);
+        let fragment_decoded_header = match header::decode(
+            &fragment_to_verify.scale_encoded_header,
+            self.inner.block_number_bytes,
+        ) {
+            Ok(j) => j,
+            Err(err) => {
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
-                return (self.inner, Some(error));
+                return (self.inner, Some(FragmentError::InvalidHeader(err)));
             }
+        };
+        let fragment_decoded_justification = match justification::decode::decode_grandpa(
+            &fragment_to_verify.scale_encoded_justification,
+            self.inner.block_number_bytes,
+        ) {
+            Ok(j) => j,
+            Err(err) => {
+                self.inner.verify_queue.clear();
+                self.inner.warp_sync_fragments_download = None;
+                return (self.inner, Some(FragmentError::InvalidJustification(err)));
+            }
+        };
+
+        // Make sure that the justification indeed corresponds to the header.
+        // TODO: also check number
+        if *fragment_decoded_justification.target_hash != fragment_header_hash {
+            let error = FragmentError::TargetHashMismatch {
+                justification_target_hash: *fragment_decoded_justification.target_hash,
+                justification_target_height: fragment_decoded_justification.target_number,
+                header_hash: fragment_header_hash,
+            };
+            self.inner.verify_queue.clear();
+            self.inner.warp_sync_fragments_download = None;
+            return (self.inner, Some(error));
+        }
+
+        // Check whether the justification is valid.
+        if let Err(err) = justification::verify::verify(justification::verify::Config {
+            justification: fragment_decoded_justification,
+            block_number_bytes: self.inner.block_number_bytes,
+            authorities_list: finalized_triggered_authorities
+                .iter()
+                .map(|a| &a.public_key[..]),
+            authorities_set_id: *after_finalized_block_authorities_set_id,
+            randomness_seed,
+        }) {
+            self.inner.verify_queue.clear();
+            self.inner.warp_sync_fragments_download = None;
+            return (self.inner, Some(FragmentError::Verify(err)));
+        }
+
+        // Try to grab the new list of authorities from the header.
+        let new_authorities_list = fragment_decoded_header
+            .digest
+            .logs()
+            .find_map(|log_item| match log_item {
+                header::DigestItemRef::GrandpaConsensus(grandpa_log_item) => match grandpa_log_item
+                {
+                    header::GrandpaConsensusLogRef::ScheduledChange(change)
+                    | header::GrandpaConsensusLogRef::ForcedChange { change, .. } => {
+                        Some(change.next_authorities)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .map(|next_authorities| {
+                next_authorities
+                    .map(header::GrandpaAuthority::from)
+                    .collect()
+            });
+
+        // Fragments must only include headers containing an update to the list of authorities,
+        // unless it's the very head of the chain.
+        if new_authorities_list.is_none()
+            && (!fragments_to_verify.final_set_of_fragments
+                || fragments_to_verify.next_fragment_to_verify_index
+                    != fragments_to_verify.fragments.len() - 1)
+        {
+            self.inner.verify_queue.clear();
+            self.inner.warp_sync_fragments_download = None;
+            return (self.inner, Some(FragmentError::NonMinimalProof));
+        }
+
+        // Verification of the fragment has succeeded 🎉. We can now update `self`.
+        fragments_to_verify.next_fragment_to_verify_index += 1;
+        self.inner.warped_header = fragment_decoded_header.into();
+        self.inner.runtime_download = RuntimeDownload::NotStarted {
+            hint_doesnt_match: false,
+        };
+        if let Some(new_authorities_list) = new_authorities_list {
+            *finalized_triggered_authorities = new_authorities_list;
+            *after_finalized_block_authorities_set_id += 1;
+        }
+        if fragments_to_verify.next_fragment_to_verify_index == fragments_to_verify.fragments.len()
+        {
+            self.inner.verify_queue.pop_front().unwrap();
         }
 
         (self.inner, None)
