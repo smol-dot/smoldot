@@ -307,15 +307,15 @@ impl HandleRpcError {
             HandleRpcError::MalformedJsonRpc(_) => return None,
         };
 
-        match json_rpc::parse::parse_call(&json_rpc_request) {
-            Ok(json_rpc::parse::Call {
+        match json_rpc::parse::parse_request(&json_rpc_request) {
+            Ok(json_rpc::parse::Request {
                 id_json: Some(id), ..
             }) => Some(json_rpc::parse::build_error_response(
                 id,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
                 None,
             )),
-            Ok(json_rpc::parse::Call { id_json: None, .. }) | Err(_) => None,
+            Ok(json_rpc::parse::Request { id_json: None, .. }) | Err(_) => None,
         }
     }
 }

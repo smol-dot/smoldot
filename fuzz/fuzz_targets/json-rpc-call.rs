@@ -18,5 +18,5 @@
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &str| {
-    let _ = smoldot::json_rpc::methods::parse_json_call(data);
+    let _ = smoldot::json_rpc::methods::parse_jsonrpc_client_to_server(data);
 });

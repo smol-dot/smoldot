@@ -22,8 +22,8 @@
 // TODO:remove all the unwraps in this module that shouldn't be there
 
 use super::{
-    encode_babe_epoch_information, insert_storage, AccessError, CorruptedError, InsertTrieNode,
-    InternalError, SqliteFullDatabase,
+    encode_babe_epoch_information, insert_storage, CorruptedError, InsertTrieNode, InternalError,
+    SqliteFullDatabase,
 };
 use crate::chain::chain_information;
 
@@ -349,19 +349,19 @@ impl DatabaseEmpty {
         finalized_block_justification: Option<Vec<u8>>,
         finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
         finalized_block_state_version: u8,
-    ) -> Result<SqliteFullDatabase, AccessError> {
+    ) -> Result<SqliteFullDatabase, CorruptedError> {
         // Start a transaction to insert everything in one go.
         let transaction = self
             .database
             .transaction()
-            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         // Temporarily disable foreign key checks in order to make the initial insertion easier,
         // as we don't have to make sure that trie nodes are sorted.
         // Note that this is immediately disabled again when we `COMMIT`.
         transaction
             .execute("PRAGMA defer_foreign_keys = ON", ())
-            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         let chain_information = chain_information.into();
 
@@ -512,7 +512,7 @@ impl DatabaseEmpty {
 
         transaction
             .commit()
-            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),

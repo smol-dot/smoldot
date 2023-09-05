@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{database_thread, network_service, LogCallback, LogLevel};
+use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
 use futures_util::FutureExt;
 use smol::{
     future,
@@ -37,6 +37,7 @@ use std::{
 
 pub use service::ParseError as RequestParseError;
 
+mod legacy_api_subscriptions;
 mod requests_handler;
 
 /// Configuration for a [`JsonRpcService`].
@@ -71,7 +72,11 @@ pub struct Config {
     pub chain_properties_json: String,
 
     /// Hash of the genesis block.
+    // TODO: load from database maybe?
     pub genesis_block_hash: [u8; 32],
+
+    /// Consensus service of the chain.
+    pub consensus_service: Arc<consensus_service::ConsensusService>,
 }
 
 /// Running JSON-RPC service.
@@ -152,6 +157,7 @@ impl JsonRpcService {
                 chain_name: config.chain_name.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),
                 genesis_block_hash: config.genesis_block_hash,
+                consensus_service: config.consensus_service.clone(),
             });
         }
 

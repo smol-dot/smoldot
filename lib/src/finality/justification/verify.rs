@@ -36,7 +36,7 @@ pub struct Config<'a, I> {
     pub authorities_set_id: u64,
 
     /// List of authorities that are allowed to emit pre-commits for the block referred to by
-    /// the justification. Must implement `Iterator<Item = impl AsRef<[u8]>>`, where each item is
+    /// the justification. Must implement `Iterator<Item = &[u8]>`, where each item is
     /// the public key of an authority.
     pub authorities_list: I,
 
@@ -47,27 +47,17 @@ pub struct Config<'a, I> {
 }
 
 /// Verifies that a justification is valid.
-pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>>>) -> Result<(), Error> {
+pub fn verify<'a>(config: Config<impl Iterator<Item = &'a [u8]>>) -> Result<(), Error> {
     let num_precommits = config.justification.precommits.iter().count();
 
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
-    // Used to store the authority public keys that have been seen, in order to check for
-    // duplicates.
-    let mut seen_pub_keys = hashbrown::HashSet::with_capacity_and_hasher(
-        num_precommits,
-        crate::util::SipHasherBuild::new({
-            let mut seed = [0; 16];
-            randomness.fill_bytes(&mut seed);
-            seed
-        }),
-    );
-
     // Collect the authorities in a set in order to be able to determine with a low complexity
     // whether a public key is an authority.
-    // TODO: instead of collecting in a hashset, rewrite as a generator-style process where we ask the API user whether a public key is an authority
-    let authorities_list = {
-        let mut list = hashbrown::HashSet::<Vec<u8>, _>::with_capacity_and_hasher(
+    // For each authority, contains a boolean indicating whether the authority has been seen
+    // before in the list of pre-commits.
+    let mut authorities_list = {
+        let mut list = hashbrown::HashMap::<&[u8], _, _>::with_capacity_and_hasher(
             0,
             crate::util::SipHasherBuild::new({
                 let mut seed = [0; 16];
@@ -76,7 +66,7 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>>>) -> Result<
             }),
         );
         for authority in config.authorities_list {
-            list.insert(authority.as_ref().to_vec());
+            list.insert(authority, false);
         }
         list
     };
@@ -98,13 +88,15 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>>>) -> Result<
     let mut batch = ed25519_zebra::batch::Verifier::new();
 
     for precommit in config.justification.precommits.iter() {
-        if !authorities_list.contains(&precommit.authority_public_key[..]) {
-            return Err(Error::NotAuthority(*precommit.authority_public_key));
-        }
-
-        // Make sure that the public key isn't in `seen_pub_keys` yet, and insert it in there.
-        if !seen_pub_keys.insert(precommit.authority_public_key) {
-            return Err(Error::DuplicateSignature(*precommit.authority_public_key));
+        match authorities_list.entry(precommit.authority_public_key) {
+            hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                if entry.insert(true) {
+                    return Err(Error::DuplicateSignature(*precommit.authority_public_key));
+                }
+            }
+            hashbrown::hash_map::Entry::Vacant(_) => {
+                return Err(Error::NotAuthority(*precommit.authority_public_key))
+            }
         }
 
         // TODO: must check signed block ancestry using `votes_ancestries`

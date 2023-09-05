@@ -170,7 +170,7 @@ impl Verifier {
         verify(VerifyConfig {
             justification,
             block_number_bytes: self.block_number_bytes,
-            authorities_list: self.authorities_list.iter().map(|a| &a.public_key),
+            authorities_list: self.authorities_list.iter().map(|a| &a.public_key[..]),
             authorities_set_id: self.authorities_set_id,
             randomness_seed,
         })
