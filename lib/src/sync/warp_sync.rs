@@ -139,9 +139,6 @@ pub enum Error {
     /// Merkle proof is missing the necessary entries.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum
     MerkleProofEntriesMissing,
-    /// Warp sync requires fetching the key that follows another one. This isn't implemented in
-    /// smoldot.
-    NextKeyUnimplemented,
 }
 
 /// The configuration for [`start_warp_sync()`].
@@ -1538,13 +1535,42 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
 
                     get.inject_value(value.map(|(val, ver)| (iter::once(val), ver)))
                 }
-                chain_information::build::InProgress::NextKey(_)
-                | chain_information::build::InProgress::ClosestDescendantMerkleValue(_) => {
-                    // TODO: implement
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::NextKeyUnimplemented),
-                    );
+                chain_information::build::InProgress::NextKey(nk) => {
+                    // TODO: child tries not supported
+                    let proof = calls.get(&nk.call_in_progress()).unwrap();
+                    let value = match proof.next_key(
+                        &self.inner.warped_header.state_root,
+                        &nk.key().collect::<Vec<_>>(), // TODO: overhead
+                        nk.or_equal(),
+                        &nk.prefix().collect::<Vec<_>>(), // TODO: overhead
+                        nk.branch_nodes(),
+                    ) {
+                        Ok(v) => v,
+                        Err(proof_decode::IncompleteProofError { .. }) => {
+                            return (
+                                WarpSync::InProgress(self.inner),
+                                Some(Error::MerkleProofEntriesMissing),
+                            );
+                        }
+                    };
+                    nk.inject_key(value.map(|v| v.iter().copied()))
+                }
+                chain_information::build::InProgress::ClosestDescendantMerkleValue(mv) => {
+                    // TODO: child tries not supported
+                    let proof = calls.get(&mv.call_in_progress()).unwrap();
+                    let value = match proof.closest_descendant_merkle_value(
+                        &self.inner.warped_header.state_root,
+                        &mv.key().collect::<Vec<_>>(), // TODO: overhead
+                    ) {
+                        Ok(v) => v,
+                        Err(proof_decode::IncompleteProofError { .. }) => {
+                            return (
+                                WarpSync::InProgress(self.inner),
+                                Some(Error::MerkleProofEntriesMissing),
+                            );
+                        }
+                    };
+                    mv.inject_merkle_value(value)
                 }
             };
 
