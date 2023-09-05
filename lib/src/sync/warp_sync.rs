@@ -157,6 +157,7 @@ pub enum FragmentError {
         justification_target_hash: [u8; 32],
         justification_target_height: u64,
         header_hash: [u8; 32],
+        header_height: u64,
     },
     NonMinimalProof,
     EmptyProof,
@@ -172,13 +173,15 @@ impl fmt::Display for FragmentError {
                 justification_target_hash,
                 justification_target_height,
                 header_hash,
+                header_height,
             } => {
                 write!(
                     f,
-                    "Justification target hash ({}, height: {}) doesn't match the hash of the associated header ({})",
+                    "Justification target (hash: {}, height: {}) doesn't match the associated header (hash: {}, height: {})",
                     HashDisplay(justification_target_hash),
                     justification_target_height,
-                    HashDisplay(header_hash)
+                    HashDisplay(header_hash),
+                    header_height,
                 )
             }
             FragmentError::NonMinimalProof => write!(
@@ -1280,12 +1283,14 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         };
 
         // Make sure that the justification indeed corresponds to the header.
-        // TODO: also check number
-        if *fragment_decoded_justification.target_hash != fragment_header_hash {
+        if *fragment_decoded_justification.target_hash != fragment_header_hash
+            || fragment_decoded_justification.target_number != fragment_decoded_header.number
+        {
             let error = FragmentError::TargetHashMismatch {
                 justification_target_hash: *fragment_decoded_justification.target_hash,
                 justification_target_height: fragment_decoded_justification.target_number,
                 header_hash: fragment_header_hash,
+                header_height: fragment_decoded_header.number,
             };
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
