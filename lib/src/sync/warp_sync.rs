@@ -1226,6 +1226,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
             // It is acceptable to send an empty list of fragments only if `final_set_of_fragments`
             // is `true`, meaning that the source has no further data.
+            // TODO: is that true? shouldn't we send targeted requests so that we're guaranteed a response?
             if final_set_of_fragments {
                 return (self.inner, None);
             } else {
