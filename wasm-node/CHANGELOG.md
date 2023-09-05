@@ -4,8 +4,9 @@
 
 ### Changed
 
-- During the warp syncing process, smoldot will now download the runtime and call proofs from any peer whose finalized block is superior or equal to the target block, rather than always the peer that was used to download the warp sync fragments.
-- During the warp syncing process, smoldot will now download warp sync fragments in parallel of verifying previously-downloaded fragments. This is expected to speed up the warp syncing process.
+- During the warp syncing process, smoldot will now download the runtime and call proofs from any peer whose finalized block is superior or equal to the target block, rather than always the peer that was used to download the warp sync fragments. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- During the warp syncing process, smoldot will now download warp sync fragments in parallel of verifying previously-downloaded fragments. This is expected to speed up the warp syncing process. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- When a warp sync response contains an invalid warp sync fragment, the earlier valid fragments are now still used to make the warp syncing progress instead of being thrown away. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 
 ## 1.0.17 - 2023-08-25
 
