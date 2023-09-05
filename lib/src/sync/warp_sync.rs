@@ -1520,7 +1520,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         };
 
         loop {
-            match chain_info_builder {
+            let chain_info_builder_update = match chain_info_builder {
                 chain_information::build::InProgress::StorageGet(get) => {
                     // TODO: child tries not supported
                     let proof = calls.get(&get.call_in_progress()).unwrap();
@@ -1536,59 +1536,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         }
                     };
 
-                    match get.inject_value(value.map(|(val, ver)| (iter::once(val), ver))) {
-                        chain_information::build::ChainInformationBuild::Finished {
-                            result: Ok(chain_information),
-                            virtual_machine,
-                        } => {
-                            return (
-                                WarpSync::Finished(Success {
-                                    chain_information,
-                                    finalized_runtime: virtual_machine,
-                                    finalized_storage_code: downloaded_runtime.storage_code,
-                                    finalized_storage_heap_pages: downloaded_runtime
-                                        .storage_heap_pages,
-                                    finalized_storage_code_merkle_value: downloaded_runtime
-                                        .code_merkle_value,
-                                    finalized_storage_code_closest_ancestor_excluding:
-                                        downloaded_runtime.closest_ancestor_excluding,
-                                    sources_ordered: mem::take(&mut self.inner.sources)
-                                        .into_iter()
-                                        .map(|(id, source)| {
-                                            (
-                                                SourceId(id),
-                                                source.finalized_block_height,
-                                                source.user_data,
-                                            )
-                                        })
-                                        .collect(),
-                                    in_progress_requests: mem::take(
-                                        &mut self.inner.in_progress_requests,
-                                    )
-                                    .into_iter()
-                                    .map(|(id, (src_id, user_data, detail))| {
-                                        (src_id, RequestId(id), user_data, detail)
-                                    })
-                                    .collect(),
-                                }),
-                                None,
-                            );
-                        }
-                        chain_information::build::ChainInformationBuild::Finished {
-                            result: Err(err),
-                            ..
-                        } => {
-                            return (
-                                WarpSync::InProgress(self.inner),
-                                Some(Error::ChainInformationBuild(err)),
-                            );
-                        }
-                        chain_information::build::ChainInformationBuild::InProgress(
-                            in_progress,
-                        ) => {
-                            chain_info_builder = in_progress;
-                        }
-                    }
+                    get.inject_value(value.map(|(val, ver)| (iter::once(val), ver)))
                 }
                 chain_information::build::InProgress::NextKey(_)
                 | chain_information::build::InProgress::ClosestDescendantMerkleValue(_) => {
@@ -1597,6 +1545,55 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         WarpSync::InProgress(self.inner),
                         Some(Error::NextKeyUnimplemented),
                     );
+                }
+            };
+
+            match chain_info_builder_update {
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Ok(chain_information),
+                    virtual_machine,
+                } => {
+                    return (
+                        WarpSync::Finished(Success {
+                            chain_information,
+                            finalized_runtime: virtual_machine,
+                            finalized_storage_code: downloaded_runtime.storage_code,
+                            finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
+                            finalized_storage_code_merkle_value: downloaded_runtime
+                                .code_merkle_value,
+                            finalized_storage_code_closest_ancestor_excluding: downloaded_runtime
+                                .closest_ancestor_excluding,
+                            sources_ordered: mem::take(&mut self.inner.sources)
+                                .into_iter()
+                                .map(|(id, source)| {
+                                    (
+                                        SourceId(id),
+                                        source.finalized_block_height,
+                                        source.user_data,
+                                    )
+                                })
+                                .collect(),
+                            in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
+                                .into_iter()
+                                .map(|(id, (src_id, user_data, detail))| {
+                                    (src_id, RequestId(id), user_data, detail)
+                                })
+                                .collect(),
+                        }),
+                        None,
+                    );
+                }
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Err(err),
+                    ..
+                } => {
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::ChainInformationBuild(err)),
+                    );
+                }
+                chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
+                    chain_info_builder = in_progress;
                 }
             }
         }
