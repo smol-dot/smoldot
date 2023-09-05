@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped.
+
+### Fixed
+
+- Fix `Chain.remove()` not actually removing the chain until the warp syncing process is finished (which might never happen if for example bootnodes are misconfigured).
+- Fix JSON-RPC server not processing requests if many transactions are submitted before the warp syncing process is finished.
+
 ## 1.0.17 - 2023-08-25
 
 ### Changed
