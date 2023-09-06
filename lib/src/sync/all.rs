@@ -48,9 +48,7 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use warp_sync::{
-    ConfigCodeTrieNodeHint, FragmentError as WarpSyncFragmentError, WarpSyncFragment,
-};
+pub use warp_sync::{ConfigCodeTrieNodeHint, VerifyFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -2814,7 +2812,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     pub fn perform(
         self,
         randomness_seed: [u8; 32],
-    ) -> (AllSync<TRq, TSrc, TBl>, Result<(), WarpSyncFragmentError>) {
+    ) -> (AllSync<TRq, TSrc, TBl>, Result<(), VerifyFragmentError>) {
         let (next_grandpa_warp_sync, error) = self.inner.verify(randomness_seed);
 
         (

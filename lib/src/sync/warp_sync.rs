@@ -150,51 +150,6 @@ pub struct WarpSyncFragment {
     pub scale_encoded_justification: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub enum FragmentError {
-    Verify(justification::verify::Error),
-    TargetHashMismatch {
-        justification_target_hash: [u8; 32],
-        justification_target_height: u64,
-        header_hash: [u8; 32],
-        header_height: u64,
-    },
-    NonMinimalProof,
-    EmptyProof,
-    InvalidHeader(header::Error),
-    InvalidJustification(justification::decode::Error),
-}
-
-impl fmt::Display for FragmentError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            FragmentError::Verify(err) => fmt::Display::fmt(err, f),
-            FragmentError::TargetHashMismatch {
-                justification_target_hash,
-                justification_target_height,
-                header_hash,
-                header_height,
-            } => {
-                write!(
-                    f,
-                    "Justification target (hash: {}, height: {}) doesn't match the associated header (hash: {}, height: {})",
-                    HashDisplay(justification_target_hash),
-                    justification_target_height,
-                    HashDisplay(header_hash),
-                    header_height,
-                )
-            }
-            FragmentError::NonMinimalProof => write!(
-                f,
-                "Warp sync proof fragment doesn't contain an authorities list change"
-            ),
-            FragmentError::EmptyProof => write!(f, "Warp sync proof is empty"),
-            FragmentError::InvalidHeader(_) => write!(f, "Failed to decode header"),
-            FragmentError::InvalidJustification(_) => write!(f, "Failed to decode justification"),
-        }
-    }
-}
-
 /// The configuration for [`start_warp_sync()`].
 #[derive(Debug)]
 pub struct Config {
@@ -1213,7 +1168,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     pub fn verify(
         mut self,
         randomness_seed: [u8; 32],
-    ) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
+    ) -> (InProgressWarpSync<TSrc, TRq>, Option<VerifyFragmentError>) {
         // A `VerifyWarpSyncFragment` is only ever created if `verify_queue` is non-empty.
         debug_assert!(!self.inner.verify_queue.is_empty());
         let fragments_to_verify = self
@@ -1233,7 +1188,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             if final_set_of_fragments {
                 return (self.inner, None);
             } else {
-                return (self.inner, Some(FragmentError::EmptyProof));
+                return (self.inner, Some(VerifyFragmentError::EmptyProof));
             }
         }
 
@@ -1267,7 +1222,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             Err(err) => {
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
-                return (self.inner, Some(FragmentError::InvalidHeader(err)));
+                return (self.inner, Some(VerifyFragmentError::InvalidHeader(err)));
             }
         };
         let fragment_decoded_justification = match justification::decode::decode_grandpa(
@@ -1278,7 +1233,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             Err(err) => {
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
-                return (self.inner, Some(FragmentError::InvalidJustification(err)));
+                return (
+                    self.inner,
+                    Some(VerifyFragmentError::InvalidJustification(err)),
+                );
             }
         };
 
@@ -1286,7 +1244,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         if *fragment_decoded_justification.target_hash != fragment_header_hash
             || fragment_decoded_justification.target_number != fragment_decoded_header.number
         {
-            let error = FragmentError::TargetHashMismatch {
+            let error = VerifyFragmentError::TargetHashMismatch {
                 justification_target_hash: *fragment_decoded_justification.target_hash,
                 justification_target_height: fragment_decoded_justification.target_number,
                 header_hash: fragment_header_hash,
@@ -1309,7 +1267,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         }) {
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
-            return (self.inner, Some(FragmentError::Verify(err)));
+            return (
+                self.inner,
+                Some(VerifyFragmentError::JustificationVerify(err)),
+            );
         }
 
         // Try to grab the new list of authorities from the header.
@@ -1342,7 +1303,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         {
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
-            return (self.inner, Some(FragmentError::NonMinimalProof));
+            return (self.inner, Some(VerifyFragmentError::NonMinimalProof));
         }
 
         // Verification of the fragment has succeeded 🎉. We can now update `self`.
@@ -1361,6 +1322,64 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         }
 
         (self.inner, None)
+    }
+}
+
+/// Error potentially returned by [`VerifyWarpSyncFragment::verify`].
+#[derive(Debug)]
+pub enum VerifyFragmentError {
+    /// Justification found within the fragment is invalid.
+    JustificationVerify(justification::verify::Error),
+    /// Mismatch between the block targeted by the justification and the header.
+    TargetHashMismatch {
+        /// Hash of the block the justification targets.
+        justification_target_hash: [u8; 32],
+        /// Height of the block the justification targets.
+        justification_target_height: u64,
+        /// Hash of the header.
+        header_hash: [u8; 32],
+        /// Height of the header.
+        header_height: u64,
+    },
+    /// Warp sync fragment doesn't contain an authorities list change when it should.
+    NonMinimalProof,
+    /// Warp sync proof is empty.
+    EmptyProof,
+    /// Failed to decode header.
+    InvalidHeader(header::Error),
+    /// Failed to decode justification.
+    InvalidJustification(justification::decode::Error),
+}
+
+impl fmt::Display for VerifyFragmentError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            VerifyFragmentError::JustificationVerify(err) => fmt::Display::fmt(err, f),
+            VerifyFragmentError::TargetHashMismatch {
+                justification_target_hash,
+                justification_target_height,
+                header_hash,
+                header_height,
+            } => {
+                write!(
+                    f,
+                    "Justification target (hash: {}, height: {}) doesn't match the associated header (hash: {}, height: {})",
+                    HashDisplay(justification_target_hash),
+                    justification_target_height,
+                    HashDisplay(header_hash),
+                    header_height,
+                )
+            }
+            VerifyFragmentError::NonMinimalProof => write!(
+                f,
+                "Warp sync proof fragment doesn't contain an authorities list change"
+            ),
+            VerifyFragmentError::EmptyProof => write!(f, "Warp sync proof is empty"),
+            VerifyFragmentError::InvalidHeader(err) => write!(f, "Failed to decode header: {err}"),
+            VerifyFragmentError::InvalidJustification(err) => {
+                write!(f, "Failed to decode justification: {err}")
+            }
+        }
     }
 }
 

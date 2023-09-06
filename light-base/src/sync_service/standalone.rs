@@ -707,7 +707,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 self.sync = sync;
 
                 if let Err(err) = result {
-                    let maybe_forced_change = matches!(err, all::WarpSyncFragmentError::Verify(_));
+                    let maybe_forced_change = matches!(err, all::VerifyFragmentError::JustificationVerify(_));
                     log::warn!(
                         target: &self.log_target,
                         "Failed to verify warp sync fragment from {}: {}{}",
