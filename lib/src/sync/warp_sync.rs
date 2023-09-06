@@ -174,12 +174,23 @@ pub struct Config {
     /// but if the hint matches it saves a big download.
     pub code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
 
-    /// Number of warp sync fragments after which the state machine will stop downloading new
-    /// ones.
+    /// Number of warp sync fragments after which the state machine will pause downloading new
+    /// ones until the ones that have been downloaded are verified.
     ///
     /// A too low value will cause stalls, while a high value will use more memory and runs the
     /// risk of wasting more bandwidth in case the downloaded fragments need to be thrown away.
     pub num_download_ahead_fragments: usize,
+
+    /// If the height of the current local finalized block is `N`, the warp sync state machine
+    /// will not attempt to warp sync to blocks whose height inferior or equal to `N + k` where
+    /// `k` is the value in this field.
+    ///
+    /// Because warp syncing is a relatively expensive process, it is not worth performing it
+    /// between two blocks that are too close to each other.
+    ///
+    /// The ideal value of this field depends on the block production rate and the time it takes
+    /// to answer requests.
+    pub pause_if_blocks_gap_lower_than: usize,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -235,6 +246,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         start_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
         num_download_ahead_fragments: config.num_download_ahead_fragments,
+        pause_if_blocks_gap_lower_than: config.pause_if_blocks_gap_lower_than,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
@@ -363,6 +375,8 @@ pub struct InProgressWarpSync<TSrc, TRq> {
     start_chain_information: ValidChainInformation,
     /// See [`Config::num_download_ahead_fragments`].
     num_download_ahead_fragments: usize,
+    /// See [`Config::pause_if_blocks_gap_lower_than`].
+    pause_if_blocks_gap_lower_than: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// List of requests that have been added using [`InProgressWarpSync::add_source`].
@@ -662,20 +676,31 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     })
                     .unwrap_or_else(|| self.warped_header.hash(self.block_number_bytes));
 
+                let current_finalized_number = self.warped_header.number;
+                let pause_if_blocks_gap_lower_than = self.pause_if_blocks_gap_lower_than;
+
                 // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
-                    // TODO: also filter by source finalized block? so that we don't request from sources below us
-                    if all_sources_already_tried || !src.already_tried {
-                        Some((
-                            SourceId(src_id),
-                            &src.user_data,
-                            DesiredRequest::WarpSyncRequest {
-                                block_hash: start_block_hash,
-                            },
-                        ))
-                    } else {
-                        None
+                    if src.finalized_block_height
+                        <= current_finalized_number.saturating_add(
+                            u64::try_from(pause_if_blocks_gap_lower_than)
+                                .unwrap_or(u64::max_value()),
+                        )
+                    {
+                        return None;
                     }
+
+                    if !all_sources_already_tried && src.already_tried {
+                        return None;
+                    }
+
+                    Some((
+                        SourceId(src_id),
+                        &src.user_data,
+                        DesiredRequest::WarpSyncRequest {
+                            block_hash: start_block_hash,
+                        },
+                    ))
                 }))
             } else {
                 either::Right(iter::empty())
