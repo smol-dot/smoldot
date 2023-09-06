@@ -942,6 +942,7 @@ where
                                 substream.state = SubstreamState::Reset;
                             }
 
+                            outer_read_write.wake_up_asap();
                             return Ok(ReadWriteOutcome::GoAway {
                                 yamux: self,
                                 code: error_code,
@@ -1024,6 +1025,7 @@ where
 
                             substream.state = SubstreamState::Reset;
 
+                            outer_read_write.wake_up_asap();
                             return Ok(ReadWriteOutcome::StreamReset {
                                 yamux: self,
                                 substream_id: SubstreamId(stream_id),

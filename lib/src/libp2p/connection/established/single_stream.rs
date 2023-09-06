@@ -226,9 +226,6 @@ where
 
                 self.inner.yamux = yamux;
 
-                // Return now but indicate to the caller that `read_write` should be called again
-                // as soon as possible.
-                decrypted_read_write.wake_up_asap();
                 drop(decrypted_read_write);
                 return Ok((self, None));
             }
@@ -251,11 +248,6 @@ where
                     )
                 });
 
-                // TODO: hacky ; necessary because Yamux doesn't know that there was an event
-                if event_to_yield.is_some() {
-                    substream_read_write.read_write().wake_up_asap();
-                }
-
                 match state_machine_update {
                     Some(s) => {
                         *substream_read_write.user_data_mut() = Some((s, substream_user_data));
@@ -277,7 +269,6 @@ where
             }
             yamux::ReadWriteOutcome::GoAway { yamux, .. } => {
                 self.inner.yamux = yamux;
-                decrypted_read_write.wake_up_asap();
                 drop(decrypted_read_write);
                 return Ok((self, Some(Event::NewOutboundSubstreamsForbidden)));
             }
@@ -301,9 +292,6 @@ where
         for (dead_substream_id, death_ty) in dead_substream_ids {
             match death_ty {
                 yamux::DeadSubstreamTy::Reset => {
-                    // If the substream has been reset, we simply remove it from the Yamux
-                    // state machine.
-
                     // If the substream was reset by the remote, then the substream state
                     // machine will still be `Some`.
                     if let Some((state_machine, mut user_data)) =
@@ -327,81 +315,7 @@ where
                     read_write.wake_up_asap();
                 }
                 yamux::DeadSubstreamTy::ClosedGracefully => {
-                    // If the substream has been closed gracefully, we don't necessarily
-                    // remove it instantly. Instead, we continue processing the substream
-                    // state machine until it tells us that there are no more events to
-                    // return.
-
-                    // Mutable reference to the substream state machine within the yamux
-                    // state machine.
-                    let state_machine_refmut = self.inner.yamux.user_data_mut(dead_substream_id);
-
-                    // Extract the substream state machine, maybe putting it back later.
-                    let (state_machine_extracted, mut substream_user_data) =
-                        match state_machine_refmut.take() {
-                            Some(s) => s,
-                            None => {
-                                // Substream has already been removed from the Yamux state machine
-                                // previously. We know that it can't yield any more event.
-                                self.inner.yamux.remove_dead_substream(dead_substream_id);
-
-                                // Removing a dead substream might lead to Yamux being able to
-                                // process more incoming data. As such, we loop again.
-                                read_write.wake_up_asap();
-
-                                continue;
-                            }
-                        };
-
-                    // Now we run `state_machine_extracted.read_write`.
-                    let mut substream_read_write = ReadWrite {
-                        now: read_write.now.clone(),
-                        incoming_buffer: Vec::new(),
-                        expected_incoming_bytes: None,
-                        write_buffers: Vec::new(),
-                        write_bytes_queued: 0,
-                        write_bytes_queueable: None,
-                        read_bytes: 0,
-                        wake_up_after: None,
-                    };
-
-                    let (substream_update, event) =
-                        state_machine_extracted.read_write(&mut substream_read_write);
-
-                    debug_assert!(
-                        substream_read_write.read_bytes == 0
-                            && substream_read_write.write_bytes_queued == 0
-                    );
-
-                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                        read_write.wake_up_after(&wake_up_after);
-                    }
-
-                    let event_pass_through = event.map(|ev| {
-                        Self::pass_through_substream_event(
-                            dead_substream_id,
-                            &mut substream_user_data,
-                            ev,
-                        )
-                    });
-
-                    if let Some(substream_update) = substream_update {
-                        // Put back the substream state machine. It will be picked up again
-                        // the next time `read_write` is called.
-                        *state_machine_refmut = Some((substream_update, substream_user_data));
-                    } else {
-                        // Substream has no more events to give us. Remove it from the Yamux
-                        // state machine.
-                        self.inner.yamux.remove_dead_substream(dead_substream_id);
-
-                        // Removing a dead substream might lead to Yamux being able to process more
-                        // incoming data. As such, we loop again.
-                        read_write.wake_up_asap();
-                    }
-
-                    if let Some(event_pass_through) = event_pass_through {
-                        return Ok((self, Some(event_pass_through)));
-                    }
+                    self.inner.yamux.remove_dead_substream(dead_substream_id);
                 }
             }
         }
