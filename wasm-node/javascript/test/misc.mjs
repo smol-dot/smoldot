@@ -17,24 +17,9 @@
 
 import test from 'ava';
 import * as fs from 'node:fs';
-import { start, JsonRpcDisabledError, MalformedJsonRpcError } from "../dist/mjs/index-nodejs.js";
+import { start, JsonRpcDisabledError } from "../dist/mjs/index-nodejs.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
-
-test('malformed json-rpc requests rejected', async t => {
-  const client = start({ logCallback: () => { } });
-  await client
-    .addChain({ chainSpec: westendSpec })
-    .then((chain) => {
-      try {
-        chain.sendJsonRpc("this is not a valid JSON-RPC request");
-      } catch(error) {
-        t.assert(error instanceof MalformedJsonRpcError);
-        t.pass();
-      }
-    })
-    .then(() => client.terminate());
-});
 
 test('disableJsonRpc option forbids sendJsonRpc', async t => {
   const client = start({ logCallback: () => { } });

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError, SmoldotBytecode } from '../public-types.js';
+import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, CrashError, SmoldotBytecode } from '../public-types.js';
 import * as instance from './local-instance.js';
 import * as remote from './remote-instance.js';
 
@@ -538,8 +538,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                     const retVal = state.instance.instance.request(request, chainId);
                     switch (retVal) {
                         case 0: break;
-                        case 1: throw new MalformedJsonRpcError();
-                        case 2: throw new QueueFullError();
+                        case 1: throw new QueueFullError();
                         default: throw new Error("Internal error: unknown json_rpc_send error code: " + retVal)
                     }
                 },

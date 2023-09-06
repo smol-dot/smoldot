@@ -363,9 +363,20 @@ impl ClientMainTask {
                     }
                     Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
                     Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
-                        // The `SerializedRequestsIo` makes sure that requests are valid before
-                        // sending them.
-                        unreachable!()
+                        let response = parse::build_parse_error_response();
+                        let mut responses_queue =
+                            self.inner.serialized_io.responses_queue.lock().await;
+                        let pos = responses_queue
+                            .pending_serialized_responses
+                            .insert((response, true));
+                        responses_queue
+                            .pending_serialized_responses_queue
+                            .push_back(pos);
+                        self.inner
+                            .serialized_io
+                            .on_response_pushed_or_task_destroyed
+                            .notify(usize::max_value());
+                        continue;
                     }
                 };
 
@@ -824,17 +835,6 @@ impl SerializedRequestsIo {
     /// This might cause a call to [`ClientMainTask::run_until_event`] to return
     /// [`Event::HandleRequest`] or [`Event::HandleSubscriptionStart`].
     pub async fn send_request(&self, request: String) -> Result<(), SendRequestError> {
-        // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
-        // requests that can't be parsed.
-        if let Err(methods::ParseClientToServerError::JsonRpcParse(err)) =
-            methods::parse_jsonrpc_client_to_server(&request)
-        {
-            return Err(SendRequestError {
-                request,
-                cause: SendRequestErrorCause::MalformedJson(err),
-            });
-        }
-
         // Wait until it is possible to increment `num_requests_in_fly`.
         let mut wait = None;
         let queue = loop {
@@ -880,17 +880,6 @@ impl SerializedRequestsIo {
     /// This might cause a call to [`ClientMainTask::run_until_event`] to return
     /// [`Event::HandleRequest`] or [`Event::HandleSubscriptionStart`].
     pub fn try_send_request(&self, request: String) -> Result<(), TrySendRequestError> {
-        // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
-        // requests that can't be parsed.
-        if let Err(methods::ParseClientToServerError::JsonRpcParse(err)) =
-            methods::parse_jsonrpc_client_to_server(&request)
-        {
-            return Err(TrySendRequestError {
-                request,
-                cause: TrySendRequestErrorCause::MalformedJson(err),
-            });
-        }
-
         let Some(queue) = self.serialized_io.upgrade() else {
             return Err(TrySendRequestError {
                 request,
@@ -959,9 +948,6 @@ pub struct SendRequestError {
 /// See [`SendRequestError::cause`].
 #[derive(Debug, derive_more::Display)]
 pub enum SendRequestErrorCause {
-    /// Data is not JSON, or JSON is missing or has invalid fields.
-    #[display(fmt = "{_0}")]
-    MalformedJson(ParseError),
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }
@@ -979,9 +965,6 @@ pub struct TrySendRequestError {
 /// See [`TrySendRequestError::cause`].
 #[derive(Debug, derive_more::Display)]
 pub enum TrySendRequestErrorCause {
-    /// Data is not JSON, or JSON is missing or has invalid fields.
-    #[display(fmt = "{_0}")]
-    MalformedJson(ParseError),
     /// Limit to the maximum number of pending requests that was passed as
     /// [`Config::max_pending_requests`] has been reached. No more requests can be sent before
     /// some responses have been pulled.

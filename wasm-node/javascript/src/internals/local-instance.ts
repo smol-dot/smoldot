@@ -627,7 +627,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
     return {
         request: (request: string, chainId: number) => {
             if (!state.instance)
-                return 2;  // TODO: return a different error code? should be documented
+                return 1;  // TODO: return a different error code? should be documented
             state.bufferIndices[0] = new TextEncoder().encode(request);
             return state.instance.exports.json_rpc_send(0, chainId) >>> 0;
         },
