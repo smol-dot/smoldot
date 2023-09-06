@@ -145,8 +145,7 @@ export interface Chain {
      * as the responses.
      *
      * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request
-     * (for example if it is not valid JSON) or if the request is unreasonably large (64 MiB at the
-     * time of writing of this comment).
+     * (for example if it is not valid JSON).
      * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, or
      * if for example some parameters are missing, an error response is properly generated and
      * yielded through the JSON-RPC callback.

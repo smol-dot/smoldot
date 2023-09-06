@@ -5,6 +5,7 @@
 ### Changed
 
 - Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+- JSON-RPC requests that are too large are no longer rejected.
 
 ### Fixed
 

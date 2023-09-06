@@ -36,29 +36,6 @@ test('malformed json-rpc requests rejected', async t => {
     .then(() => client.terminate());
 });
 
-test('too large json-rpc requests rejected', async t => {
-  // Generate a very long string. We start with a length of 1 and double for every iteration.
-  // Thus the final length of the string is `2^i` where `i` is the number of iterations.
-  let veryLongString = 'a';
-  for (let i = 0; i < 27; ++i) {
-    veryLongString += veryLongString;
-  }
-
-  const client = start({ logCallback: () => { } });
-  await client
-    .addChain({ chainSpec: westendSpec })
-    .then((chain) => {
-      try {
-        // We use `JSON.stringify` in order to be certain that the request is valid JSON.
-        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }));
-      } catch(error) {
-        t.assert(error instanceof MalformedJsonRpcError);
-        t.pass();
-      }
-    })
-    .then(() => client.terminate());
-});
-
 test('disableJsonRpc option forbids sendJsonRpc', async t => {
   const client = start({ logCallback: () => { } });
   await client
