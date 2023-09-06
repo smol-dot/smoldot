@@ -49,11 +49,7 @@ use alloc::{
     sync::Arc,
 };
 use core::num::NonZeroU32;
-use smoldot::{
-    chain_spec,
-    json_rpc::{self, service},
-    libp2p::PeerId,
-};
+use smoldot::{chain_spec, json_rpc::service, libp2p::PeerId};
 
 /// Configuration for [`service()`].
 pub struct Config {
