@@ -83,11 +83,11 @@
 //! API user.
 //!
 //! Similarly, at any given moment, this state machine holds a list of requests that concern these
-//! sources. Use [`InProgressWarpSync::desired_requests`] to determine which requests will be
-//! useful to the progress of the warp syncing, then use [`InProgressWarpSync::add_request`] to
-//! update the state machine with a newly-started request.
+//! sources. Use [`WarpSync::desired_requests`] to determine which requests will be useful to the
+//! progress of the warp syncing, then use [`WarpSync::add_request`] to update the state machine
+//! with a newly-started request.
 //!
-//! Use [`InProgressWarpSync::process_one`] in order to run verifications of the payloads that have
+//! Use [`WarpSync::process_one`] in order to run verifications of the payloads that have
 //! previously been downloaded.
 //!
 
@@ -211,7 +211,7 @@ pub struct ConfigCodeTrieNodeHint {
 /// On error, returns the [`ValidChainInformation`] that was provided in the configuration.
 pub fn start_warp_sync<TSrc, TRq>(
     config: Config,
-) -> Result<InProgressWarpSync<TSrc, TRq>, (ValidChainInformation, WarpSyncInitError)> {
+) -> Result<WarpSync<TSrc, TRq>, (ValidChainInformation, WarpSyncInitError)> {
     match config.start_chain_information.as_ref().finality {
         // TODO: we make sure that `finalized_scheduled_change` is `None` because it seems complicated to support, but ideally it would be supported
         ChainInformationFinalityRef::Grandpa {
@@ -236,7 +236,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         }
     }
 
-    Ok(InProgressWarpSync {
+    Ok(WarpSync {
         warped_header: config
             .start_chain_information
             .as_ref()
@@ -285,11 +285,24 @@ impl SourceId {
     }
 }
 
-/// The result of a successful warp sync.
-pub struct Success<TSrc, TRq> {
+/// A [`WarpSync`] that has been deconstructed.
+// TODO: consider removing this entirely
+pub struct Deconstructed<TSrc, TRq> {
     /// The synced chain information.
     pub chain_information: ValidChainInformation,
 
+    /// The list of sources that were added to the state machine, with their finalized block
+    /// height and user data.
+    /// The list is ordered by [`SourceId`].
+    // TODO: use a struct?
+    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
+
+    /// The list of requests that were added to the state machine.
+    pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
+}
+
+// TODO: consider removing this entirely
+pub struct RuntimeInformation {
     /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
     /// finalized block of [`Success::chain_information`].
     pub finalized_runtime: HostVmPrototype,
@@ -305,27 +318,9 @@ pub struct Success<TSrc, TRq> {
 
     /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code` itself.
     pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
-
-    /// The list of sources that were added to the state machine, with their finalized block
-    /// height and user data.
-    /// The list is ordered by [`SourceId`].
-    // TODO: use a struct?
-    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
-
-    /// The list of requests that were added to the state machine.
-    pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
 }
 
-/// The warp sync state machine.
-#[derive(derive_more::From)]
-pub enum WarpSync<TSrc, TRq> {
-    /// Warp syncing is over.
-    Finished(Success<TSrc, TRq>),
-    /// Warp syncing is in progress,
-    InProgress(InProgressWarpSync<TSrc, TRq>),
-}
-
-impl<TSrc, TRq> ops::Index<SourceId> for InProgressWarpSync<TSrc, TRq> {
+impl<TSrc, TRq> ops::Index<SourceId> for WarpSync<TSrc, TRq> {
     type Output = TSrc;
 
     #[track_caller]
@@ -335,7 +330,7 @@ impl<TSrc, TRq> ops::Index<SourceId> for InProgressWarpSync<TSrc, TRq> {
     }
 }
 
-impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
+impl<TSrc, TRq> ops::IndexMut<SourceId> for WarpSync<TSrc, TRq> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         debug_assert!(self.sources.contains(source_id.0));
@@ -343,7 +338,7 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
     }
 }
 
-impl<TSrc, TRq> ops::Index<RequestId> for InProgressWarpSync<TSrc, TRq> {
+impl<TSrc, TRq> ops::Index<RequestId> for WarpSync<TSrc, TRq> {
     type Output = TRq;
 
     #[track_caller]
@@ -353,7 +348,7 @@ impl<TSrc, TRq> ops::Index<RequestId> for InProgressWarpSync<TSrc, TRq> {
     }
 }
 
-impl<TSrc, TRq> ops::IndexMut<RequestId> for InProgressWarpSync<TSrc, TRq> {
+impl<TSrc, TRq> ops::IndexMut<RequestId> for WarpSync<TSrc, TRq> {
     #[track_caller]
     fn index_mut(&mut self, request_id: RequestId) -> &mut TRq {
         debug_assert!(self.in_progress_requests.contains(request_id.0));
@@ -362,12 +357,12 @@ impl<TSrc, TRq> ops::IndexMut<RequestId> for InProgressWarpSync<TSrc, TRq> {
 }
 
 /// Warp syncing process now obtaining the chain information.
-pub struct InProgressWarpSync<TSrc, TRq> {
+pub struct WarpSync<TSrc, TRq> {
     /// Finalized block of the chain we warp synced to. Initially identical to the value in
-    /// [`InProgressWarpSync::start_chain_information`].
+    /// [`WarpSync::start_chain_information`].
     warped_header: Header,
     /// Information about the finality of the chain at the point where we warp synced to.
-    /// Initially identical to the value in [`InProgressWarpSync::start_chain_information`].
+    /// Initially identical to the value in [`WarpSync::start_chain_information`].
     warped_finality: ChainInformationFinality,
     /// See [`Config::code_trie_node_hint`].
     code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
@@ -379,12 +374,11 @@ pub struct InProgressWarpSync<TSrc, TRq> {
     pause_if_blocks_gap_lower_than: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
-    /// List of requests that have been added using [`InProgressWarpSync::add_source`].
+    /// List of requests that have been added using [`WarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
-    /// Same entries as [`InProgressWarpSync::sources`], but indexed by
-    /// [`Source::finalized_block_height`].
+    /// Same entries as [`WarpSync::sources`], but indexed by [`Source::finalized_block_height`].
     sources_by_finalized_height: BTreeSet<(u64, SourceId)>,
-    /// List of requests that have been added using [`InProgressWarpSync::add_request`].
+    /// List of requests that have been added using [`WarpSync::add_request`].
     in_progress_requests: slab::Slab<(SourceId, TRq, RequestDetail)>,
     /// Request that is downloading warp sync fragments, if any has been started yet.
     warp_sync_fragments_download: Option<RequestId>,
@@ -408,7 +402,7 @@ enum RuntimeDownload {
     },
     Verified {
         downloaded_runtime: DownloadedRuntime,
-        chain_info_builder: chain_information::build::InProgress,
+        chain_info_builder: chain_information::build::ChainInformationBuild,
         /// For each call required by the chain information builder, whether it has been
         /// downloaded yet.
         calls: hashbrown::HashMap<
@@ -450,7 +444,7 @@ enum CallProof {
     Downloaded(Vec<u8>),
 }
 
-/// See [`InProgressWarpSync::status`].
+/// See [`WarpSync::status`].
 #[derive(Debug)]
 pub enum Status<'a, TSrc> {
     /// Warp syncing algorithm is downloading Grandpa warp sync fragments containing a finality
@@ -461,7 +455,7 @@ pub enum Status<'a, TSrc> {
         /// Hash of the highest block that is proven to be finalized.
         ///
         /// This isn't necessarily the same block as returned by
-        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
+        /// [`WarpSync::as_chain_information`], as this function first has to download
         /// extra information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
         /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
@@ -473,7 +467,7 @@ pub enum Status<'a, TSrc> {
         /// Hash of the highest block that is proven to be finalized.
         ///
         /// This isn't necessarily the same block as returned by
-        /// [`InProgressWarpSync::as_chain_information`], as this function first has to download
+        /// [`WarpSync::as_chain_information`], as this function first has to download
         /// extra information compared to just the finalized block.
         finalized_block_hash: [u8; 32],
         /// Height of the block indicated by [`Status::ChainInformation::finalized_block_hash`].
@@ -481,7 +475,7 @@ pub enum Status<'a, TSrc> {
     },
 }
 
-impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
+impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         self.block_number_bytes
@@ -528,6 +522,26 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }
     }
 
+    pub fn deconstruct(mut self) -> Deconstructed<TSrc, TRq> {
+        Deconstructed {
+            chain_information: self.start_chain_information,
+            sources_ordered: mem::take(&mut self.sources)
+                .into_iter()
+                .map(|(id, source)| {
+                    (
+                        SourceId(id),
+                        source.finalized_block_height,
+                        source.user_data,
+                    )
+                })
+                .collect(),
+            in_progress_requests: mem::take(&mut self.in_progress_requests)
+                .into_iter()
+                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
+                .collect(),
+        }
+    }
+
     /// Returns a list of all known sources stored in the state machine.
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
         self.sources.iter().map(|(id, _)| SourceId(id))
@@ -536,7 +550,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Add a source to the list of sources.
     ///
     /// The source has a finalized block height of 0, which should later be updated using
-    /// [`InProgressWarpSync::set_source_finality_state`].
+    /// [`WarpSync::set_source_finality_state`].
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
@@ -653,7 +667,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// process to completion.
     ///
     /// Once a request that matches a desired request is added through
-    /// [`InProgressWarpSync::add_request`], it is no longer returned by this function.
+    /// [`WarpSync::add_request`], it is no longer returned by this function.
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
@@ -794,7 +808,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Inserts a new request in the data structure.
     ///
     /// > **Note**: The request doesn't necessarily have to match a request returned by
-    /// >           [`InProgressWarpSync::desired_requests`].
+    /// >           [`WarpSync::desired_requests`].
     ///
     /// # Panic
     ///
@@ -1095,7 +1109,7 @@ struct Source<TSrc> {
 
 /// Information about a request that the warp sync state machine would like to start.
 ///
-/// See [`InProgressWarpSync::desired_requests`].
+/// See [`WarpSync::desired_requests`].
 #[derive(Debug, Clone)]
 pub enum DesiredRequest {
     /// A warp sync request should be start.
@@ -1127,7 +1141,7 @@ pub enum DesiredRequest {
 
 /// Information about a request to add to the state machine.
 ///
-/// See [`InProgressWarpSync::add_request`].
+/// See [`WarpSync::add_request`].
 #[derive(Debug, Clone)]
 pub enum RequestDetail {
     /// See [`DesiredRequest::WarpSyncRequest`].
@@ -1157,10 +1171,10 @@ pub enum RequestDetail {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
 
-/// Return value of [`InProgressWarpSync::process_one`].
+/// Return value of [`WarpSync::process_one`].
 pub enum ProcessOne<TSrc, TRq> {
     /// Nothing to verify at the moment. The state machine is yielded back.
-    Idle(InProgressWarpSync<TSrc, TRq>),
+    Idle(WarpSync<TSrc, TRq>),
     /// Ready to verify a warp sync fragment.
     VerifyWarpSyncFragment(VerifyWarpSyncFragment<TSrc, TRq>),
     /// Ready to build the runtime of the chain..
@@ -1171,7 +1185,7 @@ pub enum ProcessOne<TSrc, TRq> {
 
 /// Ready to verify a warp sync fragment.
 pub struct VerifyWarpSyncFragment<TSrc, TRq> {
-    inner: InProgressWarpSync<TSrc, TRq>,
+    inner: WarpSync<TSrc, TRq>,
 }
 
 impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
@@ -1193,7 +1207,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     pub fn verify(
         mut self,
         randomness_seed: [u8; 32],
-    ) -> (InProgressWarpSync<TSrc, TRq>, Option<VerifyFragmentError>) {
+    ) -> (WarpSync<TSrc, TRq>, Option<VerifyFragmentError>) {
         // A `VerifyWarpSyncFragment` is only ever created if `verify_queue` is non-empty.
         debug_assert!(!self.inner.verify_queue.is_empty());
         let fragments_to_verify = self
@@ -1410,7 +1424,7 @@ impl fmt::Display for VerifyFragmentError {
 
 /// Ready to build the runtime of the finalized chain.
 pub struct BuildRuntime<TSrc, TRq> {
-    inner: InProgressWarpSync<TSrc, TRq>,
+    inner: WarpSync<TSrc, TRq>,
 }
 
 impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
@@ -1445,10 +1459,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::InvalidMerkleProof(err)),
-                    );
+                    return (self.inner, Some(Error::InvalidMerkleProof(err)));
                 }
             };
 
@@ -1476,7 +1487,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
                                 hint_doesnt_match: *hint_doesnt_match,
                             };
-                            return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                            return (self.inner, Some(Error::MissingCode));
                         }
                     }
                 }
@@ -1484,16 +1495,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                    return (self.inner, Some(Error::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::MerkleProofEntriesMissing),
-                    );
+                    return (self.inner, Some(Error::MerkleProofEntriesMissing));
                 }
             }
         };
@@ -1507,7 +1515,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: true,
                 };
-                return (WarpSync::InProgress(self.inner), None);
+                return (self.inner, None);
             }
         } else {
             match decoded_downloaded_runtime
@@ -1518,13 +1526,10 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                    return (self.inner, Some(Error::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::MerkleProofEntriesMissing),
-                    );
+                    return (self.inner, Some(Error::MerkleProofEntriesMissing));
                 }
             }
         };
@@ -1534,10 +1539,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         {
             Ok(val) => val.map(|(v, _)| v),
             Err(proof_decode::IncompleteProofError { .. }) => {
-                return (
-                    WarpSync::InProgress(self.inner),
-                    Some(Error::MerkleProofEntriesMissing),
-                );
+                return (self.inner, Some(Error::MerkleProofEntriesMissing));
             }
         };
 
@@ -1548,10 +1550,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::InvalidHeapPages(err)),
-                    );
+                    return (self.inner, Some(Error::InvalidHeapPages(err)));
                 }
             };
 
@@ -1566,10 +1565,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: *hint_doesnt_match,
                 };
-                return (
-                    WarpSync::InProgress(self.inner),
-                    Some(Error::RuntimeBuild(err)),
-                );
+                return (self.inner, Some(Error::RuntimeBuild(err)));
             }
         };
 
@@ -1588,60 +1584,18 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         );
 
         let (calls, chain_info_builder) = match chain_info_builder {
-            chain_information::build::ChainInformationBuild::Finished {
-                result: Ok(chain_information),
-                virtual_machine,
-            } => {
-                return (
-                    WarpSync::Finished(Success {
-                        chain_information,
-                        finalized_runtime: virtual_machine,
-                        finalized_storage_code: Some(finalized_storage_code.to_owned()),
-                        finalized_storage_heap_pages: finalized_storage_heappages
-                            .map(|v| v.to_vec()),
-                        finalized_storage_code_merkle_value: Some(
-                            finalized_storage_code_merkle_value,
-                        ),
-                        finalized_storage_code_closest_ancestor_excluding: Some(
-                            finalized_storage_code_closest_ancestor_excluding,
-                        ),
-                        sources_ordered: mem::take(&mut self.inner.sources)
-                            .into_iter()
-                            .map(|(id, source)| {
-                                (
-                                    SourceId(id),
-                                    source.finalized_block_height,
-                                    source.user_data,
-                                )
-                            })
-                            .collect(),
-                        in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
-                            .into_iter()
-                            .map(|(id, (src_id, user_data, detail))| {
-                                (src_id, RequestId(id), user_data, detail)
-                            })
-                            .collect(),
-                    }),
-                    None,
-                );
-            }
-            chain_information::build::ChainInformationBuild::Finished {
-                result: Err(err), ..
-            } => {
-                self.inner.runtime_download = RuntimeDownload::NotStarted {
-                    hint_doesnt_match: *hint_doesnt_match,
-                };
-                return (
-                    WarpSync::InProgress(self.inner),
-                    Some(Error::ChainInformationBuild(err)),
-                );
+            builder @ chain_information::build::ChainInformationBuild::Finished { .. } => {
+                (Default::default(), builder)
             }
             chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
                 let calls = in_progress
                     .remaining_calls()
                     .map(|call| (call, CallProof::NotStarted))
                     .collect();
-                (calls, in_progress)
+                (
+                    calls,
+                    chain_information::build::ChainInformationBuild::InProgress(in_progress),
+                )
             }
         };
 
@@ -1656,21 +1610,19 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             calls,
         };
 
-        (WarpSync::InProgress(self.inner), None)
+        (self.inner, None)
     }
 }
 
 /// Ready to verify the parameters of the chain against the finalized block.
 pub struct BuildChainInformation<TSrc, TRq> {
-    inner: InProgressWarpSync<TSrc, TRq>,
+    inner: WarpSync<TSrc, TRq>,
 }
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
     /// Build the information about the chain.
-    ///
-    /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
     // TODO: refactor this error or explain what it is
-    pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Result<RuntimeInformation, Error>) {
         let RuntimeDownload::Verified {
             mut chain_info_builder,
             downloaded_runtime,
@@ -1707,10 +1659,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     }) {
                         Ok(d) => d,
                         Err(err) => {
-                            return (
-                                WarpSync::InProgress(self.inner),
-                                Some(Error::InvalidMerkleProof(err)),
-                            );
+                            return (self.inner, Err(Error::InvalidMerkleProof(err)));
                         }
                     };
                 decoded_proofs.insert(call, decoded_proof);
@@ -1720,7 +1669,38 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         };
 
         loop {
-            let chain_info_builder_update = match chain_info_builder {
+            let in_progress = match chain_info_builder {
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Ok(chain_information),
+                    virtual_machine,
+                } => {
+                    // TODO: rename `start_chain_information` to something else
+                    self.inner.start_chain_information = chain_information;
+                    return (
+                        self.inner,
+                        Ok(RuntimeInformation {
+                            finalized_runtime: virtual_machine,
+                            finalized_storage_code: downloaded_runtime.storage_code,
+                            finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
+                            finalized_storage_code_merkle_value: downloaded_runtime
+                                .code_merkle_value,
+                            finalized_storage_code_closest_ancestor_excluding: downloaded_runtime
+                                .closest_ancestor_excluding,
+                        }),
+                    );
+                }
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Err(err),
+                    ..
+                } => {
+                    return (self.inner, Err(Error::ChainInformationBuild(err)));
+                }
+                chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
+                    in_progress
+                }
+            };
+
+            chain_info_builder = match in_progress {
                 chain_information::build::InProgress::StorageGet(get) => {
                     // TODO: child tries not supported
                     let proof = calls.get(&get.call_in_progress()).unwrap();
@@ -1729,10 +1709,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            return (
-                                WarpSync::InProgress(self.inner),
-                                Some(Error::MerkleProofEntriesMissing),
-                            );
+                            return (self.inner, Err(Error::MerkleProofEntriesMissing));
                         }
                     };
 
@@ -1750,10 +1727,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            return (
-                                WarpSync::InProgress(self.inner),
-                                Some(Error::MerkleProofEntriesMissing),
-                            );
+                            return (self.inner, Err(Error::MerkleProofEntriesMissing));
                         }
                     };
                     nk.inject_key(value.map(|v| v.iter().copied()))
@@ -1767,64 +1741,12 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            return (
-                                WarpSync::InProgress(self.inner),
-                                Some(Error::MerkleProofEntriesMissing),
-                            );
+                            return (self.inner, Err(Error::MerkleProofEntriesMissing));
                         }
                     };
                     mv.inject_merkle_value(value)
                 }
             };
-
-            match chain_info_builder_update {
-                chain_information::build::ChainInformationBuild::Finished {
-                    result: Ok(chain_information),
-                    virtual_machine,
-                } => {
-                    return (
-                        WarpSync::Finished(Success {
-                            chain_information,
-                            finalized_runtime: virtual_machine,
-                            finalized_storage_code: downloaded_runtime.storage_code,
-                            finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
-                            finalized_storage_code_merkle_value: downloaded_runtime
-                                .code_merkle_value,
-                            finalized_storage_code_closest_ancestor_excluding: downloaded_runtime
-                                .closest_ancestor_excluding,
-                            sources_ordered: mem::take(&mut self.inner.sources)
-                                .into_iter()
-                                .map(|(id, source)| {
-                                    (
-                                        SourceId(id),
-                                        source.finalized_block_height,
-                                        source.user_data,
-                                    )
-                                })
-                                .collect(),
-                            in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
-                                .into_iter()
-                                .map(|(id, (src_id, user_data, detail))| {
-                                    (src_id, RequestId(id), user_data, detail)
-                                })
-                                .collect(),
-                        }),
-                        None,
-                    );
-                }
-                chain_information::build::ChainInformationBuild::Finished {
-                    result: Err(err),
-                    ..
-                } => {
-                    return (
-                        WarpSync::InProgress(self.inner),
-                        Some(Error::ChainInformationBuild(err)),
-                    );
-                }
-                chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
-                    chain_info_builder = in_progress;
-                }
-            }
         }
     }
 }
