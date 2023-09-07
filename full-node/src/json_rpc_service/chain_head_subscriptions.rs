@@ -16,18 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use smol::stream::StreamExt as _;
-use smoldot::json_rpc::{methods, parse, service};
-use std::{
-    future::Future,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    sync::Arc,
+use smoldot::{
+    executor,
+    json_rpc::{methods, service},
 };
+use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
 
-use crate::{
-    consensus_service, database_thread, json_rpc_service::legacy_api_subscriptions,
-    network_service, LogCallback, LogLevel,
-};
+use crate::{consensus_service, database_thread, LogCallback};
 
 pub struct Config {
     /// Function that can be used to spawn background tasks.
@@ -37,6 +32,9 @@ pub struct Config {
 
     /// Function called in order to notify of something.
     pub log_callback: Arc<dyn LogCallback + Send + Sync>,
+
+    /// Receiver for actions that the JSON-RPC client wants to perform.
+    pub receiver: async_channel::Receiver<Message>,
 
     /// `chainHead_unstable_follow` subscription start handle.
     pub chain_head_follow_subscription: service::SubscriptionStartProcess,
@@ -51,6 +49,10 @@ pub struct Config {
     pub database: Arc<database_thread::DatabaseThread>,
 }
 
+pub enum Message {
+    Unpin { block_hash: [u8; 32] },
+}
+
 /// Spawns a new tasks dedicated to handling a `chainHead_unstable_follow` subscription.
 pub fn spawn_chain_head_subscription_task(mut config: Config) {
     let tasks_executor = config.tasks_executor.clone();
@@ -58,7 +60,7 @@ pub fn spawn_chain_head_subscription_task(mut config: Config) {
         let mut json_rpc_subscription = config.chain_head_follow_subscription.accept();
         let json_rpc_subscription_id = json_rpc_subscription.subscription_id().to_owned();
 
-        let consensus_service_subscription = config
+        let mut consensus_service_subscription = config
             .consensus_service
             .subscribe_all(32, NonZeroUsize::new(32).unwrap())
             .await;
@@ -71,7 +73,11 @@ pub fn spawn_chain_head_subscription_task(mut config: Config) {
                         consensus_service_subscription.finalized_block_hash,
                     ),
                     finalized_block_runtime: if config.with_runtime {
-                        Some(todo!()) // TODO:
+                        Some(convert_runtime_spec(
+                            consensus_service_subscription
+                                .finalized_block_runtime
+                                .runtime_version(),
+                        ))
                     } else {
                         None
                     },
@@ -82,7 +88,84 @@ pub fn spawn_chain_head_subscription_task(mut config: Config) {
         for block in consensus_service_subscription.non_finalized_blocks_ancestry_order {}
 
         loop {
-            match consensus_service_subscription.new_blocks.next().await {}
+            match consensus_service_subscription.new_blocks.next().await {
+                Some(consensus_service::Notification::Block(block)) => {
+                    json_rpc_subscription
+                        .send_notification(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: (&json_rpc_subscription_id).into(),
+                                result: methods::FollowEvent::NewBlock {
+                                    block_hash: methods::HashHexString(block.block_hash),
+                                    new_runtime: if let (Some(new_runtime), true) =
+                                        (&block.runtime_update, config.with_runtime)
+                                    {
+                                        Some(convert_runtime_spec(new_runtime.runtime_version()))
+                                    } else {
+                                        None
+                                    },
+                                    parent_block_hash: methods::HashHexString(block.parent_hash),
+                                },
+                            },
+                        )
+                        .await;
+
+                    if block.is_new_best {
+                        json_rpc_subscription
+                            .send_notification(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: (&json_rpc_subscription_id).into(),
+                                    result: methods::FollowEvent::BestBlockChanged {
+                                        best_block_hash: methods::HashHexString(block.block_hash),
+                                    },
+                                },
+                            )
+                            .await;
+                    }
+                }
+                Some(consensus_service::Notification::Finalized {
+                    hash,
+                    best_block_hash,
+                }) => {
+                    json_rpc_subscription
+                        .send_notification(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: (&json_rpc_subscription_id).into(),
+                                result: methods::FollowEvent::Finalized {
+                                    finalized_blocks_hashes: todo!(),
+                                    pruned_blocks_hashes: todo!(),
+                                },
+                            },
+                        )
+                        .await;
+                }
+                None => {
+                    json_rpc_subscription
+                        .send_notification(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: (&json_rpc_subscription_id).into(),
+                                result: methods::FollowEvent::Stop {},
+                            },
+                        )
+                        .await;
+                }
+            }
         }
     }));
+}
+
+fn convert_runtime_spec(runtime: &executor::CoreVersion) -> methods::MaybeRuntimeSpec {
+    let runtime = runtime.decode();
+    methods::MaybeRuntimeSpec::Valid {
+        spec: methods::RuntimeSpec {
+            impl_name: runtime.impl_name.into(),
+            spec_name: runtime.spec_name.into(),
+            impl_version: runtime.impl_version,
+            spec_version: runtime.spec_version,
+            transaction_version: runtime.transaction_version,
+            apis: runtime
+                .apis
+                .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
+                .collect(),
+        },
+    }
 }
