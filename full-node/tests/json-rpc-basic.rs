@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use smoldot::json_rpc;
 use std::sync::Arc;
 
 #[test]
@@ -40,10 +41,12 @@ fn send_request_errs_if_malformed() {
         .await
         .unwrap();
 
-        assert!(matches!(
-            client.send_json_rpc_request(r#"thisisnotproperjsonrpc"#.to_owned(),),
-            Err(smoldot_full_node::JsonRpcRequestParseError { .. })
-        ));
+        client.send_json_rpc_request(r#"thisisnotproperjsonrpc"#.to_owned());
+        let response_raw = client.next_json_rpc_response().await;
+        match json_rpc::parse::parse_response(&response_raw).unwrap() {
+            json_rpc::parse::Response::ParseError { .. } => {}
+            _ => unreachable!(),
+        }
     });
 }
 
@@ -70,11 +73,16 @@ fn send_request_works_if_unknown_request() {
         .await
         .unwrap();
 
-        client
-            .send_json_rpc_request(
-                r#"{"jsonrpc":"2.0","id":1,"method":"thisjsonrpcmethoddoesntexist","params":[]}"#
-                    .to_owned(),
-            )
-            .unwrap();
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"thisjsonrpcmethoddoesntexist","params":[]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        match json_rpc::parse::parse_response(&response_raw).unwrap() {
+            json_rpc::parse::Response::Error { id_json, .. } => {
+                assert_eq!(id_json, "1");
+            }
+            _ => unreachable!(),
+        }
     });
 }

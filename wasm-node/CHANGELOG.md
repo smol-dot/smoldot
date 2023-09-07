@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Remove
+
+- Removed `MalformedJsonRpcError`. Malformed JSON-RPC requests now generate an error JSON-RPC response where the `id` field is equal to `null`, in accordance with the JSON-RPC 2.0 specification. ([#1116](https://github.com/smol-dot/smoldot/pull/1116))
+
 ### Changed
 
 - Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))

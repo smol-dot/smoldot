@@ -35,8 +35,6 @@ use std::{
     time::Duration,
 };
 
-pub use service::ParseError as RequestParseError;
-
 mod legacy_api_subscriptions;
 mod requests_handler;
 
@@ -193,13 +191,10 @@ impl JsonRpcService {
     /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint.
     ///
     /// The virtual endpoint doesn't have any limit.
-    ///
-    /// Returns an error if the JSON-RPC request is malformed.
-    pub fn send_request(&self, request: String) -> Result<(), RequestParseError> {
+    pub fn send_request(&self, request: String) {
         match self.virtual_client_io.try_send_request(request) {
-            Ok(()) => Ok(()),
+            Ok(()) => (),
             Err(err) => match err.cause {
-                service::TrySendRequestErrorCause::MalformedJson(err) => return Err(err),
                 service::TrySendRequestErrorCause::TooManyPendingRequests
                 | service::TrySendRequestErrorCause::ClientMainTaskDestroyed => unreachable!(),
             },
@@ -483,12 +478,6 @@ fn spawn_client_io_task(
                         // The client main task never closes by itself but only as a
                         // consequence to the I/O task closing.
                         unreachable!()
-                    }
-                    Err(service::SendRequestError {
-                        cause: service::SendRequestErrorCause::MalformedJson(error),
-                        ..
-                    }) => {
-                        break Err(format!("Malformed JSON-RPC request: {error}"));
                     }
                 }
             }

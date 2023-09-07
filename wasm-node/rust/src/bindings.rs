@@ -409,6 +409,9 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
 ///
+/// If the buffer isn't a valid JSON-RPC request, then an error JSON-RPC response with an `id`
+/// equal to `null` is generated, in accordance with the JSON-RPC 2.0 specification.
+///
 /// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
 /// request, then provide this buffer index to the function. The Rust code will call
 /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
@@ -422,8 +425,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 /// This function returns:
 /// - 0 on success.
-/// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
-/// - 2 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
+/// - 1 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
