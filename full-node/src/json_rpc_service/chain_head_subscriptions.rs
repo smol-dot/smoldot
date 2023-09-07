@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use futures_channel::oneshot;
+use futures_lite::FutureExt as _;
 use smol::stream::StreamExt as _;
 use smoldot::{
     executor,
@@ -72,6 +73,10 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
             .subscribe_all(32, NonZeroUsize::new(32).unwrap())
             .await;
 
+        let mut pinned_blocks =
+            hashbrown::HashSet::with_capacity_and_hasher(32, fnv::FnvBuildHasher::default());
+
+        pinned_blocks.insert(consensus_service_subscription.finalized_block_hash);
         json_rpc_subscription
             .send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
                 subscription: (&json_rpc_subscription_id).into(),
@@ -92,11 +97,56 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
             })
             .await;
 
-        for block in consensus_service_subscription.non_finalized_blocks_ancestry_order {}
+        for block in consensus_service_subscription.non_finalized_blocks_ancestry_order {
+            pinned_blocks.insert(block.block_hash);
+        }
 
         loop {
-            match consensus_service_subscription.new_blocks.next().await {
-                Some(consensus_service::Notification::Block(block)) => {
+            enum WhatHappened {
+                ConsensusNotification(consensus_service::Notification),
+                ConsensusSubscriptionStop,
+                Foreground(Message),
+                ForegroundClosed,
+            }
+
+            let what_happened = async {
+                consensus_service_subscription
+                    .new_blocks
+                    .next()
+                    .await
+                    .map_or(
+                        WhatHappened::ConsensusSubscriptionStop,
+                        WhatHappened::ConsensusNotification,
+                    )
+            }
+            .or(async {
+                config
+                    .receiver
+                    .next()
+                    .await
+                    .map_or(WhatHappened::ForegroundClosed, WhatHappened::Foreground)
+            })
+            .await;
+
+            match what_happened {
+                WhatHappened::ForegroundClosed => return,
+                WhatHappened::Foreground(Message::Unpin {
+                    block_hashes,
+                    outcome,
+                }) => {
+                    if block_hashes.iter().any(|h| !pinned_blocks.contains(h)) {
+                        let _ = outcome.send(Err(()));
+                    } else {
+                        for block_hash in block_hashes {
+                            pinned_blocks.remove(&block_hash);
+                        }
+                        let _ = outcome.send(Ok(()));
+                    }
+                }
+                WhatHappened::ConsensusNotification(consensus_service::Notification::Block(
+                    block,
+                )) => {
+                    pinned_blocks.insert(block.block_hash);
                     json_rpc_subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
@@ -129,10 +179,12 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                             .await;
                     }
                 }
-                Some(consensus_service::Notification::Finalized {
-                    hash,
-                    best_block_hash,
-                }) => {
+                WhatHappened::ConsensusNotification(
+                    consensus_service::Notification::Finalized {
+                        hash,
+                        best_block_hash,
+                    },
+                ) => {
                     json_rpc_subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
@@ -145,7 +197,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                         )
                         .await;
                 }
-                None => {
+                WhatHappened::ConsensusSubscriptionStop => {
                     json_rpc_subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
