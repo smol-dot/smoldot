@@ -243,7 +243,7 @@ pub fn start_warp_sync<TSrc, TRq>(
             .finalized_block_header
             .into(),
         warped_finality: config.start_chain_information.as_ref().finality.into(),
-        start_chain_information: config.start_chain_information,
+        verified_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
         num_download_ahead_fragments: config.num_download_ahead_fragments,
         pause_if_blocks_gap_lower_than: config.pause_if_blocks_gap_lower_than,
@@ -366,8 +366,9 @@ pub struct WarpSync<TSrc, TRq> {
     warped_finality: ChainInformationFinality,
     /// See [`Config::code_trie_node_hint`].
     code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
-    /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
-    start_chain_information: ValidChainInformation,
+    /// Starting point of the warp syncing as provided to [`start_warp_sync`], or latest chain
+    /// information that was warp synced to.
+    verified_chain_information: ValidChainInformation,
     /// See [`Config::num_download_ahead_fragments`].
     num_download_ahead_fragments: usize,
     /// See [`Config::pause_if_blocks_gap_lower_than`].
@@ -488,7 +489,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // produce a full chain information struct. Such struct can only be produced after the
         // entire warp syncing has succeeded. If if it still in progress, all we can return is
         // the starting point.
-        (&self.start_chain_information).into()
+        (&self.verified_chain_information).into()
     }
 
     /// Returns the current status of the warp syncing.
@@ -524,7 +525,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
 
     pub fn deconstruct(mut self) -> Deconstructed<TSrc, TRq> {
         Deconstructed {
-            chain_information: self.start_chain_information,
+            chain_information: self.verified_chain_information,
             sources_ordered: mem::take(&mut self.sources)
                 .into_iter()
                 .map(|(id, source)| {
@@ -1674,8 +1675,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     result: Ok(chain_information),
                     virtual_machine,
                 } => {
-                    // TODO: rename `start_chain_information` to something else
-                    self.inner.start_chain_information = chain_information;
+                    self.inner.verified_chain_information = chain_information;
                     return (
                         self.inner,
                         Ok(RuntimeInformation {
