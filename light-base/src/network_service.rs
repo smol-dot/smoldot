@@ -199,58 +199,59 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         );
 
         // Spawn main task that processes the network service.
-        config.platform.spawn_task(
-            "network-service".into(),
-            Box::pin(
-                background_task(BackgroundTask {
-                    identify_agent_version: config.identify_agent_version,
-                    log_chain_names: log_chain_names.clone(),
-                    messages_tx: messages_tx.clone(),
-                    network: service::ChainNetwork::new(service::Config {
-                        now: config.platform.now(),
-                        chains,
-                        connections_capacity: 32,
-                        peers_capacity: 8,
-                        max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
-                        noise_key: config.noise_key,
-                        handshake_timeout: Duration::from_secs(8),
-                        randomness_seed: {
-                            let mut seed = [0; 32];
-                            config.platform.fill_random_bytes(&mut seed);
-                            seed
-                        },
+        let task = Box::pin(
+            background_task(BackgroundTask {
+                identify_agent_version: config.identify_agent_version,
+                log_chain_names: log_chain_names.clone(),
+                messages_tx: messages_tx.clone(),
+                network: service::ChainNetwork::new(service::Config {
+                    now: config.platform.now(),
+                    chains,
+                    connections_capacity: 32,
+                    peers_capacity: 8,
+                    max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
+                    noise_key: config.noise_key,
+                    handshake_timeout: Duration::from_secs(8),
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
+                    },
+                }),
+                platform: config.platform.clone(),
+                event_senders: either::Left(event_senders),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(
+                    32,
+                    util::SipHasherBuild::new({
+                        let mut seed = [0; 16];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
                     }),
-                    platform: config.platform.clone(),
-                    event_senders: either::Left(event_senders),
-                    slots_assign_backoff: HashMap::with_capacity_and_hasher(
-                        32,
-                        util::SipHasherBuild::new({
-                            let mut seed = [0; 16];
-                            config.platform.fill_random_bytes(&mut seed);
-                            seed
-                        }),
-                    ),
-                    important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
-                    active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
-                    messages_rx,
-                    blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                    grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
-                        8,
-                        Default::default(),
-                    ),
-                    storage_proof_requests: HashMap::with_capacity_and_hasher(
-                        8,
-                        Default::default(),
-                    ),
-                    call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                    kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
-                        2,
-                        Default::default(),
-                    ),
-                })
-                .or(on_service_killed.listen()),
-            ),
+                ),
+                important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+                active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
+                messages_rx,
+                blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
+                    8,
+                    Default::default(),
+                ),
+                storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
+                    2,
+                    Default::default(),
+                ),
+            })
+            .or(on_service_killed.listen()),
         );
+
+        config
+            .platform
+            .spawn_task("network-service".into(), async move {
+                task.await;
+                log::debug!(target: "network", "Shutdown")
+            });
 
         let final_network_service = Arc::new(NetworkService {
             log_chain_names,

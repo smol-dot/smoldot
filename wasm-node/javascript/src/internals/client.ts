@@ -534,9 +534,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                         throw new AlreadyDestroyedError();
                     if (options.disableJsonRpc)
                         throw new JsonRpcDisabledError();
-                    if (request.length >= 64 * 1024 * 1024) {
-                        throw new MalformedJsonRpcError();
-                    };
 
                     const retVal = state.instance.instance.request(request, chainId);
                     switch (retVal) {

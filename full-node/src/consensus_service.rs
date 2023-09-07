@@ -444,6 +444,9 @@ pub struct SubscribeAll {
     /// Hash of the finalized block, to provide to [`ConsensusService::unpin_block`].
     pub finalized_block_hash: [u8; 32],
 
+    /// Runtime of the finalized block.
+    pub finalized_block_runtime: Arc<executor::host::HostVmPrototype>,
+
     /// List of all known non-finalized blocks at the time of subscription.
     ///
     /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
@@ -508,6 +511,10 @@ pub struct BlockNotification {
 
     /// Hash of the block, to provide to [`ConsensusService::unpin_block`].
     pub block_hash: [u8; 32],
+
+    /// If the block has a different runtime compared to its parent, contains the new runtime.
+    /// Contains `None` if the runtime of the block is the same as its parent's.
+    pub runtime_update: Option<Arc<executor::host::HostVmPrototype>>,
 
     /// BLAKE2 hash of the header of the parent of this block.
     ///
@@ -792,34 +799,53 @@ impl SyncBackground {
                         Some(ToBackground::SubscribeAll { buffer_size, _max_finalized_pinned_blocks: _, result_tx }) => {
                             let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
-                            let non_finalized_blocks_ancestry_order = {
-                                let best_hash = self.sync.best_block_hash();
-                                self.sync
-                                    .non_finalized_blocks_ancestry_order()
-                                    .map(|h| {
-                                        let scale_encoding =
-                                            h.scale_encoding_vec(self.sync.block_number_bytes());
-                                        BlockNotification {
-                                            is_new_best: header::hash_from_scale_encoded_header(
-                                                &scale_encoding,
-                                            ) == best_hash,
-                                            block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
-                                            scale_encoded_header: scale_encoding,
-                                            parent_hash: *h.parent_hash,
-                                        }
-                                    })
-                                    .collect()
-                            };
-
-                            self.blocks_notifications.push(tx);
+                            // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
                             let finalized_block_scale_encoded_header = self
                                 .sync
                                 .finalized_block_header()
                                 .scale_encoding_vec(self.sync.block_number_bytes());
+                            let finalized_block_height = header::decode(&finalized_block_scale_encoded_header, self.sync.block_number_bytes()).unwrap().number;
+                            let finalized_block_hash = header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header);
+                            let finalized_block_runtime = match &self.sync[(finalized_block_height, &finalized_block_hash)] {
+                                NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                                _ => unreachable!()
+                            };
+
+                            let non_finalized_blocks_ancestry_order = {
+                                let best_hash = self.sync.best_block_hash();
+                                let blocks_in = self.sync.non_finalized_blocks_ancestry_order()
+                                    .map(|h| (h.number, h.scale_encoding_vec(self.sync.block_number_bytes()), *h.parent_hash)).collect::<Vec<_>>();
+                                let mut blocks_out = Vec::new();
+                                for (number, scale_encoding, parent_hash) in blocks_in {
+                                    let hash = header::hash_from_scale_encoded_header(&scale_encoding);
+                                    let runtime = match &self.sync[(number, &hash)] {
+                                        NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                                        _ => unreachable!()
+                                    };
+                                    let runtime_update = if Arc::ptr_eq(&finalized_block_runtime, &runtime) {
+                                        None
+                                    } else {
+                                        Some(Arc::new(runtime.lock().await.clone().unwrap()))
+                                    };
+                                    blocks_out.push(BlockNotification {
+                                        is_new_best: header::hash_from_scale_encoded_header(
+                                            &scale_encoding,
+                                        ) == best_hash,
+                                        block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
+                                        scale_encoded_header: scale_encoding,
+                                        runtime_update,
+                                        parent_hash,
+                                    });
+                                }
+                                blocks_out
+                            };
+
+                            self.blocks_notifications.push(tx);
                             let _ = result_tx.send(SubscribeAll {
                                 id: SubscriptionId(0), // TODO:
-                                finalized_block_hash: header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header),
+                                finalized_block_hash,
                                 finalized_block_scale_encoded_header,
+                                finalized_block_runtime: Arc::new(finalized_block_runtime.lock().await.clone().unwrap()),
                                 non_finalized_blocks_ancestry_order,
                                 new_blocks,
                             });
@@ -1643,6 +1669,11 @@ impl SyncBackground {
                             // Notify the subscribers.
                             // Elements in `blocks_notifications` are removed one by one and
                             // inserted back if the channel is still open.
+                            let runtime_to_notify = if let Some(new_runtime) = &new_runtime {
+                                Some(Arc::new(new_runtime.clone()))
+                            } else {
+                                None
+                            };
                             for index in (0..self.blocks_notifications.len()).rev() {
                                 let subscription = self.blocks_notifications.swap_remove(index);
                                 if subscription
@@ -1650,6 +1681,7 @@ impl SyncBackground {
                                         is_new_best,
                                         scale_encoded_header: scale_encoded_header.clone(),
                                         block_hash: header_verification_success.hash(),
+                                        runtime_update: runtime_to_notify.clone(),
                                         parent_hash,
                                     }))
                                     .is_err()

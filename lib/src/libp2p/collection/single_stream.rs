@@ -574,7 +574,7 @@ where
                 mut inbound_negotiated_cancel_acknowledgments,
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
-                    if read_write.is_dead() && event.is_none() {
+                    if read_write.is_dead() && read_write.wake_up_after.is_none() {
                         self.pending_messages.push_back(
                             ConnectionToCoordinatorInner::StartShutdown(Some(
                                 ShutdownCause::CleanShutdown,
