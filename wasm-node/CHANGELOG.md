@@ -6,12 +6,12 @@
 
 ### Remove
 
-- Removed `MalformedJsonRpcError`. Malformed JSON-RPC requests now generate an error JSON-RPC response where the `id` field is equal to `null`, in accordance with the JSON-RPC 2.0 specification. ([#1116](https://github.com/smol-dot/smoldot/pull/1116))
+- Removed `MalformedJsonRpcError`. Malformed JSON-RPC requests now later generate an error JSON-RPC response where the `id` field is equal to `null`, in accordance with the JSON-RPC 2.0 specification. ([#1116](https://github.com/smol-dot/smoldot/pull/1116))
 
 ### Changed
 
 - Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
-- JSON-RPC requests that are too large are no longer rejected. In case where the JSON-RPC client is trusted, then there is nothing to do, and the potential lack of memory space will become a non-issue once the `Memory64` WebAssembly proposal becomes widely available. In case where the JSON-RPC client is not trusted, the API user is encouraged to manually implement a limit to the size of JSON-RPC requests. ([#1115](https://github.com/smol-dot/smoldot/pull/1115))
+- JSON-RPC requests that are very large are no longer rejected. In case where the JSON-RPC client is trusted, then there is nothing to do, and the potential lack of memory space will become a non-issue once the `Memory64` WebAssembly proposal becomes widely available. In case where the JSON-RPC client is not trusted, the API user is encouraged to manually implement a limit to the size of JSON-RPC requests, as it should do already right now anyway. ([#1115](https://github.com/smol-dot/smoldot/pull/1115))
 
 ### Fixed
 
