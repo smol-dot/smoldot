@@ -1048,8 +1048,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
     /// a good way to avoid errors here, but this should only be done if the JSON-RPC client is
     /// trusted.
     ///
-    /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
-    /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.
+    /// If the JSON-RPC request is not a valid JSON-RPC request, a JSON-RPC error response with
+    /// an `id` equal to `null` is later generated, in accordance with the JSON-RPC specification.
     ///
     /// # Panic
     ///

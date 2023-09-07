@@ -7,7 +7,17 @@
 - During the warp syncing process, smoldot will now download the runtime and call proofs from any peer whose finalized block is superior or equal to the target block, rather than always the peer that was used to download the warp sync fragments. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 - During the warp syncing process, smoldot will now download warp sync fragments in parallel of verifying previously-downloaded fragments. This is expected to speed up the warp syncing process. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 - When a warp sync response contains an invalid warp sync fragment, the earlier valid fragments are now still used to make the warp syncing progress instead of being thrown away. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+
+## 2.0.0 - 2023-09-07
+
+### Remove
+
+- Removed `MalformedJsonRpcError`. Malformed JSON-RPC requests now later generate an error JSON-RPC response where the `id` field is equal to `null`, in accordance with the JSON-RPC 2.0 specification. ([#1116](https://github.com/smol-dot/smoldot/pull/1116))
+
+### Changed
+
 - Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+- JSON-RPC requests that are very large are no longer rejected. In case where the JSON-RPC client is trusted, then there is nothing to do, and the potential lack of memory space will become a non-issue once the `Memory64` WebAssembly proposal becomes widely available. In case where the JSON-RPC client is not trusted, the API user is encouraged to manually implement a limit to the size of JSON-RPC requests, as it should do already right now anyway. ([#1115](https://github.com/smol-dot/smoldot/pull/1115))
 
 ### Fixed
 

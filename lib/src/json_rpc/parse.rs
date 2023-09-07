@@ -335,6 +335,34 @@ pub enum ErrorResponse<'a> {
     ApplicationDefined(i64, &'a str),
 }
 
+/// Builds a JSON error response when a request couldn't be decoded.
+///
+/// # Example
+///
+/// ```
+/// # use smoldot::json_rpc::parse;
+/// let _result_json = parse::build_parse_error_response();
+/// ```
+///
+/// # Panic
+///
+/// Panics if `id_json` or `data_json` aren't valid JSON.
+/// Panics if the code in the [`ErrorResponse`] doesn't respect the rules documented under
+/// certain variants.
+///
+pub fn build_parse_error_response() -> String {
+    serde_json::to_string(&SerdeFailure {
+        jsonrpc: SerdeVersion::V2,
+        id: serde_json::from_str("null").unwrap(),
+        error: SerdeError {
+            code: SerdeErrorCode::ParseError,
+            message: "Parse error",
+            data: None,
+        },
+    })
+    .unwrap()
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct SerdeRequest<'a> {
     jsonrpc: SerdeVersion,
@@ -639,5 +667,11 @@ mod tests {
             method: "test",
             params_json: Some("invalid"),
         });
+    }
+
+    #[test]
+    fn build_parse_error() {
+        let response = super::build_parse_error_response();
+        assert_eq!(response, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}");
     }
 }
