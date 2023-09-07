@@ -16,12 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{consensus_service, database_thread, network_service, LogCallback, LogLevel};
+use futures_channel::oneshot;
 use futures_util::FutureExt;
 use smol::{
     future,
     net::{TcpListener, TcpStream},
 };
-use smoldot::json_rpc::service;
+use smoldot::json_rpc::{methods, parse, service};
 use std::{
     future::Future,
     io, mem,
@@ -531,6 +532,12 @@ fn spawn_client_main_task(
 ) {
     let tasks_executor2 = tasks_executor.clone();
     tasks_executor2(Box::pin(async move {
+        let mut chain_head_follow_subscriptions: hashbrown::HashMap<
+            String,
+            async_channel::Sender<chain_head_subscriptions::Message>,
+            _,
+        > = hashbrown::HashMap::with_capacity_and_hasher(2, fnv::FnvBuildHasher::default());
+
         loop {
             match client_main_task.run_until_event().await {
                 service::Event::HandleRequest {
@@ -538,10 +545,54 @@ fn spawn_client_main_task(
                     request_process,
                 } => {
                     client_main_task = task;
-                    to_requests_handlers
-                        .send(requests_handler::Message::Request(request_process))
-                        .await
-                        .unwrap();
+
+                    match request_process.request() {
+                        smoldot::json_rpc::methods::MethodCall::chainHead_unstable_unpin {
+                            follow_subscription,
+                            hash,
+                        } => {
+                            if let Some(follow_subscription) =
+                                chain_head_follow_subscriptions.get_mut(&*follow_subscription)
+                            {
+                                let block_hashes = match hash {
+                                    smoldot::json_rpc::methods::HashHexStringSingleOrArray::Array(list) => {
+                                        list.into_iter().map(|h| h.0).collect::<Vec<_>>()
+                                    },
+                                    smoldot::json_rpc::methods::HashHexStringSingleOrArray::Single(hash) => vec![hash.0]
+                                };
+
+                                let (outcome, outcome_rx) = oneshot::channel();
+                                follow_subscription
+                                    .send(chain_head_subscriptions::Message::Unpin {
+                                        block_hashes,
+                                        outcome,
+                                    })
+                                    .await;
+
+                                match outcome_rx.await {
+                                    Err(_) => {
+                                        request_process.respond(
+                                            methods::Response::chainHead_unstable_unpin(()),
+                                        );
+                                    }
+                                    Ok(Ok(())) => {
+                                        request_process.respond(
+                                            methods::Response::chainHead_unstable_unpin(()),
+                                        );
+                                    }
+                                    Ok(Err(())) => {
+                                        request_process.fail(service::ErrorResponse::InvalidParams);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            to_requests_handlers
+                                .send(requests_handler::Message::Request(request_process))
+                                .await
+                                .unwrap();
+                        }
+                    }
                 }
                 service::Event::HandleSubscriptionStart {
                     task,
@@ -553,16 +604,23 @@ fn spawn_client_main_task(
                         // TODO: enforce limit to number of subscriptions
                         smoldot::json_rpc::methods::MethodCall::chainHead_unstable_follow {
                             with_runtime,
-                        } => chain_head_subscriptions::spawn_chain_head_subscription_task(
-                            chain_head_subscriptions::Config {
-                                tasks_executor: tasks_executor.clone(),
-                                log_callback: log_callback.clone(),
-                                chain_head_follow_subscription: subscription_start,
-                                with_runtime,
-                                consensus_service: consensus_service.clone(),
-                                database: database.clone(),
-                            },
-                        ),
+                        } => {
+                            let (tx, rx) = async_channel::bounded(16);
+                            let subscription_id =
+                                chain_head_subscriptions::spawn_chain_head_subscription_task(
+                                    chain_head_subscriptions::Config {
+                                        tasks_executor: tasks_executor.clone(),
+                                        log_callback: log_callback.clone(),
+                                        receiver: rx,
+                                        chain_head_follow_subscription: subscription_start,
+                                        with_runtime,
+                                        consensus_service: consensus_service.clone(),
+                                        database: database.clone(),
+                                    },
+                                )
+                                .await;
+                            chain_head_follow_subscriptions.insert(subscription_id, tx);
+                        }
                         _ => {
                             to_requests_handlers
                                 .send(requests_handler::Message::SubscriptionStart(
@@ -573,7 +631,12 @@ fn spawn_client_main_task(
                         }
                     }
                 }
-                service::Event::SubscriptionDestroyed { task, .. } => {
+                service::Event::SubscriptionDestroyed {
+                    task,
+                    subscription_id,
+                    ..
+                } => {
+                    let _ = chain_head_follow_subscriptions.remove(&subscription_id);
                     client_main_task = task;
                 }
                 service::Event::SerializedRequestsIoClosed => {

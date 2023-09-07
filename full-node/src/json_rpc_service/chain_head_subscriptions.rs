@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use futures_channel::oneshot;
 use smol::stream::StreamExt as _;
 use smoldot::{
     executor,
@@ -50,16 +51,22 @@ pub struct Config {
 }
 
 pub enum Message {
-    Unpin { block_hash: [u8; 32] },
+    Unpin {
+        block_hashes: Vec<[u8; 32]>,
+        outcome: oneshot::Sender<Result<(), ()>>,
+    },
 }
 
 /// Spawns a new tasks dedicated to handling a `chainHead_unstable_follow` subscription.
-pub fn spawn_chain_head_subscription_task(mut config: Config) {
+///
+/// Returns the identifier of the subscription.
+pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
+    let mut json_rpc_subscription = config.chain_head_follow_subscription.accept();
+    let json_rpc_subscription_id = json_rpc_subscription.subscription_id().to_owned();
+    let return_value = json_rpc_subscription_id.clone();
+
     let tasks_executor = config.tasks_executor.clone();
     tasks_executor(Box::pin(async move {
-        let mut json_rpc_subscription = config.chain_head_follow_subscription.accept();
-        let json_rpc_subscription_id = json_rpc_subscription.subscription_id().to_owned();
-
         let mut consensus_service_subscription = config
             .consensus_service
             .subscribe_all(32, NonZeroUsize::new(32).unwrap())
@@ -151,6 +158,8 @@ pub fn spawn_chain_head_subscription_task(mut config: Config) {
             }
         }
     }));
+
+    return_value
 }
 
 fn convert_runtime_spec(runtime: &executor::CoreVersion) -> methods::MaybeRuntimeSpec {
