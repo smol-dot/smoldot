@@ -245,8 +245,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
         .json_rpc_request(json_rpc_request, client_chain_id)
     {
         Ok(()) => 0,
-        Err(HandleRpcError::MalformedJsonRpc(_)) => 1,
-        Err(HandleRpcError::TooManyPendingRequests { .. }) => 2,
+        Err(HandleRpcError::TooManyPendingRequests { .. }) => 1,
     }
 }
 

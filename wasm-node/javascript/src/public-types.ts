@@ -58,15 +58,6 @@ export class CrashError extends Error {
 }
 
 /**
- * Thrown in case a malformed JSON-RPC request is sent.
- */
-export class MalformedJsonRpcError extends Error {
-    constructor() {
-        super("JSON-RPC request is malformed");
-    }
-}
-
-/**
  * Thrown in case the buffer of JSON-RPC requests is full and cannot accept any more request.
  */
 export class QueueFullError extends Error {
@@ -144,14 +135,12 @@ export interface Chain {
      * Be aware that some requests will cause notifications to be sent back using the same callback
      * as the responses.
      *
-     * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request
-     * (for example if it is not valid JSON).
+     * If the request is not a valid JSON-RPC request, then a JSON-RPC error response is later
+     * generated with an `id` equal to `null`, in accordance with the JSON-RPC 2.0 specification.
+     *
      * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, or
      * if for example some parameters are missing, an error response is properly generated and
      * yielded through the JSON-RPC callback.
-     * In other words, a {@link MalformedJsonRpcError} is thrown in situations where something
-     * is *so wrong* with the request that it is not possible for smoldot to send back an error
-     * through the JSON-RPC callback.
      *
      * Two JSON-RPC APIs are supported by smoldot:
      *
@@ -160,7 +149,6 @@ export interface Chain {
      *
      * @param rpc JSON-encoded RPC request.
      *
-     * @throws {@link MalformedJsonRpcError} If the payload isn't valid JSON-RPC.
      * @throws {@link QueueFullError} If the queue of JSON-RPC requests of the chain is full.
      * @throws {@link AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
      * @throws {@link JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.

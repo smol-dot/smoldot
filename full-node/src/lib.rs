@@ -42,8 +42,6 @@ mod json_rpc_service;
 mod network_service;
 mod util;
 
-pub use json_rpc_service::RequestParseError as JsonRpcRequestParseError;
-
 pub struct Config<'a> {
     /// Chain to connect to.
     pub chain: ChainConfig<'a>,
@@ -170,9 +168,7 @@ impl Client {
     /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint of the chain.
     ///
     /// The virtual endpoint doesn't have any limit.
-    ///
-    /// Returns an error if the JSON-RPC request is malformed.
-    pub fn send_json_rpc_request(&self, request: String) -> Result<(), JsonRpcRequestParseError> {
+    pub fn send_json_rpc_request(&self, request: String) {
         self.json_rpc_service.send_request(request)
     }
 

@@ -32,7 +32,6 @@ export {
     SmoldotBytecode,
     CrashError,
     JsonRpcDisabledError,
-    MalformedJsonRpcError,
     QueueFullError,
     LogCallback
 } from './public-types.js';

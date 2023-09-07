@@ -49,11 +49,7 @@ use alloc::{
     sync::Arc,
 };
 use core::num::NonZeroU32;
-use smoldot::{
-    chain_spec,
-    json_rpc::{self, service},
-    libp2p::PeerId,
-};
+use smoldot::{chain_spec, json_rpc::service, libp2p::PeerId};
 
 /// Configuration for [`service()`].
 pub struct Config {
@@ -135,8 +131,7 @@ impl Frontend {
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
     /// if the requests take a long time to process or if [`Frontend::next_json_rpc_response`]
-    /// isn't called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
-    /// JSON-RPC response to immediately send back to the user.
+    /// isn't called often enough.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let log_friendly_request =
             crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
@@ -160,18 +155,6 @@ impl Frontend {
             }) => Err(HandleRpcError::TooManyPendingRequests {
                 json_rpc_request: request,
             }),
-            Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::MalformedJson(error),
-                ..
-            }) => {
-                // If the request isn't even a valid JSON-RPC request, we can't even send back a
-                // response. We have no choice but to immediately refuse the request.
-                log::warn!(
-                    target: &self.log_target,
-                    "Refused malformed JSON-RPC request: {}", error
-                );
-                Err(HandleRpcError::MalformedJsonRpc(error))
-            }
             Err(service::TrySendRequestError {
                 cause: service::TrySendRequestErrorCause::ClientMainTaskDestroyed,
                 ..
@@ -291,31 +274,4 @@ pub enum HandleRpcError {
         /// Request that was being queued.
         json_rpc_request: String,
     },
-    /// The request isn't a valid JSON-RPC request.
-    #[display(fmt = "The request isn't a valid JSON-RPC request: {_0}")]
-    MalformedJsonRpc(json_rpc::parse::ParseError),
-}
-
-impl HandleRpcError {
-    /// Builds the JSON-RPC error string corresponding to this error.
-    ///
-    /// Returns `None` if the JSON-RPC requests isn't valid JSON-RPC or if the call was a
-    /// notification.
-    pub fn into_json_rpc_error(self) -> Option<String> {
-        let json_rpc_request = match self {
-            HandleRpcError::TooManyPendingRequests { json_rpc_request } => json_rpc_request,
-            HandleRpcError::MalformedJsonRpc(_) => return None,
-        };
-
-        match json_rpc::parse::parse_request(&json_rpc_request) {
-            Ok(json_rpc::parse::Request {
-                id_json: Some(id), ..
-            }) => Some(json_rpc::parse::build_error_response(
-                id,
-                json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
-                None,
-            )),
-            Ok(json_rpc::parse::Request { id_json: None, .. }) | Err(_) => None,
-        }
-    }
 }
