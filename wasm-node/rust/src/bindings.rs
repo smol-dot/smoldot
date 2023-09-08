@@ -34,16 +34,6 @@
 //!
 //! This avoids potential stack overflows and tricky borrowing-related situations.
 //!
-//! # About wasi
-//!
-//! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
-//! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source
-//! of randomness and time.
-//!
-//! Consequently, the exports found in the `extern` block below are not the only functions that
-//! must be implemented. Several functions required by the Wasi ABI are also used. The best place
-//! to find documentation at the moment is <https://docs.rs/wasi>.
-//!
 //! # About `u32`s and JavaScript
 //!
 //! Many functions below accept as parameter or return a `u32`. In reality, however, the
@@ -154,7 +144,7 @@ extern "C" {
     /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
     /// of the duration.
     ///
-    /// When [`timer_finished`] is called, the value of the monotonic clock (in the WASI bindings)
+    /// When [`timer_finished`] is called, the value of the monotonic clock (in the bindings)
     /// must have increased by at least the given number of `milliseconds`.
     ///
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
