@@ -34,32 +34,6 @@ if (process.argv.slice(2).indexOf("--release") !== -1) {
 if (buildProfile != 'debug' && buildProfile != 'min-size-release')
     throw new Error("Either --debug or --release must be passed");
 
-// The Rust version to use.
-// The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
-// possible for the wasm-js bindings to change between two Rust versions. Feel free to update
-// this version pin whenever you like, provided it continues to build.
-const rustVersion = '1.72.0';
-
-// Assume that the user has `rustup` installed and make sure that `rust_version` is available.
-// Because `rustup install` requires an Internet connection, check whether the toolchain is
-// already installed before attempting it.
-try {
-    child_process.execSync(
-        "rustup which --toolchain " + rustVersion + " cargo",
-        { 'stdio': 'inherit' }
-    );
-} catch (error) {
-    child_process.execSync(
-        "rustup install --no-self-update --profile=minimal " + rustVersion,
-        { 'stdio': 'inherit' }
-    );
-}
-// `rustup target add` doesn't require an Internet connection if the target is already installed.
-child_process.execSync(
-    "rustup target add --toolchain=" + rustVersion + " wasm32-unknown-unknown",
-    { 'stdio': 'inherit' }
-);
-
 // The important step in this script is running `cargo build --target wasm32-unknown-unknown` on
 // the Rust code. This generates a `wasm` file in `target/wasm32-unknown-unknown`.
 // Some optional Wasm features are enabled during the compilation in order to speed up the
@@ -78,7 +52,7 @@ child_process.execSync(
 // feature.
 // See also the issue: <https://github.com/smol-dot/smoldot/issues/350>
 child_process.execSync(
-    "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-unknown-unknown --no-default-features " +
+    "cargo build --package smoldot-light-wasm --target wasm32-unknown-unknown --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
     { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
 );
