@@ -1104,6 +1104,8 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         // complexity to avoid it is probably not worth the speed gain.
         let finalized_blocks = apply
             .apply()
+            .filter(|b| matches!(b.ty, blocks_tree::RemovedBlockType::Finalized))
+            .map(|b| b.user_data)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()

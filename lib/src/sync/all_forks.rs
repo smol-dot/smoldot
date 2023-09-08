@@ -417,6 +417,7 @@ enum FinalityProof {
 }
 
 struct Block<TBl> {
+    // TODO: redundant with NonFinalizedTree
     header: header::Header,
     user_data: TBl,
 }
@@ -2163,15 +2164,24 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         // TODO: DRY
                         let finalized_blocks_iter = success.apply();
                         let updates_best_block = finalized_blocks_iter.updates_best_block();
-                        let finalized_blocks = finalized_blocks_iter
-                            .map(|b| (b.header, b.user_data))
-                            .collect::<Vec<_>>();
+                        let mut finalized_blocks = Vec::new();
+                        let mut pruned_blocks = Vec::new();
+                        for block in finalized_blocks_iter {
+                            if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
+                                finalized_blocks
+                                    .push((block.user_data.header, block.user_data.user_data));
+                            } else {
+                                pruned_blocks
+                                    .push((block.user_data.header, block.user_data.user_data));
+                            }
+                        }
                         let _finalized_blocks =
                             self.parent.inner.blocks.set_finalized_block_height(
                                 finalized_blocks.last().unwrap().0.number,
                             );
                         FinalityProofVerifyOutcome::NewFinalized {
                             finalized_blocks,
+                            pruned_blocks,
                             updates_best_block,
                         }
                     }
@@ -2218,15 +2228,24 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                     Ok(success) => {
                         let finalized_blocks_iter = success.apply();
                         let updates_best_block = finalized_blocks_iter.updates_best_block();
-                        let finalized_blocks = finalized_blocks_iter
-                            .map(|b| (b.header, b.user_data))
-                            .collect::<Vec<_>>();
+                        let mut finalized_blocks = Vec::new();
+                        let mut pruned_blocks = Vec::new();
+                        for block in finalized_blocks_iter {
+                            if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
+                                finalized_blocks
+                                    .push((block.user_data.header, block.user_data.user_data));
+                            } else {
+                                pruned_blocks
+                                    .push((block.user_data.header, block.user_data.user_data));
+                            }
+                        }
                         let _finalized_blocks =
                             self.parent.inner.blocks.set_finalized_block_height(
                                 finalized_blocks.last().unwrap().0.number,
                             );
                         FinalityProofVerifyOutcome::NewFinalized {
                             finalized_blocks,
+                            pruned_blocks,
                             updates_best_block,
                         }
                     }
@@ -2319,7 +2338,8 @@ pub enum FinalityProofVerifyOutcome<TBl> {
         /// List of finalized blocks, in decreasing block number.
         // TODO: use `Vec<u8>` instead of `Header`?
         finalized_blocks: Vec<(header::Header, TBl)>,
-        // TODO: missing pruned blocks
+        /// List of blocks that aren't descendant of the latest finalized block, in an unspecified order.
+        pruned_blocks: Vec<(header::Header, TBl)>,
         /// If `true`, this operation modifies the best block of the non-finalized chain.
         /// This can happen if the previous best block isn't a descendant of the now finalized
         /// block.

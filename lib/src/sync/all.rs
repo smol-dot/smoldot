@@ -2697,6 +2697,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                         sync,
                         all_forks::FinalityProofVerifyOutcome::NewFinalized {
                             finalized_blocks,
+                            pruned_blocks,
                             updates_best_block,
                         },
                     ) => (
@@ -2710,6 +2711,10 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                     justifications: Vec::new(), // TODO: wrong
                                     user_data: b.1.unwrap(),
                                 })
+                                .collect(),
+                            pruned_blocks: pruned_blocks
+                                .into_iter()
+                                .map(|b| b.0.hash(self.shared.block_number_bytes))
                                 .collect(),
                             updates_best_block,
                         },
@@ -2753,6 +2758,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                 full: b.full.map(|b| BlockFull { body: b.body }),
                             })
                             .collect(),
+                        pruned_blocks: Vec::new(),
                         updates_best_block: false,
                     },
                 ),
@@ -2775,7 +2781,9 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
         finalized_blocks: Vec<Block<TBl>>,
-        // TODO: missing pruned blocks
+        /// List of hashes of blocks that are no longer descendant of the finalized block, in
+        /// an unspecified order.
+        pruned_blocks: Vec<[u8; 32]>,
         /// If `true`, this operation modifies the best block of the non-finalized chain.
         /// This can happen if the previous best block isn't a descendant of the now finalized
         /// block.
