@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Justifications are no longer downloaded for blocks that can't be finalized because an earlier block needs to be finalized first. ([#1127](https://github.com/smol-dot/smoldot/pull/1127))
+
 ## 2.0.1 - 2023-09-08
 
 ### Fixed
