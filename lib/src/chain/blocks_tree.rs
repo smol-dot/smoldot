@@ -572,7 +572,7 @@ struct Block<T> {
     /// Cache of the hash of the block. Always equal to the hash of the header stored in this
     /// same struct.
     hash: [u8; 32],
-    /// Number contains in [`Block::header`].
+    /// Number contained in [`Block::header`].
     number: u64,
     /// Changes to the consensus made by the block.
     consensus: BlockConsensus,
