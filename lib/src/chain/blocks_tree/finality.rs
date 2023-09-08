@@ -201,20 +201,17 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// The block must have been passed to [`NonFinalizedTree::verify_header`].
     ///
-    /// Returns an iterator containing the now-finalized blocks in decreasing block numbers. In
-    /// other words, the first element of the iterator is always the block whose hash is the
-    /// `block_hash` passed as parameter.
+    /// Returns an iterator containing the now-finalized blocks and the pruned blocks in "reverse
+    /// hierarchical order". Each block is yielded by the iterator before its parent.
     ///
-    /// > **Note**: This function returns blocks in decreasing block number, because any other
-    /// >           ordering would incur a performance cost. While returning blocks in increasing
-    /// >           block number would often be more convenient, the overhead of doing so is
-    /// >           moved to the user.
+    /// > **Note**: This function returns blocks in this order, because any other ordering would
+    /// >           incur a performance cost. While returning blocks in hierarchical order would
+    /// >           often be more convenient, the overhead of doing so is moved to the user.
     ///
     /// The pruning is completely performed, even if the iterator is dropped eagerly.
     ///
     /// If necessary, the current best block will be updated to be a descendant of the
     /// newly-finalized block.
-    // TODO: should return the pruned blocks as well
     pub fn set_finalized_block(
         &mut self,
         block_hash: &[u8; 32],
@@ -589,7 +586,7 @@ impl<'a, T> SetFinalizedBlockIter<'a, T> {
 }
 
 impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
-    type Item = T;
+    type Item = RemovedBlock<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -600,10 +597,16 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
                 .blocks_by_best_score
                 .remove(&pruned.user_data.best_score);
             debug_assert_eq!(_removed, Some(pruned.index));
-            if !pruned.is_prune_target_ancestor {
-                continue;
-            }
-            break Some(pruned.user_data.user_data);
+            break Some(RemovedBlock {
+                block_hash: pruned.user_data.hash,
+                scale_encoded_header: pruned.user_data.header,
+                user_data: pruned.user_data.user_data,
+                ty: if pruned.is_prune_target_ancestor {
+                    RemovedBlockType::Finalized
+                } else {
+                    RemovedBlockType::Pruned
+                },
+            });
         }
     }
 
@@ -624,4 +627,26 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
 pub enum SetFinalizedError {
     /// Block must have been passed to [`NonFinalizedTree::insert_verified_header`] in the past.
     UnknownBlock,
+}
+
+/// Block removed from the [`NonFinalizedTree`] by a [`SetFinalizedBlockIter`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RemovedBlock<T> {
+    /// Hash of the block.
+    pub block_hash: [u8; 32],
+    /// User data that was associated with that block in the [`NonFinalizedTree`].
+    pub user_data: T,
+    /// Reason why the block was removed.
+    pub ty: RemovedBlockType,
+    /// SCALE-encoded header of the block.
+    pub scale_encoded_header: Vec<u8>,
+}
+
+/// Reason why a block was removed from the [`NonFinalizedTree`] by a [`SetFinalizedBlockIter`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum RemovedBlockType {
+    /// Block is now part of the finalized chain.
+    Finalized,
+    /// Block is not a descendant of the new finalized block.
+    Pruned,
 }
