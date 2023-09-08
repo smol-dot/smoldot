@@ -75,6 +75,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
 
         let mut pinned_blocks =
             hashbrown::HashSet::with_capacity_and_hasher(32, fnv::FnvBuildHasher::default());
+        let mut current_best_block = consensus_service_subscription.finalized_block_hash;
 
         pinned_blocks.insert(consensus_service_subscription.finalized_block_hash);
         json_rpc_subscription
@@ -99,6 +100,34 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
 
         for block in consensus_service_subscription.non_finalized_blocks_ancestry_order {
             pinned_blocks.insert(block.block_hash);
+            json_rpc_subscription
+                .send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
+                    subscription: (&json_rpc_subscription_id).into(),
+                    result: methods::FollowEvent::NewBlock {
+                        block_hash: methods::HashHexString(block.block_hash),
+                        new_runtime: if let (Some(new_runtime), true) =
+                            (&block.runtime_update, config.with_runtime)
+                        {
+                            Some(convert_runtime_spec(new_runtime.runtime_version()))
+                        } else {
+                            None
+                        },
+                        parent_block_hash: methods::HashHexString(block.parent_hash),
+                    },
+                })
+                .await;
+
+            if block.is_new_best {
+                current_best_block = block.block_hash;
+                json_rpc_subscription
+                    .send_notification(methods::ServerToClient::chainHead_unstable_followEvent {
+                        subscription: (&json_rpc_subscription_id).into(),
+                        result: methods::FollowEvent::BestBlockChanged {
+                            best_block_hash: methods::HashHexString(block.block_hash),
+                        },
+                    })
+                    .await;
+            }
         }
 
         loop {
@@ -139,6 +168,10 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                     } else {
                         for block_hash in block_hashes {
                             pinned_blocks.remove(&block_hash);
+                            config
+                                .consensus_service
+                                .unpin_block(consensus_service_subscription.id, block_hash)
+                                .await;
                         }
                         let _ = outcome.send(Ok(()));
                     }
@@ -167,6 +200,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                         .await;
 
                     if block.is_new_best {
+                        current_best_block = block.block_hash;
                         json_rpc_subscription
                             .send_notification(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
@@ -181,7 +215,8 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                 }
                 WhatHappened::ConsensusNotification(
                     consensus_service::Notification::Finalized {
-                        hash,
+                        finalized_blocks_hashes,
+                        pruned_blocks_hashes,
                         best_block_hash,
                     },
                 ) => {
@@ -190,12 +225,32 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                             methods::ServerToClient::chainHead_unstable_followEvent {
                                 subscription: (&json_rpc_subscription_id).into(),
                                 result: methods::FollowEvent::Finalized {
-                                    finalized_blocks_hashes: todo!(),
-                                    pruned_blocks_hashes: todo!(),
+                                    finalized_blocks_hashes: finalized_blocks_hashes
+                                        .into_iter()
+                                        .map(methods::HashHexString)
+                                        .collect(),
+                                    pruned_blocks_hashes: pruned_blocks_hashes
+                                        .into_iter()
+                                        .map(methods::HashHexString)
+                                        .collect(),
                                 },
                             },
                         )
                         .await;
+
+                    if best_block_hash != current_best_block {
+                        current_best_block = best_block_hash;
+                        json_rpc_subscription
+                            .send_notification(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: (&json_rpc_subscription_id).into(),
+                                    result: methods::FollowEvent::BestBlockChanged {
+                                        best_block_hash: methods::HashHexString(best_block_hash),
+                                    },
+                                },
+                            )
+                            .await;
+                    }
                 }
                 WhatHappened::ConsensusSubscriptionStop => {
                     json_rpc_subscription
