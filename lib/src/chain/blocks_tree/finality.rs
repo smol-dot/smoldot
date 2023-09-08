@@ -405,8 +405,8 @@ impl<T> NonFinalizedTree<T> {
             _ => unreachable!(),
         }
 
-        // Update `self.finalized_block_header`, `self.finalized_block_hash`, and
-        // `self.finalized_best_score`.
+        // Update `self.finalized_block_header`, `self.finalized_block_hash`,
+        // `self.finalized_block_number`, and `self.finalized_best_score`.
         mem::swap(
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
