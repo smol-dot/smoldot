@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic in Yamux state machine when a remote closes a substream with an active timeout. ([#1121](https://github.com/smol-dot/smoldot/pull/1121))
+
 ## 2.0.0 - 2023-09-07
 
 ### Remove
