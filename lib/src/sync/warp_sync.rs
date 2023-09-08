@@ -243,6 +243,9 @@ pub fn start_warp_sync<TSrc, TRq>(
             .finalized_block_header
             .into(),
         warped_finality: config.start_chain_information.as_ref().finality.into(),
+        runtime_calls: runtime_calls_default_value(
+            config.start_chain_information.as_ref().consensus,
+        ),
         verified_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
         num_download_ahead_fragments: config.num_download_ahead_fragments,
@@ -387,6 +390,9 @@ pub struct WarpSync<TSrc, TRq> {
     verify_queue: VecDeque<PendingVerify>,
     /// State of the download of the runtime and chain information call proofs.
     runtime_download: RuntimeDownload,
+    /// For each call required by the chain information builder, whether it has been downloaded yet.
+    runtime_calls:
+        hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
 }
 
 enum RuntimeDownload {
@@ -404,13 +410,6 @@ enum RuntimeDownload {
     Verified {
         downloaded_runtime: DownloadedRuntime,
         chain_info_builder: chain_information::build::ChainInformationBuild,
-        /// For each call required by the chain information builder, whether it has been
-        /// downloaded yet.
-        calls: hashbrown::HashMap<
-            chain_information::build::RuntimeCall,
-            CallProof,
-            fnv::FnvBuildHasher,
-        >,
     },
 }
 
@@ -443,6 +442,44 @@ enum CallProof {
     NotStarted,
     Downloading(RequestId),
     Downloaded(Vec<u8>),
+}
+
+/// Returns the default value for [`WarpSync::runtime_calls`].
+///
+/// Contains the list of calls that we anticipate the chain information builder will make. This
+/// assumes that the runtime is the latest version available.
+fn runtime_calls_default_value(
+    verified_chain_information_consensus: chain_information::ChainInformationConsensusRef,
+) -> hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher> {
+    let mut list = hashbrown::HashMap::with_capacity_and_hasher(8, Default::default());
+    match verified_chain_information_consensus {
+        ChainInformationConsensusRef::Aura { .. } => {
+            list.insert(
+                chain_information::build::RuntimeCall::AuraApiAuthorities,
+                CallProof::NotStarted,
+            );
+            list.insert(
+                chain_information::build::RuntimeCall::AuraApiSlotDuration,
+                CallProof::NotStarted,
+            );
+        }
+        ChainInformationConsensusRef::Babe { .. } => {
+            list.insert(
+                chain_information::build::RuntimeCall::BabeApiCurrentEpoch,
+                CallProof::NotStarted,
+            );
+            list.insert(
+                chain_information::build::RuntimeCall::BabeApiNextEpoch,
+                CallProof::NotStarted,
+            );
+            list.insert(
+                chain_information::build::RuntimeCall::BabeApiConfiguration,
+                CallProof::NotStarted,
+            );
+        }
+        ChainInformationConsensusRef::Unknown => {}
+    }
+    list
 }
 
 /// See [`WarpSync::status`].
@@ -605,26 +642,21 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             if self.warp_sync_fragments_download == Some(RequestId(index)) {
                 self.warp_sync_fragments_download = None;
             }
-            match &mut self.runtime_download {
-                RuntimeDownload::Downloading {
-                    request_id,
-                    hint_doesnt_match,
-                } => {
-                    if *request_id == RequestId(index) {
-                        self.runtime_download = RuntimeDownload::NotStarted {
-                            hint_doesnt_match: *hint_doesnt_match,
-                        };
-                    }
+            for call in self.runtime_calls.values_mut() {
+                if matches!(call, CallProof::Downloading(rq_id) if *rq_id == RequestId(index)) {
+                    *call = CallProof::NotStarted;
                 }
-                RuntimeDownload::Verified { calls, .. } => {
-                    for call in calls.values_mut() {
-                        if matches!(call, CallProof::Downloading(rq_id) if *rq_id == RequestId(index))
-                        {
-                            *call = CallProof::NotStarted;
-                        }
-                    }
+            }
+            if let RuntimeDownload::Downloading {
+                request_id,
+                hint_doesnt_match,
+            } = &mut self.runtime_download
+            {
+                if *request_id == RequestId(index) {
+                    self.runtime_download = RuntimeDownload::NotStarted {
+                        hint_doesnt_match: *hint_doesnt_match,
+                    };
                 }
-                _ => {}
             }
             obsolete_requests.push((RequestId(index), user_data));
         }
@@ -767,38 +799,33 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 either::Right(iter::empty())
             };
 
-        // If we are in the appropriate phase, return the list of runtime calls indicated by the
-        // chain information builder state machine.
-        let call_proofs = if let RuntimeDownload::Verified { calls, .. } = &self.runtime_download {
-            either::Left(
-                calls
-                    .iter()
-                    .filter(|(_, v)| matches!(v, CallProof::NotStarted))
-                    .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
-                        block_hash: self.warped_header.hash(self.block_number_bytes),
-                        function_name: call.function_name().into(),
-                        parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
-                    })
-                    .flat_map(move |request_detail| {
-                        // Sources are ordered by increasing finalized block height, in order to
-                        // have the highest chance for the block to not be pruned.
-                        let sources_with_block = self
-                            .sources_by_finalized_height
-                            .range((self.warped_header.number, SourceId(usize::min_value()))..)
-                            .map(|(_, src_id)| src_id);
+        // Return the list of runtime calls indicated by the chain information builder state
+        // machine.
+        let call_proofs = self
+            .runtime_calls
+            .iter()
+            .filter(|(_, v)| matches!(v, CallProof::NotStarted))
+            .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
+                block_hash: self.warped_header.hash(self.block_number_bytes),
+                function_name: call.function_name().into(),
+                parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
+            })
+            .flat_map(move |request_detail| {
+                // Sources are ordered by increasing finalized block height, in order to
+                // have the highest chance for the block to not be pruned.
+                let sources_with_block = self
+                    .sources_by_finalized_height
+                    .range((self.warped_header.number, SourceId(usize::min_value()))..)
+                    .map(|(_, src_id)| src_id);
 
-                        sources_with_block.map(move |source_id| {
-                            (
-                                *source_id,
-                                &self.sources[source_id.0].user_data,
-                                request_detail.clone(),
-                            )
-                        })
-                    }),
-            )
-        } else {
-            either::Right(iter::empty())
-        };
+                sources_with_block.map(move |source_id| {
+                    (
+                        *source_id,
+                        &self.sources[source_id.0].user_data,
+                        request_detail.clone(),
+                    )
+                })
+            });
 
         // Chain all these demanded requests together.
         warp_sync_request
@@ -879,9 +906,9 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     function_name,
                     parameter_vectored,
                 },
-                RuntimeDownload::Verified { calls, .. },
+                _,
             ) => {
-                for (info, status) in calls {
+                for (info, status) in &mut self.runtime_calls {
                     if matches!(status, CallProof::NotStarted)
                         && self.sources[source_id.0].finalized_block_height
                             >= self.warped_header.number
@@ -913,25 +940,22 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             self.warp_sync_fragments_download = None;
         }
 
-        match &mut self.runtime_download {
-            RuntimeDownload::Downloading {
-                request_id,
-                hint_doesnt_match,
-            } => {
-                if *request_id == id {
-                    self.runtime_download = RuntimeDownload::NotStarted {
-                        hint_doesnt_match: *hint_doesnt_match,
-                    }
+        for call in self.runtime_calls.values_mut() {
+            if matches!(call, CallProof::Downloading(rq_id) if *rq_id == id) {
+                *call = CallProof::NotStarted;
+            }
+        }
+
+        if let RuntimeDownload::Downloading {
+            request_id,
+            hint_doesnt_match,
+        } = &mut self.runtime_download
+        {
+            if *request_id == id {
+                self.runtime_download = RuntimeDownload::NotStarted {
+                    hint_doesnt_match: *hint_doesnt_match,
                 }
             }
-            RuntimeDownload::Verified { calls, .. } => {
-                for call in calls.values_mut() {
-                    if matches!(call, CallProof::Downloading(rq_id) if *rq_id == id) {
-                        *call = CallProof::NotStarted;
-                    }
-                }
-            }
-            _ => {}
         }
 
         match self.in_progress_requests.remove(id.0) {
@@ -1005,31 +1029,21 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         request_id: RequestId,
         response: Vec<u8>,
     ) -> TRq {
-        match (
-            self.in_progress_requests.remove(request_id.0),
-            &mut self.runtime_download,
-        ) {
-            ((_, user_data, _), RuntimeDownload::Verified { ref mut calls, .. }) => {
-                for call in calls.values_mut() {
-                    if matches!(call, CallProof::Downloading(rq_id) if *rq_id == request_id) {
-                        *call = CallProof::Downloaded(response);
-                        break;
-                    }
-                }
-
-                user_data
-            }
-
-            // Uninteresting request.
-            ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => user_data,
-
+        let (_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }) =
+            self.in_progress_requests.remove(request_id.0)
+        else {
             // Wrong request type.
-            (
-                (_, _, RequestDetail::StorageGetMerkleProof { .. })
-                | (_, _, RequestDetail::WarpSyncRequest { .. }),
-                _,
-            ) => panic!(),
+            panic!()
+        };
+
+        for call in self.runtime_calls.values_mut() {
+            if matches!(call, CallProof::Downloading(rq_id) if *rq_id == request_id) {
+                *call = CallProof::Downloaded(response);
+                break;
+            }
         }
+
+        user_data
     }
 
     /// Injects a successful response and removes the given request from the state machine. Returns
@@ -1076,15 +1090,15 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     ///
     /// This function takes ownership of `self` and yields it back after the operation is finished.
     pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
-        if let RuntimeDownload::Verified { calls, .. } = &self.runtime_download {
-            // If we've downloaded everything that was needed, switch to "build chain information"
-            // mode.
-            if calls
+        // If we've downloaded everything that was needed, switch to "build chain information"
+        // mode.
+        if matches!(self.runtime_download, RuntimeDownload::Verified { .. })
+            && self
+                .runtime_calls
                 .values()
                 .all(|c| matches!(c, CallProof::Downloaded(_)))
-            {
-                return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
-            }
+        {
+            return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
         }
 
         if let RuntimeDownload::NotVerified { .. } = &self.runtime_download {
@@ -1352,6 +1366,8 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         self.inner.runtime_download = RuntimeDownload::NotStarted {
             hint_doesnt_match: false,
         };
+        self.inner.runtime_calls =
+            runtime_calls_default_value(self.inner.verified_chain_information.as_ref().consensus);
         if let Some(new_authorities_list) = new_authorities_list {
             *finalized_triggered_authorities = new_authorities_list;
             *after_finalized_block_authorities_set_id += 1;
@@ -1584,21 +1600,17 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             },
         );
 
-        let (calls, chain_info_builder) = match chain_info_builder {
-            builder @ chain_information::build::ChainInformationBuild::Finished { .. } => {
-                (Default::default(), builder)
+        if let chain_information::build::ChainInformationBuild::InProgress(in_progress) =
+            &chain_info_builder
+        {
+            for call in in_progress.remaining_calls() {
+                if let hashbrown::hash_map::Entry::Vacant(entry) =
+                    self.inner.runtime_calls.entry(call)
+                {
+                    entry.insert(CallProof::NotStarted);
+                }
             }
-            chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
-                let calls = in_progress
-                    .remaining_calls()
-                    .map(|call| (call, CallProof::NotStarted))
-                    .collect();
-                (
-                    calls,
-                    chain_information::build::ChainInformationBuild::InProgress(in_progress),
-                )
-            }
-        };
+        }
 
         self.inner.runtime_download = RuntimeDownload::Verified {
             downloaded_runtime: DownloadedRuntime {
@@ -1608,7 +1620,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 closest_ancestor_excluding: Some(finalized_storage_code_closest_ancestor_excluding),
             },
             chain_info_builder,
-            calls,
         };
 
         (self.inner, None)
@@ -1627,7 +1638,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         let RuntimeDownload::Verified {
             mut chain_info_builder,
             downloaded_runtime,
-            calls,
             ..
         } = mem::replace(
             &mut self.inner.runtime_download,
@@ -1639,18 +1649,20 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             unreachable!()
         };
 
-        debug_assert!(calls
+        let runtime_calls = mem::take(&mut self.inner.runtime_calls);
+
+        debug_assert!(runtime_calls
             .values()
             .all(|c| matches!(c, CallProof::Downloaded(_))));
 
         // Decode all the Merkle proofs that have been received.
         let calls = {
             let mut decoded_proofs = hashbrown::HashMap::with_capacity_and_hasher(
-                calls.len(),
+                runtime_calls.len(),
                 fnv::FnvBuildHasher::default(),
             );
 
-            for (call, proof) in calls {
+            for (call, proof) in runtime_calls {
                 let CallProof::Downloaded(proof) = proof else {
                     unreachable!()
                 };
@@ -1676,6 +1688,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     virtual_machine,
                 } => {
                     self.inner.verified_chain_information = chain_information;
+                    self.inner.runtime_calls = runtime_calls_default_value(
+                        self.inner.verified_chain_information.as_ref().consensus,
+                    );
                     return (
                         self.inner,
                         Ok(RuntimeInformation {
