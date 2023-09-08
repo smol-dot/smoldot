@@ -455,6 +455,7 @@ impl<T> NonFinalizedTree<T> {
 
         Ok(HeaderVerifySuccess::Verified {
             verified_header: VerifiedHeader {
+                number: decoded_header.number,
                 scale_encoded_header,
                 consensus_update,
                 finality_update,
@@ -514,6 +515,7 @@ impl<T> NonFinalizedTree<T> {
             Block {
                 header: verified_header.scale_encoded_header,
                 hash: verified_header.hash,
+                number: verified_header.number,
                 consensus: verified_header.consensus_update,
                 finality: verified_header.finality_update,
                 best_score,
@@ -548,6 +550,7 @@ pub struct VerifiedHeader {
     best_score_num_primary_slots: u64,
     best_score_num_secondary_slots: u64,
     hash: [u8; 32],
+    number: u64,
 }
 
 impl VerifiedHeader {

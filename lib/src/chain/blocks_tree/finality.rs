@@ -38,29 +38,22 @@ impl<T> NonFinalizedTree<T> {
                 || !matches!(self.finality, Finality::Outsourced)
         );
 
-        // TODO: add finalized block number as a cached field?
         self.blocks_trigger_gp_change
             .range((
                 ops::Bound::Excluded((
-                    Some(self.finalized_block_header().number),
+                    Some(self.finalized_block_number),
                     fork_tree::NodeIndex::max_value(),
                 )),
                 ops::Bound::Unbounded,
             ))
             .map(|(_prev_auth_change_trigger_number, block_index)| {
-                debug_assert!(_prev_auth_change_trigger_number.is_some());
-
-                let block = &self
+                debug_assert!(_prev_auth_change_trigger_number
+                    .map_or(false, |n| n > self.finalized_block_number));
+                let block = self
                     .blocks
                     .get(*block_index)
                     .unwrap_or_else(|| unreachable!());
-
-                (
-                    header::decode(&block.header, self.block_number_bytes)
-                        .unwrap()
-                        .number,
-                    &block.hash,
-                )
+                (block.number, &block.hash)
             })
     }
 
@@ -251,12 +244,7 @@ impl<T> NonFinalizedTree<T> {
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
-                let finalized_block_number =
-                    header::decode(&self.finalized_block_header, self.block_number_bytes)
-                        .unwrap()
-                        .number;
-
-                match target_number.cmp(&finalized_block_number) {
+                match target_number.cmp(&self.finalized_block_number) {
                     cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
                         return Err(FinalityVerifyError::EqualToFinalized)
                     }
@@ -287,7 +275,7 @@ impl<T> NonFinalizedTree<T> {
                 } = self.blocks.get(block_index).unwrap().finality
                 {
                     if let Some(prev_auth_change_trigger_number) = prev_auth_change_trigger_number {
-                        if *prev_auth_change_trigger_number > finalized_block_number {
+                        if *prev_auth_change_trigger_number > self.finalized_block_number {
                             return Err(FinalityVerifyError::TooFarAhead {
                                 justification_block_number: target_number,
                                 justification_block_hash: *target_hash,
@@ -353,11 +341,7 @@ impl<T> NonFinalizedTree<T> {
                 );
                 debug_assert!(scheduled_change
                     .as_ref()
-                    .map(|(n, _)| *n
-                        > header::decode(&new_finalized_block.header, self.block_number_bytes)
-                            .unwrap()
-                            .number)
-                    .unwrap_or(true));
+                    .map_or(true, |(n, _)| *n > new_finalized_block.number));
 
                 *after_finalized_block_authorities_set_id = *after_block_authorities_set_id;
                 *finalized_triggered_authorities = triggered_authorities.clone();

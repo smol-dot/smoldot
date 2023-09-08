@@ -118,6 +118,8 @@ pub struct NonFinalizedTree<T> {
     finalized_block_header: Vec<u8>,
     /// Hash of [`NonFinalizedTree::finalized_block_header`].
     finalized_block_hash: [u8; 32],
+    /// Number of [`NonFinalizedTree::finalized_block_header`].
+    finalized_block_number: u64,
     /// State of the chain finality engine.
     finality: Finality,
     /// State of the consensus of the finalized block.
@@ -162,15 +164,14 @@ impl<T> NonFinalizedTree<T> {
         let chain_information: chain_information::ChainInformation =
             config.chain_information.into();
 
-        let finalized_block_hash = chain_information
-            .finalized_block_header
-            .hash(config.block_number_bytes);
-
         NonFinalizedTree {
+            finalized_block_number: chain_information.finalized_block_header.number,
+            finalized_block_hash: chain_information
+                .finalized_block_header
+                .hash(config.block_number_bytes),
             finalized_block_header: chain_information
                 .finalized_block_header
                 .scale_encoding_vec(config.block_number_bytes),
-            finalized_block_hash,
             finality: match chain_information.finality {
                 chain_information::ChainInformationFinality::Outsourced => Finality::Outsourced,
                 chain_information::ChainInformationFinality::Grandpa {
@@ -571,6 +572,8 @@ struct Block<T> {
     /// Cache of the hash of the block. Always equal to the hash of the header stored in this
     /// same struct.
     hash: [u8; 32],
+    /// Number contains in [`Block::header`].
+    number: u64,
     /// Changes to the consensus made by the block.
     consensus: BlockConsensus,
     /// Information about finality attached to each block.
