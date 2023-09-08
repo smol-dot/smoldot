@@ -133,7 +133,7 @@ enum ToBackground {
     SubscribeAll {
         buffer_size: usize,
         // TODO: unused field
-        _max_pinned_blocks: NonZeroUsize,
+        _max_finalized_pinned_blocks: NonZeroUsize,
         result_tx: oneshot::Sender<SubscribeAll>,
     },
     GetSyncState {
@@ -392,7 +392,7 @@ impl ConsensusService {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_pinned_blocks: NonZeroUsize,
+        max_finalized_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
@@ -401,7 +401,7 @@ impl ConsensusService {
             .await
             .send(ToBackground::SubscribeAll {
                 buffer_size,
-                _max_pinned_blocks: max_pinned_blocks,
+                _max_finalized_pinned_blocks: max_finalized_pinned_blocks,
                 result_tx,
             })
             .await;
@@ -799,7 +799,7 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
-                        Some(ToBackground::SubscribeAll { buffer_size, _max_pinned_blocks: _, result_tx }) => {
+                        Some(ToBackground::SubscribeAll { buffer_size, _max_finalized_pinned_blocks: _, result_tx }) => {
                             let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                             // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
