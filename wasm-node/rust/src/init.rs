@@ -78,10 +78,6 @@ pub(crate) fn init(max_log_level: u32) {
         env!("CARGO_PKG_VERSION")
     );
 
-    // Simple fool-proof check to make sure that randomness is properly implemented.
-    assert_ne!(rand::random::<u64>(), 0);
-    assert_ne!(rand::random::<u64>(), rand::random::<u64>());
-
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
     platform::PLATFORM_REF.spawn_task(

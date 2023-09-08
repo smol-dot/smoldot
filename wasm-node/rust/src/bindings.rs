@@ -91,6 +91,25 @@ extern "C" {
     /// behave like `abort` and prevent any further execution.
     pub fn panic(message_ptr: u32, message_len: u32);
 
+    /// Fills the buffer of the WebAssembly virtual machine with random data, starting at `ptr`
+    /// and for `len` bytes.
+    ///
+    /// This data will be used in order to generate secrets. Do not use a dummy implementation!
+    pub fn random_get(ptr: u32, len: u32);
+
+    /// Returns the system clock in number of microseconds since the UNIX epoch, ignoring leap
+    /// seconds.
+    ///
+    /// This clock is allowed to go backwards.
+    ///
+    /// Must never return a negative number. Implementers should be aware that the system clock
+    /// can be negative, and abort execution if that is the case.
+    pub fn unix_timestamp_us() -> u64;
+
+    /// Returns the number of microseconds since an especified point in time. Must never decrease
+    /// over time.
+    pub fn monotonic_clock_us() -> u64;
+
     /// Copies the entire content of the buffer with the given index to the memory of the
     /// WebAssembly at offset `target_pointer`.
     ///

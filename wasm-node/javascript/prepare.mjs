@@ -56,12 +56,12 @@ try {
 }
 // `rustup target add` doesn't require an Internet connection if the target is already installed.
 child_process.execSync(
-    "rustup target add --toolchain=" + rustVersion + " wasm32-wasi",
+    "rustup target add --toolchain=" + rustVersion + " wasm32-unknown-unknown",
     { 'stdio': 'inherit' }
 );
 
-// The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
-// code. This generates a `wasm` file in `target/wasm32-wasi`.
+// The important step in this script is running `cargo build --target wasm32-unknown-unknown` on
+// the Rust code. This generates a `wasm` file in `target/wasm32-unknown-unknown`.
 // Some optional Wasm features are enabled during the compilation in order to speed up the
 // execution of smoldot.
 // SIMD is intentionally not enabled, because WASM engines seem to allow only SIMD instructions
@@ -72,16 +72,17 @@ child_process.execSync(
 // precompiled), but the missing optimizations shouldn't be too much of a problem. The Rust
 // standard library could be compiled with these features using the `-Z build-std` flag, but at
 // the time of the writing of this comment this would require an unstable version of Rust.
-// Use `rustc --print target-features --target wasm32-wasi` to see the list of target features.
+// Use `rustc --print target-features --target wasm32-unknown-unknown` to see the list of target
+// features.
 // See <https://webassembly.org/roadmap/> to know which version of which engine supports which
 // feature.
 // See also the issue: <https://github.com/smol-dot/smoldot/issues/350>
 child_process.execSync(
-    "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
+    "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-unknown-unknown --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
     { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
 );
-const rustOutput = "../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
+const rustOutput = "../../target/wasm32-unknown-unknown/" + buildProfile + "/smoldot_light_wasm.wasm";
 
 // The code below will write a variable number of files to the `src/internals/bytecode` directory.
 // Start by clearing all existing files from this directory in case there are some left from past

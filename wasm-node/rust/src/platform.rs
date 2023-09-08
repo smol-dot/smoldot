@@ -29,7 +29,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have
@@ -47,7 +46,7 @@ pub(crate) struct PlatformRef {}
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
-    type Instant = Instant;
+    type Instant = Duration;
     type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type StreamConnectFuture =
@@ -75,20 +74,22 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     >;
 
     fn now_from_unix_epoch(&self) -> Duration {
-        // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
-        // before the UNIX epoch.
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| panic!())
+        let microseconds = unsafe { bindings::unix_timestamp_us() };
+        Duration::from_micros(microseconds)
     }
 
     fn now(&self) -> Self::Instant {
-        Instant::now()
+        let microseconds = unsafe { bindings::monotonic_clock_us() };
+        Duration::from_micros(microseconds)
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
-        use rand::RngCore as _;
-        rand::thread_rng().fill_bytes(buffer);
+        unsafe {
+            bindings::random_get(
+                u32::try_from(buffer.as_mut_ptr() as usize).unwrap(),
+                u32::try_from(buffer.len()).unwrap(),
+            )
+        }
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
@@ -96,7 +97,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
-        Delay::new_at(when)
+        Delay::new_at_monotonic_clock(when)
     }
 
     fn spawn_task(
@@ -579,7 +580,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         Ok(ReadWriteAccess {
             read_write: read_write::ReadWrite {
-                now: Instant::now(),
+                now: unsafe { Duration::from_micros(bindings::monotonic_clock_us()) },
                 incoming_buffer: mem::take(&mut stream.read_buffer),
                 expected_incoming_bytes: Some(0),
                 read_bytes: 0,
@@ -598,12 +599,12 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 }
 
 pub(crate) struct ReadWriteAccess<'a> {
-    read_write: read_write::ReadWrite<Instant>,
+    read_write: read_write::ReadWrite<Duration>,
     stream: &'a mut StreamWrapper,
 }
 
 impl<'a> ops::Deref for ReadWriteAccess<'a> {
-    type Target = read_write::ReadWrite<Instant>;
+    type Target = read_write::ReadWrite<Duration>;
 
     fn deref(&self) -> &Self::Target {
         &self.read_write
@@ -636,7 +637,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
         self.stream.when_wake_up = self
             .read_write
             .wake_up_after
-            .map(|when| Delay::new_at(when));
+            .map(|when| Delay::new_at_monotonic_clock(when));
 
         self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
 
