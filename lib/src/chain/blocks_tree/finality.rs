@@ -411,8 +411,8 @@ impl<T> NonFinalizedTree<T> {
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self.finalized_block_hash =
-            header::hash_from_scale_encoded_header(&self.finalized_block_header);
+        self.finalized_block_hash = new_finalized_block.hash;
+        self.finalized_block_number = new_finalized_block.number;
         self.finalized_best_score = new_finalized_block.best_score;
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
