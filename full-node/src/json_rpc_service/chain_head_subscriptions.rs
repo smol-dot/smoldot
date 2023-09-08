@@ -172,31 +172,30 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                     };
 
                     if !pinned_blocks.contains(&hash.0) {
-                        let database_outcome = config
-                            .database
-                            .with_database(move |database| {
-                                database.block_scale_encoded_header(&hash.0)
-                            })
-                            .await;
-
-                        match database_outcome {
-                            Ok(Some(header)) => {
-                                request.respond(methods::Response::chainHead_unstable_header(Some(
-                                    methods::HexString(header),
-                                )))
-                            }
-                            Ok(None) => {
-                                // Should never happen given that blocks are pinned.
-                                // TODO: log the problem
-                                request.fail(service::ErrorResponse::InternalError);
-                            }
-                            Err(_) => {
-                                // TODO: log the problem
-                                request.fail(service::ErrorResponse::InternalError);
-                            }
-                        }
-                    } else {
                         request.fail(service::ErrorResponse::InvalidParams);
+                        continue;
+                    }
+
+                    let database_outcome = config
+                        .database
+                        .with_database(move |database| database.block_scale_encoded_header(&hash.0))
+                        .await;
+
+                    match database_outcome {
+                        Ok(Some(header)) => {
+                            request.respond(methods::Response::chainHead_unstable_header(Some(
+                                methods::HexString(header),
+                            )))
+                        }
+                        Ok(None) => {
+                            // Should never happen given that blocks are pinned.
+                            // TODO: log the problem
+                            request.fail(service::ErrorResponse::InternalError);
+                        }
+                        Err(_) => {
+                            // TODO: log the problem
+                            request.fail(service::ErrorResponse::InternalError);
+                        }
                     }
                 }
                 WhatHappened::Foreground(Message::Unpin {
