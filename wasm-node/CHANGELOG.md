@@ -9,6 +9,8 @@
 - When a warp sync response contains an invalid warp sync fragment, the earlier valid fragments are now still used to make the warp syncing progress instead of being thrown away. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 - During the warp sync process, the runtime call Merkle proofs are now downloaded in parallel of the runtime. This should save several networking round trips. Because the list of runtime calls to perform depend on the runtime version, starting to download the Merkle proofs before the runtime has been fully obtained is built upon the assumption that the runtime is at the latest version. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 
+## 2.0.1 - 2023-09-08
+
 ### Fixed
 
 - Fix panic in Yamux state machine when a remote closes a substream with an active timeout. ([#1122](https://github.com/smol-dot/smoldot/pull/1122))
