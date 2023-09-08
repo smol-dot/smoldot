@@ -54,6 +54,9 @@ pub struct Config {
 }
 
 pub enum Message {
+    Header {
+        request: service::RequestProcess,
+    },
     Unpin {
         block_hashes: Vec<[u8; 32]>,
         outcome: oneshot::Sender<Result<(), ()>>,
@@ -161,6 +164,40 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
 
             match what_happened {
                 WhatHappened::ForegroundClosed => return,
+                WhatHappened::Foreground(Message::Header { request }) => {
+                    let methods::MethodCall::chainHead_unstable_header { hash, .. } =
+                        request.request()
+                    else {
+                        unreachable!()
+                    };
+
+                    if !pinned_blocks.contains(&hash.0) {
+                        request.fail(service::ErrorResponse::InvalidParams);
+                        continue;
+                    }
+
+                    let database_outcome = config
+                        .database
+                        .with_database(move |database| database.block_scale_encoded_header(&hash.0))
+                        .await;
+
+                    match database_outcome {
+                        Ok(Some(header)) => {
+                            request.respond(methods::Response::chainHead_unstable_header(Some(
+                                methods::HexString(header),
+                            )))
+                        }
+                        Ok(None) => {
+                            // Should never happen given that blocks are pinned.
+                            // TODO: log the problem
+                            request.fail(service::ErrorResponse::InternalError);
+                        }
+                        Err(_) => {
+                            // TODO: log the problem
+                            request.fail(service::ErrorResponse::InternalError);
+                        }
+                    }
+                }
                 WhatHappened::Foreground(Message::Unpin {
                     block_hashes,
                     outcome,
