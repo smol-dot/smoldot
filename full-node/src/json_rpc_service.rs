@@ -547,7 +547,25 @@ fn spawn_client_main_task(
                     client_main_task = task;
 
                     match request_process.request() {
-                        smoldot::json_rpc::methods::MethodCall::chainHead_unstable_unpin {
+                        methods::MethodCall::chainHead_unstable_header {
+                            follow_subscription,
+                            ..
+                        } => {
+                            if let Some(follow_subscription) =
+                                chain_head_follow_subscriptions.get_mut(&*follow_subscription)
+                            {
+                                let _ = follow_subscription
+                                    .send(chain_head_subscriptions::Message::Header {
+                                        request: request_process,
+                                    })
+                                    .await;
+                                // TODO racy; doesn't handle situation where follow subscription stops
+                            } else {
+                                request_process
+                                    .respond(methods::Response::chainHead_unstable_header(None));
+                            }
+                        }
+                        methods::MethodCall::chainHead_unstable_unpin {
                             follow_subscription,
                             hash,
                         } => {
@@ -555,10 +573,12 @@ fn spawn_client_main_task(
                                 chain_head_follow_subscriptions.get_mut(&*follow_subscription)
                             {
                                 let block_hashes = match hash {
-                                    smoldot::json_rpc::methods::HashHexStringSingleOrArray::Array(list) => {
+                                    methods::HashHexStringSingleOrArray::Array(list) => {
                                         list.into_iter().map(|h| h.0).collect::<Vec<_>>()
-                                    },
-                                    smoldot::json_rpc::methods::HashHexStringSingleOrArray::Single(hash) => vec![hash.0]
+                                    }
+                                    methods::HashHexStringSingleOrArray::Single(hash) => {
+                                        vec![hash.0]
+                                    }
                                 };
 
                                 let (outcome, outcome_rx) = oneshot::channel();
@@ -602,9 +622,7 @@ fn spawn_client_main_task(
 
                     match subscription_start.request() {
                         // TODO: enforce limit to number of subscriptions
-                        smoldot::json_rpc::methods::MethodCall::chainHead_unstable_follow {
-                            with_runtime,
-                        } => {
+                        methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
                             let (tx, rx) = async_channel::bounded(16);
                             let subscription_id =
                                 chain_head_subscriptions::spawn_chain_head_subscription_task(
