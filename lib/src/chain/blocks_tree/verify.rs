@@ -498,6 +498,17 @@ impl<T> NonFinalizedTree<T> {
             insertion_counter: self.blocks_insertion_counter,
         };
 
+        let prev_auth_change_trigger_number_if_trigger = if let BlockFinality::Grandpa {
+            prev_auth_change_trigger_number,
+            triggers_change: true,
+            ..
+        } = verified_header.finality_update
+        {
+            Some(prev_auth_change_trigger_number)
+        } else {
+            None
+        };
+
         let new_node_index = self.blocks.insert(
             parent_tree_index,
             Block {
@@ -517,6 +528,11 @@ impl<T> NonFinalizedTree<T> {
         assert!(_prev_value.is_none());
 
         self.blocks_by_best_score.insert(best_score, new_node_index);
+
+        if let Some(prev_auth_change_trigger_number) = prev_auth_change_trigger_number_if_trigger {
+            self.blocks_trigger_gp_change
+                .insert((prev_auth_change_trigger_number, new_node_index));
+        }
 
         // An overflow here would break the logic of the module. It is better to panic than to
         // continue running.

@@ -65,7 +65,12 @@ use crate::{
     header,
 };
 
-use alloc::{collections::BTreeMap, format, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    sync::Arc,
+    vec::Vec,
+};
 use core::{cmp, fmt, mem, num::NonZeroU64, ops, time::Duration};
 use hashbrown::HashMap;
 
@@ -136,6 +141,10 @@ pub struct NonFinalizedTree<T> {
     /// Blocks indexed by the value in [`Block::best_score`]. The best block is the one with the
     /// highest score.
     blocks_by_best_score: BTreeMap<BestScore, fork_tree::NodeIndex>,
+    /// Subset of [`NonFinalizedTree::blocks`] whose [`BlockFinality::Grandpa::triggers_change`]
+    /// is `true`, indexed by the value in
+    /// [`BlockFinality::Grandpa::prev_auth_change_trigger_number`].
+    blocks_trigger_gp_change: BTreeSet<(Option<u64>, fork_tree::NodeIndex)>,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// See [`Config::allow_unknown_consensus_engines`].
@@ -210,6 +219,7 @@ impl<T> NonFinalizedTree<T> {
                 Default::default(),
             ),
             blocks_by_best_score: BTreeMap::new(),
+            blocks_trigger_gp_change: BTreeSet::new(),
             block_number_bytes: config.block_number_bytes,
             allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
         }
@@ -220,6 +230,7 @@ impl<T> NonFinalizedTree<T> {
         self.blocks.clear();
         self.blocks_by_hash.clear();
         self.blocks_by_best_score.clear();
+        self.blocks_trigger_gp_change.clear();
     }
 
     /// Returns true if there isn't any non-finalized block in the chain.
