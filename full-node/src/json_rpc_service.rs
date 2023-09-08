@@ -562,7 +562,7 @@ fn spawn_client_main_task(
                                 };
 
                                 let (outcome, outcome_rx) = oneshot::channel();
-                                follow_subscription
+                                let _ = follow_subscription
                                     .send(chain_head_subscriptions::Message::Unpin {
                                         block_hashes,
                                         outcome,
