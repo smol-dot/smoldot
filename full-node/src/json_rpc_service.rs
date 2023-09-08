@@ -22,7 +22,7 @@ use smol::{
     future,
     net::{TcpListener, TcpStream},
 };
-use smoldot::json_rpc::{methods, parse, service};
+use smoldot::json_rpc::{methods, service};
 use std::{
     future::Future,
     io, mem,
