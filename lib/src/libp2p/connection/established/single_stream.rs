@@ -149,7 +149,14 @@ where
                 return Ok((self, Some(Event::PingOutFailed)));
             }
         }
-        read_write.wake_up_after(&self.inner.next_ping);
+
+        // Only wake up if the connection can be closed.
+        // TODO: review w.r.t. https://github.com/smol-dot/smoldot/issues/1121
+        if read_write.expected_incoming_bytes.is_some()
+            && read_write.write_bytes_queueable.is_some()
+        {
+            read_write.wake_up_after(&self.inner.next_ping);
+        }
 
         // If we have both sent and received a GoAway frame, that means that no new substream
         // can be opened. If in addition to this there is no substream in the connection,

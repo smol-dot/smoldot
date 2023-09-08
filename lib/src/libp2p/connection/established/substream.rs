@@ -476,8 +476,6 @@ where
                     );
                 }
 
-                read_write.wake_up_after(&timeout);
-
                 if let Some(extracted_negotiation) = negotiation.take() {
                     match extracted_negotiation.read_write(read_write) {
                         Ok(multistream_select::Negotiation::InProgress(nego)) => {
@@ -590,6 +588,8 @@ where
                     }
                 }
 
+                read_write.wake_up_after(&timeout);
+
                 (
                     Some(SubstreamInner::NotificationsOutHandshakeRecv {
                         timeout,
@@ -667,7 +667,6 @@ where
                         }),
                     );
                 }
-                read_write.wake_up_after(&timeout);
 
                 if let Some(extracted_nego) = negotiation.take() {
                     match extracted_nego.read_write(read_write) {
@@ -753,6 +752,8 @@ where
                         }
                     }
                 }
+
+                read_write.wake_up_after(&timeout);
 
                 (
                     Some(SubstreamInner::RequestOut {
@@ -1066,7 +1067,6 @@ where
                             return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                         if queued_pings.remove(0).is_some() {
-                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::PingOut {
                                     negotiation,
