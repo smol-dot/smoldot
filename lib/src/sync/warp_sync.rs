@@ -243,6 +243,7 @@ pub fn start_warp_sync<TSrc, TRq>(
             .finalized_block_header
             .into(),
         warped_finality: config.start_chain_information.as_ref().finality.into(),
+        warped_block_ty: WarpedBlockTy::AlreadyVerified,
         runtime_calls: runtime_calls_default_value(
             config.start_chain_information.as_ref().consensus,
         ),
@@ -367,6 +368,9 @@ pub struct WarpSync<TSrc, TRq> {
     /// Information about the finality of the chain at the point where we warp synced to.
     /// Initially identical to the value in [`WarpSync::start_chain_information`].
     warped_finality: ChainInformationFinality,
+    /// Information about the block described by [`WarpSync::warped_header`] and
+    /// [`WarpSync::warped_finality`].
+    warped_block_ty: WarpedBlockTy,
     /// See [`Config::code_trie_node_hint`].
     code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
     /// Starting point of the warp syncing as provided to [`start_warp_sync`], or latest chain
@@ -393,6 +397,16 @@ pub struct WarpSync<TSrc, TRq> {
     /// For each call required by the chain information builder, whether it has been downloaded yet.
     runtime_calls:
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
+}
+
+enum WarpedBlockTy {
+    /// Block is equal to the finalized block in [`WarpSync::verified_chain_information`].
+    AlreadyVerified,
+    /// Block is known to not be warp-syncable due to an incompatibility between smoldot and
+    /// the chain.
+    KnownBad,
+    /// Block is expected to be warp syncable.
+    Normal,
 }
 
 enum RuntimeDownload {
@@ -759,7 +773,9 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // If we are in the appropriate phase, and we are not currently downloading the runtime,
         // return a runtime download request.
         let runtime_parameters_get =
-            if let RuntimeDownload::NotStarted { hint_doesnt_match } = &self.runtime_download {
+            if let (WarpedBlockTy::Normal, RuntimeDownload::NotStarted { hint_doesnt_match }) =
+                (&self.warped_block_ty, &self.runtime_download)
+            {
                 if self.warp_sync_fragments_download.is_none() && self.verify_queue.is_empty() {
                     let code_key_to_request = if let (false, Some(hint)) =
                         (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
@@ -801,31 +817,36 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
 
         // Return the list of runtime calls indicated by the chain information builder state
         // machine.
-        let call_proofs = self
-            .runtime_calls
-            .iter()
-            .filter(|(_, v)| matches!(v, CallProof::NotStarted))
-            .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
-                block_hash: self.warped_header.hash(self.block_number_bytes),
-                function_name: call.function_name().into(),
-                parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
-            })
-            .flat_map(move |request_detail| {
-                // Sources are ordered by increasing finalized block height, in order to
-                // have the highest chance for the block to not be pruned.
-                let sources_with_block = self
-                    .sources_by_finalized_height
-                    .range((self.warped_header.number, SourceId(usize::min_value()))..)
-                    .map(|(_, src_id)| src_id);
+        let call_proofs = if matches!(self.warped_block_ty, WarpedBlockTy::Normal) {
+            either::Left(
+                self.runtime_calls
+                    .iter()
+                    .filter(|(_, v)| matches!(v, CallProof::NotStarted))
+                    .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
+                        block_hash: self.warped_header.hash(self.block_number_bytes),
+                        function_name: call.function_name().into(),
+                        parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
+                    })
+                    .flat_map(move |request_detail| {
+                        // Sources are ordered by increasing finalized block height, in order to
+                        // have the highest chance for the block to not be pruned.
+                        let sources_with_block = self
+                            .sources_by_finalized_height
+                            .range((self.warped_header.number, SourceId(usize::min_value()))..)
+                            .map(|(_, src_id)| src_id);
 
-                sources_with_block.map(move |source_id| {
-                    (
-                        *source_id,
-                        &self.sources[source_id.0].user_data,
-                        request_detail.clone(),
-                    )
-                })
-            });
+                        sources_with_block.map(move |source_id| {
+                            (
+                                *source_id,
+                                &self.sources[source_id.0].user_data,
+                                request_detail.clone(),
+                            )
+                        })
+                    }),
+            )
+        } else {
+            either::Right(iter::empty())
+        };
 
         // Chain all these demanded requests together.
         warp_sync_request
@@ -1363,6 +1384,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         // Verification of the fragment has succeeded 🎉. We can now update `self`.
         fragments_to_verify.next_fragment_to_verify_index += 1;
         self.inner.warped_header = fragment_decoded_header.into();
+        self.inner.warped_block_ty = WarpedBlockTy::Normal;
         self.inner.runtime_download = RuntimeDownload::NotStarted {
             hint_doesnt_match: false,
         };
@@ -1501,6 +1523,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     match merkle_value {
                         Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
                         None => {
+                            self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
                                 hint_doesnt_match: *hint_doesnt_match,
                             };
@@ -1509,6 +1532,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     }
                 }
                 Ok(None) => {
+                    self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1540,6 +1564,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             {
                 Ok(Some((code, _))) => code,
                 Ok(None) => {
+                    self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1564,6 +1589,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             match executor::storage_heap_pages_to_value(finalized_storage_heappages) {
                 Ok(hp) => hp,
                 Err(err) => {
+                    self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1579,6 +1605,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         }) {
             Ok(runtime) => runtime,
             Err(err) => {
+                self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: *hint_doesnt_match,
                 };
@@ -1687,6 +1714,14 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     result: Ok(chain_information),
                     virtual_machine,
                 } => {
+                    // This `if` is necessary as in principle we might have continued warp syncing
+                    // after downloading everything needed but before building the chain
+                    // information.
+                    if self.inner.warped_header.number
+                        == chain_information.as_ref().finalized_block_header.number
+                    {
+                        self.inner.warped_block_ty = WarpedBlockTy::AlreadyVerified;
+                    }
                     self.inner.verified_chain_information = chain_information;
                     self.inner.runtime_calls = runtime_calls_default_value(
                         self.inner.verified_chain_information.as_ref().consensus,
@@ -1708,6 +1743,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     result: Err(err),
                     ..
                 } => {
+                    self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                     return (self.inner, Err(Error::ChainInformationBuild(err)));
                 }
                 chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
