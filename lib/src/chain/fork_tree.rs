@@ -242,9 +242,9 @@ impl<T> ForkTree<T> {
     /// Returns an iterator containing the removed elements.
     /// All elements are removed from the tree even if the returned iterator is dropped eagerly.
     ///
-    /// Elements are returned in an unspecified order. However, all the elements for which
-    /// [`PrunedNode::is_prune_target_ancestor`] is `true` are guaranteed to be returned from
-    /// child to parent.
+    /// Elements are returned in an unspecified order. However, each element yielded is guaranteed
+    /// to be yielded *before* its parent gets yielded.
+    /// This can be more or less called "reverse hierarchical order".
     ///
     /// In other words, doing `prune_ancestors(...).filter(|n| n.is_prune_target_ancestor)` is
     /// guaranteed to return the elements in the same order as [`ForkTree::node_to_root_path`]

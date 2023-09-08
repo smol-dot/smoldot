@@ -471,16 +471,15 @@ pub struct SubscriptionId(u64);
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// BLAKE2 hash of the block that has been finalized.
+        /// BLAKE2 hash of the blocks that have been finalized, in increasing block number. In
+        /// other words, each block in this list is a child of the previous one. The first block
+        /// in this list is a child of the previous finalized block. The last block in this list
+        /// is the new finalized block.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
-        ///
-        /// It is, however, not guaranteed that this block is a child of the previously-finalized
-        /// block. In other words, if multiple blocks are finalized at the same time, only one
-        /// [`Notification::Finalized`] is generated and contains the highest finalized block.
-        hash: [u8; 32],
+        finalized_blocks_hashes: Vec<[u8; 32]>,
 
         /// Hash of the best block after the finalization.
         ///
@@ -492,6 +491,10 @@ pub enum Notification {
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
+
+        /// List of BLAKE2 hashes of blocks that are no longer part of the canonical chain. In
+        /// unspecified order.
+        pruned_blocks_hashes: Vec<[u8; 32]>,
     },
 
     /// A new block has been added to the list of unfinalized blocks.
@@ -1899,7 +1902,8 @@ impl SyncBackground {
                     (
                         sync_out,
                         all::FinalityProofVerifyOutcome::NewFinalized {
-                            mut finalized_blocks,
+                            finalized_blocks,
+                            pruned_blocks,
                             updates_best_block,
                         },
                     ) => {
@@ -1922,14 +1926,15 @@ impl SyncBackground {
                             self.block_authoring = None;
                         }
 
-                        let finalized_block = finalized_blocks.pop().unwrap();
-                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data
-                        else {
-                            unreachable!()
+                        self.finalized_runtime = match &finalized_blocks.last().unwrap().user_data {
+                            NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                            _ => unreachable!(),
                         };
-                        self.finalized_runtime = runtime;
-                        let new_finalized_hash =
-                            finalized_block.header.hash(self.sync.block_number_bytes());
+                        let new_finalized_hash = finalized_blocks
+                            .last()
+                            .unwrap()
+                            .header
+                            .hash(self.sync.block_number_bytes());
                         // TODO: what if best block changed?
                         self.database
                             .with_database_detached(move |database| {
@@ -1942,7 +1947,12 @@ impl SyncBackground {
                             let subscription = self.blocks_notifications.swap_remove(index);
                             if subscription
                                 .try_send(Notification::Finalized {
-                                    hash: new_finalized_hash,
+                                    finalized_blocks_hashes: finalized_blocks
+                                        .iter()
+                                        .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                        .rev()
+                                        .collect::<Vec<_>>(),
+                                    pruned_blocks_hashes: pruned_blocks.clone(),
                                     best_block_hash: self.sync.best_block_hash(),
                                 })
                                 .is_err()
