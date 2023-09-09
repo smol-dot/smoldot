@@ -2447,7 +2447,6 @@ dependencies = [
  "no-std-net",
  "nom",
  "pin-project",
- "rand",
  "slab",
  "smoldot",
  "smoldot-light",
