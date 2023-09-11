@@ -324,42 +324,6 @@ pub struct RuntimeInformation {
     pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
-impl<TSrc, TRq> ops::Index<SourceId> for WarpSync<TSrc, TRq> {
-    type Output = TSrc;
-
-    #[track_caller]
-    fn index(&self, source_id: SourceId) -> &TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &self.sources[source_id.0].user_data
-    }
-}
-
-impl<TSrc, TRq> ops::IndexMut<SourceId> for WarpSync<TSrc, TRq> {
-    #[track_caller]
-    fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &mut self.sources[source_id.0].user_data
-    }
-}
-
-impl<TSrc, TRq> ops::Index<RequestId> for WarpSync<TSrc, TRq> {
-    type Output = TRq;
-
-    #[track_caller]
-    fn index(&self, request_id: RequestId) -> &TRq {
-        debug_assert!(self.in_progress_requests.contains(request_id.0));
-        &self.in_progress_requests[request_id.0].1
-    }
-}
-
-impl<TSrc, TRq> ops::IndexMut<RequestId> for WarpSync<TSrc, TRq> {
-    #[track_caller]
-    fn index_mut(&mut self, request_id: RequestId) -> &mut TRq {
-        debug_assert!(self.in_progress_requests.contains(request_id.0));
-        &mut self.in_progress_requests[request_id.0].1
-    }
-}
-
 /// Warp syncing process now obtaining the chain information.
 pub struct WarpSync<TSrc, TRq> {
     /// Finalized block of the chain we warp synced to. Initially identical to the value in
@@ -397,6 +361,12 @@ pub struct WarpSync<TSrc, TRq> {
     /// For each call required by the chain information builder, whether it has been downloaded yet.
     runtime_calls:
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct Source<TSrc> {
+    user_data: TSrc,
+    finalized_block_height: u64,
 }
 
 enum WarpedBlockTy {
@@ -1112,10 +1082,40 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-struct Source<TSrc> {
-    user_data: TSrc,
-    finalized_block_height: u64,
+impl<TSrc, TRq> ops::Index<SourceId> for WarpSync<TSrc, TRq> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, source_id: SourceId) -> &TSrc {
+        debug_assert!(self.sources.contains(source_id.0));
+        &self.sources[source_id.0].user_data
+    }
+}
+
+impl<TSrc, TRq> ops::IndexMut<SourceId> for WarpSync<TSrc, TRq> {
+    #[track_caller]
+    fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        debug_assert!(self.sources.contains(source_id.0));
+        &mut self.sources[source_id.0].user_data
+    }
+}
+
+impl<TSrc, TRq> ops::Index<RequestId> for WarpSync<TSrc, TRq> {
+    type Output = TRq;
+
+    #[track_caller]
+    fn index(&self, request_id: RequestId) -> &TRq {
+        debug_assert!(self.in_progress_requests.contains(request_id.0));
+        &self.in_progress_requests[request_id.0].1
+    }
+}
+
+impl<TSrc, TRq> ops::IndexMut<RequestId> for WarpSync<TSrc, TRq> {
+    #[track_caller]
+    fn index_mut(&mut self, request_id: RequestId) -> &mut TRq {
+        debug_assert!(self.in_progress_requests.contains(request_id.0));
+        &mut self.in_progress_requests[request_id.0].1
+    }
 }
 
 /// Information about a request that the warp sync state machine would like to start.
