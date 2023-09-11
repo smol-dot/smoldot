@@ -133,7 +133,7 @@ enum ToBackground {
     SubscribeAll {
         buffer_size: usize,
         // TODO: unused field
-        _max_pinned_blocks: NonZeroUsize,
+        _max_finalized_pinned_blocks: NonZeroUsize,
         result_tx: oneshot::Sender<SubscribeAll>,
     },
     GetSyncState {
@@ -392,7 +392,7 @@ impl ConsensusService {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_pinned_blocks: NonZeroUsize,
+        max_finalized_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
@@ -401,7 +401,7 @@ impl ConsensusService {
             .await
             .send(ToBackground::SubscribeAll {
                 buffer_size,
-                _max_pinned_blocks: max_pinned_blocks,
+                _max_finalized_pinned_blocks: max_finalized_pinned_blocks,
                 result_tx,
             })
             .await;
@@ -799,7 +799,7 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
-                        Some(ToBackground::SubscribeAll { buffer_size, _max_pinned_blocks: _, result_tx }) => {
+                        Some(ToBackground::SubscribeAll { buffer_size, _max_finalized_pinned_blocks: _, result_tx }) => {
                             let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
                             // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
@@ -807,12 +807,7 @@ impl SyncBackground {
                                 .sync
                                 .finalized_block_header()
                                 .scale_encoding_vec(self.sync.block_number_bytes());
-                            let finalized_block_height = header::decode(&finalized_block_scale_encoded_header, self.sync.block_number_bytes()).unwrap().number;
                             let finalized_block_hash = header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header);
-                            let finalized_block_runtime = match &self.sync[(finalized_block_height, &finalized_block_hash)] {
-                                NonFinalizedBlock::Verified { runtime } => runtime.clone(),
-                                _ => unreachable!()
-                            };
 
                             let non_finalized_blocks_ancestry_order = {
                                 let best_hash = self.sync.best_block_hash();
@@ -825,7 +820,7 @@ impl SyncBackground {
                                         NonFinalizedBlock::Verified { runtime } => runtime.clone(),
                                         _ => unreachable!()
                                     };
-                                    let runtime_update = if Arc::ptr_eq(&finalized_block_runtime, &runtime) {
+                                    let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
                                         None
                                     } else {
                                         Some(Arc::new(runtime.lock().await.clone().unwrap()))
@@ -848,7 +843,7 @@ impl SyncBackground {
                                 id: SubscriptionId(0), // TODO:
                                 finalized_block_hash,
                                 finalized_block_scale_encoded_header,
-                                finalized_block_runtime: Arc::new(finalized_block_runtime.lock().await.clone().unwrap()),
+                                finalized_block_runtime: Arc::new(self.finalized_runtime.lock().await.clone().unwrap()),
                                 non_finalized_blocks_ancestry_order,
                                 new_blocks,
                             });

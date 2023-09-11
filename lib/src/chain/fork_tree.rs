@@ -676,6 +676,18 @@ pub struct PrunedNode<T> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NodeIndex(usize);
 
+impl NodeIndex {
+    /// Returns the value that compares inferior or equal to any possible [`NodeIndex`̀].
+    pub fn min_value() -> Self {
+        NodeIndex(usize::min_value())
+    }
+
+    /// Returns the value that compares superior or equal to any possible [`NodeIndex`̀].
+    pub fn max_value() -> Self {
+        NodeIndex(usize::max_value())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ForkTree;

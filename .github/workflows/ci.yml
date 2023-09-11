@@ -53,6 +53,7 @@ jobs:
       image: rust:1.72
     steps:
     - uses: actions/checkout@v4
+    - run: rustup target add wasm32-unknown-unknown
     - uses: Swatinem/rust-cache@v2
     - uses: actions/setup-node@v3.8.1
       with:

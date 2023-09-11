@@ -34,16 +34,6 @@
 //!
 //! This avoids potential stack overflows and tricky borrowing-related situations.
 //!
-//! # About wasi
-//!
-//! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
-//! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source
-//! of randomness and time.
-//!
-//! Consequently, the exports found in the `extern` block below are not the only functions that
-//! must be implemented. Several functions required by the Wasi ABI are also used. The best place
-//! to find documentation at the moment is <https://docs.rs/wasi>.
-//!
 //! # About `u32`s and JavaScript
 //!
 //! Many functions below accept as parameter or return a `u32`. In reality, however, the
@@ -91,6 +81,25 @@ extern "C" {
     /// behave like `abort` and prevent any further execution.
     pub fn panic(message_ptr: u32, message_len: u32);
 
+    /// Fills the buffer of the WebAssembly virtual machine with random data, starting at `ptr`
+    /// and for `len` bytes.
+    ///
+    /// This data will be used in order to generate secrets. Do not use a dummy implementation!
+    pub fn random_get(ptr: u32, len: u32);
+
+    /// Returns the system clock in number of microseconds since the UNIX epoch, ignoring leap
+    /// seconds.
+    ///
+    /// This clock is allowed to go backwards.
+    ///
+    /// Must never return a negative number. Implementers should be aware that the system clock
+    /// can be negative, and abort execution if that is the case.
+    pub fn unix_timestamp_us() -> u64;
+
+    /// Returns the number of microseconds since an especified point in time. Must never decrease
+    /// over time.
+    pub fn monotonic_clock_us() -> u64;
+
     /// Copies the entire content of the buffer with the given index to the memory of the
     /// WebAssembly at offset `target_pointer`.
     ///
@@ -135,7 +144,7 @@ extern "C" {
     /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
     /// of the duration.
     ///
-    /// When [`timer_finished`] is called, the value of the monotonic clock (in the WASI bindings)
+    /// When [`timer_finished`] is called, the value of the monotonic clock (in the bindings)
     /// must have increased by at least the given number of `milliseconds`.
     ///
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
