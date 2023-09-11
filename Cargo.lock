@@ -2384,6 +2384,7 @@ dependencies = [
  "hashbrown 0.14.0",
  "hex",
  "humantime",
+ "lru",
  "mick-jaeger",
  "rand",
  "serde",
