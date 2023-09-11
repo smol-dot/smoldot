@@ -15,7 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{sync::Arc, time::Duration};
+use smoldot::json_rpc;
+use std::sync::Arc;
 
 #[test]
 fn basic_block_generated() {
@@ -44,13 +45,30 @@ fn basic_block_generated() {
         .unwrap();
 
         loop {
-            smol::Timer::after(Duration::from_secs(1)).await;
+            client.send_json_rpc_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_follow","params":[false]}"#
+                    .to_owned(),
+            );
 
-            // TODO: use the JSON-RPC server of the client instead
-            let client_state = client.sync_state().await;
-            if client_state.best_block_number >= 1 {
-                // Success!
-                break;
+            let _ = json_rpc::parse::parse_response(&client.next_json_rpc_response().await)
+                .unwrap()
+                .into_success()
+                .unwrap();
+
+            loop {
+                match json_rpc::methods::parse_notification(&client.next_json_rpc_response().await)
+                    .unwrap()
+                {
+                    json_rpc::methods::ServerToClient::chainHead_unstable_followEvent {
+                        result: json_rpc::methods::FollowEvent::NewBlock { .. },
+                        ..
+                    } => return, // Test success
+                    json_rpc::methods::ServerToClient::chainHead_unstable_followEvent {
+                        result: json_rpc::methods::FollowEvent::Stop { .. },
+                        ..
+                    } => break,
+                    _ => {}
+                }
             }
         }
     });
