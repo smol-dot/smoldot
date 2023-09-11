@@ -606,7 +606,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
-            already_tried: false,
             finalized_block_height: 0,
         }));
 
@@ -725,9 +724,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 sum + entry.fragments.len() - entry.next_fragment_to_verify_index
             }) < self.num_download_ahead_fragments
             {
-                // TODO: it feels like a hack to try again sources that have failed in the past; also, this means that the already_tried mechanism only works once
-                let all_sources_already_tried = self.sources.iter().all(|(_, s)| s.already_tried);
-
                 let start_block_hash = self
                     .verify_queue
                     .back()
@@ -748,10 +744,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                                 .unwrap_or(u64::max_value()),
                         )
                     {
-                        return None;
-                    }
-
-                    if !all_sources_already_tried && src.already_tried {
                         return None;
                     }
 
@@ -979,19 +971,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             }
         }
 
-        match self.in_progress_requests.remove(id.0) {
-            (source_id, user_data, RequestDetail::WarpSyncRequest { .. }) => {
-                // TODO: check that block hash matches starting point? ^
-                self.sources[source_id.0].already_tried = true;
-                user_data
-            }
-            (
-                _,
-                user_data,
-                RequestDetail::RuntimeCallMerkleProof { .. }
-                | RequestDetail::StorageGetMerkleProof { .. },
-            ) => user_data,
-        }
+        self.in_progress_requests.remove(id.0).1
     }
 
     /// Injects a successful Merkle proof and removes the given request from the state machine.
@@ -1092,8 +1072,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         debug_assert!(self.sources.contains(rq_source_id.0));
 
         if self.warp_sync_fragments_download == Some(request_id) {
-            // TODO: why this?
-            self.sources[rq_source_id.0].already_tried = true;
             self.warp_sync_fragments_download = None;
 
             self.verify_queue.push_back(PendingVerify {
@@ -1137,9 +1115,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
 #[derive(Debug, Copy, Clone)]
 struct Source<TSrc> {
     user_data: TSrc,
-    /// `true` if this source has been in a past warp sync request and we should try a different
-    /// source.
-    already_tried: bool,
     finalized_block_height: u64,
 }
 
