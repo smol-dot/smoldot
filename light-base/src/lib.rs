@@ -310,7 +310,7 @@ pub struct JsonRpcResponses {
     inner: Option<json_rpc_service::Frontend>,
 
     /// Notified when the [`PublicApiChain`] is destroyed.
-    public_api_chain_destroyed: event_listener::EventListener,
+    public_api_chain_destroyed: pin::Pin<Box<event_listener::EventListener>>,
 }
 
 impl JsonRpcResponses {
