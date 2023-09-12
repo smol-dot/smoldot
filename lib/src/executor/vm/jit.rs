@@ -24,12 +24,10 @@ use super::{
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
-    fmt, future, mem,
-    pin::Pin,
-    slice,
+    fmt, future, mem, pin, slice,
     task::{Context, Poll, Waker},
 };
-use futures_util::{task, FutureExt as _};
+use futures_util::task;
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
@@ -295,10 +293,18 @@ impl JitPrototype {
         // If the `start` function doesn't call any import, then it will go undetected and no
         // error will be returned.
         // TODO: detect `start` anyway, for consistency with other backends
-        let instance = wasmtime::Instance::new_async(&mut store, &base_components.module, &imports)
-            .now_or_never()
-            .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
-            .map_err(|err| NewErr::Instantiation(err.to_string()))?;
+        let instance = match future::Future::poll(
+            pin::pin!(wasmtime::Instance::new_async(
+                &mut store,
+                &base_components.module,
+                &imports
+            )),
+            &mut Context::from_waker(task::noop_waker_ref()),
+        ) {
+            Poll::Pending => return Err(NewErr::StartFunctionNotSupported), // TODO: hacky error value, as the error could also be different
+            Poll::Ready(Ok(i)) => i,
+            Poll::Ready(Err(err)) => return Err(NewErr::Instantiation(err.to_string())),
+        };
 
         // Now that we are passed the `start` stage, update the state of execution.
         *shared.lock().unwrap() = Shared::Poisoned;
@@ -612,7 +618,7 @@ enum JitInner {
     Done(wasmtime::Store<()>),
 }
 
-type BoxFuture<T> = Pin<Box<dyn future::Future<Output = T> + Send>>;
+type BoxFuture<T> = pin::Pin<Box<dyn future::Future<Output = T> + Send>>;
 type ExecOutcomeValue = Result<Option<WasmValue>, wasmtime::Error>;
 
 impl Jit {
