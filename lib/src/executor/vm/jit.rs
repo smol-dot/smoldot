@@ -24,10 +24,9 @@ use super::{
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
-    fmt, future, mem, pin, slice,
-    task::{Context, Poll, Waker},
+    fmt, future, mem, pin, ptr, slice,
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
-use futures_util::task;
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
@@ -299,7 +298,7 @@ impl JitPrototype {
                 &base_components.module,
                 &imports
             )),
-            &mut Context::from_waker(task::noop_waker_ref()),
+            &mut Context::from_waker(&noop_waker()),
         ) {
             Poll::Pending => return Err(NewErr::StartFunctionNotSupported), // TODO: hacky error value, as the error could also be different
             Poll::Ready(Ok(i)) => i,
@@ -733,7 +732,7 @@ impl Jit {
         // execution might be able to progress, hence the lack of need for a waker.
         match future::Future::poll(
             function_call.as_mut(),
-            &mut Context::from_waker(task::noop_waker_ref()),
+            &mut Context::from_waker(&noop_waker()),
         ) {
             Poll::Ready((store, Ok(val))) => {
                 self.inner = JitInner::Done(store);
@@ -926,7 +925,7 @@ impl Jit {
                 // execution might be able to progress, hence the lack of need for a waker.
                 match future::Future::poll(
                     function_call.as_mut(),
-                    &mut Context::from_waker(task::noop_waker_ref()),
+                    &mut Context::from_waker(&noop_waker()),
                 ) {
                     Poll::Ready(_) => unreachable!(),
                     Poll::Pending => {
@@ -952,5 +951,18 @@ impl Jit {
 impl fmt::Debug for Jit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Jit").finish()
+    }
+}
+
+fn noop_waker() -> Waker {
+    // Safety: all the requirements in the documentation of wakers (e.g. thread safety) is
+    // irrelevant here due to the implementation being trivial.
+    unsafe {
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(ptr::null(), &VTABLE)
+        }
+        fn noop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        Waker::from_raw(RawWaker::new(ptr::null(), &VTABLE))
     }
 }
