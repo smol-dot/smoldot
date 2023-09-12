@@ -942,6 +942,7 @@ where
                                 substream.state = SubstreamState::Reset;
                             }
 
+                            outer_read_write.wake_up_asap();
                             return Ok(ReadWriteOutcome::GoAway {
                                 yamux: self,
                                 code: error_code,
@@ -1024,6 +1025,7 @@ where
 
                             substream.state = SubstreamState::Reset;
 
+                            outer_read_write.wake_up_asap();
                             return Ok(ReadWriteOutcome::StreamReset {
                                 yamux: self,
                                 substream_id: SubstreamId(stream_id),
@@ -1184,6 +1186,10 @@ where
 
                                 if fin {
                                     *remote_write_closed = true;
+
+                                    // No need to send window frames anymore if the remote has
+                                    // sent a FIN.
+                                    self.inner.window_frames_to_send.remove(&stream_id);
 
                                     // Wake up the substream.
                                     match substreams_wake_up_key {
@@ -1958,7 +1964,7 @@ where
 
         // When to wake up the substream for reading again.
         debug_assert!(matches!(substreams_wake_up_key, None));
-        let will_wake_up_again_asap_read = match (
+        let will_wake_up_read_again = match (
             self.inner_read_write.read_bytes,
             &self.inner_read_write.wake_up_after,
         ) {
@@ -1974,7 +1980,7 @@ where
                     .substreams_wake_up
                     .insert((Some(when.clone()), self.substream_id));
                 *substreams_wake_up_key = Some(Some(when.clone()));
-                false
+                true
             }
             _ => {
                 // Non-zero bytes written or `when <= now`.
@@ -2087,10 +2093,10 @@ where
             // Substream has nothing to write.
         }
 
-        // TODO: review w.r.t. wake ups
+        // Mark the substream as dead if it won't ever wake up again.
         if matches!(local_write_close, SubstreamStateLocalWrite::FinQueued)
             && *remote_write_closed
-            && !will_wake_up_again_asap_read
+            && !will_wake_up_read_again
             && !self
                 .yamux
                 .inner
@@ -2104,6 +2110,22 @@ where
             {
                 let _was_inserted = self.yamux.inner.dead_substreams.insert(self.substream_id);
                 debug_assert!(_was_inserted);
+                debug_assert!(!self
+                    .yamux
+                    .inner
+                    .substreams_wake_up
+                    .iter()
+                    .any(|(_, s)| *s == self.substream_id));
+                debug_assert!(!self
+                    .yamux
+                    .inner
+                    .substreams_write_ready
+                    .contains(&self.substream_id));
+                debug_assert!(!self
+                    .yamux
+                    .inner
+                    .window_frames_to_send
+                    .contains_key(&self.substream_id));
             }
         }
 

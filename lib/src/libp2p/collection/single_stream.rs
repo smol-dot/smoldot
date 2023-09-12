@@ -574,7 +574,7 @@ where
                 mut inbound_negotiated_cancel_acknowledgments,
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
-                    if read_write.is_dead() && event.is_none() {
+                    if read_write.is_dead() && read_write.wake_up_after.is_none() {
                         self.pending_messages.push_back(
                             ConnectionToCoordinatorInner::StartShutdown(Some(
                                 ShutdownCause::CleanShutdown,
@@ -788,10 +788,6 @@ where
                     return;
                 }
 
-                // `read_write()` should be called again as soon as possible after `timeout` in
-                // order for the check above to work.
-                read_write.wake_up_after(&timeout);
-
                 loop {
                     let (read_before, written_before) =
                         (read_write.read_bytes, read_write.write_bytes_queued);
@@ -818,6 +814,9 @@ where
                             if (read_before, written_before)
                                 == (read_write.read_bytes, read_write.write_bytes_queued) =>
                         {
+                            // `read_write()` should be called again as soon as possible
+                            // after `timeout`.
+                            read_write.wake_up_after(&timeout);
                             self.connection = SingleStreamConnectionTaskInner::Handshake {
                                 handshake: updated_handshake,
                                 randomness_seed,

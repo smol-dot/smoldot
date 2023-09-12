@@ -467,6 +467,7 @@ where
                 mut handshake_out,
             } => {
                 if timeout < read_write.now {
+                    read_write.wake_up_asap();
                     return (
                         Some(SubstreamInner::NotificationsOutNegotiationFailed),
                         Some(Event::NotificationsOutResult {
@@ -474,8 +475,6 @@ where
                         }),
                     );
                 }
-
-                read_write.wake_up_after(&timeout);
 
                 if let Some(extracted_negotiation) = negotiation.take() {
                     match extracted_negotiation.read_write(read_write) {
@@ -488,12 +487,13 @@ where
                         }
                         Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
+                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::NotificationsOutNegotiationFailed),
                                 Some(Event::NotificationsOutResult {
                                     result: Err(NotificationsOutErr::ProtocolNotAvailable),
                                 }),
-                            )
+                            );
                         }
                         Err(err) => {
                             return (
@@ -515,6 +515,7 @@ where
 
                 if negotiation.is_none() {
                     if read_write.expected_incoming_bytes.is_none() {
+                        read_write.wake_up_asap();
                         return (
                             Some(SubstreamInner::NotificationsOutNegotiationFailed),
                             Some(Event::NotificationsOutResult {
@@ -541,6 +542,7 @@ where
                     if let Some(handshake_in_size) = handshake_in_size {
                         match read_write.incoming_bytes_take(handshake_in_size) {
                             Ok(Some(remote_handshake)) => {
+                                read_write.wake_up_asap();
                                 return (
                                     Some(SubstreamInner::NotificationsOut {
                                         notifications: VecDeque::new(),
@@ -553,6 +555,7 @@ where
                             }
                             Ok(None) => {}
                             Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                                read_write.wake_up_asap();
                                 return (
                                     Some(SubstreamInner::NotificationsOutNegotiationFailed),
                                     Some(Event::NotificationsOutResult {
@@ -585,6 +588,8 @@ where
                     }
                 }
 
+                read_write.wake_up_after(&timeout);
+
                 (
                     Some(SubstreamInner::NotificationsOutHandshakeRecv {
                         timeout,
@@ -611,6 +616,7 @@ where
                 );
 
                 if !close_demanded_by_remote && read_write.expected_incoming_bytes.is_none() {
+                    read_write.wake_up_asap();
                     return (
                         Some(SubstreamInner::NotificationsOut {
                             notifications,
@@ -661,7 +667,6 @@ where
                         }),
                     );
                 }
-                read_write.wake_up_after(&timeout);
 
                 if let Some(extracted_nego) = negotiation.take() {
                     match extracted_nego.read_write(read_write) {
@@ -747,6 +752,8 @@ where
                         }
                     }
                 }
+
+                read_write.wake_up_after(&timeout);
 
                 (
                     Some(SubstreamInner::RequestOut {
@@ -876,6 +883,7 @@ where
                 if read_write.expected_incoming_bytes.is_some() {
                     (Some(SubstreamInner::NotificationsInWait), None)
                 } else {
+                    read_write.wake_up_asap();
                     (
                         Some(SubstreamInner::NotificationsInRefused),
                         Some(Event::NotificationsInOpenCancel),
@@ -911,17 +919,19 @@ where
                 if let Some(sz) = next_notification_size {
                     match read_write.incoming_bytes_take(sz) {
                         Ok(Some(notif)) => {
+                            read_write.wake_up_asap();
                             notification = Some(notif);
                             next_notification_size = None;
                         }
                         Ok(None) => {}
                         Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::NotificationsInClosed),
                                 Some(Event::NotificationsInClose {
                                     outcome: Err(NotificationsInClosedErr::SubstreamClosed),
                                 }),
-                            )
+                            );
                         }
                     }
                 } else {
@@ -929,12 +939,13 @@ where
                         Ok(Some(s)) => next_notification_size = Some(s),
                         Ok(None) => {}
                         Err(error) => {
+                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::NotificationsInClosed),
                                 Some(Event::NotificationsInClose {
                                     outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
                                 }),
-                            )
+                            );
                         }
                     }
                 }
@@ -980,6 +991,7 @@ where
                 read_write.close_write();
                 if !queued_pings.is_empty() {
                     queued_pings.remove(0);
+                    read_write.wake_up_asap();
                     (
                         Some(SubstreamInner::PingOutFailed { queued_pings }),
                         Some(Event::PingOutError {
@@ -1027,6 +1039,7 @@ where
                 for timeout in queued_pings.iter_mut() {
                     if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
                         *timeout = None;
+                        read_write.wake_up_asap();
                         return (
                             Some(SubstreamInner::PingOut {
                                 negotiation,

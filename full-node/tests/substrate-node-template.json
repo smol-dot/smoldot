@@ -6,7 +6,7 @@
   ],
   "telemetryEndpoints": null,
   "protocolId": null,
-  "properties": null,
+  "properties": {"tokenDecimals": 15},
   "consensusEngine": null,
   "codeSubstitutes": {},
   "genesis": {

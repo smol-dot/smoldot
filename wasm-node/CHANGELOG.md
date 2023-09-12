@@ -6,6 +6,32 @@
 
 - The `index` field of `bestChainBlockIncluded` events of `chainHead_unstable_follow` subscriptions is now a number rather than a string, in accordance with the latest changes in the JSON-RPC API specification. ([#1097](https://github.com/smol-dot/smoldot/pull/1097))
 
+### Fixed
+
+- Justifications are no longer downloaded for blocks that can't be finalized because an earlier block needs to be finalized first. ([#1127](https://github.com/smol-dot/smoldot/pull/1127))
+
+## 2.0.1 - 2023-09-08
+
+### Fixed
+
+- Fix panic in Yamux state machine when a remote closes a substream with an active timeout. ([#1122](https://github.com/smol-dot/smoldot/pull/1122))
+
+## 2.0.0 - 2023-09-07
+
+### Remove
+
+- Removed `MalformedJsonRpcError`. Malformed JSON-RPC requests now later generate an error JSON-RPC response where the `id` field is equal to `null`, in accordance with the JSON-RPC 2.0 specification. ([#1116](https://github.com/smol-dot/smoldot/pull/1116))
+
+### Changed
+
+- Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+- JSON-RPC requests that are very large are no longer rejected. In case where the JSON-RPC client is trusted, then there is nothing to do, and the potential lack of memory space will become a non-issue once the `Memory64` WebAssembly proposal becomes widely available. In case where the JSON-RPC client is not trusted, the API user is encouraged to manually implement a limit to the size of JSON-RPC requests, as it should do already right now anyway. ([#1115](https://github.com/smol-dot/smoldot/pull/1115))
+
+### Fixed
+
+- Fix `Chain.remove()` not actually removing the chain until the warp syncing process is finished (which might never happen if for example bootnodes are misconfigured). ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+- Fix JSON-RPC server not processing requests if many transactions are submitted before the warp syncing process is finished. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+
 ## 1.0.17 - 2023-08-25
 
 ### Changed

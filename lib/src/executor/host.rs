@@ -198,6 +198,7 @@ use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
     string::{String, ToString as _},
+    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -267,10 +268,10 @@ struct VmCommon {
 
     /// List of functions that the Wasm code imports.
     ///
-    /// The keys of this `Vec` (i.e. the `usize` indices) have been passed to the virtual machine
+    /// The keys of this list (i.e. the `usize` indices) have been passed to the virtual machine
     /// executor. Whenever the Wasm code invokes a host function, we obtain its index, and look
-    /// within this `Vec` to know what to do.
-    registered_functions: Vec<FunctionImport>,
+    /// within this list to know what to do.
+    registered_functions: Arc<[FunctionImport]>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
@@ -351,8 +352,7 @@ impl HostVmPrototype {
                     Ok(id)
                 },
             })?;
-            registered_functions.shrink_to_fit();
-            (vm_proto, registered_functions)
+            (vm_proto, registered_functions.into())
         };
 
         // In the runtime environment, Wasm blobs must export a global symbol named
@@ -770,7 +770,7 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = match self.inner.common.registered_functions.get_mut(id) {
+        let host_fn = match self.inner.common.registered_functions.get(id) {
             Some(FunctionImport::Resolved(f)) => *f,
             Some(FunctionImport::Unresolved { name, module }) => {
                 return HostVm::Error {
