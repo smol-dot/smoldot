@@ -2269,6 +2269,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 
 [[package]]
+name = "siphasher"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ac45299ccbd390721be55b412d41931911f654fa99e2cb8bfb57184b2061fe"
+
+[[package]]
 name = "slab"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2352,7 +2358,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.7",
  "sha3",
- "siphasher",
+ "siphasher 1.0.0",
  "slab",
  "smallvec",
  "soketto",
@@ -2389,7 +2395,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
- "siphasher",
+ "siphasher 0.3.11",
  "smol",
  "smoldot",
  "soketto",
@@ -2425,7 +2431,7 @@ dependencies = [
  "rand_chacha",
  "serde",
  "serde_json",
- "siphasher",
+ "siphasher 0.3.11",
  "slab",
  "smol",
  "smoldot",
