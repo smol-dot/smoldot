@@ -1036,7 +1036,7 @@ pub(crate) fn connection_stream_opened(
             initial_writable_bytes,
         ));
 
-        connection.something_happened.notify(usize::max_value())
+        connection.something_happened.notify(usize::max_value());
     } else {
         panic!()
     }

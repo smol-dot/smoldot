@@ -250,7 +250,7 @@ struct JsonRpcBackground {
     tcp_listener: TcpListener,
 
     /// Event notified when the frontend is dropped.
-    on_service_dropped: event_listener::EventListener,
+    on_service_dropped: Pin<Box<event_listener::EventListener>>,
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
