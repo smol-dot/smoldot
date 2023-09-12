@@ -2264,12 +2264,6 @@ checksum = "5e1788eed21689f9cf370582dfc467ef36ed9c707f073528ddafa8d83e3b8500"
 
 [[package]]
 name = "siphasher"
-version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
-
-[[package]]
-name = "siphasher"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54ac45299ccbd390721be55b412d41931911f654fa99e2cb8bfb57184b2061fe"
@@ -2358,7 +2352,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.7",
  "sha3",
- "siphasher 1.0.0",
+ "siphasher",
  "slab",
  "smallvec",
  "soketto",
@@ -2395,7 +2389,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
- "siphasher 0.3.11",
+ "siphasher",
  "smol",
  "smoldot",
  "soketto",
@@ -2431,7 +2425,7 @@ dependencies = [
  "rand_chacha",
  "serde",
  "serde_json",
- "siphasher 0.3.11",
+ "siphasher",
  "slab",
  "smol",
  "smoldot",
