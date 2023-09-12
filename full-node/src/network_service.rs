@@ -31,6 +31,7 @@ use crate::{database_thread, jaeger_service, util, LogCallback, LogLevel};
 
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
+use futures_lite::FutureExt as _;
 use hashbrown::HashMap;
 use smol::{
     channel, future,
@@ -1203,19 +1204,21 @@ async fn background_task(mut inner: Inner) {
             }
         }
 
-        let message = match inner.event_senders {
-            either::Left(_) => inner.to_background_rx.next().await.unwrap(),
-            either::Right(sending) => {
-                match futures_util::future::select(inner.to_background_rx.next(), sending).await {
-                    futures_util::future::Either::Left((message, sending)) => {
-                        inner.event_senders = either::Right(sending);
-                        message.unwrap()
-                    }
-                    futures_util::future::Either::Right((event_senders, _)) => {
-                        inner.event_senders = either::Left(event_senders);
-                        continue;
-                    }
+        let message = {
+            let foreground_msg = async { Some(inner.to_background_rx.next().await) };
+            let sending_done = async {
+                if let either::Right(sending) = &mut inner.event_senders {
+                    let event_senders = sending.await;
+                    inner.event_senders = either::Left(event_senders);
+                    None
+                } else {
+                    future::pending().await
                 }
+            };
+
+            match foreground_msg.or(sending_done).await {
+                Some(msg) => msg.unwrap(),
+                None => continue,
             }
         };
 
