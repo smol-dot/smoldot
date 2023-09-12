@@ -30,6 +30,7 @@ use smoldot::libp2p::websocket;
 use std::{
     io,
     net::SocketAddr,
+    thread,
     time::{Instant, UNIX_EPOCH},
 };
 
@@ -37,13 +38,44 @@ use std::{
 pub struct DefaultPlatform {
     client_name: String,
     client_version: String,
+    tasks_executor: Arc<smol::Executor<'static>>,
+    shutdown_notify: event_listener::Event,
 }
 
 impl DefaultPlatform {
+    /// Creates a new [`DefaultPlatform`]. Spawns threads to executor background tasks.
+    ///
+    /// # Panic
+    ///
+    /// Panics if it wasn't possible to spawn background threads to execute background tasks.
+    ///
     pub fn new(client_name: String, client_version: String) -> Arc<Self> {
+        let tasks_executor = Arc::new(smol::Executor::new());
+        let shutdown_notify = event_listener::Event::new();
+
+        for n in 0..thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+        {
+            // Note that `listen()` must be called here (and not in the thread being spawned), as
+            // it might be notified as soon as `DefaultPlatform::new` returns.
+            let on_shutdown = shutdown_notify.listen();
+            let tasks_executor = tasks_executor.clone();
+
+            let spawn_result = thread::Builder::new()
+                .name(format!("tasks-pool-{}", n))
+                .spawn(move || smol::block_on(tasks_executor.run(on_shutdown)));
+
+            if let Err(err) = spawn_result {
+                panic!("Failed to spawn execution thread: {err}");
+            }
+        }
+
         Arc::new(DefaultPlatform {
             client_name,
             client_version,
+            tasks_executor,
+            shutdown_notify,
         })
     }
 }
@@ -89,7 +121,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         _task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
     ) {
-        smol::spawn(task).detach();
+        self.tasks_executor.spawn(task).detach();
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -223,6 +255,12 @@ impl PlatformRef for Arc<DefaultPlatform> {
         Box::pin(stream.0.wait_read_write_again(|when| async move {
             smol::Timer::at(when).await;
         }))
+    }
+}
+
+impl Drop for DefaultPlatform {
+    fn drop(&mut self) {
+        self.shutdown_notify.notify(usize::max_value());
     }
 }
 

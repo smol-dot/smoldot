@@ -1248,8 +1248,7 @@ impl CipherState {
                 debug_assert!(overlapping_data.len() < 64);
 
                 // Return if iterator has finished.
-                let Some(mac_deref) = mac.as_mut()
-                else {
+                let Some(mac_deref) = mac.as_mut() else {
                     return None;
                 };
 

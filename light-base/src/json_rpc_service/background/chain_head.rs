@@ -370,8 +370,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_continue`].
     pub(super) async fn chain_head_continue(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::chainHead_unstable_continue { .. } = request.request()
-        else {
+        let methods::MethodCall::chainHead_unstable_continue { .. } = request.request() else {
             unreachable!()
         };
         // TODO: not implemented properly
@@ -874,11 +873,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
     }
 
     async fn start_chain_head_body(&mut self, request: service::RequestProcess) {
-        let methods::MethodCall::chainHead_unstable_body {
-            hash,
-            ..
-        } = request.request()
-        else {
+        let methods::MethodCall::chainHead_unstable_body { hash, .. } = request.request() else {
             unreachable!()
         };
 

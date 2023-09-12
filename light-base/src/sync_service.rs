@@ -29,7 +29,7 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{fmt, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use core::{fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
@@ -52,9 +52,6 @@ pub struct Config<TPlat: PlatformRef> {
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
-
-    /// State of the finalized chain.
-    pub chain_information: chain::chain_information::ValidChainInformation,
 
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
@@ -84,6 +81,9 @@ pub enum ConfigChainType<TPlat: PlatformRef> {
 
 /// See [`ConfigChainType::RelayChain`].
 pub struct ConfigRelayChain {
+    /// State of the finalized chain.
+    pub chain_information: chain::chain_information::ValidChainInformation,
+
     /// Known valid Merkle value and storage value combination for the `:code` key.
     ///
     /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
@@ -112,6 +112,11 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Number of bytes used by the block number in the relay chain.
     pub relay_chain_block_number_bytes: usize,
 
+    /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
+    /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
+    /// block can be gathered.
+    pub finalized_block_header: Vec<u8>,
+
     /// Id of the parachain within the relay chain.
     ///
     /// This is an arbitrary number used to identify the parachain within the storage of the
@@ -119,7 +124,7 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     ///
     /// > **Note**: This information is normally found in the chain specification of the
     /// >           parachain.
-    pub parachain_id: u32,
+    pub para_id: u32,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -147,41 +152,41 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
         let log_target = format!("sync-service-{}", config.log_name);
 
-        match config.chain_type {
-            ConfigChainType::Parachain(config_parachain) => {
-                config.platform.spawn_task(
-                    log_target.clone().into(),
-                    Box::pin(parachain::start_parachain(
-                        log_target,
-                        config.platform.clone(),
-                        config.chain_information,
-                        config.block_number_bytes,
-                        config_parachain.relay_chain_sync.clone(),
-                        config_parachain.relay_chain_block_number_bytes,
-                        config_parachain.parachain_id,
-                        from_foreground,
-                        config.network_service.1,
-                        config.network_events_receiver,
-                    )),
-                );
-            }
+        let task: Pin<Box<dyn Future<Output = ()> + Send>> = match config.chain_type {
+            ConfigChainType::Parachain(config_parachain) => Box::pin(parachain::start_parachain(
+                log_target.clone(),
+                config.platform.clone(),
+                config_parachain.finalized_block_header,
+                config.block_number_bytes,
+                config_parachain.relay_chain_sync.clone(),
+                config_parachain.relay_chain_block_number_bytes,
+                config_parachain.para_id,
+                from_foreground,
+                config.network_service.0.clone(),
+                config.network_service.1,
+                config.network_events_receiver,
+            )),
             ConfigChainType::RelayChain(config_relay_chain) => {
-                config.platform.spawn_task(
-                    log_target.clone().into(),
-                    Box::pin(standalone::start_standalone_chain(
-                        log_target,
-                        config.platform.clone(),
-                        config.chain_information,
-                        config.block_number_bytes,
-                        config_relay_chain.runtime_code_hint,
-                        from_foreground,
-                        config.network_service.0.clone(),
-                        config.network_service.1,
-                        config.network_events_receiver,
-                    )),
-                );
+                Box::pin(standalone::start_standalone_chain(
+                    log_target.clone(),
+                    config.platform.clone(),
+                    config_relay_chain.chain_information,
+                    config.block_number_bytes,
+                    config_relay_chain.runtime_code_hint,
+                    from_foreground,
+                    config.network_service.0.clone(),
+                    config.network_service.1,
+                    config.network_events_receiver,
+                ))
             }
-        }
+        };
+
+        config
+            .platform
+            .spawn_task(log_target.clone().into(), async move {
+                task.await;
+                log::debug!(target: &log_target, "Shutdown");
+            });
 
         SyncService {
             to_background,

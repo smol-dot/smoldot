@@ -198,10 +198,12 @@ use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
     string::{String, ToString as _},
+    sync::Arc,
     vec,
     vec::Vec,
 };
 use core::{fmt, hash::Hasher as _, iter, str};
+use functions::HostFunction;
 
 pub mod runtime_version;
 
@@ -213,6 +215,7 @@ pub use trie::TrieEntryVersion;
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
+mod functions;
 mod tests;
 mod zstd;
 
@@ -265,10 +268,10 @@ struct VmCommon {
 
     /// List of functions that the Wasm code imports.
     ///
-    /// The keys of this `Vec` (i.e. the `usize` indices) have been passed to the virtual machine
+    /// The keys of this list (i.e. the `usize` indices) have been passed to the virtual machine
     /// executor. Whenever the Wasm code invokes a host function, we obtain its index, and look
-    /// within this `Vec` to know what to do.
-    registered_functions: Vec<FunctionImport>,
+    /// within this list to know what to do.
+    registered_functions: Arc<[FunctionImport]>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
@@ -349,8 +352,7 @@ impl HostVmPrototype {
                     Ok(id)
                 },
             })?;
-            registered_functions.shrink_to_fit();
-            (vm_proto, registered_functions)
+            (vm_proto, registered_functions.into())
         };
 
         // In the runtime environment, Wasm blobs must export a global symbol named
@@ -768,7 +770,7 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = match self.inner.common.registered_functions.get_mut(id) {
+        let host_fn = match self.inner.common.registered_functions.get(id) {
             Some(FunctionImport::Resolved(f)) => *f,
             Some(FunctionImport::Unresolved { name, module }) => {
                 return HostVm::Error {
@@ -901,6 +903,28 @@ impl ReadyToRun {
             ($num:expr) => {{
                 match &params[$num] {
                     vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
+                }
+            }};
+        }
+
+        macro_rules! expect_offchain_storage_kind {
+            ($num:expr) => {{
+                match &params[$num] {
+                    // `0` indicates `StorageKind::PERSISTENT`, the only kind of offchain
+                    // storage that is available.
+                    vm::WasmValue::I32(0) => true,
+                    // `1` indicates `StorageKind::LOCAL`, which is valid but has never been
+                    // implemented in Substrate.
+                    vm::WasmValue::I32(1) => false,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
                     _ => unreachable!(),
@@ -1639,12 +1663,11 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                let Some(outcome) = self.inner.signatures_batch_verification.take()
-                else {
+                let Some(outcome) = self.inner.signatures_batch_verification.take() else {
                     return HostVm::Error {
                         error: Error::NoBatchVerify,
                         prototype: self.inner.into_prototype(),
-                    }
+                    };
                 };
 
                 HostVm::ReadyToRun(ReadyToRun {
@@ -1789,51 +1812,73 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_set_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(2);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: None,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(2);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        old_value: None,
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                }
             }
             HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(3);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: Some((old_value_ptr, old_value_size)),
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(3);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        old_value: Some((old_value_ptr, old_value_size)),
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: Some(vm::WasmValue::I32(0)),
+                    })
+                }
             }
             HostFunction::ext_offchain_local_storage_get_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-
-                HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
-                    key_ptr,
-                    key_size,
-                    calling: id,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
+                        key_ptr,
+                        key_size,
+                        calling: id,
+                        inner: self.inner,
+                    })
+                } else {
+                    // Write a SCALE-encoded `None`.
+                    self.inner
+                        .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
+                }
             }
             HostFunction::ext_offchain_local_storage_clear_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: None,
-                    old_value: None,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: None,
+                        old_value: None,
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                }
             }
             HostFunction::ext_offchain_http_request_start_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_offchain_http_request_add_header_version_1 => {
@@ -3826,435 +3871,6 @@ pub enum Error {
         /// Name of the function being called.
         function: &'static str,
     },
-}
-
-macro_rules! externalities {
-    ($($ext:ident,)*) => {
-        /// List of possible externalities.
-        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-        #[allow(non_camel_case_types)]
-        enum HostFunction {
-            $(
-                $ext,
-            )*
-        }
-
-        impl HostFunction {
-            fn by_name(name: &str) -> Option<Self> {
-                $(
-                    if name == stringify!($ext) {
-                        return Some(HostFunction::$ext);
-                    }
-                )*
-                None
-            }
-
-            fn name(&self) -> &'static str {
-                match self {
-                    $(
-                        HostFunction::$ext => stringify!($ext),
-                    )*
-                }
-            }
-        }
-    };
-}
-
-externalities! {
-    ext_storage_set_version_1,
-    ext_storage_get_version_1,
-    ext_storage_read_version_1,
-    ext_storage_clear_version_1,
-    ext_storage_exists_version_1,
-    ext_storage_clear_prefix_version_1,
-    ext_storage_clear_prefix_version_2,
-    ext_storage_root_version_1,
-    ext_storage_root_version_2,
-    ext_storage_changes_root_version_1,
-    ext_storage_next_key_version_1,
-    ext_storage_append_version_1,
-    ext_storage_start_transaction_version_1,
-    ext_storage_rollback_transaction_version_1,
-    ext_storage_commit_transaction_version_1,
-    ext_default_child_storage_get_version_1,
-    ext_default_child_storage_read_version_1,
-    ext_default_child_storage_storage_kill_version_1,
-    ext_default_child_storage_storage_kill_version_2,
-    ext_default_child_storage_storage_kill_version_3,
-    ext_default_child_storage_clear_prefix_version_1,
-    ext_default_child_storage_clear_prefix_version_2,
-    ext_default_child_storage_set_version_1,
-    ext_default_child_storage_clear_version_1,
-    ext_default_child_storage_exists_version_1,
-    ext_default_child_storage_next_key_version_1,
-    ext_default_child_storage_root_version_1,
-    ext_default_child_storage_root_version_2,
-    ext_crypto_ed25519_public_keys_version_1,
-    ext_crypto_ed25519_generate_version_1,
-    ext_crypto_ed25519_sign_version_1,
-    ext_crypto_ed25519_verify_version_1,
-    ext_crypto_ed25519_batch_verify_version_1,
-    ext_crypto_sr25519_public_keys_version_1,
-    ext_crypto_sr25519_generate_version_1,
-    ext_crypto_sr25519_sign_version_1,
-    ext_crypto_sr25519_verify_version_1,
-    ext_crypto_sr25519_verify_version_2,
-    ext_crypto_sr25519_batch_verify_version_1,
-    ext_crypto_ecdsa_generate_version_1,
-    ext_crypto_ecdsa_sign_version_1,
-    ext_crypto_ecdsa_public_keys_version_1,
-    ext_crypto_ecdsa_verify_version_1,
-    ext_crypto_ecdsa_verify_version_2,
-    ext_crypto_ecdsa_sign_prehashed_version_1,
-    ext_crypto_ecdsa_verify_prehashed_version_1,
-    ext_crypto_ecdsa_batch_verify_version_1,
-    ext_crypto_secp256k1_ecdsa_recover_version_1,
-    ext_crypto_secp256k1_ecdsa_recover_version_2,
-    ext_crypto_secp256k1_ecdsa_recover_compressed_version_1,
-    ext_crypto_secp256k1_ecdsa_recover_compressed_version_2,
-    ext_crypto_start_batch_verify_version_1,
-    ext_crypto_finish_batch_verify_version_1,
-    ext_hashing_keccak_256_version_1,
-    ext_hashing_keccak_512_version_1,
-    ext_hashing_sha2_256_version_1,
-    ext_hashing_blake2_128_version_1,
-    ext_hashing_blake2_256_version_1,
-    ext_hashing_twox_64_version_1,
-    ext_hashing_twox_128_version_1,
-    ext_hashing_twox_256_version_1,
-    ext_offchain_index_set_version_1,
-    ext_offchain_index_clear_version_1,
-    ext_offchain_is_validator_version_1,
-    ext_offchain_submit_transaction_version_1,
-    ext_offchain_network_state_version_1,
-    ext_offchain_timestamp_version_1,
-    ext_offchain_sleep_until_version_1,
-    ext_offchain_random_seed_version_1,
-    ext_offchain_local_storage_set_version_1,
-    ext_offchain_local_storage_compare_and_set_version_1,
-    ext_offchain_local_storage_get_version_1,
-    ext_offchain_local_storage_clear_version_1,
-    ext_offchain_http_request_start_version_1,
-    ext_offchain_http_request_add_header_version_1,
-    ext_offchain_http_request_write_body_version_1,
-    ext_offchain_http_response_wait_version_1,
-    ext_offchain_http_response_headers_version_1,
-    ext_offchain_http_response_read_body_version_1,
-    ext_trie_blake2_256_root_version_1,
-    ext_trie_blake2_256_root_version_2,
-    ext_trie_blake2_256_ordered_root_version_1,
-    ext_trie_blake2_256_ordered_root_version_2,
-    ext_trie_keccak_256_root_version_1,
-    ext_trie_keccak_256_root_version_2,
-    ext_trie_keccak_256_ordered_root_version_1,
-    ext_trie_keccak_256_ordered_root_version_2,
-    ext_trie_blake2_256_verify_proof_version_1,
-    ext_trie_blake2_256_verify_proof_version_2,
-    ext_trie_keccak_256_verify_proof_version_1,
-    ext_trie_keccak_256_verify_proof_version_2,
-    ext_misc_print_num_version_1,
-    ext_misc_print_utf8_version_1,
-    ext_misc_print_hex_version_1,
-    ext_misc_runtime_version_version_1,
-    ext_allocator_malloc_version_1,
-    ext_allocator_free_version_1,
-    ext_logging_log_version_1,
-    ext_logging_max_level_version_1,
-}
-
-impl HostFunction {
-    // TODO: make this a `const fn` function
-    fn signature(&self) -> vm::Signature {
-        match *self {
-            HostFunction::ext_storage_set_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_get_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_read_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_clear_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_exists_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_storage_clear_prefix_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_clear_prefix_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_root_version_1 => crate::signature!(() => vm::ValueType::I64),
-            HostFunction::ext_storage_root_version_2 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_changes_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_next_key_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_append_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_start_transaction_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_storage_rollback_transaction_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_storage_commit_transaction_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_default_child_storage_get_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_read_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_3 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_set_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_clear_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_exists_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_default_child_storage_next_key_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ed25519_public_keys_version_1 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ed25519_generate_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ed25519_sign_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ed25519_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ed25519_batch_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_public_keys_version_1 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_sr25519_generate_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_sign_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_sr25519_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_verify_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_batch_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_generate_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_sign_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ecdsa_public_keys_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ecdsa_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_verify_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_batch_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_start_batch_verify_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_keccak_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_keccak_512_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_sha2_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_blake2_128_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_blake2_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_twox_64_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_twox_128_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_twox_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_index_set_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_index_clear_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_is_validator_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_submit_transaction_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_network_state_version_1 => {
-                crate::signature!(() => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_timestamp_version_1 => {
-                crate::signature!(() => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_sleep_until_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_random_seed_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_local_storage_set_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_local_storage_get_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_local_storage_clear_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_http_request_start_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_request_add_header_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_request_write_body_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_response_wait_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_response_headers_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_response_read_body_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_trie_blake2_256_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_verify_proof_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_verify_proof_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_misc_print_num_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_misc_print_utf8_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_misc_print_hex_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_misc_runtime_version_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_allocator_malloc_version_1 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_allocator_free_version_1 => {
-                crate::signature!((vm::ValueType::I32) => ())
-            }
-            HostFunction::ext_logging_log_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_logging_max_level_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-        }
-    }
 }
 
 // Glue between the `allocator` module and the `vm` module.

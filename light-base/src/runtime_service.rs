@@ -166,11 +166,18 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
             let platform = config.platform.clone();
-            let (abortable, abort) = future::abortable(async move {
-                run_background(log_target, platform, sync_service, guarded).await;
-            });
+            let (abortable, abort) = future::abortable(run_background(
+                log_target.clone(),
+                platform,
+                sync_service,
+                guarded,
+            ));
             background_task_abort = abort;
-            abortable.map(|_| ()).boxed()
+            abortable
+                .map(move |_| {
+                    log::debug!(target: &log_target, "Shutdown");
+                })
+                .boxed()
         });
 
         RuntimeService {
@@ -200,7 +207,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// pinned blocks must be passed, indicating the maximum number of blocks that are finalized
     /// or non-canonical that the runtime service will pin at the same time for this subscription.
     /// If this maximum is reached, the channel will get closed. In situations where the subscriber
-    /// is guaranteed to always properly unpin blocks, a value of  `usize::max_value()` can be
+    /// is guaranteed to always properly unpin blocks, a value of `usize::max_value()` can be
     /// passed in order to ignore this maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
@@ -227,7 +234,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 }
             }
         };
-        let mut guarded_lock = &mut *guarded_lock;
+        let guarded_lock = &mut *guarded_lock;
 
         // Extract the components of the `FinalizedBlockRuntimeKnown`. We are guaranteed by the
         // block above to be in this state.
@@ -1413,7 +1420,7 @@ async fn run_background<TPlat: PlatformRef>(
                             let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
 
                             let mut guarded = background.guarded.lock().await;
-                            let mut guarded = &mut *guarded;
+                            let guarded = &mut *guarded;
                             // TODO: note that this code is never reached for parachains
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
@@ -1466,7 +1473,7 @@ async fn run_background<TPlat: PlatformRef>(
                             let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
 
                             let mut guarded = background.guarded.lock().await;
-                            let mut guarded = &mut *guarded;
+                            let guarded = &mut *guarded;
                             guarded.best_near_head_of_chain = near_head_of_chain;
 
                             match &mut guarded.tree {

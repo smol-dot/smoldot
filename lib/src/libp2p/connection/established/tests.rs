@@ -204,6 +204,7 @@ impl TwoEstablished {
                 self.bob_to_alice_buffer_size,
                 alice_read_write.expected_incoming_bytes.unwrap_or(0),
             );
+            self.wake_up_after = alice_read_write.wake_up_after;
 
             if let Some(event) = alice_event {
                 return (self, either::Left(event));
@@ -237,6 +238,7 @@ impl TwoEstablished {
                 self.alice_to_bob_buffer_size,
                 bob_read_write.expected_incoming_bytes.unwrap_or(0),
             );
+            self.wake_up_after = bob_read_write.wake_up_after;
 
             if let Some(event) = bob_event {
                 return (self, either::Right(event));
@@ -401,10 +403,7 @@ fn refused_request() {
     match event {
         either::Left(Event::Response { id, response, .. }) => {
             assert_eq!(id, substream_id);
-            assert!(matches!(
-                response,
-                Err(RequestError::SubstreamClosed | RequestError::SubstreamReset) // TODO: SubstreamReset is slightly wrong, it happens because the sender doesn't close the substream before the receiver receives the response, but this is a very low priority problem
-            ));
+            assert!(matches!(response, Err(RequestError::SubstreamClosed)));
         }
         _ev => unreachable!("{:?}", _ev),
     }

@@ -15,9 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::{cmp, fmt, hash, str::FromStr};
-use sha2::Digest as _;
 
 use super::multihash;
 use crate::util::protobuf;
@@ -174,13 +173,16 @@ impl PeerId {
             }
             out
         } else {
-            let mut out = Vec::with_capacity(34);
-            out.push(0x12);
-            out.push(0x32);
+            let mut out = vec![0; 34];
+            out[0] = 0x12;
+            out[1] = 0x32;
 
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&key_enc);
-            out.extend_from_slice(hasher.finalize().as_slice());
+            let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+            sha2::Digest::update(&mut hasher, &key_enc);
+            sha2::Digest::finalize_into(
+                hasher,
+                sha2::digest::generic_array::GenericArray::from_mut_slice(&mut out[2..]),
+            );
 
             out
         };

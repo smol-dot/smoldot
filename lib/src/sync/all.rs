@@ -439,7 +439,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     user_data,
                     best_block_number,
                     best_block_hash,
-                    finalized_block_height: None,
                 };
 
                 let inner_source_id = match &mut inner {
@@ -447,11 +446,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync::WarpSync::Finished(sync) => {
                         let new_id = sync.sources_ordered.last().map_or(
                             warp_sync::SourceId::min_value(),
-                            |(id, _)| {
+                            |(id, _, _)| {
                                 id.checked_add(1).unwrap_or_else(|| panic!()) // TODO: don't panic?
                             },
                         );
-                        sync.sources_ordered.push((new_id, source_extra));
+                        sync.sources_ordered.push((new_id, 0, source_extra));
                         new_id
                     }
                 };
@@ -591,9 +590,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync::WarpSync::Finished(inner) => {
                         let index = inner
                             .sources_ordered
-                            .binary_search_by_key(&source_id, |(id, _)| *id)
+                            .binary_search_by_key(&source_id, |(id, _, _)| *id)
                             .unwrap_or_else(|_| panic!());
-                        let (_, user_data) = inner.sources_ordered.remove(index);
+                        let (_, _, user_data) = inner.sources_ordered.remove(index);
                         let (requests_of_source, requests_back) =
                             mem::take(&mut inner.in_progress_requests)
                                 .into_iter()
@@ -662,7 +661,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync
                     .sources_ordered
                     .iter()
-                    .map(move |(_, ud)| ud.outer_source_id);
+                    .map(move |(_, _, ud)| ud.outer_source_id);
                 either::Left(either::Right(iter))
             }
             AllSyncInner::Optimistic { inner: sync } => {
@@ -755,9 +754,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             ) => {
                 let index = sync
                     .sources_ordered
-                    .binary_search_by_key(src, |(id, _)| *id)
+                    .binary_search_by_key(src, |(id, _, _)| *id)
                     .unwrap_or_else(|_| panic!());
-                let user_data = &sync.sources_ordered[index].1;
+                let user_data = &sync.sources_ordered[index].2;
                 (user_data.best_block_number, &user_data.best_block_hash)
             }
 
@@ -835,9 +834,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let index = sync
                     .sources_ordered
-                    .binary_search_by_key(src, |(id, _)| *id)
+                    .binary_search_by_key(src, |(id, _, _)| *id)
                     .unwrap_or_else(|_| panic!());
-                let user_data = &sync.sources_ordered[index].1;
+                let user_data = &sync.sources_ordered[index].2;
                 user_data.best_block_hash == *hash && user_data.best_block_number == height
             }
 
@@ -908,10 +907,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync
                     .sources_ordered
                     .iter()
-                    .filter(move |(_, user_data)| {
+                    .filter(move |(_, _, user_data)| {
                         user_data.best_block_hash == hash && user_data.best_block_number == height
                     })
-                    .map(move |(_, ud)| ud.outer_source_id);
+                    .map(move |(_, _, ud)| ud.outer_source_id);
 
                 either::Right(either::Right(iter))
             }
@@ -1439,9 +1438,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 warp_sync::WarpSync::Finished(sync) => {
                                     let index = sync
                                         .sources_ordered
-                                        .binary_search_by_key(&source_id, |(id, _)| *id)
+                                        .binary_search_by_key(&source_id, |(id, _, _)| *id)
                                         .unwrap_or_else(|_| panic!());
-                                    &mut sync.sources_ordered[index].1
+                                    &mut sync.sources_ordered[index].2
                                 }
                             };
                             user_data.best_block_number = header.number;
@@ -1490,11 +1489,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
                 SourceMapping::GrandpaWarpSync(source_id),
             ) => {
-                // TODO: the warp syncing algorithm could maybe be interested in the finalized block height
-                let n = &mut inner[*source_id].finalized_block_height;
-                *n = Some(n.map_or(finalized_block_height, |b| {
-                    cmp::max(b, finalized_block_height)
-                }));
+                inner.set_source_finality_state(*source_id, finalized_block_height);
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1504,13 +1499,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             ) => {
                 let index = sync
                     .sources_ordered
-                    .binary_search_by_key(src, |(id, _)| *id)
+                    .binary_search_by_key(src, |(id, _, _)| *id)
                     .unwrap_or_else(|_| panic!());
                 // TODO: the warp syncing algorithm could maybe be interested in the finalized block height
-                let n = &mut sync.sources_ordered[index].1.finalized_block_height;
-                *n = Some(n.map_or(finalized_block_height, |b| {
-                    cmp::max(b, finalized_block_height)
-                }));
+                let n = &mut sync.sources_ordered[index].1;
+                *n = cmp::max(*n, finalized_block_height);
             }
 
             // Invalid internal states.
@@ -1954,9 +1947,9 @@ impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
             ) => {
                 let index = sync
                     .sources_ordered
-                    .binary_search_by_key(src, |(id, _)| *id)
+                    .binary_search_by_key(src, |(id, _, _)| *id)
                     .unwrap_or_else(|_| panic!());
-                &sync.sources_ordered[index].1.user_data
+                &sync.sources_ordered[index].2.user_data
             }
 
             (AllSyncInner::Poisoned, _) => unreachable!(),
@@ -2001,9 +1994,9 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
             ) => {
                 let index = sync
                     .sources_ordered
-                    .binary_search_by_key(src, |(id, _)| *id)
+                    .binary_search_by_key(src, |(id, _, _)| *id)
                     .unwrap_or_else(|_| panic!());
-                &mut sync.sources_ordered[index].1.user_data
+                &mut sync.sources_ordered[index].2.user_data
             }
 
             (AllSyncInner::Poisoned, _) => unreachable!(),
@@ -2704,6 +2697,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                         sync,
                         all_forks::FinalityProofVerifyOutcome::NewFinalized {
                             finalized_blocks,
+                            pruned_blocks,
                             updates_best_block,
                         },
                     ) => (
@@ -2717,6 +2711,10 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                     justifications: Vec::new(), // TODO: wrong
                                     user_data: b.1.unwrap(),
                                 })
+                                .collect(),
+                            pruned_blocks: pruned_blocks
+                                .into_iter()
+                                .map(|b| b.0.hash(self.shared.block_number_bytes))
                                 .collect(),
                             updates_best_block,
                         },
@@ -2760,6 +2758,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                                 full: b.full.map(|b| BlockFull { body: b.body }),
                             })
                             .collect(),
+                        pruned_blocks: Vec::new(),
                         updates_best_block: false,
                     },
                 ),
@@ -2782,7 +2781,9 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
         finalized_blocks: Vec<Block<TBl>>,
-        // TODO: missing pruned blocks
+        /// List of hashes of blocks that are no longer descendant of the finalized block, in
+        /// an unspecified order.
+        pruned_blocks: Vec<[u8; 32]>,
         /// If `true`, this operation modifies the best block of the non-finalized chain.
         /// This can happen if the previous best block isn't a descendant of the now finalized
         /// block.
@@ -2949,7 +2950,6 @@ struct OptimisticRequestExtra<TRq> {
 struct GrandpaWarpSyncSourceExtra<TSrc> {
     outer_source_id: SourceId,
     user_data: TSrc,
-    finalized_block_height: Option<u64>,
     best_block_number: u64,
     best_block_hash: [u8; 32],
 }
@@ -3059,7 +3059,7 @@ impl<TRq> Shared<TRq> {
                 RequestMapping::Inline(SourceId(source_id), detail, user_data);
         }
 
-        for (_, source) in grandpa.sources_ordered {
+        for (_, finalized_block_height, source) in grandpa.sources_ordered {
             let source_user_data = AllForksSourceExtra {
                 user_data: source.user_data,
                 outer_source_id: source.outer_source_id,
@@ -3078,9 +3078,7 @@ impl<TRq> Shared<TRq> {
                 }
             };
 
-            if let Some(finalized_block_height) = source.finalized_block_height {
-                all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
-            }
+            all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
 
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }

@@ -43,12 +43,13 @@
 //! # About errors handling
 //!
 //! Most of the functions and methods in this module return a `Result` containing notably an
-//! [`AccessError`]. This kind of errors can happen if the operating system returns an error when
-//! accessing the file system, or if the database has been corrupted, for example by the user
+//! [`CorruptedError`]. This kind of errors can happen if the operating system returns an error
+//! when accessing the file system, or if the database has been corrupted, for example by the user
 //! manually modifying it.
 //!
-//! There isn't much that can be done to properly handle an [`AccessError`]. The only reasonable
-//! solutions are either to stop the program, or to delete the entire database and recreate it.
+//! There isn't much that can be done to properly handle an [`CorruptedError`]. The only
+//! reasonable solutions are either to stop the program, or to delete the entire database and
+//! recreate it.
 //!
 //! # Schema
 //!
@@ -104,22 +105,21 @@ pub struct SqliteFullDatabase {
 
 impl SqliteFullDatabase {
     /// Returns the hash of the block in the database whose storage is currently accessible.
-    pub fn best_block_hash(&self) -> Result<[u8; 32], AccessError> {
+    pub fn best_block_hash(&self) -> Result<[u8; 32], CorruptedError> {
         let connection = self.database.lock();
 
-        let val = meta_get_blob(&connection, "best")?
-            .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
+        let val = meta_get_blob(&connection, "best")?.ok_or(CorruptedError::MissingMetaKey)?;
         if val.len() == 32 {
             let mut out = [0; 32];
             out.copy_from_slice(&val);
             Ok(out)
         } else {
-            Err(AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))
+            Err(CorruptedError::InvalidBlockHashLen)
         }
     }
 
     /// Returns the hash of the finalized block in the database.
-    pub fn finalized_block_hash(&self) -> Result<[u8; 32], AccessError> {
+    pub fn finalized_block_hash(&self) -> Result<[u8; 32], CorruptedError> {
         let database = self.database.lock();
         finalized_hash(&database)
     }
@@ -132,7 +132,7 @@ impl SqliteFullDatabase {
     pub fn block_scale_encoded_header(
         &self,
         block_hash: &[u8; 32],
-    ) -> Result<Option<Vec<u8>>, AccessError> {
+    ) -> Result<Option<Vec<u8>>, CorruptedError> {
         let connection = self.database.lock();
 
         let out = connection
@@ -155,7 +155,7 @@ impl SqliteFullDatabase {
     pub fn block_extrinsics(
         &self,
         block_hash: &[u8; 32],
-    ) -> Result<Option<impl ExactSizeIterator<Item = Vec<u8>>>, AccessError> {
+    ) -> Result<Option<impl ExactSizeIterator<Item = Vec<u8>>>, CorruptedError> {
         let connection = self.database.lock();
 
         // TODO: doesn't detect if block is absent
@@ -175,10 +175,39 @@ impl SqliteFullDatabase {
     pub fn block_hash_by_number(
         &self,
         block_number: u64,
-    ) -> Result<impl ExactSizeIterator<Item = [u8; 32]>, AccessError> {
+    ) -> Result<impl ExactSizeIterator<Item = [u8; 32]>, CorruptedError> {
         let connection = self.database.lock();
         let result = block_hashes_by_number(&connection, block_number)?;
         Ok(result.into_iter())
+    }
+
+    /// Returns the hash of the block of the best chain given a block number.
+    pub fn best_block_hash_by_number(
+        &self,
+        block_number: u64,
+    ) -> Result<Option<[u8; 32]>, CorruptedError> {
+        let connection = self.database.lock();
+
+        let block_number = match i64::try_from(block_number) {
+            Ok(n) => n,
+            Err(_) => return Ok(None),
+        };
+
+        let result = connection
+            .prepare_cached(r#"SELECT hash FROM blocks WHERE number = ? AND is_best_chain = TRUE"#)
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_row((block_number,), |row| row.get::<_, Vec<u8>>(0))
+            .optional()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))
+            .and_then(|value| {
+                let Some(value) = value else { return Ok(None) };
+                Ok(Some(
+                    <[u8; 32]>::try_from(&value[..])
+                        .map_err(|_| CorruptedError::InvalidBlockHashLen)?,
+                ))
+            })?;
+
+        Ok(result)
     }
 
     /// Returns a [`chain_information::ChainInformation`] struct containing the information about
@@ -189,18 +218,18 @@ impl SqliteFullDatabase {
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`StorageAccessError::Pruned`] error is returned.
+    /// [`StorageAccessError::StoragePruned`] error is returned.
     pub fn to_chain_information(
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<chain_information::ValidChainInformation, StorageAccessError> {
         let connection = self.database.lock();
         if finalized_hash(&connection)? != *finalized_block_hash {
-            return Err(StorageAccessError::Pruned);
+            return Err(StorageAccessError::StoragePruned);
         }
 
         let finalized_block_header = block_header(&connection, finalized_block_hash)?
-            .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
+            .ok_or(CorruptedError::MissingBlockHeader)?;
 
         let finality = match (
             grandpa_authorities_set_id(&connection)?,
@@ -220,9 +249,9 @@ impl SqliteFullDatabase {
                 chain_information::ChainInformationFinality::Outsourced
             }
             _ => {
-                return Err(StorageAccessError::Access(AccessError::Corrupted(
+                return Err(StorageAccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,
-                )))
+                ))
             }
         };
 
@@ -256,9 +285,9 @@ impl SqliteFullDatabase {
             }
             (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
             _ => {
-                return Err(StorageAccessError::Access(AccessError::Corrupted(
+                return Err(StorageAccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,
-                )))
+                ))
             }
         };
 
@@ -267,8 +296,7 @@ impl SqliteFullDatabase {
                 finalized_block_header: {
                     let header = header::decode(&finalized_block_header, self.block_number_bytes)
                         .map_err(CorruptedError::BlockHeaderCorrupted)
-                        .map_err(AccessError::Corrupted)
-                        .map_err(StorageAccessError::Access)?;
+                        .map_err(StorageAccessError::Corrupted)?;
                     Box::new(header.into())
                 },
                 consensus,
@@ -276,9 +304,9 @@ impl SqliteFullDatabase {
             },
         ) {
             Ok(ci) => Ok(ci),
-            Err(err) => Err(StorageAccessError::Access(AccessError::Corrupted(
+            Err(err) => Err(StorageAccessError::Corrupted(
                 CorruptedError::InvalidChainInformation(err),
-            ))),
+            )),
         }
     }
 
@@ -289,6 +317,10 @@ impl SqliteFullDatabase {
     ///
     /// Blocks must be inserted in the correct order. An error is returned if the parent of the
     /// newly-inserted block isn't present in the database.
+    ///
+    /// > **Note**: It is not necessary for the newly-inserted block to be a descendant of the
+    /// >           finalized block, unless `is_new_best` is true.
+    ///
     pub fn insert<'a>(
         &self,
         scale_encoded_header: &[u8],
@@ -309,11 +341,9 @@ impl SqliteFullDatabase {
         let mut database = self.database.lock();
 
         // Start a transaction to insert everything at once.
-        let transaction = database.transaction().map_err(|err| {
-            InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                InternalError(err),
-            )))
-        })?;
+        let transaction = database
+            .transaction()
+            .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         // Make sure that the block to insert isn't already in the database.
         if has_block(&transaction, &block_hash)? {
@@ -325,27 +355,16 @@ impl SqliteFullDatabase {
             return Err(InsertError::MissingParent);
         }
 
-        // If the height of the block to insert is <= the latest finalized, it doesn't
-        // belong to the finalized chain and would be pruned.
-        // TODO: what if we don't immediately insert the entire finalized chain, but populate it later? should that not be a use case?
-        if header.number <= finalized_num(&transaction)? {
-            return Err(InsertError::FinalizedNephew);
-        }
-
         // Temporarily disable foreign key checks in order to make the insertion easier, as we
         // don't have to make sure that trie nodes are sorted.
         // Note that this is immediately disabled again when we `COMMIT` later down below.
         transaction
             .execute("PRAGMA defer_foreign_keys = ON", ())
-            .map_err(|err| {
-                InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                    InternalError(err),
-                )))
-            })?;
+            .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         transaction
             .prepare_cached(
-                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, justification) VALUES (?, ?, ?, ?, ?, NULL)",
+                "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, is_best_chain, justification) VALUES (?, ?, ?, ?, ?, FALSE, NULL)",
             )
             .unwrap()
             .execute((
@@ -379,27 +398,31 @@ impl SqliteFullDatabase {
             new_trie_nodes,
             trie_entries_version,
         )
-        .map_err(InsertError::Access)?;
+        .map_err(InsertError::Corrupted)?;
 
-        // Various other updates.
+        // Change the best chain to be the new block.
         if is_new_best {
-            meta_set_blob(&transaction, "best", &block_hash)?;
+            // It would be illegal to change the best chain to not overlay with the
+            // finalized chain.
+            if header.number <= finalized_num(&transaction)? {
+                return Err(InsertError::BestNotInFinalizedChain);
+            }
+
+            set_best_chain(&transaction, &block_hash)?;
         }
 
         // If everything is successful, we commit.
-        transaction.commit().map_err(|err| {
-            InsertError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                InternalError(err),
-            )))
-        })?;
+        transaction
+            .commit()
+            .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         Ok(())
     }
 
     /// Changes the finalized block to the given one.
     ///
-    /// The block must have been previously inserted using [`SqliteFullDatabase::insert`], otherwise
-    /// an error is returned.
+    /// The block must have been previously inserted using [`SqliteFullDatabase::insert`],
+    /// otherwise an error is returned.
     ///
     /// Blocks are expected to be valid in context of the chain. Inserting an invalid block can
     /// result in the database being corrupted.
@@ -407,6 +430,10 @@ impl SqliteFullDatabase {
     /// The block must be a descendant of the current finalized block. Reverting finalization is
     /// forbidden, as the database intentionally discards some information when finality is
     /// applied.
+    ///
+    /// > **Note**: This function doesn't remove any block from the database but simply moves
+    /// >           the finalized block "cursor".
+    ///
     pub fn set_finalized(
         &self,
         new_finalized_block_hash: &[u8; 32],
@@ -415,9 +442,7 @@ impl SqliteFullDatabase {
 
         // Start a transaction to insert everything at once.
         let transaction = database.transaction().map_err(|err| {
-            SetFinalizedError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                InternalError(err),
-            )))
+            SetFinalizedError::Corrupted(CorruptedError::Internal(InternalError(err)))
         })?;
 
         // Fetch the header of the block to finalize.
@@ -425,8 +450,7 @@ impl SqliteFullDatabase {
             .ok_or(SetFinalizedError::UnknownBlock)?;
         let new_finalized_header = header::decode(&new_finalized_header, self.block_number_bytes)
             .map_err(CorruptedError::BlockHeaderCorrupted)
-            .map_err(AccessError::Corrupted)
-            .map_err(SetFinalizedError::Access)?;
+            .map_err(SetFinalizedError::Corrupted)?;
 
         // Fetch the current finalized block.
         let current_finalized = finalized_num(&transaction)?;
@@ -436,6 +460,7 @@ impl SqliteFullDatabase {
         // the finalized chain, and that the presence of the block to finalize in
         // the database has already been verified, it is guaranteed that the block
         // to finalize is already the one already finalized.
+        // TODO: this comment is obsolete ^, should also compare the block hashes
         if new_finalized_header.number == current_finalized {
             return Ok(());
         }
@@ -451,101 +476,22 @@ impl SqliteFullDatabase {
         // Update the finalized block in meta.
         meta_set_number(&transaction, "finalized", new_finalized_header.number)?;
 
-        // Take each block height between `header.number` and `current_finalized + 1`
-        // and remove blocks that aren't an ancestor of the new finalized block.
-        {
-            // For each block height between the old finalized and new finalized,
-            // remove all blocks except the one whose hash is `expected_hash`.
-            // `expected_hash` always designates a block in the finalized chain.
-            let mut expected_hash = *new_finalized_block_hash;
-
-            for height in (current_finalized + 1..=new_finalized_header.number).rev() {
-                let blocks_list = block_hashes_by_number(&transaction, height)?;
-
-                let mut expected_block_found = false;
-                for hash_at_height in blocks_list {
-                    if hash_at_height == expected_hash {
-                        expected_block_found = true;
-                        continue;
-                    }
-
-                    // Remove the block from the database.
-                    purge_block(&transaction, &hash_at_height)?;
-                }
-
-                // `expected_hash` not found in the list of blocks with this number.
-                if !expected_block_found {
-                    return Err(SetFinalizedError::Access(AccessError::Corrupted(
-                        CorruptedError::BrokenChain,
-                    )));
-                }
-
-                // Update `expected_hash` to point to the parent of the current
-                // `expected_hash`.
-                expected_hash = {
-                    let header = block_header(&transaction, &expected_hash)?.ok_or(
-                        SetFinalizedError::Access(AccessError::Corrupted(
-                            CorruptedError::BrokenChain,
-                        )),
-                    )?;
-                    let header = header::decode(&header, self.block_number_bytes)
-                        .map_err(CorruptedError::BlockHeaderCorrupted)
-                        .map_err(AccessError::Corrupted)
-                        .map_err(SetFinalizedError::Access)?;
-                    *header.parent_hash
-                };
-            }
-        }
-
-        // Take each block height starting from `header.number + 1` and remove blocks
-        // that aren't a descendant of the newly-finalized block.
-        let mut allowed_parents = vec![*new_finalized_block_hash];
-        for height in new_finalized_header.number + 1.. {
-            let mut next_iter_allowed_parents = Vec::with_capacity(allowed_parents.len());
-
-            let blocks_list = block_hashes_by_number(&transaction, height)?;
-            if blocks_list.is_empty() {
-                break;
-            }
-
-            for block_hash in blocks_list {
-                let header = block_header(&transaction, &block_hash)?
-                    .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
-                let header = header::decode(&header, self.block_number_bytes)
-                    .map_err(CorruptedError::BlockHeaderCorrupted)
-                    .map_err(AccessError::Corrupted)
-                    .map_err(SetFinalizedError::Access)?;
-                if allowed_parents.iter().any(|p| *p == *header.parent_hash) {
-                    next_iter_allowed_parents.push(block_hash);
-                    continue;
-                }
-
-                purge_block(&transaction, &block_hash)?;
-            }
-
-            allowed_parents = next_iter_allowed_parents;
-        }
-
         // Now update the finalized block storage.
-        // TODO: prune the storage of old blocks?
         for height in current_finalized + 1..=new_finalized_header.number {
-            let block_hash =
-                {
-                    let list = block_hashes_by_number(&transaction, height)?;
-                    debug_assert_eq!(list.len(), 1);
-                    list.into_iter().next().ok_or(SetFinalizedError::Access(
-                        AccessError::Corrupted(CorruptedError::MissingBlockHeader),
-                    ))?
-                };
+            let block_hash = {
+                let list = block_hashes_by_number(&transaction, height)?;
+                debug_assert_eq!(list.len(), 1);
+                list.into_iter().next().ok_or(SetFinalizedError::Corrupted(
+                    CorruptedError::MissingBlockHeader,
+                ))?
+            };
 
-            let block_header =
-                block_header(&transaction, &block_hash)?.ok_or(SetFinalizedError::Access(
-                    AccessError::Corrupted(CorruptedError::MissingBlockHeader),
-                ))?;
+            let block_header = block_header(&transaction, &block_hash)?.ok_or(
+                SetFinalizedError::Corrupted(CorruptedError::MissingBlockHeader),
+            )?;
             let block_header = header::decode(&block_header, self.block_number_bytes)
                 .map_err(CorruptedError::BlockHeaderCorrupted)
-                .map_err(AccessError::Corrupted)
-                .map_err(SetFinalizedError::Access)?;
+                .map_err(SetFinalizedError::Corrupted)?;
 
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
@@ -640,10 +586,51 @@ impl SqliteFullDatabase {
 
         // If everything went well up to this point, commit the transaction.
         transaction.commit().map_err(|err| {
-            SetFinalizedError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                InternalError(err),
-            )))
+            SetFinalizedError::Corrupted(CorruptedError::Internal(InternalError(err)))
         })?;
+
+        Ok(())
+    }
+
+    /// Removes from the database all blocks that aren't a descendant of the current finalized
+    /// block.
+    pub fn purge_finality_orphans(&self) -> Result<(), CorruptedError> {
+        let mut database = self.database.lock();
+
+        // TODO: untested
+
+        let transaction = database
+            .transaction()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        // Temporarily disable foreign key checks in order to make the insertion easier, as we
+        // don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT` later down below.
+        // TODO: is this really necessary?
+        transaction
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        let current_finalized = finalized_num(&transaction)?;
+
+        let blocks = transaction
+            .prepare_cached(
+                r#"SELECT hash FROM blocks WHERE number <= ? AND is_best_chain = FALSE"#,
+            )
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_map((current_finalized,), |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        for block in blocks {
+            purge_block(&transaction, &block)?;
+        }
+
+        // If everything went well up to this point, commit the transaction.
+        transaction
+            .commit()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         Ok(())
     }
@@ -697,9 +684,9 @@ impl SqliteFullDatabase {
             WHERE blocks.hash = :block_hash;
             "#)
             .map_err(|err| {
-                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                StorageAccessError::Corrupted(CorruptedError::Internal(
                     InternalError(err),
-                )))
+                ))
             })?;
 
         let key_vectored = parent_tries_paths_nibbles
@@ -722,9 +709,7 @@ impl SqliteFullDatabase {
                 },
             )
             .map_err(|err| {
-                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                    InternalError(err),
-                )))
+                StorageAccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
             })?;
 
         if !has_block {
@@ -732,15 +717,14 @@ impl SqliteFullDatabase {
         }
 
         if !block_has_storage {
-            return Err(StorageAccessError::Pruned);
+            return Err(StorageAccessError::StoragePruned);
         }
 
         let Some(value) = value else { return Ok(None) };
 
         let trie_entry_version = u8::try_from(trie_entry_version.unwrap())
             .map_err(|_| CorruptedError::InvalidTrieEntryVersion)
-            .map_err(AccessError::Corrupted)
-            .map_err(StorageAccessError::Access)?;
+            .map_err(StorageAccessError::Corrupted)?;
         Ok(Some((value, trie_entry_version)))
     }
 
@@ -857,9 +841,9 @@ impl SqliteFullDatabase {
             LIMIT 1"#,
             )
             .map_err(|err| {
-                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                StorageAccessError::Corrupted(CorruptedError::Internal(
                     InternalError(err),
-                )))
+                ))
             })?;
 
         let parent_tries_paths_nibbles = parent_tries_paths_nibbles
@@ -895,9 +879,7 @@ impl SqliteFullDatabase {
                 },
             )
             .map_err(|err| {
-                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                    InternalError(err),
-                )))
+                StorageAccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
             })?;
 
         if !has_block {
@@ -905,7 +887,7 @@ impl SqliteFullDatabase {
         }
 
         if !block_has_storage {
-            return Err(StorageAccessError::Pruned);
+            return Err(StorageAccessError::StoragePruned);
         }
 
         if parent_tries_paths_nibbles_length != 0 {
@@ -975,9 +957,9 @@ impl SqliteFullDatabase {
             LIMIT 1"#,
             )
             .map_err(|err| {
-                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
+                StorageAccessError::Corrupted(CorruptedError::Internal(
                     InternalError(err),
-                )))
+                ))
             })?;
 
         let key_vectored = parent_tries_paths_nibbles
@@ -999,9 +981,7 @@ impl SqliteFullDatabase {
                 },
             )
             .map_err(|err| {
-                StorageAccessError::Access(AccessError::Corrupted(CorruptedError::Internal(
-                    InternalError(err),
-                )))
+                StorageAccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
             })?;
 
         if !has_block {
@@ -1009,7 +989,7 @@ impl SqliteFullDatabase {
         }
 
         if !block_has_storage {
-            return Err(StorageAccessError::Pruned);
+            return Err(StorageAccessError::StoragePruned);
         }
 
         Ok(merkle_value)
@@ -1050,24 +1030,12 @@ pub enum InsertTrieNodeStorageValue<'a> {
     SameAsParent,
 }
 
-/// Error while accessing some information.
-// TODO: completely replace with just CorruptedError?
-#[derive(Debug, derive_more::Display, derive_more::From)]
-pub enum AccessError {
-    /// Database could be accessed, but its content is invalid.
-    ///
-    /// While these corruption errors are probably unrecoverable, the inner error might however
-    /// be useful for debugging purposes.
-    #[display(fmt = "Database corrupted: {_0}")]
-    Corrupted(CorruptedError),
-}
-
 /// Error while calling [`SqliteFullDatabase::insert`].
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum InsertError {
     /// Error accessing the database.
     #[display(fmt = "{_0}")]
-    Access(AccessError),
+    Corrupted(CorruptedError),
     /// Block was already in the database.
     Duplicate,
     /// Error when decoding the header to import.
@@ -1075,15 +1043,15 @@ pub enum InsertError {
     BadHeader(header::Error),
     /// Parent of the block to insert isn't in the database.
     MissingParent,
-    /// Block isn't a descendant of the latest finalized block.
-    FinalizedNephew,
+    /// The new best block would be outside of the finalized chain.
+    BestNotInFinalizedChain,
 }
 
 /// Error while calling [`SqliteFullDatabase::set_finalized`].
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum SetFinalizedError {
     /// Error accessing the database.
-    Access(AccessError),
+    Corrupted(CorruptedError),
     /// New finalized block isn't in the database.
     UnknownBlock,
     /// New finalized block must be a child of the previous finalized block.
@@ -1094,9 +1062,9 @@ pub enum SetFinalizedError {
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum StorageAccessError {
     /// Error accessing the database.
-    Access(AccessError),
+    Corrupted(CorruptedError),
     /// Storage of the block hash passed as parameter is no longer in the database.
-    Pruned,
+    StoragePruned,
     /// Requested block couldn't be found in the database.
     UnknownBlock,
 }
@@ -1142,23 +1110,26 @@ pub struct InternalError(rusqlite::Error);
 fn meta_get_blob(
     database: &rusqlite::Connection,
     key: &str,
-) -> Result<Option<Vec<u8>>, AccessError> {
+) -> Result<Option<Vec<u8>>, CorruptedError> {
     let value = database
         .prepare_cached(r#"SELECT value_blob FROM meta WHERE key = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_row((key,), |row| row.get::<_, Vec<u8>>(0))
         .optional()
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(value)
 }
 
-fn meta_get_number(database: &rusqlite::Connection, key: &str) -> Result<Option<u64>, AccessError> {
+fn meta_get_number(
+    database: &rusqlite::Connection,
+    key: &str,
+) -> Result<Option<u64>, CorruptedError> {
     let value = database
         .prepare_cached(r#"SELECT value_number FROM meta WHERE key = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_row((key,), |row| row.get::<_, i64>(0))
         .optional()
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(value.map(|value| u64::from_ne_bytes(value.to_ne_bytes())))
 }
 
@@ -1166,12 +1137,12 @@ fn meta_set_blob(
     database: &rusqlite::Connection,
     key: &str,
     value: &[u8],
-) -> Result<(), AccessError> {
+) -> Result<(), CorruptedError> {
     database
         .prepare_cached(r#"INSERT OR REPLACE INTO meta(key, value_blob) VALUES (?, ?)"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute((key, value))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
 }
 
@@ -1179,51 +1150,50 @@ fn meta_set_number(
     database: &rusqlite::Connection,
     key: &str,
     value: u64,
-) -> Result<(), AccessError> {
+) -> Result<(), CorruptedError> {
     database
         .prepare_cached(r#"INSERT OR REPLACE INTO meta(key, value_number) VALUES (?, ?)"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute((key, i64::from_ne_bytes(value.to_ne_bytes())))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
 }
 
-fn has_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<bool, AccessError> {
+fn has_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<bool, CorruptedError> {
     database
         .prepare_cached(r#"SELECT COUNT(*) FROM blocks WHERE hash = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_row((hash,), |row| Ok(row.get_unwrap::<_, i64>(0) != 0))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))
 }
 
 // TODO: the fact that the meta table stores blobs makes it impossible to use joins ; fix that
-fn finalized_num(database: &rusqlite::Connection) -> Result<u64, AccessError> {
-    meta_get_number(database, "finalized")?
-        .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))
+fn finalized_num(database: &rusqlite::Connection) -> Result<u64, CorruptedError> {
+    meta_get_number(database, "finalized")?.ok_or(CorruptedError::MissingMetaKey)
 }
 
-fn finalized_hash(database: &rusqlite::Connection) -> Result<[u8; 32], AccessError> {
+fn finalized_hash(database: &rusqlite::Connection) -> Result<[u8; 32], CorruptedError> {
     let value = database
         .prepare_cached(r#"SELECT hash FROM blocks WHERE number = (SELECT value_number FROM meta WHERE key = "finalized")"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_row((), |row| row.get::<_, Vec<u8>>(0))
         .optional()
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
-        .ok_or(AccessError::Corrupted(CorruptedError::InvalidFinalizedNum))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+        .ok_or(CorruptedError::InvalidFinalizedNum)?;
 
     if value.len() == 32 {
         let mut out = [0; 32];
         out.copy_from_slice(&value);
         Ok(out)
     } else {
-        Err(AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))
+        Err(CorruptedError::InvalidBlockHashLen)
     }
 }
 
 fn block_hashes_by_number(
     database: &rusqlite::Connection,
     number: u64,
-) -> Result<Vec<[u8; 32]>, AccessError> {
+) -> Result<Vec<[u8; 32]>, CorruptedError> {
     let number = match i64::try_from(number) {
         Ok(n) => n,
         Err(_) => return Ok(Vec::new()),
@@ -1231,15 +1201,12 @@ fn block_hashes_by_number(
 
     database
         .prepare_cached(r#"SELECT hash FROM blocks WHERE number = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_map((number,), |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .map(|value| {
-            let value = value.map_err(|err| {
-                AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-            })?;
-            <[u8; 32]>::try_from(&value[..])
-                .map_err(|_| AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))
+            let value = value.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            <[u8; 32]>::try_from(&value[..]).map_err(|_| CorruptedError::InvalidBlockHashLen)
         })
         .collect::<Result<Vec<_>, _>>()
 }
@@ -1247,13 +1214,75 @@ fn block_hashes_by_number(
 fn block_header(
     database: &rusqlite::Connection,
     hash: &[u8; 32],
-) -> Result<Option<Vec<u8>>, AccessError> {
+) -> Result<Option<Vec<u8>>, CorruptedError> {
     database
         .prepare_cached(r#"SELECT header FROM blocks WHERE hash = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_row((&hash[..],), |row| row.get::<_, Vec<u8>>(0))
         .optional()
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))
+}
+
+fn set_best_chain(
+    database: &rusqlite::Connection,
+    new_best_block_hash: &[u8],
+) -> Result<(), CorruptedError> {
+    // TODO: can this not be embedded in the SQL statement below?
+    let current_best = meta_get_blob(&database, "best")?.ok_or(CorruptedError::MissingMetaKey)?;
+
+    // TODO: untested except in the most basic situation
+    // In the SQL below, the temporary table `changes` is built by walking down (highest to lowest
+    // block number) the new best chain and old best chain. While walking down, the iteration
+    // keeps track of the block hashes and their number. If the new best chain has a higher number
+    // than the old best chain, then only the new best chain is iterated, and vice versa. If the
+    // new and old best chain have the same number, they are both iterated, and it is possible to
+    // compare the block hashes in order to know when to stop iterating. In the context of this
+    // algorithm, a `NULL` block hash represents "one past the new/old best block", which allows
+    // to not include the new/old best block in the temporary table until it needs to be included.
+    database
+        .prepare_cached(
+            r#"
+        WITH RECURSIVE
+            changes(block_to_include, block_to_retract, block_to_include_number, block_to_retract_number) AS (
+                SELECT NULL, NULL, blocks_inc.number + 1, blocks_ret.number + 1
+                FROM blocks AS blocks_inc, blocks as blocks_ret
+                WHERE blocks_inc.hash = :new_best AND blocks_ret.hash = :current_best
+            UNION ALL
+                SELECT
+                    CASE WHEN changes.block_to_include_number >= changes.block_to_retract_number THEN
+                        COALESCE(blocks_inc.parent_hash, :new_best)
+                    ELSE
+                        changes.block_to_include
+                    END,
+                    CASE WHEN changes.block_to_retract_number >= changes.block_to_include_number THEN
+                        COALESCE(blocks_ret.parent_hash, :current_best)
+                    ELSE
+                        changes.block_to_retract
+                    END,
+                    CASE WHEN changes.block_to_include_number >= block_to_retract_number THEN changes.block_to_include_number - 1
+                    ELSE changes.block_to_include_number END,
+                    CASE WHEN changes.block_to_retract_number >= changes.block_to_include_number THEN changes.block_to_retract_number - 1
+                    ELSE changes.block_to_retract_number END
+                FROM changes
+                LEFT JOIN blocks AS blocks_inc ON blocks_inc.hash = changes.block_to_include
+                LEFT JOIN blocks AS blocks_ret ON blocks_ret.hash = changes.block_to_retract
+                WHERE changes.block_to_include_number != changes.block_to_retract_number
+                    OR COALESCE(blocks_inc.parent_hash, :new_best) != COALESCE(blocks_ret.parent_hash, :current_best)
+            )
+        UPDATE blocks SET is_best_chain = (blocks.hash = changes.block_to_include)
+        FROM changes
+        WHERE blocks.hash = changes.block_to_include OR blocks.hash = changes.block_to_retract;
+            "#,
+        )
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+        .execute(rusqlite::named_params! {
+            ":current_best": current_best,
+            ":new_best": new_best_block_hash
+        })
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+    meta_set_blob(&database, "best", new_best_block_hash)?;
+    Ok(())
 }
 
 // TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
@@ -1262,7 +1291,7 @@ fn insert_storage<'a>(
     parent_block_hash: Option<&[u8]>,
     new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
     entries_version: u8,
-) -> Result<(), AccessError> {
+) -> Result<(), CorruptedError> {
     // Create a temporary table where we store the newly-created trie nodes that must inherit the
     // storage value of the parent block. These trie nodes are processed later.
     database
@@ -1274,31 +1303,29 @@ fn insert_storage<'a>(
     "#,
             (),
         )
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     // TODO: should check whether the existing merkle values that are referenced from inserted nodes exist in the parent's storage
     // TODO: is it correct to have OR IGNORE everywhere?
     let mut insert_node_statement = database
         .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_node_storage_statement = database
         .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_node_storage_copy_statement = database
         .prepare_cached(r#"INSERT OR IGNORE INTO temp_pending_parent_copies(node_hash) VALUES (?)"#)
-        .map_err(|err: rusqlite::Error| {
-            AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-        })?;
+        .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_child_statement = database
         .prepare_cached(
             "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
         )
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     for trie_node in new_trie_nodes {
         assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
         insert_node_statement
             .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
-            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+            .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
         match trie_node.storage_value {
             InsertTrieNodeStorageValue::Value {
                 value,
@@ -1319,18 +1346,14 @@ fn insert_storage<'a>(
                         },
                         entries_version,
                     ))
-                    .map_err(|err| {
-                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                    })?;
+                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             }
             InsertTrieNodeStorageValue::SameAsParent => {
                 // TODO: error if parent_block_hash is None
 
                 insert_node_storage_copy_statement
                     .execute((&trie_node.merkle_value,))
-                    .map_err(|err| {
-                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                    })?;
+                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             }
             InsertTrieNodeStorageValue::NoValue => {}
         }
@@ -1339,9 +1362,7 @@ fn insert_storage<'a>(
                 let child_num = vec![u8::try_from(child_num).unwrap_or_else(|_| unreachable!())];
                 insert_child_statement
                     .execute((&trie_node.merkle_value, child_num, child))
-                    .map_err(|err| {
-                        AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                    })?;
+                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             }
         }
     }
@@ -1389,11 +1410,11 @@ fn insert_storage<'a>(
         WHERE LENGTH(node_with_key.search_remain) = 0;
             "#,
         )
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute(rusqlite::named_params! {
             ":parent_block_hash": parent_block_hash,
         })
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     database
         .execute(
@@ -1402,37 +1423,34 @@ fn insert_storage<'a>(
     "#,
             (),
         )
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     Ok(())
 }
 
-fn purge_block(database: &rusqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {
+fn purge_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<(), CorruptedError> {
     purge_block_storage(database, hash)?;
     database
         .prepare_cached("DELETE FROM blocks_body WHERE hash = ?")
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute((&hash[..],))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     database
         .prepare_cached("DELETE FROM blocks WHERE hash = ?")
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute((&hash[..],))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
 }
 
-fn purge_block_storage(
-    database: &rusqlite::Connection,
-    hash: &[u8; 32],
-) -> Result<(), AccessError> {
+fn purge_block_storage(database: &rusqlite::Connection, hash: &[u8]) -> Result<(), CorruptedError> {
     // TODO: untested
 
     let state_trie_root_hash = database
         .prepare_cached(r#"SELECT state_trie_root_hash FROM blocks WHERE hash = ?"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_row((hash,), |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     database
         .prepare_cached(
@@ -1441,11 +1459,11 @@ fn purge_block_storage(
             WHERE hash = :block_hash
         "#,
         )
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute(rusqlite::named_params! {
             ":block_hash": &hash[..],
         })
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     // TODO: doesn't delete everything in the situation where a single node with a merkle value is referenced multiple times from the same trie
     // TODO: currently doesn't follow `trie_root_ref`
@@ -1455,57 +1473,56 @@ fn purge_block_storage(
                 to_delete(node_hash) AS (
                     SELECT trie_node.hash
                         FROM trie_node
-                        LEFT JOIN blocks ON blocks.hash != :block_hash AND blocks.state_trie_root_hash = trie_node.state_trie_root_hash
-                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = trie_node.node_hash
+                        LEFT JOIN blocks ON blocks.hash != :block_hash AND blocks.state_trie_root_hash = trie_node.hash
+                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = trie_node.hash
                         WHERE trie_node.hash = :state_trie_root_hash AND blocks.hash IS NULL AND trie_node_storage.node_hash IS NULL
                     UNION ALL
                     SELECT trie_node_child.child_hash
                         FROM to_delete
                         JOIN trie_node_child ON trie_node_child.hash = to_delete.node_hash
                         LEFT JOIN blocks ON blocks.state_trie_root_hash = trie_node_child.child_hash
-                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = child_hash.node_hash
+                        LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = to_delete.node_hash
                         WHERE blocks.hash IS NULL AND trie_node_storage.node_hash IS NULL
                 )
             DELETE FROM trie_node
-            SELECT node_hash FROM to_delete
+            WHERE hash IN (SELECT node_hash FROM to_delete)
         "#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute(rusqlite::named_params! {
             ":state_trie_root_hash": &state_trie_root_hash,
             ":block_hash": hash,
         })
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
 }
 
-fn grandpa_authorities_set_id(database: &rusqlite::Connection) -> Result<Option<u64>, AccessError> {
+fn grandpa_authorities_set_id(
+    database: &rusqlite::Connection,
+) -> Result<Option<u64>, CorruptedError> {
     meta_get_number(database, "grandpa_authorities_set_id")
 }
 
 fn grandpa_finalized_triggered_authorities(
     database: &rusqlite::Connection,
-) -> Result<Vec<header::GrandpaAuthority>, AccessError> {
+) -> Result<Vec<header::GrandpaAuthority>, CorruptedError> {
     database
         .prepare_cached(
             r#"SELECT public_key, weight FROM grandpa_triggered_authorities ORDER BY idx ASC"#,
         )
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_map((), |row| {
             let pk = row.get::<_, Vec<u8>>(0)?;
             let weight = row.get::<_, i64>(1)?;
             Ok((pk, weight))
         })
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .map(|result| {
-            let (public_key, weight) = result.map_err(|err| {
-                AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-            })?;
+            let (public_key, weight) =
+                result.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             let public_key = <[u8; 32]>::try_from(&public_key[..])
-                .map_err(|_| CorruptedError::InvalidBlockHashLen)
-                .map_err(AccessError::Corrupted)?;
+                .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
             let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-                .ok_or(CorruptedError::InvalidNumber)
-                .map_err(AccessError::Corrupted)?;
+                .ok_or(CorruptedError::InvalidNumber)?;
             Ok(header::GrandpaAuthority { public_key, weight })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -1513,33 +1530,30 @@ fn grandpa_finalized_triggered_authorities(
 
 fn grandpa_finalized_scheduled_change(
     database: &rusqlite::Connection,
-) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, AccessError> {
+) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, CorruptedError> {
     if let Some(height) = meta_get_number(database, "grandpa_scheduled_target")? {
         // TODO: duplicated from above except different table name
         let out = database
             .prepare_cached(
                 r#"SELECT public_key, weight FROM grandpa_scheduled_authorities ORDER BY idx ASC"#,
             )
-            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
             .query_map((), |row| {
                 let pk = row.get::<_, Vec<u8>>(0)?;
                 let weight = row.get::<_, i64>(1)?;
                 Ok((pk, weight))
             })
-            .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
             .map(|result| {
-                let (public_key, weight) = result.map_err(|err| {
-                    AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-                })?;
+                let (public_key, weight) =
+                    result.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
                 let public_key = <[u8; 32]>::try_from(&public_key[..])
-                    .map_err(|_| CorruptedError::InvalidBlockHashLen)
-                    .map_err(AccessError::Corrupted)?;
+                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
                 let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-                    .ok_or(CorruptedError::InvalidNumber)
-                    .map_err(AccessError::Corrupted)?;
+                    .ok_or(CorruptedError::InvalidNumber)?;
                 Ok(header::GrandpaAuthority { public_key, weight })
             })
-            .collect::<Result<Vec<_>, AccessError>>()?;
+            .collect::<Result<Vec<_>, CorruptedError>>()?;
 
         Ok(Some((height, out)))
     } else {
@@ -1547,30 +1561,25 @@ fn grandpa_finalized_scheduled_change(
     }
 }
 
-fn expect_nz_u64(value: u64) -> Result<NonZeroU64, AccessError> {
-    NonZeroU64::new(value)
-        .ok_or(CorruptedError::InvalidNumber)
-        .map_err(AccessError::Corrupted)
+fn expect_nz_u64(value: u64) -> Result<NonZeroU64, CorruptedError> {
+    NonZeroU64::new(value).ok_or(CorruptedError::InvalidNumber)
 }
 
 fn aura_finalized_authorities(
     database: &rusqlite::Connection,
-) -> Result<Vec<header::AuraAuthority>, AccessError> {
+) -> Result<Vec<header::AuraAuthority>, CorruptedError> {
     database
         .prepare_cached(r#"SELECT public_key FROM aura_finalized_authorities ORDER BY idx ASC"#)
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .query_map((), |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|err| AccessError::Corrupted(CorruptedError::Internal(InternalError(err))))?
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .map(|result| {
-            let public_key = result.map_err(|err| {
-                AccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
-            })?;
+            let public_key = result.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             let public_key = <[u8; 32]>::try_from(&public_key[..])
-                .map_err(|_| CorruptedError::InvalidBlockHashLen)
-                .map_err(AccessError::Corrupted)?;
+                .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
             Ok(header::AuraAuthority { public_key })
         })
-        .collect::<Result<Vec<_>, AccessError>>()
+        .collect::<Result<Vec<_>, CorruptedError>>()
 }
 
 fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRef) -> Vec<u8> {
@@ -1600,7 +1609,7 @@ fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRe
 
 fn decode_babe_epoch_information(
     value: &[u8],
-) -> Result<chain_information::BabeEpochInformation, AccessError> {
+) -> Result<chain_information::BabeEpochInformation, CorruptedError> {
     let result = nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
             nom::number::streaming::le_u64,
@@ -1657,7 +1666,5 @@ fn decode_babe_epoch_information(
         Ok(_) | Err(()) => Err(()),
     };
 
-    result
-        .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
-        .map_err(AccessError::Corrupted)
+    result.map_err(|()| CorruptedError::InvalidBabeEpochInformation)
 }

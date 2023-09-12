@@ -132,10 +132,9 @@ impl<TNow> ReadWrite<TNow> {
     pub fn incoming_bytes_take_array<const N: usize>(
         &mut self,
     ) -> Result<Option<[u8; N]>, IncomingBytesTakeError> {
-        let Some(vec) = self.incoming_bytes_take(N)?
-            else {
-                return Ok(None)
-            };
+        let Some(vec) = self.incoming_bytes_take(N)? else {
+            return Ok(None);
+        };
 
         let bytes = <&[u8; N]>::try_from(&vec[..]).unwrap();
         Ok(Some(*bytes))
@@ -199,6 +198,33 @@ impl<TNow> ReadWrite<TNow> {
             }
             Err(_) => Err(IncomingBytesTakeLeb128Error::InvalidLeb128),
         }
+    }
+
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::write_buffers`]
+    /// and updates [`ReadWrite::write_bytes_queued`] and [`ReadWrite::write_bytes_queueable`].
+    /// The bytes that have been written are removed from `data`.
+    ///
+    /// This function is recommended only if the `Vec` is small.
+    pub fn write_from_vec(&mut self, data: &mut Vec<u8>) {
+        let Some(queueable) = self.write_bytes_queueable.as_mut() else {
+            return;
+        };
+
+        let to_copy = cmp::min(data.len(), *queueable);
+        if to_copy == 0 {
+            return;
+        }
+
+        if to_copy == data.len() {
+            self.write_buffers.push(mem::take(data));
+        } else {
+            self.write_buffers.push(data[..to_copy].to_vec());
+            data.copy_within(to_copy.., 0);
+            data.truncate(data.len() - to_copy);
+        }
+
+        self.write_bytes_queued += to_copy;
+        *queueable -= to_copy;
     }
 
     /// Copies as much as possible from the content of `data` to [`ReadWrite::write_buffers`]

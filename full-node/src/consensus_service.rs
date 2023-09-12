@@ -48,7 +48,7 @@ use std::{
     array,
     borrow::Cow,
     iter, mem,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -124,17 +124,50 @@ pub struct ConsensusService {
     /// Used to communicate with the background task. Also used for the background task to detect
     /// a shutdown.
     to_background_tx: Mutex<mpsc::Sender<ToBackground>>,
+
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 }
 
 enum ToBackground {
+    SubscribeAll {
+        buffer_size: usize,
+        // TODO: unused field
+        _max_finalized_pinned_blocks: NonZeroUsize,
+        result_tx: oneshot::Sender<SubscribeAll>,
+    },
     GetSyncState {
         result_tx: oneshot::Sender<SyncState>,
     },
+    Unpin {
+        // TODO: unused field
+        _subscription_id: SubscriptionId,
+        // TODO: unused field
+        _block_hash: [u8; 32],
+        /// Sends back `()` if the unpinning was successful or the subscription no longer exists.
+        /// The sender is silently destroyed if the block hash was invalid.
+        result_tx: oneshot::Sender<()>,
+    },
+}
+
+/// Potential error when calling [`ConsensusService::new`].
+#[derive(Debug, derive_more::Display)]
+pub enum InitError {
+    /// Database is corrupted.
+    DatabaseCorruption(full_sqlite::CorruptedError),
+    /// Error parsing the header of a block in the database.
+    InvalidHeader(header::Error),
+    /// `:code` key is missing from the finalized block storage.
+    FinalizedCodeMissing,
+    /// Error parsing the `:heappages` of the finalized block.
+    FinalizedHeapPagesInvalid(executor::InvalidHeapPagesError),
+    /// Error initializing the runtime of the finalized block.
+    FinalizedRuntimeInit(executor::host::NewErr),
 }
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config) -> Arc<Self> {
+    pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_number,
@@ -148,57 +181,80 @@ impl ConsensusService {
             .with_database({
                 let block_number_bytes = config.block_number_bytes;
                 move |database| {
-                    let finalized_block_hash = database.finalized_block_hash().unwrap();
+                    // If the previous run of the full node crashed, the database will contain
+                    // blocks that are no longer useful in any way. We purge them all here.
+                    database
+                        .purge_finality_orphans()
+                        .map_err(InitError::DatabaseCorruption)?;
+
+                    let finalized_block_hash = database
+                        .finalized_block_hash()
+                        .map_err(InitError::DatabaseCorruption)?;
                     let finalized_block_number = header::decode(
                         &database
                             .block_scale_encoded_header(&finalized_block_hash)
-                            .unwrap()
-                            .unwrap(),
+                            .map_err(InitError::DatabaseCorruption)?
+                            .unwrap(), // A panic here would indicate a bug in the database code.
                         block_number_bytes,
                     )
-                    .unwrap()
+                    .map_err(InitError::InvalidHeader)?
                     .number;
                     let best_block_hash = database.best_block_hash().unwrap();
                     let best_block_number = header::decode(
                         &database
                             .block_scale_encoded_header(&best_block_hash)
-                            .unwrap()
-                            .unwrap(),
+                            .map_err(InitError::DatabaseCorruption)?
+                            .unwrap(), // A panic here would indicate a bug in the database code.
                         block_number_bytes,
                     )
-                    .unwrap()
+                    .map_err(InitError::InvalidHeader)?
                     .number;
-                    let finalized_chain_information = database
-                        .to_chain_information(&finalized_block_hash)
-                        .unwrap();
-                    let finalized_code = database
-                        .block_storage_get(
-                            &finalized_block_hash,
-                            iter::empty::<iter::Empty<_>>(),
-                            trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
-                        )
-                        .unwrap()
-                        .unwrap() // TODO: better error?
-                        .0;
-                    let finalized_heap_pages = database
-                        .block_storage_get(
-                            &finalized_block_hash,
-                            iter::empty::<iter::Empty<_>>(),
-                            trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
-                        )
-                        .unwrap() // TODO: better error?
-                        .map(|(hp, _)| hp);
-                    (
+                    let finalized_chain_information =
+                        match database.to_chain_information(&finalized_block_hash) {
+                            Ok(info) => info,
+                            Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
+                                return Err(InitError::DatabaseCorruption(err))
+                            }
+                            Err(full_sqlite::StorageAccessError::StoragePruned)
+                            | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                        };
+                    let finalized_code = match database.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                    ) {
+                        Ok(Some((code, _))) => code,
+                        Ok(None) => return Err(InitError::FinalizedCodeMissing),
+                        Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
+                            return Err(InitError::DatabaseCorruption(err))
+                        }
+                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                    };
+                    let finalized_heap_pages = match database.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                    ) {
+                        Ok(Some((hp, _))) => Some(hp),
+                        Ok(None) => None,
+                        Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
+                            return Err(InitError::DatabaseCorruption(err))
+                        }
+                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
+                    };
+                    Ok((
                         finalized_block_number,
                         finalized_heap_pages,
                         finalized_code,
                         best_block_hash,
                         best_block_number,
                         finalized_chain_information,
-                    )
+                    ))
                 }
             })
-            .await;
+            .await?;
 
         // The Kusama chain contains a fork hardcoded in the official Polkadot client.
         // See <https://github.com/paritytech/polkadot/blob/93f45f996a3d5592a57eba02f91f2fc2bc5a07cf/node/service/src/grandpa_support.rs#L111-L216>
@@ -248,15 +304,15 @@ impl ConsensusService {
             // Builds the runtime of the finalized block.
             // Assumed to always be valid, otherwise the block wouldn't have been
             // saved in the database, hence the large number of unwraps here.
-            let heap_pages =
-                executor::storage_heap_pages_to_value(finalized_heap_pages.as_deref()).unwrap(); // TODO: better error message?
+            let heap_pages = executor::storage_heap_pages_to_value(finalized_heap_pages.as_deref())
+                .map_err(InitError::FinalizedHeapPagesInvalid)?;
             executor::host::HostVmPrototype::new(executor::host::Config {
                 module: finalized_code,
                 heap_pages,
                 exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
                 allow_unresolved_imports: false,
             })
-            .unwrap() // TODO: better error message?
+            .map_err(InitError::FinalizedRuntimeInit)?
         };
 
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
@@ -275,6 +331,7 @@ impl ConsensusService {
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
             to_background_rx,
+            blocks_notifications: Vec::with_capacity(8),
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
@@ -287,9 +344,15 @@ impl ConsensusService {
 
         background_sync.start();
 
-        Arc::new(ConsensusService {
+        Ok(Arc::new(ConsensusService {
+            block_number_bytes: config.block_number_bytes,
             to_background_tx: Mutex::new(to_background_tx),
-        })
+        }))
+    }
+
+    /// Returns the value that was provided through [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.block_number_bytes
     }
 
     /// Returns a summary of the state of the service.
@@ -306,6 +369,173 @@ impl ConsensusService {
             .await;
         result_rx.await.unwrap()
     }
+
+    /// Subscribes to the state of the chain: the current state and the new blocks.
+    ///
+    /// Only up to `buffer_size` notifications are buffered in the channel. If the channel is full
+    /// when a new notification is attempted to be pushed, the channel gets closed.
+    ///
+    /// A maximum number of finalized or non-canonical (i.e. not part of the finalized chain)
+    /// pinned blocks must be passed, indicating the maximum number of blocks that are finalized
+    /// or non-canonical that the consensus service will pin at the same time for this
+    /// subscription. If this maximum is reached, the channel will get closed. In situations
+    /// where the subscriber is guaranteed to always properly unpin blocks, a value of
+    /// `usize::max_value()` can be passed in order to ignore this maximum.
+    ///
+    /// All the blocks being reported are guaranteed to be present in the database associated to
+    /// this [`ConsensusService`].
+    ///
+    /// See [`SubscribeAll`] for information about the return value.
+    ///
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
+    pub async fn subscribe_all(
+        &self,
+        buffer_size: usize,
+        max_finalized_pinned_blocks: NonZeroUsize,
+    ) -> SubscribeAll {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::SubscribeAll {
+                buffer_size,
+                _max_finalized_pinned_blocks: max_finalized_pinned_blocks,
+                result_tx,
+            })
+            .await;
+        result_rx.await.unwrap()
+    }
+
+    /// Unpins a block that was reported as part of a subscription.
+    ///
+    /// Has no effect if the [`SubscriptionId`] is not or no longer valid (as the consensus service
+    /// can kill any subscription at any moment).
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block hash has not been reported or has already been unpinned.
+    ///
+    pub async fn unpin_block(&self, subscription_id: SubscriptionId, block_hash: [u8; 32]) {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::Unpin {
+                _subscription_id: subscription_id,
+                _block_hash: block_hash,
+                result_tx,
+            })
+            .await;
+        result_rx.await.unwrap()
+    }
+}
+
+/// Return value of [`ConsensusService::subscribe_all`].
+pub struct SubscribeAll {
+    /// Identifier of this subscription.
+    pub id: SubscriptionId,
+
+    /// SCALE-encoded header of the finalized block at the time of the subscription.
+    pub finalized_block_scale_encoded_header: Vec<u8>,
+
+    /// Hash of the finalized block, to provide to [`ConsensusService::unpin_block`].
+    pub finalized_block_hash: [u8; 32],
+
+    /// Runtime of the finalized block.
+    pub finalized_block_runtime: Arc<executor::host::HostVmPrototype>,
+
+    /// List of all known non-finalized blocks at the time of subscription.
+    ///
+    /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
+    ///
+    /// The blocks are guaranteed to be ordered so that parents are always found before their
+    /// children.
+    pub non_finalized_blocks_ancestry_order: Vec<BlockNotification>,
+
+    /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
+    /// block needs to be reported.
+    pub new_blocks: async_channel::Receiver<Notification>,
+}
+
+/// Identifier of a subscription returned by [`ConsensusService::subscribe_all`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubscriptionId(u64);
+
+/// Notification about a new block or a new finalized block.
+///
+/// See [`ConsensusService::subscribe_all`].
+#[derive(Debug, Clone)]
+pub enum Notification {
+    /// A non-finalized block has been finalized.
+    Finalized {
+        /// BLAKE2 hash of the blocks that have been finalized, in increasing block number. In
+        /// other words, each block in this list is a child of the previous one. The first block
+        /// in this list is a child of the previous finalized block. The last block in this list
+        /// is the new finalized block.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
+        finalized_blocks_hashes: Vec<[u8; 32]>,
+
+        /// Hash of the best block after the finalization.
+        ///
+        /// If the newly-finalized block is an ancestor of the current best block, then this field
+        /// contains the hash of this current best block. Otherwise, the best block is now
+        /// the non-finalized block with the given hash.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
+        best_block_hash: [u8; 32],
+
+        /// List of BLAKE2 hashes of blocks that are no longer part of the canonical chain. In
+        /// unspecified order.
+        pruned_blocks_hashes: Vec<[u8; 32]>,
+    },
+
+    /// A new block has been added to the list of unfinalized blocks.
+    Block(BlockNotification),
+}
+
+/// Notification about a new block.
+///
+/// See [`ConsensusService::subscribe_all`].
+#[derive(Debug, Clone)]
+pub struct BlockNotification {
+    /// True if this block is considered as the best block of the chain.
+    pub is_new_best: bool,
+
+    /// SCALE-encoded header of the block.
+    pub scale_encoded_header: Vec<u8>,
+
+    /// Hash of the block, to provide to [`ConsensusService::unpin_block`].
+    pub block_hash: [u8; 32],
+
+    /// If the block has a different runtime compared to its parent, contains the new runtime.
+    /// Contains `None` if the runtime of the block is the same as its parent's.
+    pub runtime_update: Option<Arc<executor::host::HostVmPrototype>>,
+
+    /// BLAKE2 hash of the header of the parent of this block.
+    ///
+    ///
+    /// A block with this hash is guaranteed to have earlier been reported in a
+    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`] or
+    /// in a [`Notification::Block`].
+    ///
+    /// > **Note**: The header of a block contains the hash of its parent. When it comes to
+    /// >           consensus algorithms such as Babe or Aura, the syncing code verifies that this
+    /// >           hash, stored in the header, actually corresponds to a valid block. However,
+    /// >           when it comes to parachain consensus, no such verification is performed.
+    /// >           Contrary to the hash stored in the header, the value of this field is
+    /// >           guaranteed to refer to a block that is known by the syncing service. This
+    /// >           allows a subscriber of the state of the chain to precisely track the hierarchy
+    /// >           of blocks, without risking to run into a problem in case of a block with an
+    /// >           invalid header.
+    pub parent_hash: [u8; 32],
 }
 
 struct SyncBackground {
@@ -363,6 +593,9 @@ struct SyncBackground {
 
     /// Used to receive messages from the frontend service, and to detect when it shuts down.
     to_background_rx: mpsc::Receiver<ToBackground>,
+
+    /// List of senders to report events to when they happen.
+    blocks_notifications: Vec<async_channel::Sender<Notification>>,
 
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
@@ -566,6 +799,55 @@ impl SyncBackground {
                 frontend_event = self.to_background_rx.next().fuse() => {
                     // TODO: this isn't processed quickly enough when under load
                     match frontend_event {
+                        Some(ToBackground::SubscribeAll { buffer_size, _max_finalized_pinned_blocks: _, result_tx }) => {
+                            let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+
+                            // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
+                            let finalized_block_scale_encoded_header = self
+                                .sync
+                                .finalized_block_header()
+                                .scale_encoding_vec(self.sync.block_number_bytes());
+                            let finalized_block_hash = header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header);
+
+                            let non_finalized_blocks_ancestry_order = {
+                                let best_hash = self.sync.best_block_hash();
+                                let blocks_in = self.sync.non_finalized_blocks_ancestry_order()
+                                    .map(|h| (h.number, h.scale_encoding_vec(self.sync.block_number_bytes()), *h.parent_hash)).collect::<Vec<_>>();
+                                let mut blocks_out = Vec::new();
+                                for (number, scale_encoding, parent_hash) in blocks_in {
+                                    let hash = header::hash_from_scale_encoded_header(&scale_encoding);
+                                    let runtime = match &self.sync[(number, &hash)] {
+                                        NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                                        _ => unreachable!()
+                                    };
+                                    let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
+                                        None
+                                    } else {
+                                        Some(Arc::new(runtime.lock().await.clone().unwrap()))
+                                    };
+                                    blocks_out.push(BlockNotification {
+                                        is_new_best: header::hash_from_scale_encoded_header(
+                                            &scale_encoding,
+                                        ) == best_hash,
+                                        block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
+                                        scale_encoded_header: scale_encoding,
+                                        runtime_update,
+                                        parent_hash,
+                                    });
+                                }
+                                blocks_out
+                            };
+
+                            self.blocks_notifications.push(tx);
+                            let _ = result_tx.send(SubscribeAll {
+                                id: SubscriptionId(0), // TODO:
+                                finalized_block_hash,
+                                finalized_block_scale_encoded_header,
+                                finalized_block_runtime: Arc::new(self.finalized_runtime.lock().await.clone().unwrap()),
+                                non_finalized_blocks_ancestry_order,
+                                new_blocks,
+                            });
+                        },
                         Some(ToBackground::GetSyncState { result_tx }) => {
                             let _ = result_tx.send(SyncState {
                                 best_block_hash: self.sync.best_block_hash(),
@@ -573,6 +855,10 @@ impl SyncBackground {
                                 finalized_block_hash: self.sync.finalized_block_header().hash(self.sync.block_number_bytes()),
                                 finalized_block_number: self.sync.finalized_block_header().number,
                             });
+                        },
+                        Some(ToBackground::Unpin { result_tx, .. }) => {
+                            // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
+                            let _ = result_tx.send(());
                         },
                         None => {
                             // Shutdown.
@@ -1273,7 +1559,7 @@ impl SyncBackground {
                                 LogLevel::Warn,
                                 format!(
                                     "failed-block-verification; hash={}; height={}; \
-                                total_duration={:?}; error={}",
+                                    total_duration={:?}; error={}",
                                     HashDisplay(&hash_to_verify),
                                     header_verification_success.height(),
                                     when_verification_started.elapsed(),
@@ -1367,8 +1653,8 @@ impl SyncBackground {
                                 LogLevel::Debug,
                                 format!(
                                     "block-verification-success; hash={}; height={}; \
-                                total_duration={:?}; database_accesses_duration={:?}; \
-                                runtime_build_duration={:?}; is_new_best={:?}",
+                                    total_duration={:?}; database_accesses_duration={:?}; \
+                                    runtime_build_duration={:?}; is_new_best={:?}",
                                     HashDisplay(&hash_to_verify),
                                     height,
                                     when_verification_started.elapsed(),
@@ -1377,6 +1663,32 @@ impl SyncBackground {
                                     is_new_best
                                 ),
                             );
+
+                            // Notify the subscribers.
+                            // Elements in `blocks_notifications` are removed one by one and
+                            // inserted back if the channel is still open.
+                            let runtime_to_notify = if let Some(new_runtime) = &new_runtime {
+                                Some(Arc::new(new_runtime.clone()))
+                            } else {
+                                None
+                            };
+                            for index in (0..self.blocks_notifications.len()).rev() {
+                                let subscription = self.blocks_notifications.swap_remove(index);
+                                if subscription
+                                    .try_send(Notification::Block(BlockNotification {
+                                        is_new_best,
+                                        scale_encoded_header: scale_encoded_header.clone(),
+                                        block_hash: header_verification_success.hash(),
+                                        runtime_update: runtime_to_notify.clone(),
+                                        parent_hash,
+                                    }))
+                                    .is_err()
+                                {
+                                    continue;
+                                }
+
+                                self.blocks_notifications.push(subscription);
+                            }
 
                             // Processing has made a step forward.
 
@@ -1585,7 +1897,8 @@ impl SyncBackground {
                     (
                         sync_out,
                         all::FinalityProofVerifyOutcome::NewFinalized {
-                            mut finalized_blocks,
+                            finalized_blocks,
+                            pruned_blocks,
                             updates_best_block,
                         },
                     ) => {
@@ -1608,20 +1921,42 @@ impl SyncBackground {
                             self.block_authoring = None;
                         }
 
-                        let finalized_block = finalized_blocks.pop().unwrap();
-                        let NonFinalizedBlock::Verified { runtime } = finalized_block.user_data
-                        else {
-                            unreachable!()
+                        self.finalized_runtime = match &finalized_blocks.last().unwrap().user_data {
+                            NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                            _ => unreachable!(),
                         };
-                        self.finalized_runtime = runtime;
-                        let new_finalized_hash =
-                            finalized_block.header.hash(self.sync.block_number_bytes());
+                        let new_finalized_hash = finalized_blocks
+                            .last()
+                            .unwrap()
+                            .header
+                            .hash(self.sync.block_number_bytes());
                         // TODO: what if best block changed?
                         self.database
                             .with_database_detached(move |database| {
                                 database.set_finalized(&new_finalized_hash).unwrap();
                             })
                             .await;
+                        // Elements in `blocks_notifications` are removed one by one and inserted
+                        // back if the channel is still open.
+                        for index in (0..self.blocks_notifications.len()).rev() {
+                            let subscription = self.blocks_notifications.swap_remove(index);
+                            if subscription
+                                .try_send(Notification::Finalized {
+                                    finalized_blocks_hashes: finalized_blocks
+                                        .iter()
+                                        .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                        .rev()
+                                        .collect::<Vec<_>>(),
+                                    pruned_blocks_hashes: pruned_blocks.clone(),
+                                    best_block_hash: self.sync.best_block_hash(),
+                                })
+                                .is_err()
+                            {
+                                continue;
+                            }
+
+                            self.blocks_notifications.push(subscription);
+                        }
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {

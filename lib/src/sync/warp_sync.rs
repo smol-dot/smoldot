@@ -208,14 +208,20 @@ pub fn start_warp_sync<TSrc, TRq>(
     }
 
     Ok(InProgressWarpSync {
+        phase: Phase::DownloadFragments {
+            warp_sync_fragments_download: None,
+        },
+        warped_header: config
+            .start_chain_information
+            .as_ref()
+            .finalized_block_header
+            .into(),
+        warped_finality: config.start_chain_information.as_ref().finality.into(),
         start_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
-        phase: Phase::DownloadFragments {
-            previous_verifier_values: None,
-        },
     })
 }
 
@@ -266,9 +272,11 @@ pub struct Success<TSrc, TRq> {
     /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code` itself.
     pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
 
-    /// The list of sources that were added to the state machine.
+    /// The list of sources that were added to the state machine, with their finalized block
+    /// height and user data.
     /// The list is ordered by [`SourceId`].
-    pub sources_ordered: Vec<(SourceId, TSrc)>,
+    // TODO: use a struct?
+    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -305,6 +313,12 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
 pub struct InProgressWarpSync<TSrc, TRq> {
     /// See [`Phase`].
     phase: Phase,
+    /// Finalized block of the chain we warp synced to. Initially identical to the value in
+    /// [`InProgressWarpSync::start_chain_information`].
+    warped_header: Header,
+    /// Information about the finality of the chain at the point where we warp synced to.
+    /// Initially identical to the value in [`InProgressWarpSync::start_chain_information`].
+    warped_finality: ChainInformationFinality,
     /// See [`Config::code_trie_node_hint`].
     code_trie_node_hint: Option<ConfigCodeTrieNodeHint>,
     /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
@@ -320,15 +334,11 @@ pub struct InProgressWarpSync<TSrc, TRq> {
 enum Phase {
     /// Downloading warp sync fragments.
     DownloadFragments {
-        /// Current block and chain we warp synced to. If `None`, the warp syncing is still at
-        /// the start.
-        previous_verifier_values: Option<(Header, ChainInformationFinality)>,
+        /// Request that is downloading warp sync fragments, if any has been started yet.
+        warp_sync_fragments_download: Option<RequestId>,
     },
     /// Warp sync fragments have been downloaded. Now to verify them.
     PendingVerify {
-        /// Current block and chain we warp synced to. If `None`, the warp syncing is still at
-        /// the start.
-        previous_verifier_values: Option<(Header, ChainInformationFinality)>,
         /// Source the fragments have been obtained from
         downloaded_source: SourceId,
         /// `true` if the source has indicated that there is no more fragment afterwards, in other
@@ -342,10 +352,8 @@ enum Phase {
     /// All warp sync fragments have been verified, and we are now downloading the runtime of the
     /// finalized block of the chain.
     RuntimeDownload {
-        /// Finalized block of the chain we warp synced to.
-        header: Header,
-        /// Information about the finality of the chain at the point where we warp synced to.
-        chain_information_finality: ChainInformationFinality,
+        /// Request that is downloading the runtime, if any has been started yet.
+        runtime_download: Option<RequestId>,
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
@@ -358,10 +366,6 @@ enum Phase {
     /// All warp sync fragments have been verified, we have downloaded the runtime of the finalized
     /// block, and we are now downloading and computing the information of the chain.
     ChainInformationDownload {
-        /// Finalized block of the chain we warp synced to.
-        header: Header,
-        /// Information about the finality of the chain at the point where we warp synced to.
-        chain_information_finality: ChainInformationFinality,
         /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
         /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
@@ -377,7 +381,7 @@ enum Phase {
         /// downloaded yet.
         calls: hashbrown::HashMap<
             chain_information::build::RuntimeCall,
-            Option<Vec<u8>>,
+            CallProof,
             fnv::FnvBuildHasher,
         >,
     },
@@ -392,6 +396,12 @@ struct DownloadedRuntime {
     code_merkle_value: Option<Vec<u8>>,
     /// Closest ancestor of the `:code` key except for `:code` itself.
     closest_ancestor_excluding: Option<Vec<Nibble>>,
+}
+
+enum CallProof {
+    NotStarted,
+    Downloading(RequestId),
+    Downloaded(Vec<u8>),
 }
 
 /// See [`InProgressWarpSync::status`].
@@ -447,76 +457,44 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     pub fn status(&self) -> Status<TSrc> {
         match self.phase {
             Phase::DownloadFragments {
-                ref previous_verifier_values,
+                warp_sync_fragments_download,
             } => {
-                let (finalized_block_hash, finalized_block_number) = match previous_verifier_values
-                    .as_ref()
-                {
-                    Some((header, _)) => (header.hash(self.block_number_bytes), header.number),
-                    None => {
-                        let header = self.start_chain_information.as_ref().finalized_block_header;
-                        (header.hash(self.block_number_bytes), header.number)
-                    }
-                };
+                let finalized_block_hash = self.warped_header.hash(self.block_number_bytes);
 
-                let source_id =
-                    self.in_progress_requests
-                        .iter()
-                        .find_map(|(_, (source_id, _, rq))| match rq {
-                            RequestDetail::WarpSyncRequest { block_hash }
-                                if *block_hash == finalized_block_hash =>
-                            {
-                                Some(*source_id)
-                            }
-                            _ => None,
-                        });
+                let source_id = warp_sync_fragments_download
+                    .as_ref()
+                    .map(|&RequestId(rq_id)| self.in_progress_requests.get(rq_id).unwrap().0);
 
                 Status::Fragments {
                     source: source_id.map(|id| (id, &self.sources[id.0].user_data)),
                     finalized_block_hash,
-                    finalized_block_number,
+                    finalized_block_number: self.warped_header.number,
                 }
             }
             Phase::PendingVerify {
-                downloaded_source,
-                ref previous_verifier_values,
-                ..
-            } => {
-                let (finalized_block_hash, finalized_block_number) = match previous_verifier_values
-                    .as_ref()
-                {
-                    Some((header, _)) => (header.hash(self.block_number_bytes), header.number),
-                    None => {
-                        let header = self.start_chain_information.as_ref().finalized_block_header;
-                        (header.hash(self.block_number_bytes), header.number)
-                    }
-                };
-
-                Status::Fragments {
-                    source: Some((
-                        downloaded_source,
-                        &self.sources[downloaded_source.0].user_data,
-                    )),
-                    finalized_block_hash,
-                    finalized_block_number,
-                }
-            }
+                downloaded_source, ..
+            } => Status::Fragments {
+                source: Some((
+                    downloaded_source,
+                    &self.sources[downloaded_source.0].user_data,
+                )),
+                finalized_block_hash: self.warped_header.hash(self.block_number_bytes),
+                finalized_block_number: self.warped_header.number,
+            },
             Phase::RuntimeDownload {
                 warp_sync_source_id,
-                ref header,
                 ..
             }
             | Phase::ChainInformationDownload {
                 warp_sync_source_id,
-                ref header,
                 ..
             } => Status::ChainInformation {
                 source: (
                     warp_sync_source_id,
                     &self.sources[warp_sync_source_id.0].user_data,
                 ),
-                finalized_block_hash: header.hash(self.block_number_bytes),
-                finalized_block_number: header.number,
+                finalized_block_hash: self.warped_header.hash(self.block_number_bytes),
+                finalized_block_number: self.warped_header.number,
             },
         }
     }
@@ -527,10 +505,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     }
 
     /// Add a source to the list of sources.
+    ///
+    /// The source has a finalized block height of 0, which should later be updated using
+    /// [`InProgressWarpSync::set_source_finality_state`].
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         SourceId(self.sources.insert(Source {
             user_data,
             already_tried: false,
+            finalized_block_height: 0,
         }))
     }
 
@@ -551,29 +533,20 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 
         if let Phase::RuntimeDownload {
             warp_sync_source_id,
-            header,
-            chain_information_finality,
             ..
         }
         | Phase::ChainInformationDownload {
-            header,
-            chain_information_finality,
             warp_sync_source_id,
             ..
         } = &self.phase
         {
             if to_remove == *warp_sync_source_id {
                 self.phase = Phase::DownloadFragments {
-                    previous_verifier_values: Some((
-                        header.clone(),
-                        chain_information_finality.clone(),
-                    )),
-                }
+                    warp_sync_fragments_download: None,
+                };
             }
         } else if let Phase::PendingVerify {
-            previous_verifier_values,
-            downloaded_source,
-            ..
+            downloaded_source, ..
         } = &mut self.phase
         {
             // We make sure to not leave invalid source IDs in the state of `self`.
@@ -582,8 +555,8 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             // supposed to happen.
             if *downloaded_source == to_remove {
                 self.phase = Phase::DownloadFragments {
-                    previous_verifier_values: previous_verifier_values.take(),
-                }
+                    warp_sync_fragments_download: None,
+                };
             }
         }
 
@@ -595,10 +568,45 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         let mut obsolete_requests = Vec::with_capacity(obsolete_requests_indices.len());
         for index in obsolete_requests_indices {
             let (_, user_data, _) = self.in_progress_requests.remove(index);
+            match &mut self.phase {
+                Phase::DownloadFragments {
+                    warp_sync_fragments_download,
+                } => {
+                    if *warp_sync_fragments_download == Some(RequestId(index)) {
+                        *warp_sync_fragments_download = None;
+                    }
+                }
+                Phase::RuntimeDownload {
+                    runtime_download, ..
+                } => {
+                    if *runtime_download == Some(RequestId(index)) {
+                        *runtime_download = None;
+                    }
+                }
+                Phase::ChainInformationDownload { calls, .. } => {
+                    for call in calls.values_mut() {
+                        if matches!(call, CallProof::Downloading(rq_id) if *rq_id == RequestId(index))
+                        {
+                            *call = CallProof::NotStarted;
+                        }
+                    }
+                }
+                _ => {}
+            }
             obsolete_requests.push((RequestId(index), user_data));
         }
 
         (removed, obsolete_requests.into_iter())
+    }
+
+    /// Sets the finalized block height of the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn set_source_finality_state(&mut self, source_id: SourceId, finalized_block_height: u64) {
+        self.sources[source_id.0].finalized_block_height = finalized_block_height;
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
@@ -611,45 +619,29 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         // If we are in the fragments download phase, return a fragments download request.
         let warp_sync_request = if let Phase::DownloadFragments {
-            previous_verifier_values,
+            warp_sync_fragments_download: None,
         } = &self.phase
         {
             // TODO: it feels like a hack to try again sources that have failed in the past; also, this means that the already_tried mechanism only works once
             let all_sources_already_tried = self.sources.iter().all(|(_, s)| s.already_tried);
 
-            let start_block_hash = match previous_verifier_values.as_ref() {
-                Some((header, _)) => header.hash(self.block_number_bytes),
-                None => self
-                    .start_chain_information
-                    .as_ref()
-                    .finalized_block_header
-                    .hash(self.block_number_bytes),
-            };
+            let start_block_hash = self.warped_header.hash(self.block_number_bytes);
 
-            // TODO: O(n)
-            if !self.in_progress_requests.iter().any(|(_, (_, _, rq))| {
-                matches!(rq,
-                    RequestDetail::WarpSyncRequest { block_hash }
-                        if *block_hash == start_block_hash)
-            }) {
-                // Combine the request with every single available source.
-                either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
-                    // TODO: also filter by source finalized block? so that we don't request from sources below us
-                    if all_sources_already_tried || !src.already_tried {
-                        Some((
-                            SourceId(src_id),
-                            &src.user_data,
-                            DesiredRequest::WarpSyncRequest {
-                                block_hash: start_block_hash,
-                            },
-                        ))
-                    } else {
-                        None
-                    }
-                }))
-            } else {
-                either::Right(iter::empty())
-            }
+            // Combine the request with every single available source.
+            either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
+                // TODO: also filter by source finalized block? so that we don't request from sources below us
+                if all_sources_already_tried || !src.already_tried {
+                    Some((
+                        SourceId(src_id),
+                        &src.user_data,
+                        DesiredRequest::WarpSyncRequest {
+                            block_hash: start_block_hash,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            }))
         } else {
             either::Right(iter::empty())
         };
@@ -657,10 +649,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         // If we are in the appropriate phase, and we are not currently downloading the runtime,
         // return a runtime download request.
         let runtime_parameters_get = if let Phase::RuntimeDownload {
-            header,
+            runtime_download: None,
+            downloaded_runtime: None,
             warp_sync_source_id,
             hint_doesnt_match,
-            downloaded_runtime: None,
             ..
         } = &self.phase
         {
@@ -677,29 +669,15 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 Cow::Borrowed(&b":code"[..])
             };
 
-            // TODO: O(n)
-            if !self.in_progress_requests.iter().any(|(_, rq)| {
-                rq.0 == *warp_sync_source_id
-                    && matches!(rq.2,
-                        RequestDetail::StorageGetMerkleProof {
-                            block_hash: ref b,
-                            ref keys,
-                        } if *b == header.hash(self.block_number_bytes)
-                            && keys.iter().any(|k| *k == *code_key_to_request)
-                            && keys.iter().any(|k| k == b":heappages"))
-            }) {
-                Some((
-                    *warp_sync_source_id,
-                    &self.sources[warp_sync_source_id.0].user_data,
-                    DesiredRequest::StorageGetMerkleProof {
-                        block_hash: header.hash(self.block_number_bytes),
-                        state_trie_root: header.state_root,
-                        keys: vec![code_key_to_request.to_vec(), b":heappages".to_vec()],
-                    },
-                ))
-            } else {
-                None
-            }
+            Some((
+                *warp_sync_source_id,
+                &self.sources[warp_sync_source_id.0].user_data,
+                DesiredRequest::StorageGetMerkleProof {
+                    block_hash: self.warped_header.hash(self.block_number_bytes),
+                    state_trie_root: self.warped_header.state_root,
+                    keys: vec![code_key_to_request.to_vec(), b":heappages".to_vec()],
+                },
+            ))
         } else {
             None
         };
@@ -707,46 +685,25 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         // If we are in the appropriate phase, return the list of runtime calls indicated by the
         // chain information builder state machine.
         let call_proofs = if let Phase::ChainInformationDownload {
-            header,
             warp_sync_source_id,
             calls,
             ..
         } = &self.phase
         {
             either::Left(
-                // TODO: O(n)
                 calls
                     .iter()
-                    .filter(|(_, v)| v.is_none())
-                    .filter_map(|(call, _)| {
-                        if self.in_progress_requests.iter().any(
-                            |(_, (_, _, detail))| match detail {
-                                RequestDetail::RuntimeCallMerkleProof {
-                                    function_name,
-                                    parameter_vectored,
-                                    ..
-                                } => {
-                                    function_name == call.function_name()
-                                        && parameters_equal(
-                                            parameter_vectored,
-                                            call.parameter_vectored(),
-                                        )
-                                }
-                                _ => false,
-                            },
-                        ) {
-                            return None;
-                        }
-
-                        Some((
+                    .filter(|(_, v)| matches!(v, CallProof::NotStarted))
+                    .map(|(call, _)| {
+                        (
                             *warp_sync_source_id,
                             &self.sources[warp_sync_source_id.0].user_data,
                             DesiredRequest::RuntimeCallMerkleProof {
-                                block_hash: header.hash(self.block_number_bytes),
+                                block_hash: self.warped_header.hash(self.block_number_bytes),
                                 function_name: call.function_name().into(),
                                 parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
                             },
-                        ))
+                        )
                     }),
             )
         } else {
@@ -775,10 +732,74 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         detail: RequestDetail,
     ) -> RequestId {
         assert!(self.sources.contains(source_id.0));
-        RequestId(
-            self.in_progress_requests
-                .insert((source_id, user_data, detail)),
-        )
+
+        let request_slot = self.in_progress_requests.vacant_entry();
+        let request_id = RequestId(request_slot.key());
+
+        match (&detail, &mut self.phase) {
+            (
+                RequestDetail::WarpSyncRequest { block_hash },
+                Phase::DownloadFragments {
+                    warp_sync_fragments_download: warp_sync_fragments_download @ None,
+                },
+            ) if *block_hash == self.warped_header.hash(self.block_number_bytes) => {
+                *warp_sync_fragments_download = Some(request_id);
+            }
+            (
+                RequestDetail::StorageGetMerkleProof { block_hash, keys },
+                Phase::RuntimeDownload {
+                    downloaded_runtime: None,
+                    runtime_download: runtime_download @ None,
+                    hint_doesnt_match,
+                    warp_sync_source_id,
+                    ..
+                },
+            ) => {
+                let code_key_to_request = if let (false, Some(hint)) =
+                    (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
+                {
+                    Cow::Owned(
+                        trie::nibbles_to_bytes_truncate(
+                            hint.closest_ancestor_excluding.iter().copied(),
+                        )
+                        .collect::<Vec<_>>(),
+                    )
+                } else {
+                    Cow::Borrowed(&b":code"[..])
+                };
+
+                if source_id == *warp_sync_source_id
+                    && *block_hash == self.warped_header.hash(self.block_number_bytes)
+                    && keys.iter().any(|k| *k == *code_key_to_request)
+                    && keys.iter().any(|k| k == b":heappages")
+                {
+                    *runtime_download = Some(request_id);
+                }
+            }
+            (
+                RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+                Phase::ChainInformationDownload { calls, .. },
+            ) => {
+                for (info, status) in calls {
+                    if matches!(status, CallProof::NotStarted)
+                        && *block_hash == self.warped_header.hash(self.block_number_bytes)
+                        && function_name == info.function_name()
+                        && parameters_equal(parameter_vectored, info.parameter_vectored())
+                    {
+                        *status = CallProof::Downloading(request_id);
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        request_slot.insert((source_id, user_data, detail));
+        request_id
     }
 
     /// Removes the given request from the state machine. Returns the user data that was associated
@@ -789,6 +810,31 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     pub fn fail_request(&mut self, id: RequestId) -> TRq {
+        match &mut self.phase {
+            Phase::DownloadFragments {
+                warp_sync_fragments_download,
+            } => {
+                if *warp_sync_fragments_download == Some(id) {
+                    *warp_sync_fragments_download = None;
+                }
+            }
+            Phase::RuntimeDownload {
+                runtime_download, ..
+            } => {
+                if *runtime_download == Some(id) {
+                    *runtime_download = None;
+                }
+            }
+            Phase::ChainInformationDownload { calls, .. } => {
+                for call in calls.values_mut() {
+                    if matches!(call, CallProof::Downloading(rq_id) if *rq_id == id) {
+                        *call = CallProof::NotStarted;
+                    }
+                }
+            }
+            _ => {}
+        }
+
         match (self.in_progress_requests.remove(id.0), &mut self.phase) {
             ((source_id, user_data, RequestDetail::WarpSyncRequest { .. }), _) => {
                 // TODO: check that block hash matches starting point? ^
@@ -803,8 +849,6 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     | RequestDetail::StorageGetMerkleProof { .. },
                 ),
                 Phase::RuntimeDownload {
-                    header,
-                    chain_information_finality,
                     warp_sync_source_id,
                     ..
                 },
@@ -813,10 +857,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 // in order to try a different source.
                 self.sources[source_id.0].already_tried = true;
                 self.phase = Phase::DownloadFragments {
-                    previous_verifier_values: Some((
-                        header.clone(),
-                        chain_information_finality.clone(),
-                    )),
+                    warp_sync_fragments_download: None,
                 };
                 user_data
             }
@@ -846,21 +887,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         // continues below, otherwise we return early.
         let user_data = match (self.in_progress_requests.remove(id.0), &self.phase) {
             (
-                (
-                    _,
-                    user_data,
-                    RequestDetail::StorageGetMerkleProof {
-                        ref block_hash,
-                        ref keys,
-                    },
-                ),
-                Phase::RuntimeDownload { header, .. },
-            ) if *block_hash == header.hash(self.block_number_bytes)
-                // TODO: doesn't check for `:cod` ,but in practice this doesn't really matter anyway
-                && keys.iter().any(|k| k == b":heappages") =>
-            {
-                user_data
-            }
+                (_, user_data, _),
+                Phase::RuntimeDownload {
+                    runtime_download, ..
+                },
+            ) if *runtime_download == Some(id) => user_data,
             ((_, user_data, RequestDetail::StorageGetMerkleProof { .. }), _) => return user_data,
             (
                 (
@@ -903,27 +934,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             self.in_progress_requests.remove(request_id.0),
             &mut self.phase,
         ) {
-            (
-                (
-                    _,
-                    user_data,
-                    RequestDetail::RuntimeCallMerkleProof {
-                        block_hash,
-                        function_name,
-                        parameter_vectored,
-                    },
-                ),
-                Phase::ChainInformationDownload {
-                    ref header,
-                    ref mut calls,
-                    ..
-                },
-            ) if block_hash == header.hash(self.block_number_bytes) => {
-                for (call, value) in calls.iter_mut() {
-                    if function_name == call.function_name()
-                        && parameters_equal(&parameter_vectored, call.parameter_vectored())
-                    {
-                        *value = Some(response);
+            ((_, user_data, _), Phase::ChainInformationDownload { ref mut calls, .. }) => {
+                for call in calls.values_mut() {
+                    if matches!(call, CallProof::Downloading(rq_id) if *rq_id == request_id) {
+                        *call = CallProof::Downloaded(response);
                         break;
                     }
                 }
@@ -963,45 +977,22 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             &mut self.phase,
         ) {
             (
-                (rq_source_id, user_data, RequestDetail::WarpSyncRequest { block_hash }),
+                (rq_source_id, user_data, _),
                 Phase::DownloadFragments {
-                    previous_verifier_values,
+                    warp_sync_fragments_download,
                 },
-            ) => {
-                let desired_block_hash = match previous_verifier_values.as_ref() {
-                    Some((header, _)) => header.hash(self.block_number_bytes),
-                    None => self
-                        .start_chain_information
-                        .as_ref()
-                        .finalized_block_header
-                        .hash(self.block_number_bytes),
-                };
-
-                // Uninteresting request. We downloaded fragments from the wrong starting point.
-                if desired_block_hash != block_hash {
-                    return user_data;
-                }
-
+            ) if *warp_sync_fragments_download == Some(request_id) => {
                 // TODO: why this?
                 self.sources[rq_source_id.0].already_tried = true;
 
-                let verifier = match &previous_verifier_values {
-                    Some((_, chain_information_finality)) => verifier::Verifier::new(
-                        chain_information_finality.into(),
-                        self.block_number_bytes,
-                        fragments,
-                        final_set_of_fragments,
-                    ),
-                    None => verifier::Verifier::new(
-                        self.start_chain_information.as_ref().finality,
-                        self.block_number_bytes,
-                        fragments,
-                        final_set_of_fragments,
-                    ),
-                };
+                let verifier = verifier::Verifier::new(
+                    (&self.warped_finality).into(),
+                    self.block_number_bytes,
+                    fragments,
+                    final_set_of_fragments,
+                );
 
                 self.phase = Phase::PendingVerify {
-                    previous_verifier_values: previous_verifier_values.take(),
                     final_set_of_fragments,
                     downloaded_source: rq_source_id,
                     verifier: Some(verifier),
@@ -1024,7 +1015,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         if let Phase::ChainInformationDownload { calls, .. } = &self.phase {
             // If we've downloaded everything that was needed, switch to "build chain information"
             // mode.
-            if calls.values().all(Option::is_some) {
+            if calls
+                .values()
+                .all(|c| matches!(c, CallProof::Downloaded(_)))
+            {
                 return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
             }
         }
@@ -1051,6 +1045,7 @@ struct Source<TSrc> {
     /// `true` if this source has been in a past warp sync request and we should try a different
     /// source.
     already_tried: bool,
+    finalized_block_height: u64,
 }
 
 /// Information about a request that the warp sync state machine would like to start.
@@ -1161,10 +1156,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         randomness_seed: [u8; 32],
     ) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
         if let Phase::PendingVerify {
-            previous_verifier_values,
             verifier,
             final_set_of_fragments,
             downloaded_source,
+            ..
         } = &mut self.inner.phase
         {
             match verifier.take().unwrap().next(randomness_seed) {
@@ -1172,19 +1167,16 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                     *verifier = Some(next_verifier);
                 }
                 Ok(verifier::Next::EmptyProof) => {
+                    self.inner.warped_header = self
+                        .inner
+                        .start_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .into();
+                    self.inner.warped_finality =
+                        self.inner.start_chain_information.as_ref().finality.into();
                     self.inner.phase = Phase::RuntimeDownload {
-                        header: self
-                            .inner
-                            .start_chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .into(),
-                        chain_information_finality: self
-                            .inner
-                            .start_chain_information
-                            .as_ref()
-                            .finality
-                            .into(),
+                        runtime_download: None,
                         warp_sync_source_id: *downloaded_source,
                         downloaded_runtime: None,
                         hint_doesnt_match: false,
@@ -1196,28 +1188,28 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 }) => {
                     // As the verification of the fragment has succeeded, we are sure that the header
                     // is valid and can decode it.
-                    let header: Header =
+                    self.inner.warped_header =
                         header::decode(&scale_encoded_header, self.inner.block_number_bytes)
                             .unwrap()
                             .into();
+                    self.inner.warped_finality = chain_information_finality;
 
                     if *final_set_of_fragments {
                         self.inner.phase = Phase::RuntimeDownload {
-                            header,
-                            chain_information_finality,
+                            runtime_download: None,
                             warp_sync_source_id: *downloaded_source,
                             downloaded_runtime: None,
                             hint_doesnt_match: false,
                         };
                     } else {
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((header, chain_information_finality)),
+                            warp_sync_fragments_download: None,
                         };
                     }
                 }
                 Err(error) => {
                     self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: previous_verifier_values.take(),
+                        warp_sync_fragments_download: None,
                     };
                     return (self.inner, Some(error));
                 }
@@ -1250,9 +1242,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         if let Phase::RuntimeDownload {
-            header,
             downloaded_runtime,
-            chain_information_finality,
             warp_sync_source_id,
             hint_doesnt_match,
             ..
@@ -1266,10 +1256,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     Ok(p) => p,
                     Err(err) => {
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
+                            warp_sync_fragments_download: None,
                         };
                         return (
                             WarpSync::InProgress(self.inner),
@@ -1285,13 +1272,16 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 let code_nibbles =
                     trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
                 match decoded_downloaded_runtime.closest_ancestor_in_proof(
-                    &header.state_root,
+                    &self.inner.warped_header.state_root,
                     &code_nibbles[..code_nibbles.len() - 1],
                 ) {
                     Ok(Some(closest_ancestor_key)) => {
                         let next_nibble = code_nibbles[closest_ancestor_key.len()];
                         let merkle_value = decoded_downloaded_runtime
-                            .trie_node_info(&header.state_root, closest_ancestor_key)
+                            .trie_node_info(
+                                &self.inner.warped_header.state_root,
+                                closest_ancestor_key,
+                            )
                             .unwrap()
                             .children
                             .child(next_nibble)
@@ -1301,10 +1291,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
                             None => {
                                 self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
+                                    warp_sync_fragments_download: None,
                                 };
                                 return (
                                     WarpSync::InProgress(self.inner),
@@ -1315,19 +1302,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     }
                     Ok(None) => {
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
+                            warp_sync_fragments_download: None,
                         };
                         return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
                     }
                     Err(proof_decode::IncompleteProofError { .. }) => {
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
+                            warp_sync_fragments_download: None,
                         };
                         return (
                             WarpSync::InProgress(self.inner),
@@ -1347,24 +1328,17 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     return (WarpSync::InProgress(self.inner), None);
                 }
             } else {
-                match decoded_downloaded_runtime.storage_value(&header.state_root, b":code") {
+                match decoded_downloaded_runtime
+                    .storage_value(&self.inner.warped_header.state_root, b":code")
+                {
                     Ok(Some((code, _))) => code,
                     Ok(None) => {
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
+                            warp_sync_fragments_download: None,
                         };
                         return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
                     }
                     Err(proof_decode::IncompleteProofError { .. }) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
-                        };
                         return (
                             WarpSync::InProgress(self.inner),
                             Some(Error::MerkleProofEntriesMissing),
@@ -1373,32 +1347,24 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 }
             };
 
-            let finalized_storage_heappages =
-                match decoded_downloaded_runtime.storage_value(&header.state_root, b":heappages") {
-                    Ok(val) => val.map(|(v, _)| v),
-                    Err(proof_decode::IncompleteProofError { .. }) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
-                        };
-                        return (
-                            WarpSync::InProgress(self.inner),
-                            Some(Error::MerkleProofEntriesMissing),
-                        );
-                    }
-                };
+            let finalized_storage_heappages = match decoded_downloaded_runtime
+                .storage_value(&self.inner.warped_header.state_root, b":heappages")
+            {
+                Ok(val) => val.map(|(v, _)| v),
+                Err(proof_decode::IncompleteProofError { .. }) => {
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::MerkleProofEntriesMissing),
+                    );
+                }
+            };
 
             let decoded_heap_pages =
                 match executor::storage_heap_pages_to_value(finalized_storage_heappages) {
                     Ok(hp) => hp,
                     Err(err) => {
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
+                            warp_sync_fragments_download: None,
                         };
                         return (
                             WarpSync::InProgress(self.inner),
@@ -1416,10 +1382,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 Ok(runtime) => runtime,
                 Err(err) => {
                     self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
+                        warp_sync_fragments_download: None,
                     };
                     return (
                         WarpSync::InProgress(self.inner),
@@ -1430,17 +1393,14 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
 
             let chain_info_builder = chain_information::build::ChainInformationBuild::new(
                 chain_information::build::Config {
-                    finalized_block_header: if header.number == 0 {
-                        chain_information::build::ConfigFinalizedBlockHeader::Genesis {
-                            state_trie_root_hash: header.state_root,
-                        }
-                    } else {
-                        chain_information::build::ConfigFinalizedBlockHeader::NonGenesis {
-                            scale_encoded_header: header
+                    finalized_block_header:
+                        chain_information::build::ConfigFinalizedBlockHeader::Any {
+                            scale_encoded_header: self
+                                .inner
+                                .warped_header
                                 .scale_encoding_vec(self.inner.block_number_bytes),
-                            known_finality: Some(chain_information_finality.clone()),
-                        }
-                    },
+                            known_finality: Some((&self.inner.warped_finality).clone()),
+                        },
                     block_number_bytes: self.inner.block_number_bytes,
                     runtime,
                 },
@@ -1466,7 +1426,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             ),
                             sources_ordered: mem::take(&mut self.inner.sources)
                                 .into_iter()
-                                .map(|(id, source)| (SourceId(id), source.user_data))
+                                .map(|(id, source)| {
+                                    (
+                                        SourceId(id),
+                                        source.finalized_block_height,
+                                        source.user_data,
+                                    )
+                                })
                                 .collect(),
                             in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
                                 .into_iter()
@@ -1483,10 +1449,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     ..
                 } => {
                     self.inner.phase = Phase::DownloadFragments {
-                        previous_verifier_values: Some((
-                            header.clone(),
-                            chain_information_finality.clone(),
-                        )),
+                        warp_sync_fragments_download: None,
                     };
                     return (
                         WarpSync::InProgress(self.inner),
@@ -1496,15 +1459,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
                     let calls = in_progress
                         .remaining_calls()
-                        .map(|call| (call, None))
+                        .map(|call| (call, CallProof::NotStarted))
                         .collect();
                     (calls, in_progress)
                 }
             };
 
             self.inner.phase = Phase::ChainInformationDownload {
-                header: header.clone(),
-                chain_information_finality: chain_information_finality.clone(),
                 warp_sync_source_id: *warp_sync_source_id,
                 downloaded_runtime: Some(DownloadedRuntime {
                     storage_code: Some(finalized_storage_code.to_vec()),
@@ -1537,15 +1498,15 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
     // TODO: refactor this error or explain what it is
     pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         if let Phase::ChainInformationDownload {
-            header,
-            chain_information_finality,
             chain_info_builder,
             downloaded_runtime,
             calls,
             ..
         } = &mut self.inner.phase
         {
-            debug_assert!(calls.values().all(Option::is_some));
+            debug_assert!(calls
+                .values()
+                .all(|c| matches!(c, CallProof::Downloaded(_))));
 
             // Decode all the Merkle proofs that have been received.
             let calls = {
@@ -1555,7 +1516,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 );
 
                 for (call, proof) in calls {
-                    let proof = proof.take().unwrap();
+                    let CallProof::Downloaded(proof) = mem::replace(proof, CallProof::NotStarted)
+                    else {
+                        unreachable!()
+                    };
                     let decoded_proof =
                         match proof_decode::decode_and_verify_proof(proof_decode::Config {
                             proof: proof.into_iter(),
@@ -1563,10 +1527,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             Ok(d) => d,
                             Err(err) => {
                                 self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
+                                    warp_sync_fragments_download: None,
                                 };
                                 return (
                                     WarpSync::InProgress(self.inner),
@@ -1587,22 +1548,20 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     chain_information::build::InProgress::StorageGet(get) => {
                         // TODO: child tries not supported
                         let proof = calls.get(&get.call_in_progress()).unwrap();
-                        let value =
-                            match proof.storage_value(&header.state_root, get.key().as_ref()) {
-                                Ok(v) => v,
-                                Err(proof_decode::IncompleteProofError { .. }) => {
-                                    self.inner.phase = Phase::DownloadFragments {
-                                        previous_verifier_values: Some((
-                                            header.clone(),
-                                            chain_information_finality.clone(),
-                                        )),
-                                    };
-                                    return (
-                                        WarpSync::InProgress(self.inner),
-                                        Some(Error::MerkleProofEntriesMissing),
-                                    );
-                                }
-                            };
+                        let value = match proof
+                            .storage_value(&self.inner.warped_header.state_root, get.key().as_ref())
+                        {
+                            Ok(v) => v,
+                            Err(proof_decode::IncompleteProofError { .. }) => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    warp_sync_fragments_download: None,
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::MerkleProofEntriesMissing),
+                                );
+                            }
+                        };
 
                         match get.inject_value(value.map(|(val, ver)| (iter::once(val), ver))) {
                             chain_information::build::ChainInformationBuild::Finished {
@@ -1624,7 +1583,13 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                             downloaded_runtime.closest_ancestor_excluding,
                                         sources_ordered: mem::take(&mut self.inner.sources)
                                             .into_iter()
-                                            .map(|(id, source)| (SourceId(id), source.user_data))
+                                            .map(|(id, source)| {
+                                                (
+                                                    SourceId(id),
+                                                    source.finalized_block_height,
+                                                    source.user_data,
+                                                )
+                                            })
                                             .collect(),
                                         in_progress_requests: mem::take(
                                             &mut self.inner.in_progress_requests,
@@ -1643,10 +1608,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 ..
                             } => {
                                 self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
+                                    warp_sync_fragments_download: None,
                                 };
                                 return (
                                     WarpSync::InProgress(self.inner),
@@ -1664,10 +1626,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     | chain_information::build::InProgress::ClosestDescendantMerkleValue(_) => {
                         // TODO: implement
                         self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: Some((
-                                header.clone(),
-                                chain_information_finality.clone(),
-                            )),
+                            warp_sync_fragments_download: None,
                         };
                         return (
                             WarpSync::InProgress(self.inner),

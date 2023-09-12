@@ -17,6 +17,8 @@
 
 use crate::{bindings, timers::Delay};
 
+use futures_lite::future::FutureExt as _;
+
 use smoldot_light::platform::{read_write, ConnectError, SubstreamDirection};
 
 use core::{future, iter, mem, ops, pin, str, task, time::Duration};
@@ -27,7 +29,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have
@@ -45,13 +46,13 @@ pub(crate) struct PlatformRef {}
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
-    type Instant = Instant;
+    type Instant = Duration;
     type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type StreamConnectFuture =
         pin::Pin<Box<dyn future::Future<Output = Result<Self::Stream, ConnectError>> + Send>>;
     type ReadWriteAccess<'a> = ReadWriteAccess<'a>;
-    type StreamErrorRef<'a> = String;
+    type StreamErrorRef<'a> = StreamError;
     type MultiStreamConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
@@ -73,20 +74,22 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     >;
 
     fn now_from_unix_epoch(&self) -> Duration {
-        // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
-        // before the UNIX epoch.
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| panic!())
+        let microseconds = unsafe { bindings::unix_timestamp_us() };
+        Duration::from_micros(microseconds)
     }
 
     fn now(&self) -> Self::Instant {
-        Instant::now()
+        let microseconds = unsafe { bindings::monotonic_clock_us() };
+        Duration::from_micros(microseconds)
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
-        use rand::RngCore as _;
-        rand::thread_rng().fill_bytes(buffer);
+        unsafe {
+            bindings::random_get(
+                u32::try_from(buffer.as_mut_ptr() as usize).unwrap(),
+                u32::try_from(buffer.len()).unwrap(),
+            )
+        }
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
@@ -94,7 +97,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
-        Delay::new_at(when)
+        Delay::new_at_monotonic_clock(when)
     }
 
     fn spawn_task(
@@ -293,6 +296,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         writable_bytes: 0,
                         write_closable,
                         write_closed: false,
+                        when_wake_up: None,
                     })
                 }
                 ConnectionInner::Reset {
@@ -458,6 +462,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     writable_bytes: usize::try_from(initial_writable_bytes).unwrap(),
                     write_closable: false, // Note: this is currently hardcoded for WebRTC.
                     write_closed: false,
+                    when_wake_up: None,
                 },
                 direction,
             ))
@@ -518,6 +523,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         while let Some(msg) = stream_inner.messages_queue.pop_front() {
                             // TODO: could be optimized by reworking the bindings
                             stream.read_buffer.extend_from_slice(&msg);
+                            // TODO: only wake up if `read_bytes >= expected_incoming_bytes`
                             shall_return = true;
                         }
 
@@ -540,7 +546,24 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     stream_inner.something_happened.listen()
                 };
 
-                listener.await
+                let timer_stop = async move {
+                    listener.await;
+                    false
+                }
+                .or(async {
+                    if let Some(when_wake_up) = stream.when_wake_up.as_mut() {
+                        when_wake_up.await;
+                        stream.when_wake_up = None;
+                        true
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .await;
+
+                if timer_stop {
+                    return;
+                }
             }
         })
     }
@@ -552,12 +575,12 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let stream = stream.get_mut();
 
         if stream.is_reset {
-            todo!()
+            return Err(StreamError {});
         }
 
         Ok(ReadWriteAccess {
             read_write: read_write::ReadWrite {
-                now: Instant::now(),
+                now: unsafe { Duration::from_micros(bindings::monotonic_clock_us()) },
                 incoming_buffer: mem::take(&mut stream.read_buffer),
                 expected_incoming_bytes: Some(0),
                 read_bytes: 0,
@@ -576,12 +599,12 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 }
 
 pub(crate) struct ReadWriteAccess<'a> {
-    read_write: read_write::ReadWrite<Instant>,
+    read_write: read_write::ReadWrite<Duration>,
     stream: &'a mut StreamWrapper,
 }
 
 impl<'a> ops::Deref for ReadWriteAccess<'a> {
-    type Target = read_write::ReadWrite<Instant>;
+    type Target = read_write::ReadWrite<Duration>;
 
     fn deref(&self) -> &Self::Target {
         &self.read_write
@@ -602,6 +625,19 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .streams
             .get_mut(&(self.stream.connection_id, self.stream.stream_id))
             .unwrap();
+
+        // TODO: only wake up if `read_bytes >= expected_incoming_bytes`
+        if (self.read_write.read_bytes != 0 && !self.read_write.incoming_buffer.is_empty())
+            || (self.read_write.write_bytes_queued != 0
+                && self.read_write.write_bytes_queueable.is_some())
+        {
+            self.read_write.wake_up_asap();
+        }
+
+        self.stream.when_wake_up = self
+            .read_write
+            .wake_up_after
+            .map(|when| Delay::new_at_monotonic_clock(when));
 
         self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
 
@@ -648,6 +684,8 @@ pub(crate) struct StreamWrapper {
     writable_bytes: usize,
     write_closable: bool,
     write_closed: bool,
+    /// The stream should wake up after this delay.
+    when_wake_up: Option<Delay>,
 }
 
 impl Drop for StreamWrapper {
@@ -741,6 +779,10 @@ impl Drop for MultiStreamWrapper {
         }
     }
 }
+
+#[derive(Debug, derive_more::Display, Clone)]
+#[display(fmt = "stream error")]
+pub(crate) struct StreamError;
 
 static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
     next_connection_id: 0,
@@ -924,20 +966,27 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
 
     // There is unfortunately no way to instruct the browser to back-pressure connections to
     // remotes.
+    //
     // In order to avoid DoS attacks, we refuse to buffer more than a certain amount of data per
     // connection. This limit is completely arbitrary, and this is in no way a robust solution
     // because this limit isn't in sync with any other part of the code. In other words, it could
     // be legitimate for the remote to buffer a large amount of data.
+    //
     // This corner case is handled by discarding the messages that would go over the limit. While
     // this is not a great solution, going over that limit can be considered as a fault from the
     // remote, the same way as it would be a fault from the remote to forget to send some bytes,
     // and thus should be handled in a similar way by the higher level code.
+    //
     // A better way to handle this would be to kill the connection abruptly. However, this would
     // add a lot of complex code in this module, and the effort is clearly not worth it for this
     // niche situation.
+    //
+    // While this problem is specific to browsers (Deno and NodeJS have ways to back-pressure
+    // connections), we add this hack for all platforms, for consistency. If this limit is ever
+    // reached, we want to be sure to detect it, even when testing on NodeJS or Deno.
+    //
     // See <https://github.com/smol-dot/smoldot/issues/109>.
     // TODO: do this properly eventually ^
-    // TODO: move this limit check in the browser-specific code so that NodeJS and Deno don't suffer from it?
     if stream.messages_queue_total_size >= 25 * 1024 * 1024 {
         return;
     }
@@ -987,7 +1036,7 @@ pub(crate) fn connection_stream_opened(
             initial_writable_bytes,
         ));
 
-        connection.something_happened.notify(usize::max_value())
+        connection.something_happened.notify(usize::max_value());
     } else {
         panic!()
     }

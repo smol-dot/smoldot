@@ -64,9 +64,9 @@ pub enum CliOptionsCommand {
 
 #[derive(Debug, clap::Parser)]
 pub struct CliOptionsRun {
-    /// Chain to connect to ("Polkadot", "Kusama", "Westend", or a file path).
-    #[arg(long, default_value = "polkadot")]
-    pub chain: CliChain,
+    /// Path to a file containing the specification of the chain to connect to.
+    #[arg(long)]
+    pub path_to_chain_spec: PathBuf,
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[arg(long, default_value = "auto")]
     pub output: Output,
@@ -120,30 +120,6 @@ pub struct CliOptionsBlake264Hash {
 pub struct CliOptionsBlake2256Hash {
     /// Path of the file whose hash to compute.
     pub file: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub enum CliChain {
-    Polkadot,
-    Kusama,
-    Westend,
-    Custom(PathBuf),
-}
-
-impl core::str::FromStr for CliChain {
-    type Err = core::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "polkadot" {
-            Ok(CliChain::Polkadot)
-        } else if s == "kusama" {
-            Ok(CliChain::Kusama)
-        } else if s == "westend" {
-            Ok(CliChain::Westend)
-        } else {
-            Ok(CliChain::Custom(s.parse()?))
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

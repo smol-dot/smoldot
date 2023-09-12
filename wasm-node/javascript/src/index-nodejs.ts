@@ -33,7 +33,6 @@ export {
     ClientOptionsWithBytecode,
     SmoldotBytecode,
     CrashError,
-    MalformedJsonRpcError,
     QueueFullError,
     JsonRpcDisabledError,
     LogCallback

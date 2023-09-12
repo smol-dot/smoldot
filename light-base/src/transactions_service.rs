@@ -85,6 +85,7 @@ use core::{
     time::Duration,
 };
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
 use itertools::Itertools as _;
@@ -146,26 +147,28 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = mpsc::channel(8);
 
-        config.platform.spawn_task(
-            log_target.clone().into(),
-            Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
-                log_target,
-                platform: config.platform.clone(),
-                sync_service: config.sync_service,
-                runtime_service: config.runtime_service,
-                network_service: config.network_service.0,
-                network_chain_index: config.network_service.1,
-                from_foreground,
-                max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
-                    .unwrap_or(usize::max_value()),
-                max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
-                    .unwrap_or(usize::max_value()),
-                max_concurrent_validations: usize::try_from(
-                    config.max_concurrent_validations.get(),
-                )
+        let task = Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
+            log_target: log_target.clone(),
+            platform: config.platform.clone(),
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
+            network_service: config.network_service.0,
+            network_chain_index: config.network_service.1,
+            from_foreground,
+            max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
-            })),
-        );
+            max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
+                .unwrap_or(usize::max_value()),
+            max_concurrent_validations: usize::try_from(config.max_concurrent_validations.get())
+                .unwrap_or(usize::max_value()),
+        }));
+
+        config
+            .platform
+            .spawn_task(log_target.clone().into(), async move {
+                task.await;
+                log::debug!(target: &log_target, "Shutdown");
+            });
 
         TransactionsService {
             to_background: Mutex::new(to_background),
@@ -350,19 +353,51 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
         // service. This happens when there is a gap in the blocks, either intentionally (e.g.
         // after a Grandpa warp sync) or because the transactions service was too busy to process
         // the new blocks.
+        let mut subscribe_all = {
+            let sub_future = async {
+                Some(
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of the transactions service resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
+                    worker
+                        .runtime_service
+                        .subscribe_all(
+                            "transactions-service",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
+                        .await,
+                )
+            };
 
-        // The buffer size should be large enough so that, if the CPU is busy, it doesn't
-        // become full before the execution of the transactions service resumes.
-        // The maximum number of pinned block is ignored, as this maximum is a way to avoid
-        // malicious behaviors. This code is by definition not considered malicious.
-        let mut subscribe_all = worker
-            .runtime_service
-            .subscribe_all(
-                "transactions-service",
-                32,
-                NonZeroUsize::new(usize::max_value()).unwrap(),
-            )
-            .await;
+            // Because `runtime_service.subscribe_all()` might take a long time (potentially
+            // forever), we need to process messages coming from the foreground in parallel.
+            let from_foreground = &mut config.from_foreground;
+            let messages_process = async move {
+                loop {
+                    match from_foreground.next().await {
+                        Some(ToBackground::SubmitTransaction {
+                            updates_report: Some(mut updates_report),
+                            ..
+                        }) => {
+                            let _ = updates_report
+                                .send(TransactionStatus::Dropped(DropReason::GapInChain))
+                                .await;
+                        }
+                        Some(ToBackground::SubmitTransaction { .. }) => {}
+                        None => break None,
+                    }
+                }
+            };
+
+            match sub_future.or(messages_process).await {
+                Some(s) => s,
+                None => return,
+            }
+        };
+
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
         );
@@ -489,7 +524,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 let (to_execute, result_rx) = validation_future.remote_handle();
                 worker
                     .validations_in_progress
-                    .push(to_execute.map(move |()| to_start_validate).boxed());
+                    .push(Box::pin(to_execute.map(move |()| to_start_validate)));
                 let tx = worker
                     .pending_transactions
                     .transaction_user_data_mut(to_start_validate)
@@ -580,8 +615,9 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         NonZeroU32::new(3).unwrap(),
                     );
 
-                    async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) }
-                        .boxed()
+                    Box::pin(
+                        async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) },
+                    )
                 });
 
                 worker
@@ -673,7 +709,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     // A block body download has finished, successfully or not.
                     let (block_hash, block_body) = download;
 
-                    let mut block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
+                    let block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
                         None => {
                             // It is possible that this block has been discarded because a sibling
@@ -754,10 +790,10 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     tx.when_reannounce = now + Duration::from_secs(5);
                     worker.next_reannounce.push({
                         let platform = worker.platform.clone();
-                        async move {
+                        Box::pin(async move {
                             platform.sleep(Duration::from_secs(5)).await;
                             maybe_reannounce_tx_id
-                        }.boxed()
+                        })
                     });
 
                     // Perform the announce.
@@ -842,9 +878,9 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                                 .update_status(TransactionStatus::Validated);
 
                             // Schedule this transaction for announcement.
-                            worker.next_reannounce.push(async move {
+                            worker.next_reannounce.push(Box::pin(async move {
                                 maybe_validated_tx_id
-                            }.boxed());
+                            }));
 
                             Ok(result)
                         }
