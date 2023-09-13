@@ -221,7 +221,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                         methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: Some(methods::TransactionWatchEventBlock {
                                                 hash: methods::HashHexString(block_hash),
-                                                index: methods::NumberAsString(index),
+                                                index,
                                             }),
                                         },
                                 }).await;
@@ -342,7 +342,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 result: methods::TransactionWatchEvent::Finalized {
                                     block: methods::TransactionWatchEventBlock {
                                         hash: methods::HashHexString(block_hash),
-                                        index: methods::NumberAsString(index),
+                                        index,
                                     },
                                 },
                             }).await,

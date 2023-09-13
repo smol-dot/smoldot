@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `index` field of `bestChainBlockIncluded` events of `chainHead_unstable_follow` subscriptions is now a number rather than a string, in accordance with the latest changes in the JSON-RPC API specification. ([#1097](https://github.com/smol-dot/smoldot/pull/1097))
+
 ### Fixed
 
 - Justifications are no longer downloaded for blocks that can't be finalized because an earlier block needs to be finalized first. ([#1127](https://github.com/smol-dot/smoldot/pull/1127))
