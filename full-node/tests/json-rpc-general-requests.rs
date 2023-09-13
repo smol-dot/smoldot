@@ -202,6 +202,27 @@ fn system_chain() {
 }
 
 #[test]
+fn system_chain_type() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"system_chainType","params":[]}"#.to_owned(),
+        );
+
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            "Local"
+        );
+    });
+}
+
+#[test]
 fn system_local_peer_id() {
     smol::block_on(async move {
         let client = start_client().await;

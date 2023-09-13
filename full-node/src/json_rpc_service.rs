@@ -69,6 +69,9 @@ pub struct Config {
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
 
+    /// Type of the chain, as found in the chain specification.
+    pub chain_type: String,
+
     /// JSON-encoded properties of the chain, as found in the chain specification.
     pub chain_properties_json: String,
 
@@ -168,6 +171,7 @@ impl JsonRpcService {
                 network_service: config.network_service.clone(),
                 receiver: from_background.clone(),
                 chain_name: config.chain_name.clone(),
+                chain_type: config.chain_type.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),
                 genesis_block_hash: config.genesis_block_hash,
                 consensus_service: config.consensus_service.clone(),

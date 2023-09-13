@@ -49,6 +49,9 @@ pub struct Config {
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
 
+    /// Type of the chain, as found in the chain specification.
+    pub chain_type: String,
+
     /// JSON-encoded properties of the chain, as found in the chain specification.
     pub chain_properties_json: String,
 
@@ -353,6 +356,11 @@ pub fn spawn_requests_handler(mut config: Config) {
                     methods::MethodCall::system_chain {} => {
                         request
                             .respond(methods::Response::system_chain((&config.chain_name).into()));
+                    }
+                    methods::MethodCall::system_chainType {} => {
+                        request.respond(methods::Response::system_chainType(
+                            (&config.chain_type).into(),
+                        ));
                     }
                     methods::MethodCall::system_localPeerId {} => {
                         let peer_id = config.network_service.local_peer_id().to_base58();
