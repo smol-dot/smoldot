@@ -563,7 +563,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         log_callback: config.log_callback.clone(),
         database,
         consensus_service: consensus_service.clone(),
-        network_service: network_service.clone(),
+        network_service: (network_service.clone(), 0),
         bind_address: config
             .json_rpc_listen
             .as_ref()
@@ -575,6 +575,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         chain_name: chain_spec.name().to_owned(),
         chain_type: chain_spec.chain_type().to_owned(),
         chain_properties_json: chain_spec.properties().to_owned(),
+        chain_is_live: chain_spec.has_live_network(),
         genesis_block_hash: genesis_chain_information
             .as_ref()
             .finalized_block_header

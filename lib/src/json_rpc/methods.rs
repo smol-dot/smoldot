@@ -1216,26 +1216,40 @@ impl serde::Serialize for RuntimeDispatchInfo {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerdeSystemHealth {
+    #[serde(rename = "isSyncing")]
+    is_syncing: bool,
+    peers: u64,
+    #[serde(rename = "shouldHavePeers")]
+    should_have_peers: bool,
+}
+
 impl serde::Serialize for SystemHealth {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        #[derive(serde::Serialize)]
-        struct SerdeSystemHealth {
-            #[serde(rename = "isSyncing")]
-            is_syncing: bool,
-            peers: u64,
-            #[serde(rename = "shouldHavePeers")]
-            should_have_peers: bool,
-        }
-
         SerdeSystemHealth {
             is_syncing: self.is_syncing,
             peers: self.peers,
             should_have_peers: self.should_have_peers,
         }
         .serialize(serializer)
+    }
+}
+
+impl<'a> serde::Deserialize<'a> for SystemHealth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let h: SerdeSystemHealth = serde::Deserialize::deserialize(deserializer)?;
+        Ok(SystemHealth {
+            is_syncing: h.is_syncing,
+            peers: h.peers,
+            should_have_peers: h.should_have_peers,
+        })
     }
 }
 

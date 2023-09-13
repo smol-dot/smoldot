@@ -223,6 +223,26 @@ fn system_chain_type() {
 }
 
 #[test]
+fn system_health() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        // Query the runtime of the genesis.
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}"#.to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        let decoded = serde_json::from_str::<json_rpc::methods::SystemHealth>(result_json).unwrap();
+        assert_eq!(decoded.peers, 0);
+        assert_eq!(decoded.should_have_peers, true);
+    });
+}
+
+#[test]
 fn system_local_peer_id() {
     smol::block_on(async move {
         let client = start_client().await;

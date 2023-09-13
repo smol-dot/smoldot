@@ -148,6 +148,9 @@ enum ToBackground {
         /// The sender is silently destroyed if the block hash was invalid.
         result_tx: oneshot::Sender<()>,
     },
+    IsMajorSyncingHint {
+        result_tx: oneshot::Sender<bool>,
+    },
 }
 
 /// Potential error when calling [`ConsensusService::new`].
@@ -428,6 +431,22 @@ impl ConsensusService {
                 _block_hash: block_hash,
                 result_tx,
             })
+            .await;
+        result_rx.await.unwrap()
+    }
+
+    /// Returns `true` if the syncing is currently downloading blocks at a high rate in order to
+    /// catch up with the head of the chain.
+    ///
+    /// > **Note**: This function is used to implement the `system_health` JSON-RPC function and
+    /// >           is basically a hack that shouldn't be relied upon.
+    pub async fn is_major_syncing_hint(&self) -> bool {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::IsMajorSyncingHint { result_tx })
             .await;
         result_rx.await.unwrap()
     }
@@ -859,6 +878,15 @@ impl SyncBackground {
                         Some(ToBackground::Unpin { result_tx, .. }) => {
                             // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
                             let _ = result_tx.send(());
+                        },
+                        Some(ToBackground::IsMajorSyncingHint { result_tx }) => {
+                            // As documented, the value returned doesn't need to be precise.
+                            let result = match self.sync.status() {
+                                all::Status::Sync => false,
+                                all::Status::WarpSyncFragments { .. }| all::Status::WarpSyncChainInformation { .. } => true,
+                            };
+
+                            let _ = result_tx.send(result);
                         },
                         None => {
                             // Shutdown.
