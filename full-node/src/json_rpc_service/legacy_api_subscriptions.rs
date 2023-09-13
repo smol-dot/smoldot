@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use hashbrown::HashMap;
 use smol::stream::StreamExt as _;
 use std::{iter, num::NonZeroUsize, sync::Arc};
 
@@ -91,6 +92,173 @@ impl SubscribeAllHeads {
                     }
                     Some(consensus_service::Notification::Finalized { .. }) => {
                         // Ignore event.
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Helper that provides the blocks of a `chain_subscribeNewHeads` subscription.
+pub struct SubscribeNewHeads {
+    consensus_service: Arc<consensus_service::ConsensusService>,
+
+    /// Active subscription to the consensus service blocks. `None` if not subscribed yet or if
+    /// the subscription has stopped.
+    subscription: Option<SubscribeNewHeadsSubscription>,
+}
+
+struct SubscribeNewHeadsSubscription {
+    subscription_id: consensus_service::SubscriptionId,
+    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    pinned_blocks: HashMap<[u8; 32], Vec<u8>>,
+    blocks_to_unpin: Vec<[u8; 32]>,
+    current_best_block_hash: [u8; 32],
+}
+
+impl SubscribeNewHeads {
+    /// Builds a new [`SubscribeNewHeads`].
+    pub fn new(consensus_service: Arc<consensus_service::ConsensusService>) -> Self {
+        SubscribeNewHeads {
+            consensus_service,
+            subscription: None,
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the next block to provide as part of the subscription.
+    pub async fn next_scale_encoded_header(&mut self) -> &Vec<u8> {
+        // Note: this function is convoluted with many unwraps due to a difficult fight with the
+        // Rust borrow checker.
+
+        loop {
+            if self.subscription.is_none() {
+                let subscribe_all = self
+                    .consensus_service
+                    .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                    .await;
+
+                let mut pinned_blocks = HashMap::with_capacity(
+                    subscribe_all.non_finalized_blocks_ancestry_order.len() + 1 + 8,
+                );
+
+                let mut current_best_block_hash = subscribe_all.finalized_block_hash;
+
+                pinned_blocks.insert(
+                    subscribe_all.finalized_block_hash,
+                    subscribe_all.finalized_block_scale_encoded_header,
+                );
+
+                for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                    pinned_blocks.insert(block.block_hash, block.scale_encoded_header);
+                    if block.is_new_best {
+                        current_best_block_hash = block.block_hash;
+                    }
+                }
+
+                let subscription = self.subscription.insert(SubscribeNewHeadsSubscription {
+                    subscription_id: subscribe_all.id,
+                    new_blocks: subscribe_all.new_blocks,
+                    pinned_blocks,
+                    blocks_to_unpin: Vec::with_capacity(8),
+                    current_best_block_hash,
+                });
+
+                return subscription
+                    .pinned_blocks
+                    .get(&subscription.current_best_block_hash)
+                    .unwrap();
+            }
+
+            {
+                let subscription = self.subscription.as_mut().unwrap();
+                while let Some(block_to_unpin) = subscription.blocks_to_unpin.last() {
+                    self.consensus_service
+                        .unpin_block(subscription.subscription_id, *block_to_unpin)
+                        .await;
+                    let _ = subscription.blocks_to_unpin.pop();
+                }
+            }
+
+            loop {
+                let notification = self.subscription.as_mut().unwrap().new_blocks.next().await;
+                let Some(notification) = notification else {
+                    self.subscription = None;
+                    break;
+                };
+
+                match notification {
+                    consensus_service::Notification::Block(block) => {
+                        let _previous_value = self
+                            .subscription
+                            .as_mut()
+                            .unwrap()
+                            .pinned_blocks
+                            .insert(block.block_hash, block.scale_encoded_header);
+                        debug_assert!(_previous_value.is_none());
+
+                        if block.is_new_best {
+                            self.subscription.as_mut().unwrap().current_best_block_hash =
+                                block.block_hash;
+                            return self
+                                .subscription
+                                .as_mut()
+                                .unwrap()
+                                .pinned_blocks
+                                .get(&block.block_hash)
+                                .unwrap();
+                        }
+                    }
+                    consensus_service::Notification::Finalized {
+                        pruned_blocks_hashes,
+                        finalized_blocks_hashes,
+                        best_block_hash,
+                    } => {
+                        for hash in pruned_blocks_hashes {
+                            self.subscription
+                                .as_mut()
+                                .unwrap()
+                                .blocks_to_unpin
+                                .push(hash);
+                            let _was_in = self
+                                .subscription
+                                .as_mut()
+                                .unwrap()
+                                .pinned_blocks
+                                .remove(&hash);
+                            debug_assert!(_was_in.is_some());
+                        }
+
+                        for hash in finalized_blocks_hashes
+                            .iter()
+                            .take(finalized_blocks_hashes.len() - 1)
+                        {
+                            self.subscription
+                                .as_mut()
+                                .unwrap()
+                                .blocks_to_unpin
+                                .push(*hash);
+                            let _was_in = self
+                                .subscription
+                                .as_mut()
+                                .unwrap()
+                                .pinned_blocks
+                                .remove(hash);
+                            debug_assert!(_was_in.is_some());
+                        }
+
+                        if best_block_hash
+                            != self.subscription.as_mut().unwrap().current_best_block_hash
+                        {
+                            self.subscription.as_mut().unwrap().current_best_block_hash =
+                                best_block_hash;
+                            return self
+                                .subscription
+                                .as_mut()
+                                .unwrap()
+                                .pinned_blocks
+                                .get(&best_block_hash)
+                                .unwrap();
+                        }
                     }
                 }
             }
