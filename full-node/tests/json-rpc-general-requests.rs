@@ -134,6 +134,29 @@ fn chain_get_block_hash() {
 }
 
 #[test]
+fn state_get_metadata() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        // Query the metadata of the genesis.
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"state_getMetadata","params":["0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"]}"#.to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<String>(result_json).unwrap(),
+            include_str!("./substrate-node-template-metadata.hex").trim()
+        );
+
+        // TOOD: there are no tests for the corner cases of state_getMetadata because it's unclear how the function is supposed to behave at all
+    });
+}
+
+#[test]
 fn state_get_runtime_version() {
     smol::block_on(async move {
         let client = start_client().await;
