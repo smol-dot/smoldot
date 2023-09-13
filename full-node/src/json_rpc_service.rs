@@ -27,7 +27,7 @@ use std::{
     future::Future,
     io, mem,
     net::SocketAddr,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -39,6 +39,7 @@ use std::{
 mod chain_head_subscriptions;
 mod legacy_api_subscriptions;
 mod requests_handler;
+mod runtime_caches_service;
 
 /// Configuration for a [`JsonRpcService`].
 pub struct Config {
@@ -150,6 +151,15 @@ impl JsonRpcService {
             virtual_client_main_task,
         );
 
+        let runtime_caches_service = Arc::new(runtime_caches_service::RuntimeCachesService::new(
+            runtime_caches_service::Config {
+                tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback.clone(),
+                database: config.database.clone(),
+                num_cache_entries: NonZeroUsize::new(16).unwrap(), // TODO: configurable?
+            },
+        ));
+
         for _ in 0..config.max_parallel_requests {
             requests_handler::spawn_requests_handler(requests_handler::Config {
                 tasks_executor: config.tasks_executor.clone(),
@@ -161,6 +171,7 @@ impl JsonRpcService {
                 chain_properties_json: config.chain_properties_json.clone(),
                 genesis_block_hash: config.genesis_block_hash,
                 consensus_service: config.consensus_service.clone(),
+                runtime_caches_service: runtime_caches_service.clone(),
             });
         }
 
@@ -239,7 +250,7 @@ struct JsonRpcBackground {
     tcp_listener: TcpListener,
 
     /// Event notified when the frontend is dropped.
-    on_service_dropped: event_listener::EventListener,
+    on_service_dropped: Pin<Box<event_listener::EventListener>>,
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,

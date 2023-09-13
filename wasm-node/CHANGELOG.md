@@ -8,6 +8,7 @@
 - During the warp syncing process, smoldot will now download warp sync fragments in parallel of verifying previously-downloaded fragments. This is expected to speed up the warp syncing process. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 - When a warp sync response contains an invalid warp sync fragment, the earlier valid fragments are now still used to make the warp syncing progress instead of being thrown away. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 - During the warp sync process, the runtime call Merkle proofs are now downloaded in parallel of the runtime. This should save several networking round trips. Because the list of runtime calls to perform depend on the runtime version, starting to download the Merkle proofs before the runtime has been fully obtained is built upon the assumption that the runtime is at the latest version. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- The `index` field of `bestChainBlockIncluded` events of `chainHead_unstable_follow` subscriptions is now a number rather than a string, in accordance with the latest changes in the JSON-RPC API specification. ([#1097](https://github.com/smol-dot/smoldot/pull/1097))
 
 ### Fixed
 

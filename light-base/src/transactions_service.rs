@@ -77,17 +77,15 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use async_lock::Mutex;
 use core::{
     cmp, iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     header,
@@ -136,7 +134,7 @@ pub struct Config<TPlat: PlatformRef> {
 /// See [the module-level documentation](..).
 pub struct TransactionsService<TPlat> {
     /// Sending messages to the background task.
-    to_background: Mutex<mpsc::Sender<ToBackground>>,
+    to_background: async_channel::Sender<ToBackground>,
 
     platform: PhantomData<fn() -> TPlat>,
 }
@@ -145,7 +143,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
     pub async fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
-        let (to_background, from_foreground) = mpsc::channel(8);
+        let (to_background, from_foreground) = async_channel::bounded(8);
 
         let task = Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
             log_target: log_target.clone(),
@@ -171,7 +169,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             });
 
         TransactionsService {
-            to_background: Mutex::new(to_background),
+            to_background,
             platform: PhantomData,
         }
     }
@@ -194,12 +192,10 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
-    ) -> mpsc::Receiver<TransactionStatus> {
-        let (updates_report, rx) = mpsc::channel(channel_size);
+    ) -> async_channel::Receiver<TransactionStatus> {
+        let (updates_report, rx) = async_channel::bounded(channel_size);
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SubmitTransaction {
                 transaction_bytes,
                 updates_report: Some(updates_report),
@@ -214,8 +210,6 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// channel.
     pub async fn submit_transaction(&self, transaction_bytes: Vec<u8>) {
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SubmitTransaction {
                 transaction_bytes,
                 updates_report: None,
@@ -305,7 +299,7 @@ enum ValidationError {
 enum ToBackground {
     SubmitTransaction {
         transaction_bytes: Vec<u8>,
-        updates_report: Option<mpsc::Sender<TransactionStatus>>,
+        updates_report: Option<async_channel::Sender<TransactionStatus>>,
     },
 }
 
@@ -317,7 +311,7 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
-    from_foreground: mpsc::Receiver<ToBackground>,
+    from_foreground: async_channel::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
     max_concurrent_validations: usize,
@@ -379,7 +373,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 loop {
                     match from_foreground.next().await {
                         Some(ToBackground::SubmitTransaction {
-                            updates_report: Some(mut updates_report),
+                            updates_report: Some(updates_report),
                             ..
                         }) => {
                             let _ = updates_report
@@ -964,7 +958,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                             // We intentionally limit the number of transactions in the pool,
                             // and immediately drop new transactions of this limit is reached.
                             if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
-                                if let Some(mut updates_report) = updates_report {
+                                if let Some(updates_report) = updates_report {
                                     let _ = updates_report.try_send(TransactionStatus::Dropped(DropReason::MaxPendingTransactionsReached));
                                 }
                                 continue;
@@ -1124,7 +1118,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
     when_reannounce: TPlat::Instant,
 
     /// List of channels that should receive changes to the transaction status.
-    status_update: Vec<mpsc::Sender<TransactionStatus>>,
+    status_update: Vec<async_channel::Sender<TransactionStatus>>,
 
     /// Latest known status of the transaction. Used when a new sender is added to
     /// [`PendingTransaction::status_update`].
@@ -1140,7 +1134,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
-    fn add_status_update(&mut self, mut channel: mpsc::Sender<TransactionStatus>) {
+    fn add_status_update(&mut self, channel: async_channel::Sender<TransactionStatus>) {
         if let Some(latest_status) = &self.latest_status {
             if channel.try_send(latest_status.clone()).is_err() {
                 return;
@@ -1152,7 +1146,7 @@ impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
 
     fn update_status(&mut self, status: TransactionStatus) {
         for n in 0..self.status_update.len() {
-            let mut channel = self.status_update.swap_remove(n);
+            let channel = self.status_update.swap_remove(n);
             if channel.try_send(status.clone()).is_ok() {
                 self.status_update.push(channel);
             }

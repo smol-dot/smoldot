@@ -47,7 +47,7 @@ crossbeam-queue = { version = "0.3.8", default-features = false, features = ["al
 derive_more = "0.99.17"
 ed25519-zebra = { version = "4.0.1", default-features = false }
 either = { version = "1.9.0", default-features = false }
-event-listener = { version = "2.5.3" }  # TODO: no-std-ize
+event-listener = { version = "3.0.0", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
 futures-lite = { version = "1.13.0", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
@@ -67,12 +67,12 @@ poly1305 = { version = "0.8.0", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.4.0" }  # TODO: uses `#![feature(error_in_core)]` when the `std` feature is disabled, see https://github.com/rust-lang/rust/issues/103765
-schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
+schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc"] }
 serde = { version = "1.0.183", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.7", default-features = false }
 sha3 = { version = "0.10.8", default-features = false }
-siphasher = { version = "0.3.10", default-features = false }
+siphasher = { version = "1.0.0", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smallvec = { version = "1.11.0", default-features = false }
 twox-hash = { version = "1.6.3", default-features = false }
@@ -94,7 +94,7 @@ soketto = { version = "0.7.1", optional = true }
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", target_os = "linux", target_os = "macos")), all(target_arch = "aarch64", target_os = "linux"), all(target_arch = "s390x", target_os = "linux")))'.dependencies]
 # `wasmtime` feature
-wasmtime = { version = "11.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "12.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
