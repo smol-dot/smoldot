@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use futures_lite::future;
 use smol::stream::StreamExt as _;
 use smoldot::{
     executor,
@@ -43,8 +44,9 @@ pub struct Config {
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
-    /// Access to the peer-to-peer networking.
-    pub network_service: Arc<network_service::NetworkService>,
+    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// network service.
+    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -54,6 +56,9 @@ pub struct Config {
 
     /// JSON-encoded properties of the chain, as found in the chain specification.
     pub chain_properties_json: String,
+
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
 
     /// Hash of the genesis block.
     // TODO: load from database maybe?
@@ -362,8 +367,21 @@ pub fn spawn_requests_handler(mut config: Config) {
                             (&config.chain_type).into(),
                         ));
                     }
+                    methods::MethodCall::system_health {} => {
+                        let (is_syncing, peers) = future::zip(
+                            config.consensus_service.is_major_syncing_hint(),
+                            config.network_service.0.num_peers(config.network_service.1),
+                        )
+                        .await;
+
+                        request.respond(methods::Response::system_health(methods::SystemHealth {
+                            is_syncing,
+                            peers: u64::try_from(peers).unwrap_or(u64::max_value()),
+                            should_have_peers: config.chain_is_live,
+                        }));
+                    }
                     methods::MethodCall::system_localPeerId {} => {
-                        let peer_id = config.network_service.local_peer_id().to_base58();
+                        let peer_id = config.network_service.0.local_peer_id().to_base58();
                         request.respond(methods::Response::system_localPeerId(peer_id.into()));
                     }
                     methods::MethodCall::system_name {} => {

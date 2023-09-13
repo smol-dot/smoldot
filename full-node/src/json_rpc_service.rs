@@ -54,8 +54,9 @@ pub struct Config {
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
-    /// Access to the peer-to-peer networking.
-    pub network_service: Arc<network_service::NetworkService>,
+    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// network service.
+    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Where to bind the WebSocket server. If `None`, no TCP server is started.
     pub bind_address: Option<SocketAddr>,
@@ -74,6 +75,9 @@ pub struct Config {
 
     /// JSON-encoded properties of the chain, as found in the chain specification.
     pub chain_properties_json: String,
+
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
 
     /// Hash of the genesis block.
     // TODO: load from database maybe?
@@ -173,6 +177,7 @@ impl JsonRpcService {
                 chain_name: config.chain_name.clone(),
                 chain_type: config.chain_type.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),
+                chain_is_live: config.chain_is_live,
                 genesis_block_hash: config.genesis_block_hash,
                 consensus_service: config.consensus_service.clone(),
                 runtime_caches_service: runtime_caches_service.clone(),
