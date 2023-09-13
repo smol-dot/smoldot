@@ -99,6 +99,112 @@ impl SubscribeAllHeads {
     }
 }
 
+/// Helper that provides the blocks of a `chain_subscribeFinalizedHeads` subscription.
+pub struct SubscribeFinalizedHeads {
+    consensus_service: Arc<consensus_service::ConsensusService>,
+
+    /// Active subscription to the consensus service blocks. `None` if not subscribed yet or if
+    /// the subscription has stopped.
+    subscription: Option<SubscribeFinalizedHeadsSubscription>,
+}
+
+struct SubscribeFinalizedHeadsSubscription {
+    subscription_id: consensus_service::SubscriptionId,
+    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    pinned_blocks: HashMap<[u8; 32], Vec<u8>>,
+    blocks_to_unpin: Vec<[u8; 32]>,
+}
+
+impl SubscribeFinalizedHeads {
+    /// Builds a new [`SubscribeFinalizedHeads`].
+    pub fn new(consensus_service: Arc<consensus_service::ConsensusService>) -> Self {
+        SubscribeFinalizedHeads {
+            consensus_service,
+            subscription: None,
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the next block to provide as part of the subscription.
+    pub async fn next_scale_encoded_header(&mut self) -> Vec<u8> {
+        loop {
+            let subscription = match &mut self.subscription {
+                Some(s) => s,
+                None => {
+                    let subscribe_all = self
+                        .consensus_service
+                        .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                        .await;
+
+                    let mut pinned_blocks = HashMap::with_capacity(
+                        subscribe_all.non_finalized_blocks_ancestry_order.len() + 1 + 8,
+                    );
+                    for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                        pinned_blocks.insert(block.block_hash, block.scale_encoded_header);
+                    }
+
+                    let mut blocks_to_unpin = Vec::with_capacity(8);
+                    blocks_to_unpin.push(subscribe_all.finalized_block_hash);
+
+                    self.subscription = Some(SubscribeFinalizedHeadsSubscription {
+                        subscription_id: subscribe_all.id,
+                        new_blocks: subscribe_all.new_blocks,
+                        pinned_blocks,
+                        blocks_to_unpin,
+                    });
+
+                    return subscribe_all.finalized_block_scale_encoded_header;
+                }
+            };
+
+            while let Some(block_to_unpin) = subscription.blocks_to_unpin.last() {
+                self.consensus_service
+                    .unpin_block(subscription.subscription_id, *block_to_unpin)
+                    .await;
+                let _ = subscription.blocks_to_unpin.pop();
+            }
+
+            loop {
+                match subscription.new_blocks.next().await {
+                    None => {
+                        self.subscription = None;
+                        break;
+                    }
+                    Some(consensus_service::Notification::Block(_)) => {
+                        // Ignore event.
+                    }
+                    Some(consensus_service::Notification::Finalized {
+                        mut finalized_blocks_hashes,
+                        pruned_blocks_hashes,
+                        ..
+                    }) => {
+                        debug_assert!(!finalized_blocks_hashes.is_empty());
+                        let finalized_block_hash = finalized_blocks_hashes.pop().unwrap();
+                        subscription.blocks_to_unpin.push(finalized_block_hash);
+                        let finalized_block_header = subscription
+                            .pinned_blocks
+                            .remove(&finalized_block_hash)
+                            .unwrap();
+
+                        for block in pruned_blocks_hashes {
+                            subscription.blocks_to_unpin.push(block);
+                            let _was_in = subscription.pinned_blocks.remove(&block);
+                            debug_assert!(_was_in.is_some());
+                        }
+
+                        for block in finalized_blocks_hashes {
+                            subscription.blocks_to_unpin.push(block);
+                            let _was_in = subscription.pinned_blocks.remove(&block);
+                            debug_assert!(_was_in.is_some());
+                        }
+
+                        return finalized_block_header;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Helper that provides the blocks of a `chain_subscribeNewHeads` subscription.
 pub struct SubscribeNewHeads {
     consensus_service: Arc<consensus_service::ConsensusService>,
