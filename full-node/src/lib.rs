@@ -573,6 +573,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             .json_rpc_listen
             .map_or(0, |cfg| cfg.max_json_rpc_clients),
         chain_name: chain_spec.name().to_owned(),
+        chain_type: chain_spec.chain_type().to_owned(),
         chain_properties_json: chain_spec.properties().to_owned(),
         genesis_block_hash: genesis_chain_information
             .as_ref()
