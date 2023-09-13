@@ -19,8 +19,9 @@ use smol::stream::StreamExt as _;
 use smoldot::{
     executor,
     json_rpc::{methods, parse, service},
+    trie,
 };
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, iter, pin::Pin, sync::Arc};
 
 use crate::{
     consensus_service, database_thread,
@@ -123,6 +124,195 @@ pub fn spawn_requests_handler(mut config: Config) {
                             Err(error) => {
                                 config.log_callback.log(LogLevel::Warn, format!("json-rpc; request=chain_getBlockHash; height={:?}; database_error={}", height, error));
                                 request.fail(parse::ErrorResponse::InternalError)
+                            }
+                        }
+                    }
+                    methods::MethodCall::state_getMetadata { hash } => {
+                        let hash = match hash {
+                            Some(h) => h.0,
+                            None => match config
+                                .database
+                                .with_database(|db| db.best_block_hash())
+                                .await
+                            {
+                                Ok(b) => b,
+                                Err(_) => {
+                                    request.fail(service::ErrorResponse::InternalError);
+                                    continue;
+                                }
+                            },
+                        };
+
+                        let runtime = match config.runtime_caches_service.get(hash).await {
+                            Ok(runtime) => (*runtime).clone(),
+                            Err(runtime_caches_service::GetError::UnknownBlock)
+                            | Err(runtime_caches_service::GetError::Pruned) => {
+                                request.respond_null();
+                                continue;
+                            } // TODO: unclear if correct error
+                            Err(runtime_caches_service::GetError::InvalidRuntime(_))
+                            | Err(runtime_caches_service::GetError::NoCode)
+                            | Err(runtime_caches_service::GetError::InvalidHeapPages)
+                            | Err(runtime_caches_service::GetError::CorruptedDatabase) => {
+                                request.fail(service::ErrorResponse::InternalError);
+                                continue;
+                            }
+                        };
+
+                        let mut call =
+                            match executor::runtime_host::run(executor::runtime_host::Config {
+                                virtual_machine: runtime,
+                                function_to_call: "Metadata_metadata",
+                                parameter: iter::empty::<&'static [u8]>(),
+                                max_log_level: 0,
+                                storage_main_trie_changes: Default::default(),
+                                calculate_trie_changes: false,
+                            }) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    request.fail(service::ErrorResponse::InternalError);
+                                    continue;
+                                }
+                            };
+
+                        loop {
+                            match call {
+                                executor::runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                                    match methods::remove_metadata_length_prefix(success.virtual_machine.value().as_ref()) {
+                                        Ok(m) => request.respond(methods::Response::state_getMetadata(methods::HexString(m.to_vec()))),
+                                        Err(_) => {
+                                            request.fail(service::ErrorResponse::InternalError);
+                                        }
+                                    }
+                                    break;
+                                }
+                                executor::runtime_host::RuntimeHostVm::Finished(Err(_)) => {
+                                    request.fail(service::ErrorResponse::InternalError);
+                                    break;
+                                }
+                                executor::runtime_host::RuntimeHostVm::StorageGet(req) => {
+                                    let parent_paths = req.child_trie().map(|child_trie| {
+                                        trie::bytes_to_nibbles(
+                                            b":child_storage:default:".iter().copied(),
+                                        )
+                                        .chain(trie::bytes_to_nibbles(
+                                            child_trie.as_ref().iter().copied(),
+                                        ))
+                                        .map(u8::from)
+                                        .collect::<Vec<_>>()
+                                    });
+                                    let key =
+                                        trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                                            .map(u8::from)
+                                            .collect::<Vec<_>>();
+                                    let value = config
+                                        .database
+                                        .with_database(move |db| {
+                                            db.block_storage_get(
+                                                &hash,
+                                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                                key.iter().copied(),
+                                            )
+                                        })
+                                        .await;
+                                    let Ok(value) = value else {
+                                        request.fail(service::ErrorResponse::InternalError);
+                                        break;
+                                    };
+                                    let value = value.as_ref().map(|(val, vers)| {
+                                        (
+                                            iter::once(&val[..]),
+                                            executor::runtime_host::TrieEntryVersion::try_from(*vers)
+                                                .expect("corrupted database"),
+                                        )
+                                    });
+
+                                    call = req.inject_value(value);
+                                }
+                                executor::runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
+                                    let parent_paths = req.child_trie().map(|child_trie| {
+                                        trie::bytes_to_nibbles(
+                                            b":child_storage:default:".iter().copied(),
+                                        )
+                                        .chain(trie::bytes_to_nibbles(
+                                            child_trie.as_ref().iter().copied(),
+                                        ))
+                                        .map(u8::from)
+                                        .collect::<Vec<_>>()
+                                    });
+                                    let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                                    let merkle_value = config
+                                        .database
+                                        .with_database(move |db| {
+                                            db.block_storage_closest_descendant_merkle_value(
+                                                &hash,
+                                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                                key_nibbles.iter().copied(),
+                                            )
+                                        })
+                                        .await;
+
+                                    let Ok(merkle_value) = merkle_value else {
+                                        request.fail(service::ErrorResponse::InternalError);
+                                        break;
+                                    };
+
+                                    call = req
+                                        .inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+                                }
+                                executor::runtime_host::RuntimeHostVm::NextKey(req) => {
+                                    let parent_paths = req.child_trie().map(|child_trie| {
+                                        trie::bytes_to_nibbles(
+                                            b":child_storage:default:".iter().copied(),
+                                        )
+                                        .chain(trie::bytes_to_nibbles(
+                                            child_trie.as_ref().iter().copied(),
+                                        ))
+                                        .map(u8::from)
+                                        .collect::<Vec<_>>()
+                                    });
+                                    let key_nibbles = req
+                                        .key()
+                                        .map(u8::from)
+                                        .chain(if req.or_equal() { None } else { Some(0u8) })
+                                        .collect::<Vec<_>>();
+                                    let prefix_nibbles =
+                                        req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                                    let branch_nodes = req.branch_nodes();
+                                    let next_key = config
+                                        .database
+                                        .with_database(move |db| {
+                                            db.block_storage_next_key(
+                                                &hash,
+                                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                                key_nibbles.iter().copied(),
+                                                prefix_nibbles.iter().copied(),
+                                                branch_nodes,
+                                            )
+                                        })
+                                        .await;
+
+                                    let Ok(next_key) = next_key else {
+                                        request.fail(service::ErrorResponse::InternalError);
+                                        break;
+                                    };
+
+                                    call = req.inject_key(next_key.map(|k| {
+                                        k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
+                                    }));
+                                }
+                                executor::runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                                    call = req.resume();
+                                }
+                                executor::runtime_host::RuntimeHostVm::SignatureVerification(req) => {
+                                    call = req.verify_and_resume();
+                                }
+                                executor::runtime_host::RuntimeHostVm::Offchain(_) => {
+                                    request.fail(service::ErrorResponse::InternalError);
+                                    break;
+                                },
                             }
                         }
                     }
