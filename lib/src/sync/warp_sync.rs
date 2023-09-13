@@ -321,7 +321,7 @@ pub struct Deconstructed<TSrc, TRq> {
 // TODO: consider removing this entirely
 pub struct RuntimeInformation {
     /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
-    /// finalized block of [`Success::chain_information`].
+    /// finalized block of [`WarpSync::as_chain_information`].
     pub finalized_runtime: HostVmPrototype,
 
     /// Storage value at the `:code` key of the finalized block.
@@ -1463,8 +1463,6 @@ pub struct BuildRuntime<TSrc, TRq> {
 
 impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
     /// Build the runtime of the chain.
-    ///
-    /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
     ///
     /// Must be passed parameters used for the construction of the runtime: a hint as to whether
     /// the runtime is trusted and/or will be executed again, and whether unresolved function
