@@ -169,8 +169,10 @@ impl SubscribeFinalizedHeads {
                         self.subscription = None;
                         break;
                     }
-                    Some(consensus_service::Notification::Block(_)) => {
-                        // Ignore event.
+                    Some(consensus_service::Notification::Block(block)) => {
+                        subscription
+                            .pinned_blocks
+                            .insert(block.block_hash, block.scale_encoded_header);
                     }
                     Some(consensus_service::Notification::Finalized {
                         mut finalized_blocks_hashes,
