@@ -424,6 +424,42 @@ pub fn spawn_requests_handler(mut config: Config) {
                         }));
                     }
 
+                    methods::MethodCall::chain_subscribeNewHeads {} => {
+                        let block_number_bytes = config.consensus_service.block_number_bytes();
+                        let mut blocks_to_report = legacy_api_subscriptions::SubscribeNewHeads::new(
+                            config.consensus_service.clone(),
+                        );
+
+                        (config.tasks_executor)(Box::pin(async move {
+                            let mut subscription = request.accept();
+                            let subscription_id = subscription.subscription_id().to_owned();
+
+                            loop {
+                                let scale_encoded_header =
+                                    blocks_to_report.next_scale_encoded_header().await;
+
+                                let json_rpc_header =
+                                    match methods::Header::from_scale_encoded_header(
+                                        &scale_encoded_header,
+                                        block_number_bytes,
+                                    ) {
+                                        Ok(h) => h,
+                                        Err(_) => {
+                                            // TODO: consider reporting to logs
+                                            continue;
+                                        }
+                                    };
+
+                                subscription
+                                    .send_notification(methods::ServerToClient::chain_newHead {
+                                        subscription: (&subscription_id).into(),
+                                        result: json_rpc_header.clone(),
+                                    })
+                                    .await
+                            }
+                        }));
+                    }
+
                     _ => request.fail(service::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",
