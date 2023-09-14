@@ -62,7 +62,7 @@ pub struct Config<'a> {
     pub jaeger_agent: Option<SocketAddr>,
 }
 
-/// See [`Config::json_rpc_listen`].
+/// See [`ChainConfig::json_rpc_listen`].
 #[derive(Debug, Clone)]
 pub struct JsonRpcListenConfig {
     /// Bind point of the JSON-RPC server.
@@ -132,9 +132,20 @@ pub struct Client {
 impl Client {
     /// Returns the address the JSON-RPC server is listening on.
     ///
-    /// Returns `None` if and only if [`Config::json_rpc_listen`] was `None`.
+    /// Returns `None` if and only if [`ChainConfig::json_rpc_listen`] was `None`
+    /// in [`Config::chain`].
     pub fn json_rpc_server_addr(&self) -> Option<SocketAddr> {
         self.json_rpc_service.listen_addr()
+    }
+
+    /// Returns the address the relay chain JSON-RPC server is listening on.
+    ///
+    /// Returns `None` if and only if [`Config::relay_chain`] was `None` or if
+    /// [`ChainConfig::json_rpc_listen`] was `None` in [`Config::relay_chain`].
+    pub fn relay_chain_json_rpc_server_addr(&self) -> Option<SocketAddr> {
+        self.relay_chain_json_rpc_service
+            .as_ref()
+            .and_then(|j| j.listen_addr())
     }
 
     /// Returns the best block according to the networking.
