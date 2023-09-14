@@ -264,6 +264,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 keystore_path: base_storage_directory
                     .as_ref()
                     .map(|path| path.join(parsed_relay_spec.id()).join("keys")),
+                json_rpc_listen: None,
             };
 
             (Some(cfg), Some(relay_chain_name.to_owned()))
@@ -373,18 +374,18 @@ async fn run(cli_options: cli::CliOptionsRun) {
             sqlite_database_path,
             sqlite_cache_size: cli_options.database_cache_size.0,
             keystore_path,
+            json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
+                Some(smoldot_full_node::JsonRpcListenConfig {
+                    address,
+                    max_json_rpc_clients: cli_options.json_rpc_max_clients,
+                })
+            } else {
+                None
+            },
         },
         relay_chain,
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
-        json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
-            Some(smoldot_full_node::JsonRpcListenConfig {
-                address,
-                max_json_rpc_clients: cli_options.json_rpc_max_clients,
-            })
-        } else {
-            None
-        },
         tasks_executor: {
             let executor = executor.clone();
             Arc::new(move |task| executor.spawn(task).detach())
