@@ -87,7 +87,7 @@ impl SubscribeAllHeads {
                         self.subscription = None;
                         break;
                     }
-                    Some(consensus_service::Notification::Block(block)) => {
+                    Some(consensus_service::Notification::Block { block, .. }) => {
                         subscription.blocks_to_unpin.push(block.block_hash);
                         return block.scale_encoded_header;
                     }
@@ -170,7 +170,7 @@ impl SubscribeFinalizedHeads {
                         self.subscription = None;
                         break;
                     }
-                    Some(consensus_service::Notification::Block(block)) => {
+                    Some(consensus_service::Notification::Block { block, .. }) => {
                         subscription
                             .pinned_blocks
                             .insert(block.block_hash, block.scale_encoded_header);
@@ -296,7 +296,7 @@ impl SubscribeNewHeads {
                 };
 
                 match notification {
-                    consensus_service::Notification::Block(block) => {
+                    consensus_service::Notification::Block { block, .. } => {
                         let _previous_value = self
                             .subscription
                             .as_mut()
@@ -469,7 +469,7 @@ impl SubscribeRuntimeVersion {
                 };
 
                 match notification {
-                    consensus_service::Notification::Block(block) => {
+                    consensus_service::Notification::Block { block, .. } => {
                         let runtime = block.runtime_update.unwrap_or_else(|| {
                             self.subscription
                                 .as_ref()

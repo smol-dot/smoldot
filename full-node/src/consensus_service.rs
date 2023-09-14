@@ -42,7 +42,7 @@ use smoldot::{
     network::{self, protocol::BlockData},
     sync::all,
     trie,
-    verify::body_only::{self, TrieEntryVersion},
+    verify::body_only::{self, StorageChanges, TrieEntryVersion},
 };
 use std::{
     array,
@@ -517,7 +517,15 @@ pub enum Notification {
     },
 
     /// A new block has been added to the list of unfinalized blocks.
-    Block(BlockNotification),
+    Block {
+        /// Information about the block.
+        block: BlockNotification,
+
+        /// Changes to the storage that the block has performed.
+        ///
+        /// Note that this field is only available when a new block is available.
+        storage_changes: Arc<StorageChanges>,
+    },
 }
 
 /// Notification about a new block.
@@ -1605,10 +1613,13 @@ impl SyncBackground {
                             new_runtime,
                             ..
                         })) => {
+                            let storage_changes = Arc::new(storage_changes);
+
                             // Insert the block in the database.
                             let when_database_access_started = Instant::now();
                             self.database
-                                .with_database_detached({
+                                .with_database({
+                                    let storage_changes = storage_changes.clone();
                                     let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
                                     move |database| {
                                         // TODO: overhead for building the SCALE encoding of the header
@@ -1669,8 +1680,7 @@ impl SyncBackground {
                                             Err(err) => panic!("{}", err),
                                         }
                                     }
-                                })
-                                .await;
+                                });
                             database_accesses_duration += when_database_access_started.elapsed();
 
                             let height = header_verification_success.height();
@@ -1703,13 +1713,16 @@ impl SyncBackground {
                             for index in (0..self.blocks_notifications.len()).rev() {
                                 let subscription = self.blocks_notifications.swap_remove(index);
                                 if subscription
-                                    .try_send(Notification::Block(BlockNotification {
-                                        is_new_best,
-                                        scale_encoded_header: scale_encoded_header.clone(),
-                                        block_hash: header_verification_success.hash(),
-                                        runtime_update: runtime_to_notify.clone(),
-                                        parent_hash,
-                                    }))
+                                    .try_send(Notification::Block {
+                                        block: BlockNotification {
+                                            is_new_best,
+                                            scale_encoded_header: scale_encoded_header.clone(),
+                                            block_hash: header_verification_success.hash(),
+                                            runtime_update: runtime_to_notify.clone(),
+                                            parent_hash,
+                                        },
+                                        storage_changes: storage_changes.clone(),
+                                    })
                                     .is_err()
                                 {
                                     continue;
