@@ -517,6 +517,32 @@ pub fn spawn_requests_handler(mut config: Config) {
                         }));
                     }
 
+                    methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                        let mut runtime_versions_to_report =
+                            legacy_api_subscriptions::SubscribeRuntimeVersion::new(
+                                config.consensus_service.clone(),
+                            );
+
+                        (config.tasks_executor)(Box::pin(async move {
+                            let mut subscription = request.accept();
+                            let subscription_id = subscription.subscription_id().to_owned();
+
+                            loop {
+                                let runtime_version =
+                                    runtime_versions_to_report.next_runtime_version().await;
+
+                                subscription
+                                    .send_notification(
+                                        methods::ServerToClient::state_runtimeVersion {
+                                            subscription: (&subscription_id).into(),
+                                            result: Some(convert_runtime_version(runtime_version)),
+                                        },
+                                    )
+                                    .await
+                            }
+                        }));
+                    }
+
                     _ => request.fail(service::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",
