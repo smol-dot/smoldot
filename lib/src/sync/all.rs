@@ -2696,14 +2696,14 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                     (
                         sync,
                         all_forks::FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest,
                             pruned_blocks,
                             updates_best_block,
                         },
                     ) => (
                         sync,
                         FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks: finalized_blocks
+                            finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
                                 .into_iter()
                                 .map(|b| Block {
                                     full: None, // TODO: wrong
@@ -2742,14 +2742,19 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                 )
             }
             FinalityProofVerifyInner::Optimistic(verify) => match verify.perform(randomness_seed) {
-                (inner, optimistic::JustificationVerification::Finalized { finalized_blocks }) => (
+                (
+                    inner,
+                    optimistic::JustificationVerification::Finalized {
+                        finalized_blocks_newest_to_oldest: finalized_blocks,
+                    },
+                ) => (
                     // TODO: transition to all_forks
                     AllSync {
                         inner: AllSyncInner::Optimistic { inner },
                         shared: self.shared,
                     },
                     FinalityProofVerifyOutcome::NewFinalized {
-                        finalized_blocks: finalized_blocks
+                        finalized_blocks_newest_to_oldest: finalized_blocks
                             .into_iter()
                             .map(|b| Block {
                                 header: b.header,
@@ -2780,7 +2785,7 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     /// Proof verification successful. The block and all its ancestors is now finalized.
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
-        finalized_blocks: Vec<Block<TBl>>,
+        finalized_blocks_newest_to_oldest: Vec<Block<TBl>>,
         /// List of hashes of blocks that are no longer descendant of the finalized block, in
         /// an unspecified order.
         pruned_blocks: Vec<[u8; 32]>,
