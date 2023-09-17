@@ -134,6 +134,80 @@ fn chain_get_block_hash() {
 }
 
 #[test]
+fn chain_get_header() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        // Test the current best block.
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":[]}"#.to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        let decoded_header =
+            serde_json::from_str::<json_rpc::methods::Header>(result_json).unwrap();
+        assert_eq!(
+            decoded_header.parent_hash.0,
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0
+            ]
+        );
+        assert_eq!(decoded_header.number, 0);
+        assert_eq!(
+            decoded_header.state_root.0,
+            [
+                40, 162, 219, 5, 170, 164, 232, 78, 136, 198, 190, 40, 202, 73, 212, 91, 4, 51,
+                248, 171, 238, 66, 27, 9, 45, 250, 15, 77, 216, 87, 135, 166
+            ]
+        );
+        assert!(decoded_header.digest.logs.is_empty());
+
+        // Test passing an explicit block hash.
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":["0x6bf30d04495c16ef053de4ac74eac35dfd6473e4907810f450bea1b976ac518f"]}"#.to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        let decoded_header =
+            serde_json::from_str::<json_rpc::methods::Header>(result_json).unwrap();
+        assert_eq!(
+            decoded_header.parent_hash.0,
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0
+            ]
+        );
+        assert_eq!(decoded_header.number, 0);
+        assert_eq!(
+            decoded_header.state_root.0,
+            [
+                40, 162, 219, 5, 170, 164, 232, 78, 136, 198, 190, 40, 202, 73, 212, 91, 4, 51,
+                248, 171, 238, 66, 27, 9, 45, 250, 15, 77, 216, 87, 135, 166
+            ]
+        );
+        assert!(decoded_header.digest.logs.is_empty());
+
+        // Test for unknown block.
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":["0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"]}"#.to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        assert_eq!(result_json, "null");
+    });
+}
+
+#[test]
 fn state_get_metadata() {
     smol::block_on(async move {
         let client = start_client().await;
