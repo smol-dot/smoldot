@@ -23,13 +23,7 @@ use smoldot::{
     executor::{host::HostVmPrototype, CoreVersion},
     trie,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    iter, mem,
-    num::NonZeroUsize,
-    ops,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, iter, mem, num::NonZeroUsize, ops, sync::Arc};
 
 use crate::{consensus_service, database_thread};
 
@@ -606,8 +600,11 @@ impl SubscribeRuntimeVersion {
 /// Note that various corner cases are weirdly handled, due to `state_subscribeStorage` not being
 /// properly defined anyway.
 pub struct SubscribeStorage {
+    /// Consensus service that was passed to [`SubscribeStorage::new`].
     consensus_service: Arc<consensus_service::ConsensusService>,
+    /// Database that was passed to [`SubscribeStorage::new`].
     database: Arc<database_thread::DatabaseThread>,
+    /// List of keys that was passed to [`SubscribeStorage::new`].
     keys: Vec<Vec<u8>>,
 
     /// Active subscription to the consensus service blocks. `None` if not subscribed yet or if
@@ -621,10 +618,17 @@ struct SubscribeStorageSubscription {
     /// List of keys that remain to be included
     /// in [`SubscribeStorageSubscription::new_report_preparation`].
     new_report_remaining_keys: hashbrown::HashSet<Vec<u8>, fnv::FnvBuildHasher>,
+
+    /// Identifier of the subscription towards the consensus service.
     subscription_id: consensus_service::SubscriptionId,
+    /// Channel connected to the consensus service where notifications are received.
     new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    /// List of block hashes that are still pinned but are not necessary anymore and should be
+    /// unpinned.
+    blocks_to_unpin: Vec<[u8; 32]>,
+
     /// Tree of all pinned blocks. Doesn't include the current finalized block.
-    pinned_blocks: fork_tree::ForkTree<SubscribeStorageSubscriptionBlock>,
+    pinned_blocks: fork_tree::ForkTree<[u8; 32]>,
     /// Content of [`SubscribeStorageSubscription::pinned_blocks`], indexed by block hashes.
     pinned_blocks_by_hash: hashbrown::HashMap<[u8; 32], fork_tree::NodeIndex>,
     /// Contains all the storage changes related to the keys found by [`SubscribeStorage::keys`]
@@ -636,16 +640,12 @@ struct SubscribeStorageSubscription {
     /// cases where some changes aren't provided, but we don't really care
     /// as `state_subscribeStorage` is not properly defined anyway.
     pinned_blocks_storage_changes: BTreeSet<(fork_tree::NodeIndex, Vec<u8>)>,
-    blocks_to_unpin: Vec<[u8; 32]>,
+    /// Hash of the current finalized block. Not found
+    /// in [`SubscribeStorageSubscription::pinned_blocks`].
     current_finalized_block_hash: [u8; 32],
     /// Index of the current  best block within [`SubscribeStorageSubscription::pinned_blocks`],
     /// or `None` if the best block is equal to the finalized block.
     current_best_block_index: Option<fork_tree::NodeIndex>,
-}
-
-struct SubscribeStorageSubscriptionBlock {
-    scale_encoded_header: Vec<u8>,
-    block_hash: [u8; 32],
 }
 
 impl SubscribeStorage {
@@ -674,6 +674,7 @@ impl SubscribeStorage {
         impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)> + '_,
     ) {
         'main_subscription: loop {
+            // Get the active consensus service subscription, or subscribe if necessary.
             let subscription = match &mut self.subscription {
                 Some(s) => s,
                 subscription @ None => {
@@ -697,10 +698,7 @@ impl SubscribeStorage {
                             } else {
                                 None
                             },
-                            SubscribeStorageSubscriptionBlock {
-                                scale_encoded_header: block.scale_encoded_header,
-                                block_hash: block.block_hash,
-                            },
+                            block.block_hash,
                         );
                         pinned_blocks_by_hash.insert(block.block_hash, node_index);
                         if block.is_new_best {
@@ -710,6 +708,16 @@ impl SubscribeStorage {
 
                     subscription.insert(SubscribeStorageSubscription {
                         new_report_preparation: Vec::with_capacity(self.keys.len()),
+                        // We put all the keys in `new_report_remaining_keys`, as we must indicate
+                        // the initial values of all the keys.
+                        // If the list of keys is empty (meaning that the API user wants to
+                        // subscribe to all keys), this will intentionally not lead to any report,
+                        // as said report would be huge.
+                        // It is unclear how `state_subscribeStorage` is supposed to behave in
+                        // that situation.
+                        //
+                        // Also note that this initial report will happen after a re-subscription,
+                        // in order to not miss a storage change.
                         new_report_remaining_keys: self.keys.iter().cloned().collect(),
                         subscription_id: subscribe_all.id,
                         new_blocks: subscribe_all.new_blocks,
@@ -723,6 +731,7 @@ impl SubscribeStorage {
                 }
             };
 
+            // Unpin the blocks that must be unpinned.
             while let Some(block_to_unpin) = subscription.blocks_to_unpin.last() {
                 self.consensus_service
                     .unpin_block(subscription.subscription_id, *block_to_unpin)
@@ -730,11 +739,12 @@ impl SubscribeStorage {
                 let _ = subscription.blocks_to_unpin.pop();
             }
 
+            // Continue to fill the next storage changes report.
             while let Some(key) = subscription.new_report_remaining_keys.iter().next() {
                 let best_block_hash = subscription
                     .current_best_block_index
                     .map_or(subscription.current_finalized_block_hash, |idx| {
-                        subscription.pinned_blocks.get(idx).unwrap().block_hash
+                        *subscription.pinned_blocks.get(idx).unwrap()
                     });
 
                 let key = key.clone();
@@ -769,11 +779,13 @@ impl SubscribeStorage {
                 }
             }
 
+            // Send the storage changes report if it is complete.
+            debug_assert!(subscription.new_report_remaining_keys.is_empty());
             if !subscription.new_report_preparation.is_empty() {
                 let best_block_hash = subscription
                     .current_best_block_index
                     .map_or(subscription.current_finalized_block_hash, |idx| {
-                        subscription.pinned_blocks.get(idx).unwrap().block_hash
+                        *subscription.pinned_blocks.get(idx).unwrap()
                     });
                 return (
                     best_block_hash,
@@ -785,137 +797,138 @@ impl SubscribeStorage {
                 );
             }
 
-            loop {
-                let notification = subscription.new_blocks.next().await;
-                let Some(mut notification) = notification else {
-                    self.subscription = None;
-                    break;
+            // Process the next incoming consensus service notification.
+            let notification = subscription.new_blocks.next().await;
+            let Some(mut notification) = notification else {
+                self.subscription = None;
+                continue;
+            };
+
+            // If the notification is about a new block, insert said new block in the state
+            // machine.
+            if let consensus_service::Notification::Block {
+                block,
+                storage_changes,
+            } = &mut notification
+            {
+                let node_index = subscription.pinned_blocks.insert(
+                    if block.parent_hash != subscription.current_finalized_block_hash {
+                        Some(
+                            *subscription
+                                .pinned_blocks_by_hash
+                                .get(&block.parent_hash)
+                                .unwrap(),
+                        )
+                    } else {
+                        None
+                    },
+                    block.block_hash,
+                );
+
+                subscription
+                    .pinned_blocks_by_hash
+                    .insert(block.block_hash, node_index);
+
+                if !self.keys.is_empty() {
+                    for key in &self.keys {
+                        if storage_changes.main_trie_diff_get(&key).is_some() {
+                            subscription
+                                .pinned_blocks_storage_changes
+                                .insert((node_index, key.clone()));
+                        }
+                    }
+                } else {
+                    for (changed_key, _) in
+                        storage_changes.main_trie_storage_changes_iter_unordered()
+                    {
+                        subscription
+                            .pinned_blocks_storage_changes
+                            .insert((node_index, changed_key.to_owned()));
+                    }
+                }
+            }
+
+            // If the notification changes the best block, find the keys that have changed and
+            // put them in `new_report_remaining_keys`.
+            if let consensus_service::Notification::Block {
+                block:
+                    consensus_service::BlockNotification {
+                        block_hash: best_block_hash,
+                        is_new_best: true,
+                        ..
+                    },
+                ..
+            }
+            | consensus_service::Notification::Finalized {
+                best_block_hash, ..
+            } = &notification
+            {
+                let new_best_block_node_index = *subscription
+                    .pinned_blocks_by_hash
+                    .get(best_block_hash)
+                    .unwrap();
+
+                let ascend_descend_iter = match subscription.current_best_block_index {
+                    Some(prev_best_idx) => {
+                        let (a, d) = subscription
+                            .pinned_blocks
+                            .ascend_and_descend(prev_best_idx, new_best_block_node_index);
+                        either::Left(a.chain(d))
+                    }
+                    None => either::Right(
+                        subscription
+                            .pinned_blocks
+                            .root_to_node_path(new_best_block_node_index),
+                    ),
                 };
 
-                if let consensus_service::Notification::Block {
-                    block,
-                    storage_changes,
-                } = &mut notification
-                {
-                    let node_index = subscription.pinned_blocks.insert(
-                        if block.parent_hash != subscription.current_finalized_block_hash {
-                            Some(
-                                *subscription
-                                    .pinned_blocks_by_hash
-                                    .get(&block.parent_hash)
-                                    .unwrap(),
-                            )
+                for block in ascend_descend_iter {
+                    let storage_changes = subscription.pinned_blocks_storage_changes.range((
+                        ops::Bound::Included((block, Vec::new())),
+                        if let Some(block_plus_one) = block.inc() {
+                            ops::Bound::Excluded((block_plus_one, Vec::new()))
                         } else {
-                            None
+                            ops::Bound::Unbounded
                         },
-                        SubscribeStorageSubscriptionBlock {
-                            scale_encoded_header: mem::take(&mut block.scale_encoded_header),
-                            block_hash: block.block_hash,
-                        },
-                    );
+                    ));
 
-                    subscription
-                        .pinned_blocks_by_hash
-                        .insert(block.block_hash, node_index);
-
-                    if !self.keys.is_empty() {
-                        for key in &self.keys {
-                            if storage_changes.main_trie_diff_get(&key).is_some() {
-                                subscription
-                                    .pinned_blocks_storage_changes
-                                    .insert((node_index, key.clone()));
-                            }
-                        }
-                    } else {
-                        for (changed_key, _) in
-                            storage_changes.main_trie_storage_changes_iter_unordered()
-                        {
-                            subscription
-                                .pinned_blocks_storage_changes
-                                .insert((node_index, changed_key.to_owned()));
-                        }
+                    for (_, key) in storage_changes {
+                        subscription.new_report_remaining_keys.insert(key.clone());
                     }
                 }
 
-                if let consensus_service::Notification::Block {
-                    block:
-                        consensus_service::BlockNotification {
-                            block_hash: best_block_hash,
-                            is_new_best: true,
-                            ..
-                        },
-                    ..
-                }
-                | consensus_service::Notification::Finalized {
-                    best_block_hash, ..
-                } = &notification
-                {
-                    let new_best_block_node_index = *subscription
+                subscription.current_best_block_index = Some(new_best_block_node_index);
+            }
+
+            // Remove from the state machine the blocks that have been finalized.
+            if let consensus_service::Notification::Finalized {
+                finalized_blocks_hashes,
+                ..
+            } = notification
+            {
+                subscription.current_finalized_block_hash =
+                    *finalized_blocks_hashes.last().unwrap();
+
+                for pruned_block in subscription.pinned_blocks.prune_ancestors(
+                    *subscription
                         .pinned_blocks_by_hash
-                        .get(best_block_hash)
-                        .unwrap();
+                        .get(&subscription.current_finalized_block_hash)
+                        .unwrap(),
+                ) {
+                    let _was_in = subscription
+                        .pinned_blocks_by_hash
+                        .remove(&pruned_block.user_data);
+                    debug_assert_eq!(_was_in, Some(pruned_block.index));
 
-                    let descend_iter = match subscription.current_best_block_index {
-                        Some(prev_best_idx) => either::Left(
-                            subscription
-                                .pinned_blocks
-                                .ascend_and_descend(prev_best_idx, new_best_block_node_index)
-                                .1,
-                        ),
-                        None => either::Right(
-                            subscription
-                                .pinned_blocks
-                                .root_to_node_path(new_best_block_node_index),
-                        ),
-                    };
-
-                    for block in descend_iter {
-                        let storage_changes = subscription.pinned_blocks_storage_changes.range((
-                            ops::Bound::Included((block, Vec::new())),
-                            if let Some(block_plus_one) = block.inc() {
-                                ops::Bound::Excluded((block_plus_one, Vec::new()))
-                            } else {
-                                ops::Bound::Unbounded
-                            },
-                        ));
-
-                        for (_, key) in storage_changes {
-                            subscription.new_report_remaining_keys.insert(key.clone());
-                        }
-                    }
-
-                    subscription.current_best_block_index = Some(new_best_block_node_index);
-                }
-
-                if let consensus_service::Notification::Finalized {
-                    finalized_blocks_hashes,
-                    ..
-                } = notification
-                {
-                    subscription.current_finalized_block_hash =
-                        *finalized_blocks_hashes.last().unwrap();
-
-                    for pruned_block in subscription.pinned_blocks.prune_ancestors(
-                        *subscription
-                            .pinned_blocks_by_hash
-                            .get(&subscription.current_finalized_block_hash)
-                            .unwrap(),
-                    ) {
-                        let _was_in = subscription
-                            .pinned_blocks_by_hash
-                            .remove(&pruned_block.user_data.block_hash);
-                        debug_assert_eq!(_was_in, Some(pruned_block.index));
-
-                        let mut after_split_off_point = subscription
+                    let mut after_split_off_point = subscription
+                        .pinned_blocks_storage_changes
+                        .split_off(&(pruned_block.index, Vec::new()));
+                    if let Some(index_plus_one) = pruned_block.index.inc() {
+                        let mut after_changes =
+                            after_split_off_point.split_off(&(index_plus_one, Vec::new()));
+                        subscription
                             .pinned_blocks_storage_changes
-                            .split_off(&(pruned_block.index, Vec::new()));
-                        if let Some(index_plus_one) = pruned_block.index.inc() {
-                            let mut after_changes =
-                                after_split_off_point.split_off(&(index_plus_one, Vec::new()));
-                            subscription
-                                .pinned_blocks_storage_changes
-                                .append(&mut after_changes);
-                        }
+                            .append(&mut after_changes);
                     }
                 }
             }
