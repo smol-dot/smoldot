@@ -543,6 +543,42 @@ pub fn spawn_requests_handler(mut config: Config) {
                         }));
                     }
 
+                    methods::MethodCall::state_subscribeStorage { list } => {
+                        let mut notifications_to_report =
+                            legacy_api_subscriptions::SubscribeStorage::new(
+                                config.consensus_service.clone(),
+                                config.database.clone(),
+                                list.into_iter().map(|item| item.0).collect(),
+                            );
+
+                        (config.tasks_executor)(Box::pin(async move {
+                            let mut subscription = request.accept();
+                            let subscription_id = subscription.subscription_id().to_owned();
+
+                            loop {
+                                let (block_hash, storage_changes) =
+                                    notifications_to_report.next_storage_update().await;
+
+                                subscription
+                                    .send_notification(methods::ServerToClient::state_storage {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::StorageChangeSet {
+                                            block: methods::HashHexString(block_hash),
+                                            changes: storage_changes
+                                                .map(|(key, value)| {
+                                                    (
+                                                        methods::HexString(key),
+                                                        value.map(methods::HexString),
+                                                    )
+                                                })
+                                                .collect(),
+                                        },
+                                    })
+                                    .await
+                            }
+                        }));
+                    }
+
                     _ => request.fail(service::ErrorResponse::ServerError(
                         -32000,
                         "Not implemented in smoldot yet",

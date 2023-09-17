@@ -686,6 +686,11 @@ impl NodeIndex {
     pub fn max_value() -> Self {
         NodeIndex(usize::max_value())
     }
+
+    /// Adds `1` to `self`. Returns `None` if this causes an overflow.
+    pub fn inc(self) -> Option<Self> {
+        self.0.checked_add(1).map(NodeIndex)
+    }
 }
 
 #[cfg(test)]

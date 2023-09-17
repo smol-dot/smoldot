@@ -215,9 +215,10 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                         let _ = outcome.send(Ok(()));
                     }
                 }
-                WhatHappened::ConsensusNotification(consensus_service::Notification::Block(
+                WhatHappened::ConsensusNotification(consensus_service::Notification::Block {
                     block,
-                )) => {
+                    ..
+                }) => {
                     pinned_blocks.insert(block.block_hash);
                     json_rpc_subscription
                         .send_notification(
