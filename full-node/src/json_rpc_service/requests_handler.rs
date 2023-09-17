@@ -135,6 +135,49 @@ pub fn spawn_requests_handler(mut config: Config) {
                             }
                         }
                     }
+                    methods::MethodCall::chain_getHeader { hash } => {
+                        let hash = match hash {
+                            Some(h) => h.0,
+                            None => match config
+                                .database
+                                .with_database(|db| db.best_block_hash())
+                                .await
+                            {
+                                Ok(b) => b,
+                                Err(_) => {
+                                    request.fail(service::ErrorResponse::InternalError);
+                                    continue;
+                                }
+                            },
+                        };
+
+                        let result = config
+                            .database
+                            .with_database(move |db| db.block_scale_encoded_header(&hash))
+                            .await;
+
+                        match result {
+                            Ok(Some(encoded_header)) => {
+                                match methods::Header::from_scale_encoded_header(
+                                    &encoded_header,
+                                    config.consensus_service.block_number_bytes(),
+                                ) {
+                                    Ok(header) => {
+                                        request.respond(methods::Response::chain_getHeader(header))
+                                    }
+                                    Err(_) => {
+                                        request.fail(service::ErrorResponse::InternalError);
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                request.respond_null();
+                            }
+                            Err(_) => {
+                                request.fail(service::ErrorResponse::InternalError);
+                            }
+                        }
+                    }
                     methods::MethodCall::state_getMetadata { hash } => {
                         let hash = match hash {
                             Some(h) => h.0,
