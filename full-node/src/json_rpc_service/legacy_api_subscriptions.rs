@@ -181,12 +181,13 @@ impl SubscribeFinalizedHeads {
                             .insert(block.block_hash, block.scale_encoded_header);
                     }
                     Some(consensus_service::Notification::Finalized {
-                        mut finalized_blocks_hashes,
+                        finalized_blocks_newest_to_oldest,
                         pruned_blocks_hashes,
                         ..
                     }) => {
-                        debug_assert!(!finalized_blocks_hashes.is_empty());
-                        let finalized_block_hash = finalized_blocks_hashes.pop().unwrap();
+                        debug_assert!(!finalized_blocks_newest_to_oldest.is_empty());
+                        let finalized_block_hash =
+                            *finalized_blocks_newest_to_oldest.first().unwrap();
                         subscription.blocks_to_unpin.push(finalized_block_hash);
                         let finalized_block_header = subscription
                             .pinned_blocks
@@ -199,7 +200,7 @@ impl SubscribeFinalizedHeads {
                             debug_assert!(_was_in.is_some());
                         }
 
-                        for block in finalized_blocks_hashes {
+                        for block in finalized_blocks_newest_to_oldest.into_iter().skip(1) {
                             subscription.blocks_to_unpin.push(block);
                             let _was_in = subscription.pinned_blocks.remove(&block);
                             debug_assert!(_was_in.is_some());
@@ -324,7 +325,7 @@ impl SubscribeNewHeads {
                     }
                     consensus_service::Notification::Finalized {
                         pruned_blocks_hashes,
-                        finalized_blocks_hashes,
+                        finalized_blocks_newest_to_oldest,
                         best_block_hash,
                     } => {
                         for hash in pruned_blocks_hashes {
@@ -342,10 +343,7 @@ impl SubscribeNewHeads {
                             debug_assert!(_was_in.is_some());
                         }
 
-                        for hash in finalized_blocks_hashes
-                            .iter()
-                            .take(finalized_blocks_hashes.len() - 1)
-                        {
+                        for hash in finalized_blocks_newest_to_oldest.iter().skip(1) {
                             self.subscription
                                 .as_mut()
                                 .unwrap()
@@ -519,7 +517,7 @@ impl SubscribeRuntimeVersion {
                     }
                     consensus_service::Notification::Finalized {
                         pruned_blocks_hashes,
-                        finalized_blocks_hashes,
+                        finalized_blocks_newest_to_oldest,
                         best_block_hash,
                     } => {
                         for hash in pruned_blocks_hashes {
@@ -537,10 +535,7 @@ impl SubscribeRuntimeVersion {
                             debug_assert!(_was_in.is_some());
                         }
 
-                        for hash in finalized_blocks_hashes
-                            .iter()
-                            .take(finalized_blocks_hashes.len() - 1)
-                        {
+                        for hash in finalized_blocks_newest_to_oldest.iter().skip(1) {
                             self.subscription
                                 .as_mut()
                                 .unwrap()
@@ -902,12 +897,12 @@ impl SubscribeStorage {
 
             // Remove from the state machine the blocks that have been finalized.
             if let consensus_service::Notification::Finalized {
-                finalized_blocks_hashes,
+                finalized_blocks_newest_to_oldest,
                 ..
             } = notification
             {
                 subscription.current_finalized_block_hash =
-                    *finalized_blocks_hashes.last().unwrap();
+                    *finalized_blocks_newest_to_oldest.first().unwrap();
 
                 for pruned_block in subscription.pinned_blocks.prune_ancestors(
                     *subscription

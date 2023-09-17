@@ -1097,18 +1097,10 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
             .push((consensus_engine_id, justification));
 
         // Applying the finalization and iterating over the now-finalized block.
-        // Since `apply()` returns the blocks in decreasing block number, we have
-        // to revert the list in order to get them in increasing block number
-        // instead.
-        // While this intermediary buffering is an overhead, the increased code
-        // complexity to avoid it is probably not worth the speed gain.
-        let finalized_blocks = apply
+        let finalized_blocks_newest_to_oldest = apply
             .apply()
             .filter(|b| matches!(b.ty, blocks_tree::RemovedBlockType::Finalized))
             .map(|b| b.user_data)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
             .collect();
 
         // Since the best block is now the finalized block, reset the storage
@@ -1123,7 +1115,9 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                 chain: self.chain,
                 inner: self.inner,
             },
-            JustificationVerification::Finalized { finalized_blocks },
+            JustificationVerification::Finalized {
+                finalized_blocks_newest_to_oldest,
+            },
         )
     }
 }
@@ -1144,8 +1138,8 @@ pub enum JustificationVerification<TBl> {
     ///
     /// There might be more blocks remaining. Call [`OptimisticSync::process_one`] again.
     Finalized {
-        /// Blocks that have been finalized.
-        finalized_blocks: Vec<Block<TBl>>,
+        /// Blocks that have been finalized, in decreasing block number.
+        finalized_blocks_newest_to_oldest: Vec<Block<TBl>>,
     },
 }
 
