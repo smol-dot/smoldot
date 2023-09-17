@@ -1618,7 +1618,7 @@ impl SyncBackground {
                             // Insert the block in the database.
                             let when_database_access_started = Instant::now();
                             self.database
-                                .with_database({
+                                .with_database_detached({
                                     let storage_changes = storage_changes.clone();
                                     let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
                                     move |database| {
@@ -1680,7 +1680,7 @@ impl SyncBackground {
                                             Err(err) => panic!("{}", err),
                                         }
                                     }
-                                });
+                                }).await;
                             database_accesses_duration += when_database_access_started.elapsed();
 
                             let height = header_verification_success.height();
