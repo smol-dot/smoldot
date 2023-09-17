@@ -930,6 +930,8 @@ impl SubscribeStorage {
                             .pinned_blocks_storage_changes
                             .append(&mut after_changes);
                     }
+
+                    subscription.blocks_to_unpin.push(pruned_block.user_data);
                 }
             }
         }
