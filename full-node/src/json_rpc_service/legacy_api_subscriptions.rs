@@ -59,7 +59,7 @@ impl SubscribeAllHeads {
                 None => {
                     let subscribe_all = self
                         .consensus_service
-                        .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await;
 
                     let blocks_to_unpin = iter::once(subscribe_all.finalized_block_hash)
@@ -138,7 +138,7 @@ impl SubscribeFinalizedHeads {
                 None => {
                     let subscribe_all = self
                         .consensus_service
-                        .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await;
 
                     let mut pinned_blocks = HashMap::with_capacity(
@@ -248,7 +248,7 @@ impl SubscribeNewHeads {
             if self.subscription.is_none() {
                 let subscribe_all = self
                     .consensus_service
-                    .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                    .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                     .await;
 
                 let mut pinned_blocks = HashMap::with_capacity(
@@ -416,7 +416,7 @@ impl SubscribeRuntimeVersion {
             if self.subscription.is_none() {
                 let subscribe_all = self
                     .consensus_service
-                    .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                    .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                     .await;
 
                 let mut pinned_blocks = HashMap::with_capacity(
@@ -680,7 +680,7 @@ impl SubscribeStorage {
                 subscription @ None => {
                     let subscribe_all = self
                         .consensus_service
-                        .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await;
 
                     let mut pinned_blocks_by_hash = HashMap::with_capacity(
