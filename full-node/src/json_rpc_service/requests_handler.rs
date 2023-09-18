@@ -504,6 +504,90 @@ pub fn spawn_requests_handler(mut config: Config) {
                             }
                         }
                     }
+                    methods::MethodCall::state_queryStorageAt { keys, at } => {
+                        // TODO: add a limit to the number of keys?
+
+                        // Convert the list of keys into a format suitable for the database.
+                        let keys_nibbles = keys
+                            .iter()
+                            .map(|key| {
+                                trie::bytes_to_nibbles(key.0.iter().copied())
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>();
+
+                        // The bulk of the request is performed in the database thread.
+                        let result = config
+                            .database
+                            .with_database(move |db| {
+                                let at = match at {
+                                    Some(h) => h.0,
+                                    None => db.best_block_hash()?,
+                                };
+
+                                let parent = db
+                                    .block_parent(&at)?
+                                    .ok_or(database_thread::StorageAccessError::UnknownBlock)?;
+
+                                let mut out = methods::StorageChangeSet {
+                                    block: methods::HashHexString(at),
+                                    changes: Vec::with_capacity(keys_nibbles.len()),
+                                };
+
+                                for (key_nibbles, key) in
+                                    keys_nibbles.into_iter().zip(keys.into_iter())
+                                {
+                                    let before =
+                                        match db.block_storage_get(
+                                            &parent,
+                                            iter::empty::<iter::Empty<_>>(),
+                                            key_nibbles.iter().copied(),
+                                        ) {
+                                            Ok(v) => v,
+                                            Err(
+                                                database_thread::StorageAccessError::UnknownBlock,
+                                            ) if parent == [0; 32] => {
+                                                // In case where `at` is the genesis block, we
+                                                // assume that its "parent" (which doesn't exist)
+                                                // has an empty storage.
+                                                None
+                                            },
+                                            Err(err) => return Err(err),
+                                        };
+
+                                    let after = db.block_storage_get(
+                                        &at,
+                                        iter::empty::<iter::Empty<_>>(),
+                                        key_nibbles.iter().copied(),
+                                    )?;
+
+                                    if before != after {
+                                        out.changes
+                                            .push((key, after.map(|(v, _)| methods::HexString(v))));
+                                    }
+                                }
+
+                                Ok(out)
+                            })
+                            .await;
+
+                        // Send back the response.
+                        match result {
+                            Ok(out) => {
+                                request.respond(methods::Response::state_queryStorageAt(vec![out]));
+                            }
+                            Err(database_thread::StorageAccessError::StoragePruned)
+                            | Err(database_thread::StorageAccessError::UnknownBlock) => {
+                                // Note that it is unclear how the function should behave in
+                                // that situation.
+                                request.fail(service::ErrorResponse::InvalidParams);
+                            }
+                            Err(database_thread::StorageAccessError::Corrupted(_)) => {
+                                request.fail(service::ErrorResponse::InternalError);
+                            }
+                        }
+                    }
                     methods::MethodCall::system_chain {} => {
                         request
                             .respond(methods::Response::system_chain((&config.chain_name).into()));
