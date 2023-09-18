@@ -880,7 +880,6 @@ impl SyncBackground {
                     return;
                 }
 
-                // TODO: this isn't processed quickly enough when under load
                 WhatHappened::FrontendEvent(ToBackground::SubscribeAll {
                     buffer_size,
                     _max_finalized_pinned_blocks: _,
