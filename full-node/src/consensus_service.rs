@@ -29,7 +29,7 @@ use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLe
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{future, stream, SinkExt as _, StreamExt as _};
 use hashbrown::HashSet;
 use smol::lock::Mutex;
 use smoldot::{
