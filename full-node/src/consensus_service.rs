@@ -710,10 +710,10 @@ impl SyncBackground {
     }
 
     async fn run(mut self) {
+        let mut process_sync = true;
+
         loop {
             self.start_network_requests().await;
-            let (new_self, must_loop_again_asap) = self.process_blocks().await;
-            self = new_self;
 
             enum WhatHappened {
                 ReadyToAuthor,
@@ -840,7 +840,7 @@ impl SyncBackground {
                     WhatHappened::RequestFinished(request_id, source_id, result)
                 })
                 .or(async {
-                    if !must_loop_again_asap {
+                    if !process_sync {
                         future::pending().await
                     }
                     WhatHappened::SyncProcess
@@ -856,7 +856,6 @@ impl SyncBackground {
                     match self.block_authoring {
                         Some((author::build::Builder::Ready(_), _)) => {
                             self.author_block().await;
-                            continue;
                         }
                         Some((author::build::Builder::WaitSlot(when), local_authorities)) => {
                             self.block_authoring = Some((
@@ -864,16 +863,16 @@ impl SyncBackground {
                                 local_authorities,
                             ));
                             self.author_block().await;
-                            continue;
                         }
                         Some((author::build::Builder::Idle, _)) => {
                             self.block_authoring = None;
-                            continue;
                         }
                         None => {
                             unreachable!()
                         }
                     }
+
+                    process_sync = true;
                 }
 
                 WhatHappened::FrontendClosed => {
@@ -1092,11 +1091,14 @@ impl SyncBackground {
                             .remove(&info.unwrap().peer_id)
                             .unwrap();
                     }
+
+                    process_sync = true;
                 }
 
                 WhatHappened::SyncProcess => {
-                    // This block exists just so that we continue looping if `must_loop_again_asap`
-                    // is `true`.
+                    let (new_self, maybe_more_to_process) = self.process_blocks().await;
+                    process_sync = maybe_more_to_process;
+                    self = new_self;
                 }
             }
         }
