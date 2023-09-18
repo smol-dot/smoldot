@@ -198,11 +198,21 @@ pub fn spawn_requests_handler(mut config: Config) {
                                 .map(u8::from)
                                 .collect()
                         });
-                        let start_key_nibbles = start_key.map_or(Vec::new(), |p| {
+                        let mut start_key_nibbles = start_key.map_or(Vec::new(), |p| {
                             trie::bytes_to_nibbles(p.0.iter().copied())
                                 .map(u8::from)
                                 .collect()
                         });
+
+                        // There's a difference of semantics between `state_getKeysPaged` and
+                        // the database query we perform below in the situation where `start_key`
+                        // isn't within `prefix`: the database request will return nothing while
+                        // the JSON-RPC request expects the first key within `prefix`. As such,
+                        // we adjust the start key if necessary.
+                        // TODO: add documentation and a test in the database code regarding this behavior
+                        if start_key_nibbles < prefix_nibbles {
+                            start_key_nibbles = prefix_nibbles.clone();
+                        }
 
                         // Continue in the background.
                         let result = config

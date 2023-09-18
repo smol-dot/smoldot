@@ -314,7 +314,6 @@ fn state_get_keys_paged_basic() {
 }
 
 #[test]
-#[ignore] // FIXME: test doesn't pass /!\ the obtained values aren't within the prefix; database code highly suspected
 fn state_get_keys_paged_prefix_works() {
     smol::block_on(async move {
         let client = start_client().await;
