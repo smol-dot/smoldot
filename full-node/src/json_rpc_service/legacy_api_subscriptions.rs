@@ -19,7 +19,6 @@ use hashbrown::HashMap;
 use smol::stream::StreamExt as _;
 use smoldot::{
     chain::fork_tree,
-    database::full_sqlite::StorageAccessError,
     executor::{host::HostVmPrototype, CoreVersion},
     trie,
 };
@@ -762,12 +761,12 @@ impl SubscribeStorage {
                     Ok(value) => subscription
                         .new_report_preparation
                         .push((key, value.map(|(v, _)| v))),
-                    Err(StorageAccessError::UnknownBlock)
-                    | Err(StorageAccessError::StoragePruned) => {
+                    Err(database_thread::StorageAccessError::UnknownBlock)
+                    | Err(database_thread::StorageAccessError::StoragePruned) => {
                         self.subscription = None;
                         continue 'main_subscription;
                     }
-                    Err(StorageAccessError::Corrupted(_)) => {
+                    Err(database_thread::StorageAccessError::Corrupted(_)) => {
                         // Database corruption errors are ignored.
                         continue;
                     }

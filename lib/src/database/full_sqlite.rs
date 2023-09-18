@@ -829,7 +829,7 @@ impl SqliteFullDatabase {
                 )
 
             SELECT
-                COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1,
+                COUNT(trie_node.hash) >= 1,
                 CASE COALESCE(SUBSTR(MIN(next_key.node_full_key), 1, LENGTH(:prefix)), X'') = :prefix
                     WHEN TRUE THEN MIN(next_key.node_full_key)
                     ELSE NULL END
@@ -863,7 +863,7 @@ impl SqliteFullDatabase {
             v
         };
 
-        let (has_block, block_has_storage, mut next_key) = statement
+        let result = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -872,19 +872,19 @@ impl SqliteFullDatabase {
                     ":skip_branches": !branch_nodes
                 },
                 |row| {
-                    let has_block = row.get::<_, i64>(0)? != 0;
-                    let block_has_storage = row.get::<_, i64>(1)? != 0;
-                    let next_key = row.get::<_, Option<Vec<u8>>>(2)?;
-                    Ok((has_block, block_has_storage, next_key))
+                    let block_has_storage = row.get::<_, i64>(0)? != 0;
+                    let next_key = row.get::<_, Option<Vec<u8>>>(1)?;
+                    Ok((block_has_storage, next_key))
                 },
             )
+            .optional()
             .map_err(|err| {
                 StorageAccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
             })?;
 
-        if !has_block {
+        let Some((block_has_storage, mut next_key)) = result else {
             return Err(StorageAccessError::UnknownBlock);
-        }
+        };
 
         if !block_has_storage {
             return Err(StorageAccessError::StoragePruned);
