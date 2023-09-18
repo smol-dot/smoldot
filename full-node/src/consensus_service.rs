@@ -881,186 +881,172 @@ impl SyncBackground {
                     return;
                 }
 
-                WhatHappened::FrontendEvent(frontend_event) => {
-                    // TODO: this isn't processed quickly enough when under load
-                    match frontend_event {
-                        ToBackground::SubscribeAll {
-                            buffer_size,
-                            _max_finalized_pinned_blocks: _,
-                            result_tx,
-                        } => {
-                            let (tx, new_blocks) =
-                                async_channel::bounded(buffer_size.saturating_sub(1));
+                // TODO: this isn't processed quickly enough when under load
+                WhatHappened::FrontendEvent(ToBackground::SubscribeAll {
+                    buffer_size,
+                    _max_finalized_pinned_blocks: _,
+                    result_tx,
+                }) => {
+                    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
-                            // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
-                            let finalized_block_scale_encoded_header = self
-                                .sync
-                                .finalized_block_header()
-                                .scale_encoding_vec(self.sync.block_number_bytes());
-                            let finalized_block_hash = header::hash_from_scale_encoded_header(
-                                &finalized_block_scale_encoded_header,
+                    // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
+                    let finalized_block_scale_encoded_header = self
+                        .sync
+                        .finalized_block_header()
+                        .scale_encoding_vec(self.sync.block_number_bytes());
+                    let finalized_block_hash = header::hash_from_scale_encoded_header(
+                        &finalized_block_scale_encoded_header,
+                    );
+
+                    let non_finalized_blocks_ancestry_order = {
+                        let best_hash = self.sync.best_block_hash();
+                        let blocks_in = self
+                            .sync
+                            .non_finalized_blocks_ancestry_order()
+                            .map(|h| {
+                                (
+                                    h.number,
+                                    h.scale_encoding_vec(self.sync.block_number_bytes()),
+                                    *h.parent_hash,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let mut blocks_out = Vec::new();
+                        for (number, scale_encoding, parent_hash) in blocks_in {
+                            let hash = header::hash_from_scale_encoded_header(&scale_encoding);
+                            let runtime = match &self.sync[(number, &hash)] {
+                                NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                                _ => unreachable!(),
+                            };
+                            let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
+                                None
+                            } else {
+                                Some(Arc::new(runtime.lock().await.clone().unwrap()))
+                            };
+                            blocks_out.push(BlockNotification {
+                                is_new_best: header::hash_from_scale_encoded_header(
+                                    &scale_encoding,
+                                ) == best_hash,
+                                block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
+                                scale_encoded_header: scale_encoding,
+                                runtime_update,
+                                parent_hash,
+                            });
+                        }
+                        blocks_out
+                    };
+
+                    self.blocks_notifications.push(tx);
+                    let _ = result_tx.send(SubscribeAll {
+                        id: SubscriptionId(0), // TODO:
+                        finalized_block_hash,
+                        finalized_block_scale_encoded_header,
+                        finalized_block_runtime: Arc::new(
+                            self.finalized_runtime.lock().await.clone().unwrap(),
+                        ),
+                        non_finalized_blocks_ancestry_order,
+                        new_blocks,
+                    });
+                }
+                WhatHappened::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
+                    let _ = result_tx.send(SyncState {
+                        best_block_hash: self.sync.best_block_hash(),
+                        best_block_number: self.sync.best_block_number(),
+                        finalized_block_hash: self
+                            .sync
+                            .finalized_block_header()
+                            .hash(self.sync.block_number_bytes()),
+                        finalized_block_number: self.sync.finalized_block_header().number,
+                    });
+                }
+                WhatHappened::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
+                    // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
+                    let _ = result_tx.send(());
+                }
+                WhatHappened::FrontendEvent(ToBackground::IsMajorSyncingHint { result_tx }) => {
+                    // As documented, the value returned doesn't need to be precise.
+                    let result = match self.sync.status() {
+                        all::Status::Sync => false,
+                        all::Status::WarpSyncFragments { .. }
+                        | all::Status::WarpSyncChainInformation { .. } => true,
+                    };
+
+                    let _ = result_tx.send(result);
+                }
+
+                WhatHappened::NetworkEvent(network_service::Event::Connected {
+                    peer_id,
+                    chain_index,
+                    best_block_number,
+                    best_block_hash,
+                }) if chain_index == self.network_chain_index => {
+                    // Most of the time, we insert a new source in the state machine.
+                    // However, a source of that `PeerId` might already exist but be considered as
+                    // disconnected. If that is the case, we simply mark it as no
+                    // longer disconnected.
+                    match self.peers_source_id_map.entry(peer_id) {
+                        hashbrown::hash_map::Entry::Occupied(entry) => {
+                            let id = *entry.get();
+                            let is_disconnected =
+                                &mut self.sync[id].as_mut().unwrap().is_disconnected;
+                            debug_assert!(*is_disconnected);
+                            *is_disconnected = false;
+                        }
+                        hashbrown::hash_map::Entry::Vacant(entry) => {
+                            let id = self.sync.add_source(
+                                Some(NetworkSourceInfo {
+                                    peer_id: entry.key().clone(),
+                                    is_disconnected: false,
+                                }),
+                                best_block_number,
+                                best_block_hash,
                             );
-
-                            let non_finalized_blocks_ancestry_order = {
-                                let best_hash = self.sync.best_block_hash();
-                                let blocks_in = self
-                                    .sync
-                                    .non_finalized_blocks_ancestry_order()
-                                    .map(|h| {
-                                        (
-                                            h.number,
-                                            h.scale_encoding_vec(self.sync.block_number_bytes()),
-                                            *h.parent_hash,
-                                        )
-                                    })
-                                    .collect::<Vec<_>>();
-                                let mut blocks_out = Vec::new();
-                                for (number, scale_encoding, parent_hash) in blocks_in {
-                                    let hash =
-                                        header::hash_from_scale_encoded_header(&scale_encoding);
-                                    let runtime = match &self.sync[(number, &hash)] {
-                                        NonFinalizedBlock::Verified { runtime } => runtime.clone(),
-                                        _ => unreachable!(),
-                                    };
-                                    let runtime_update =
-                                        if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
-                                            None
-                                        } else {
-                                            Some(Arc::new(runtime.lock().await.clone().unwrap()))
-                                        };
-                                    blocks_out.push(BlockNotification {
-                                        is_new_best: header::hash_from_scale_encoded_header(
-                                            &scale_encoding,
-                                        ) == best_hash,
-                                        block_hash: header::hash_from_scale_encoded_header(
-                                            &scale_encoding,
-                                        ),
-                                        scale_encoded_header: scale_encoding,
-                                        runtime_update,
-                                        parent_hash,
-                                    });
-                                }
-                                blocks_out
-                            };
-
-                            self.blocks_notifications.push(tx);
-                            let _ = result_tx.send(SubscribeAll {
-                                id: SubscriptionId(0), // TODO:
-                                finalized_block_hash,
-                                finalized_block_scale_encoded_header,
-                                finalized_block_runtime: Arc::new(
-                                    self.finalized_runtime.lock().await.clone().unwrap(),
-                                ),
-                                non_finalized_blocks_ancestry_order,
-                                new_blocks,
-                            });
-                        }
-                        ToBackground::GetSyncState { result_tx } => {
-                            let _ = result_tx.send(SyncState {
-                                best_block_hash: self.sync.best_block_hash(),
-                                best_block_number: self.sync.best_block_number(),
-                                finalized_block_hash: self
-                                    .sync
-                                    .finalized_block_header()
-                                    .hash(self.sync.block_number_bytes()),
-                                finalized_block_number: self.sync.finalized_block_header().number,
-                            });
-                        }
-                        ToBackground::Unpin { result_tx, .. } => {
-                            // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
-                            let _ = result_tx.send(());
-                        }
-                        ToBackground::IsMajorSyncingHint { result_tx } => {
-                            // As documented, the value returned doesn't need to be precise.
-                            let result = match self.sync.status() {
-                                all::Status::Sync => false,
-                                all::Status::WarpSyncFragments { .. }
-                                | all::Status::WarpSyncChainInformation { .. } => true,
-                            };
-
-                            let _ = result_tx.send(result);
+                            entry.insert(id);
                         }
                     }
                 }
-
-                WhatHappened::NetworkEvent(network_event) => {
-                    match network_event {
-                        network_service::Event::Connected {
-                            peer_id,
-                            chain_index,
-                            best_block_number,
-                            best_block_hash,
-                        } if chain_index == self.network_chain_index => {
-                            // Most of the time, we insert a new source in the state machine.
-                            // However, a source of that `PeerId` might already exist but be
-                            // considered as disconnected. If that is the case, we simply mark it
-                            // as no longer disconnected.
-                            match self.peers_source_id_map.entry(peer_id) {
-                                hashbrown::hash_map::Entry::Occupied(entry) => {
-                                    let id = *entry.get();
-                                    let is_disconnected =
-                                        &mut self.sync[id].as_mut().unwrap().is_disconnected;
-                                    debug_assert!(*is_disconnected);
-                                    *is_disconnected = false;
-                                }
-                                hashbrown::hash_map::Entry::Vacant(entry) => {
-                                    let id = self.sync.add_source(
-                                        Some(NetworkSourceInfo {
-                                            peer_id: entry.key().clone(),
-                                            is_disconnected: false,
-                                        }),
-                                        best_block_number,
-                                        best_block_hash,
-                                    );
-                                    entry.insert(id);
-                                }
-                            }
-                        }
-                        network_service::Event::Disconnected {
-                            peer_id,
-                            chain_index,
-                        } if chain_index == self.network_chain_index => {
-                            // Sources that disconnect are only immediately removed from the sync
-                            // state machine if they have no request in progress. If that is not
-                            // the case, they are instead only marked as disconnected.
-                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            if self.sync.source_num_ongoing_requests(id) == 0 {
-                                self.peers_source_id_map.remove(&peer_id).unwrap();
-                                let (_, mut _requests) = self.sync.remove_source(id);
-                                debug_assert!(_requests.next().is_none());
-                            } else {
-                                let is_disconnected =
-                                    &mut self.sync[id].as_mut().unwrap().is_disconnected;
-                                debug_assert!(!*is_disconnected);
-                                *is_disconnected = true;
-                            }
-                        }
-                        network_service::Event::BlockAnnounce {
-                            chain_index,
-                            peer_id,
-                            scale_encoded_header,
-                            is_best,
-                        } if chain_index == self.network_chain_index => {
-                            let _jaeger_span = self.jaeger_service.block_announce_process_span(
-                                &header::hash_from_scale_encoded_header(&scale_encoded_header),
-                            );
-
-                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            // TODO: log the outcome
-                            match self.sync.block_announce(id, scale_encoded_header, is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify => {}
-                                all::BlockAnnounceOutcome::TooOld { .. } => {}
-                                all::BlockAnnounceOutcome::AlreadyInChain => {}
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {}
-                                all::BlockAnnounceOutcome::Discarded => {}
-                                all::BlockAnnounceOutcome::StoredForLater {} => {}
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
-                            }
-                        }
-                        _ => {
-                            // Different chain index.
-                        }
+                WhatHappened::NetworkEvent(network_service::Event::Disconnected {
+                    peer_id,
+                    chain_index,
+                }) if chain_index == self.network_chain_index => {
+                    // Sources that disconnect are only immediately removed from the sync state
+                    // machine if they have no request in progress. If that is not the case, they
+                    // are instead only marked as disconnected.
+                    let id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                    if self.sync.source_num_ongoing_requests(id) == 0 {
+                        self.peers_source_id_map.remove(&peer_id).unwrap();
+                        let (_, mut _requests) = self.sync.remove_source(id);
+                        debug_assert!(_requests.next().is_none());
+                    } else {
+                        let is_disconnected = &mut self.sync[id].as_mut().unwrap().is_disconnected;
+                        debug_assert!(!*is_disconnected);
+                        *is_disconnected = true;
                     }
+                }
+                WhatHappened::NetworkEvent(network_service::Event::BlockAnnounce {
+                    chain_index,
+                    peer_id,
+                    scale_encoded_header,
+                    is_best,
+                }) if chain_index == self.network_chain_index => {
+                    let _jaeger_span = self.jaeger_service.block_announce_process_span(
+                        &header::hash_from_scale_encoded_header(&scale_encoded_header),
+                    );
+
+                    let id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                    // TODO: log the outcome
+                    match self.sync.block_announce(id, scale_encoded_header, is_best) {
+                        all::BlockAnnounceOutcome::HeaderVerify => {}
+                        all::BlockAnnounceOutcome::TooOld { .. } => {}
+                        all::BlockAnnounceOutcome::AlreadyInChain => {}
+                        all::BlockAnnounceOutcome::NotFinalizedChain => {}
+                        all::BlockAnnounceOutcome::Discarded => {}
+                        all::BlockAnnounceOutcome::StoredForLater {} => {}
+                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
+                    }
+                }
+                WhatHappened::NetworkEvent(_) => {
+                    // Different chain index.
                 }
 
                 WhatHappened::RequestFinished(request_id, source_id, result) => {
