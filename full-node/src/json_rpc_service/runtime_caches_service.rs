@@ -20,7 +20,7 @@ use crate::{database_thread, LogCallback};
 use futures_channel::oneshot;
 use futures_lite::{Future, StreamExt as _};
 use smol::lock::Mutex;
-use smoldot::{database::full_sqlite, executor, trie};
+use smoldot::{executor, trie};
 use std::{iter, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 /// Configuration of the service.
@@ -108,22 +108,22 @@ impl RuntimeCachesService {
                                 }
                             }
                             (Ok(None), Ok(_)) => Err(GetError::NoCode),
-                            (Err(full_sqlite::StorageAccessError::UnknownBlock), _)
-                            | (_, Err(full_sqlite::StorageAccessError::UnknownBlock)) => {
+                            (Err(database_thread::StorageAccessError::UnknownBlock), _)
+                            | (_, Err(database_thread::StorageAccessError::UnknownBlock)) => {
                                 // Note that we don't put the `CorruptedError` in the cache, in
                                 // case the database somehow recovers.
                                 let _ = result_tx.send(Err(GetError::UnknownBlock));
                                 continue;
                             }
-                            (Err(full_sqlite::StorageAccessError::StoragePruned), _)
-                            | (_, Err(full_sqlite::StorageAccessError::StoragePruned)) => {
+                            (Err(database_thread::StorageAccessError::StoragePruned), _)
+                            | (_, Err(database_thread::StorageAccessError::StoragePruned)) => {
                                 // Note that we don't put the `CorruptedError` in the cache, in
                                 // case the database somehow recovers.
                                 let _ = result_tx.send(Err(GetError::Pruned));
                                 continue;
                             }
-                            (Err(full_sqlite::StorageAccessError::Corrupted(_)), _)
-                            | (_, Err(full_sqlite::StorageAccessError::Corrupted(_))) => {
+                            (Err(database_thread::StorageAccessError::Corrupted(_)), _)
+                            | (_, Err(database_thread::StorageAccessError::Corrupted(_))) => {
                                 // Note that we don't put the `CorruptedError` in the cache, in
                                 // case the database somehow recovers.
                                 let _ = result_tx.send(Err(GetError::CorruptedDatabase));

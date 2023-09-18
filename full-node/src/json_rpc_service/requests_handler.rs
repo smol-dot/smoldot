@@ -178,6 +178,109 @@ pub fn spawn_requests_handler(mut config: Config) {
                             }
                         }
                     }
+                    methods::MethodCall::state_getKeysPaged {
+                        prefix,
+                        count,
+                        start_key,
+                        hash,
+                    } => {
+                        // As an undocumented thing, a count strictly superior to 1000 isn't
+                        // accepted by Substrate.
+                        // See <https://github.com/paritytech/polkadot-sdk/blob/61be78c621ab2fa390cd3bfc79c8307431d0ea90/substrate/client/rpc/src/state/mod.rs#L238>.
+                        if count > 1000 {
+                            request.fail(service::ErrorResponse::InvalidParams);
+                            continue;
+                        }
+
+                        // Turn the parameters into a format suitable for the database query.
+                        let prefix_nibbles = prefix.map_or(Vec::new(), |p| {
+                            trie::bytes_to_nibbles(p.0.iter().copied())
+                                .map(u8::from)
+                                .collect()
+                        });
+                        let mut start_key_nibbles = start_key.map_or(Vec::new(), |p| {
+                            trie::bytes_to_nibbles(p.0.iter().copied())
+                                .map(u8::from)
+                                .collect()
+                        });
+
+                        // There's a difference of semantics between `state_getKeysPaged` and
+                        // the database query we perform below in the situation where `start_key`
+                        // isn't within `prefix`: the database request will return nothing while
+                        // the JSON-RPC request expects the first key within `prefix`. As such,
+                        // we adjust the start key if necessary.
+                        // TODO: add documentation and a test in the database code regarding this behavior
+                        if start_key_nibbles < prefix_nibbles {
+                            start_key_nibbles = prefix_nibbles.clone();
+                        }
+
+                        // Continue in the background.
+                        let result = config
+                            .database
+                            .with_database(
+                                move |db| -> Result<_, database_thread::StorageAccessError> {
+                                    let hash = match hash {
+                                        Some(h) => h.0,
+                                        None => db.best_block_hash()?,
+                                    };
+
+                                    let mut out =
+                                        Vec::with_capacity(usize::try_from(count).unwrap());
+
+                                    let mut key_iter = start_key_nibbles;
+
+                                    // The query is performed by repeatedly asking for the next
+                                    // key.
+                                    while out.len() < usize::try_from(count).unwrap() {
+                                        let next_key_nibbles = db.block_storage_next_key(
+                                            &hash,
+                                            iter::empty::<iter::Empty<_>>(),
+                                            key_iter.iter().copied(),
+                                            prefix_nibbles.iter().copied(),
+                                            false,
+                                        )?;
+
+                                        let Some(next_key_nibbles) = next_key_nibbles else {
+                                            break;
+                                        };
+
+                                        out.push(methods::HexString(
+                                            trie::nibbles_to_bytes_truncate(
+                                                next_key_nibbles
+                                                    .iter()
+                                                    .copied()
+                                                    .map(|n| trie::Nibble::try_from(n).unwrap()),
+                                            )
+                                            .collect::<Vec<_>>(),
+                                        ));
+
+                                        // Push an extra nibble as otherwise `block_storage_next_key`
+                                        // will return the same key again.
+                                        key_iter = next_key_nibbles;
+                                        key_iter.push(0);
+                                    }
+
+                                    Ok(out)
+                                },
+                            )
+                            .await;
+
+                        // Send back outcome.
+                        match result {
+                            Ok(out) => {
+                                request.respond(methods::Response::state_getKeysPaged(out));
+                            }
+                            Err(database_thread::StorageAccessError::StoragePruned)
+                            | Err(database_thread::StorageAccessError::UnknownBlock) => {
+                                // Note that it is unclear how the function should behave in
+                                // that situation.
+                                request.fail(service::ErrorResponse::InvalidParams);
+                            }
+                            Err(database_thread::StorageAccessError::Corrupted(_)) => {
+                                request.fail(service::ErrorResponse::InternalError);
+                            }
+                        }
+                    }
                     methods::MethodCall::state_getMetadata { hash } => {
                         let hash = match hash {
                             Some(h) => h.0,

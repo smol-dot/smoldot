@@ -255,6 +255,182 @@ fn state_get_runtime_version() {
 }
 
 #[test]
+fn state_get_keys_paged_basic() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"state_getKeysPaged","params":["0x", 10]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        let decoded = serde_json::from_str::<Vec<json_rpc::methods::HexString>>(result_json)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decoded,
+            &[
+                &[][..],
+                &[
+                    23, 126, 104, 87, 251, 29, 14, 64, 147, 118, 18, 47, 238, 58, 212, 248, 78,
+                    123, 144, 18, 9, 107, 65, 196, 235, 58, 175, 148, 127, 110, 164, 41
+                ],
+                &[38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 78,
+                    123, 144, 18, 9, 107, 65, 196, 235, 58, 175, 148, 127, 110, 164, 41
+                ],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 86,
+                    132, 160, 34, 163, 77, 216, 191, 162, 186, 175, 68, 241, 114, 183, 16
+                ],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 138,
+                    66, 243, 51, 35, 203, 92, 237, 59, 68, 221, 130, 95, 218, 159, 204
+                ],
+                &[38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 164,
+                    71, 4, 181, 104, 210, 22, 103, 53, 106, 90, 5, 12, 17, 135, 70, 180, 222, 242,
+                    92, 253, 166, 239, 58, 0, 0, 0, 0
+                ],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 167,
+                    253, 108, 40, 131, 107, 154, 40, 82, 45, 201, 36, 17, 12, 244, 57
+                ],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 185,
+                    157, 136, 14, 198, 129, 121, 156, 12, 243, 14, 136, 134, 55, 29, 169
+                ]
+            ]
+        );
+    });
+}
+
+#[test]
+fn state_get_keys_paged_prefix_works() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"state_getKeysPaged","params":["0x26aa394e", 2]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        let decoded = serde_json::from_str::<Vec<json_rpc::methods::HexString>>(result_json)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decoded,
+            &[
+                &[38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247][..],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 78,
+                    123, 144, 18, 9, 107, 65, 196, 235, 58, 175, 148, 127, 110, 164, 41
+                ]
+            ]
+        );
+    });
+}
+
+#[test]
+fn state_get_keys_paged_start_key_exact_match() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        // This test checks whether the start key is included in the results on an exact match.
+        // `0x26aa394eea5630e07c48ae0c9558cef7` is equal to `[38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247]`.
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"state_getKeysPaged","params":["0x", 2, "0x26aa394eea5630e07c48ae0c9558cef7"]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        let (_, result_json) = json_rpc::parse::parse_response(&response_raw)
+            .unwrap()
+            .into_success()
+            .unwrap();
+        let decoded = serde_json::from_str::<Vec<json_rpc::methods::HexString>>(result_json)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decoded,
+            &[
+                &[38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247][..],
+                &[
+                    38, 170, 57, 78, 234, 86, 48, 224, 124, 72, 174, 12, 149, 88, 206, 247, 78,
+                    123, 144, 18, 9, 107, 65, 196, 235, 58, 175, 148, 127, 110, 164, 41
+                ]
+            ]
+        );
+    });
+}
+
+#[test]
+fn state_get_keys_paged_count_overflow() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"state_getKeysPaged","params":["0x", 1000]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        assert!(matches!(
+            json_rpc::parse::parse_response(&response_raw).unwrap(),
+            json_rpc::parse::Response::Success { .. }
+        ));
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"state_getKeysPaged","params":["0x", 1001]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        assert!(matches!(
+            json_rpc::parse::parse_response(&response_raw).unwrap(),
+            json_rpc::parse::Response::Error {
+                error_code: -32602, // Invalid parameter error code.
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
+fn state_get_keys_paged_unknown_block() {
+    smol::block_on(async move {
+        let client = start_client().await;
+
+        client.send_json_rpc_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"state_getKeysPaged","params":["0x", 10, "0x", "0x0000000000000000000000000000000000000000000000000000000000000000"]}"#
+                .to_owned(),
+        );
+        let response_raw = client.next_json_rpc_response().await;
+        assert!(matches!(
+            json_rpc::parse::parse_response(&response_raw).unwrap(),
+            json_rpc::parse::Response::Error {
+                error_code: -32602, // Invalid parameter error code.
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
 fn system_chain() {
     smol::block_on(async move {
         let client = start_client().await;
