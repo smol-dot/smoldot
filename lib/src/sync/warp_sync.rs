@@ -1326,6 +1326,16 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             }
         };
 
+        // Make sure that the header would actually advance the warp sync process forward.
+        if fragment_decoded_header.number <= self.inner.warped_header_number {
+            self.inner.verify_queue.clear();
+            self.inner.warp_sync_fragments_download = None;
+            return (
+                self.inner,
+                Err(VerifyFragmentError::BlockNumberNotIncrementing),
+            );
+        }
+
         // Make sure that the justification indeed corresponds to the header.
         if *fragment_decoded_justification.target_hash != fragment_header_hash
             || fragment_decoded_justification.target_number != fragment_decoded_header.number
@@ -1440,6 +1450,9 @@ pub enum VerifyFragmentError {
     },
     /// Warp sync fragment doesn't contain an authorities list change when it should.
     NonMinimalProof,
+    /// Header does not actually advance the warp syncing process. This means that a source has
+    /// sent a header below the requested hash.
+    BlockNumberNotIncrementing,
     /// Warp sync proof is empty.
     EmptyProof,
     /// Failed to decode header.
@@ -1470,6 +1483,10 @@ impl fmt::Display for VerifyFragmentError {
             VerifyFragmentError::NonMinimalProof => write!(
                 f,
                 "Warp sync proof fragment doesn't contain an authorities list change"
+            ),
+            VerifyFragmentError::BlockNumberNotIncrementing => write!(
+                f,
+                "Warp sync proof header doesn't advance the warp syncing process"
             ),
             VerifyFragmentError::EmptyProof => write!(f, "Warp sync proof is empty"),
             VerifyFragmentError::InvalidHeader(err) => write!(f, "Failed to decode header: {err}"),

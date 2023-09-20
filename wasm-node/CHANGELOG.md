@@ -13,6 +13,7 @@
 ### Fixed
 
 - Justifications are no longer downloaded for blocks that can't be finalized because an earlier block needs to be finalized first. ([#1127](https://github.com/smol-dot/smoldot/pull/1127))
+- Fix warp sync process stagnating if a source sends a header whose height is inferior or equal to the currently warp synced block. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
 
 ## 2.0.1 - 2023-09-08
 
