@@ -975,10 +975,14 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Removes the given request from the state machine. Returns the user data that was associated
     /// to it.
     ///
+    /// > **Note**: The state machine might want to re-start the same request again. It is out of
+    /// >           the scope of this module to keep track of requests that don't succeed.
+    ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
+    // TODO: rename to `cancel_request` to convey the meaning that nothing negative will happen to the source
     pub fn fail_request(&mut self, id: RequestId) -> TRq {
         if self.warp_sync_fragments_download == Some(id) {
             self.warp_sync_fragments_download = None;
