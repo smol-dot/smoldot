@@ -1083,6 +1083,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Start processing one CPU operation.
     ///
     /// This function takes ownership of `self` and yields it back after the operation is finished.
+    // TODO: take a `&mut self` instead of `self` ; requires many changes in all.rs
     pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
         // If we've downloaded everything that was needed, switch to "build chain information"
         // mode.
