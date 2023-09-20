@@ -757,6 +757,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
                 match result {
                     Ok((fragment_hash, fragment_number)) => {
+                        // TODO: must call `set_local_grandpa_state` and `set_local_best_block` so that other peers notify us of neighbor packets
                         log::debug!(
                             target: &self.log_target,
                             "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
