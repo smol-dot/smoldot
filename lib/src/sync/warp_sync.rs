@@ -802,32 +802,36 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // Return the list of runtime calls indicated by the chain information builder state
         // machine.
         let call_proofs = if matches!(self.warped_block_ty, WarpedBlockTy::Normal) {
-            either::Left(
-                self.runtime_calls
-                    .iter()
-                    .filter(|(_, v)| matches!(v, CallProof::NotStarted))
-                    .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
-                        block_hash: self.warped_header_hash,
-                        function_name: call.function_name().into(),
-                        parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
-                    })
-                    .flat_map(move |request_detail| {
-                        // Sources are ordered by increasing finalized block height, in order to
-                        // have the highest chance for the block to not be pruned.
-                        let sources_with_block = self
-                            .sources_by_finalized_height
-                            .range((self.warped_header_number, SourceId(usize::min_value()))..)
-                            .map(|(_, src_id)| src_id);
-
-                        sources_with_block.map(move |source_id| {
-                            (
-                                *source_id,
-                                &self.sources[source_id.0].user_data,
-                                request_detail.clone(),
-                            )
+            if self.warp_sync_fragments_download.is_none() && self.verify_queue.is_empty() {
+                either::Left(
+                    self.runtime_calls
+                        .iter()
+                        .filter(|(_, v)| matches!(v, CallProof::NotStarted))
+                        .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash: self.warped_header_hash,
+                            function_name: call.function_name().into(),
+                            parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
                         })
-                    }),
-            )
+                        .flat_map(move |request_detail| {
+                            // Sources are ordered by increasing finalized block height, in order to
+                            // have the highest chance for the block to not be pruned.
+                            let sources_with_block = self
+                                .sources_by_finalized_height
+                                .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                                .map(|(_, src_id)| src_id);
+
+                            sources_with_block.map(move |source_id| {
+                                (
+                                    *source_id,
+                                    &self.sources[source_id.0].user_data,
+                                    request_detail.clone(),
+                                )
+                            })
+                        }),
+                )
+            } else {
+                either::Right(iter::empty())
+            }
         } else {
             either::Right(iter::empty())
         };
