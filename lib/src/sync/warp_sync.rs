@@ -1140,16 +1140,30 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             .and_then(|h| header::decode(&h.scale_encoded_header, self.block_number_bytes).ok())
         {
             let src_finalized_height = &mut self.sources[rq_source_id.0].finalized_block_height;
-            if final_set_of_fragments {
+
+            let new_height = if final_set_of_fragments {
                 // If the source indicated that this is the last fragment, then we know that
                 // it's also equal to their finalized block.
-                *src_finalized_height = last_header.number;
+                last_header.number
             } else {
                 // If this is not the last fragment, we know that the finalized block of the
                 // source is *at least* the one provided.
                 // TODO: could maybe do + gap or something?
-                *src_finalized_height =
-                    cmp::max(*src_finalized_height, last_header.number.saturating_add(1));
+                cmp::max(*src_finalized_height, last_header.number.saturating_add(1))
+            };
+
+            if *src_finalized_height != new_height {
+                let _was_in = self
+                    .sources_by_finalized_height
+                    .remove(&(*src_finalized_height, rq_source_id));
+                debug_assert!(_was_in);
+
+                *src_finalized_height = new_height;
+
+                let _inserted = self
+                    .sources_by_finalized_height
+                    .insert((*src_finalized_height, rq_source_id));
+                debug_assert!(_inserted);
             }
         }
 
