@@ -113,7 +113,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{fmt, iter, mem, ops};
+use core::{cmp, fmt, iter, mem, ops};
 
 pub use trie::Nibble;
 
@@ -384,7 +384,9 @@ pub struct WarpSync<TSrc, TRq> {
 /// See [`WarpSync::sources`].
 #[derive(Debug, Copy, Clone)]
 struct Source<TSrc> {
+    /// User data chosen by the API user.
     user_data: TSrc,
+    /// Height of the finalized block of the source, as reported by the source.
     finalized_block_height: u64,
 }
 
@@ -1094,6 +1096,9 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Injects a successful response and removes the given request from the state machine. Returns
     /// the user data that was associated to it.
     ///
+    /// If the header of the last fragment of the response is decodable, this function updates
+    /// the finalized block of the source.
+    ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] is invalid.
@@ -1114,6 +1119,29 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         };
 
         debug_assert!(self.sources.contains(rq_source_id.0));
+
+        // Since we send requests only to sources with an appropriate finalized block, we make
+        // sure that the finalized block of the source that sent the response matches the
+        // fragments that it sent.
+        // If we didn't do that, it would be possible for example to warp sync to block 200 while
+        // believing that the source is only at block 199, and thus the warp syncing would stall.
+        if let Some(last_header) = fragments
+            .last()
+            .and_then(|h| header::decode(&h.scale_encoded_header, self.block_number_bytes).ok())
+        {
+            let src_finalized_height = &mut self.sources[rq_source_id.0].finalized_block_height;
+            if final_set_of_fragments {
+                // If the source indicated that this is the last fragment, then we know that
+                // it's also equal to their finalized block.
+                *src_finalized_height = last_header.number;
+            } else {
+                // If this is not the last fragment, we know that the finalized block of the
+                // source is *at least* the one provided.
+                // TODO: could maybe do + gap or something?
+                *src_finalized_height =
+                    cmp::max(*src_finalized_height, last_header.number.saturating_add(1));
+            }
+        }
 
         if self.warp_sync_fragments_download == Some(request_id) {
             self.warp_sync_fragments_download = None;
