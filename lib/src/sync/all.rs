@@ -195,7 +195,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     requests_capacity: config.sources_capacity, // TODO: ?! add as config?
                     code_trie_node_hint: config.code_trie_node_hint,
                     num_download_ahead_fragments: 128, // TODO: make configurable?
-                    pause_if_blocks_gap_lower_than: 64, // TODO: make configurable?
+                    warp_sync_minimum_gap: 64,         // TODO: make configurable?
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync {
                         inner,

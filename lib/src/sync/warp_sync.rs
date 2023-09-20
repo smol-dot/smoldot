@@ -190,7 +190,7 @@ pub struct Config {
     ///
     /// The ideal value of this field depends on the block production rate and the time it takes
     /// to answer requests.
-    pub pause_if_blocks_gap_lower_than: usize,
+    pub warp_sync_minimum_gap: usize,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -263,7 +263,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         verified_chain_information: config.start_chain_information,
         code_trie_node_hint: config.code_trie_node_hint,
         num_download_ahead_fragments: config.num_download_ahead_fragments,
-        pause_if_blocks_gap_lower_than: config.pause_if_blocks_gap_lower_than,
+        warp_sync_minimum_gap: config.warp_sync_minimum_gap,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
@@ -295,10 +295,6 @@ impl SourceId {
     /// Returns the smallest possible [`SourceId`]. It is always inferior or equal to any other.
     pub fn min_value() -> Self {
         SourceId(usize::min_value())
-    }
-
-    pub fn checked_add(&self, n: u8) -> Option<Self> {
-        Some(SourceId(self.0.checked_add(usize::from(n))?))
     }
 }
 
@@ -337,7 +333,7 @@ pub struct RuntimeInformation {
     pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
-/// Warp syncing process now obtaining the chain information.
+/// Warp syncing process state machine.
 pub struct WarpSync<TSrc, TRq> {
     /// SCALE-encoded header of the finalized block of the chain we warp synced to. Initially
     /// identical to the value in [`WarpSync::start_chain_information`].
@@ -361,8 +357,8 @@ pub struct WarpSync<TSrc, TRq> {
     verified_chain_information: ValidChainInformation,
     /// See [`Config::num_download_ahead_fragments`].
     num_download_ahead_fragments: usize,
-    /// See [`Config::pause_if_blocks_gap_lower_than`].
-    pause_if_blocks_gap_lower_than: usize,
+    /// See [`Config::warp_sync_minimum_gap`].
+    warp_sync_minimum_gap: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// List of requests that have been added using [`WarpSync::add_source`].
@@ -382,12 +378,14 @@ pub struct WarpSync<TSrc, TRq> {
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
 }
 
+/// See [`WarpSync::sources`].
 #[derive(Debug, Copy, Clone)]
 struct Source<TSrc> {
     user_data: TSrc,
     finalized_block_height: u64,
 }
 
+/// See [`WarpSync::warped_block_ty`].
 enum WarpedBlockTy {
     /// Block is equal to the finalized block in [`WarpSync::verified_chain_information`].
     AlreadyVerified,
@@ -398,6 +396,7 @@ enum WarpedBlockTy {
     Normal,
 }
 
+/// See [`WarpSync::runtime_download`].
 enum RuntimeDownload {
     NotStarted {
         hint_doesnt_match: bool,
@@ -416,6 +415,7 @@ enum RuntimeDownload {
     },
 }
 
+/// See [`WarpSync::verify_queue`].
 struct PendingVerify {
     /// Source the fragments have been obtained from. `None` if the source has been removed.
     downloaded_source: Option<SourceId>,
@@ -430,6 +430,7 @@ struct PendingVerify {
     next_fragment_to_verify_index: usize,
 }
 
+/// See [`RuntimeDownload::Verified`].
 struct DownloadedRuntime {
     /// Storage item at the `:code` key. `None` if there is no entry at that key.
     storage_code: Option<Vec<u8>>,
@@ -441,6 +442,7 @@ struct DownloadedRuntime {
     closest_ancestor_excluding: Option<Vec<Nibble>>,
 }
 
+/// See [`WarpSync::runtime_calls`].
 enum CallProof {
     NotStarted,
     Downloading(RequestId),
@@ -627,12 +629,14 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         debug_assert_eq!(self.sources.len(), self.sources_by_finalized_height.len());
 
         // We make sure to not leave invalid source IDs in the state of `self`.
+        // TODO: O(n)
         for item in &mut self.verify_queue {
             if item.downloaded_source == Some(to_remove) {
                 item.downloaded_source = None;
             }
         }
 
+        // TODO: O(n)
         let obsolete_requests_indices = self
             .in_progress_requests
             .iter()
@@ -723,14 +727,13 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     .unwrap_or(self.warped_header_hash);
 
                 let current_finalized_number = self.warped_header_number;
-                let pause_if_blocks_gap_lower_than = self.pause_if_blocks_gap_lower_than;
+                let warp_sync_minimum_gap = self.warp_sync_minimum_gap;
 
                 // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     if src.finalized_block_height
                         <= current_finalized_number.saturating_add(
-                            u64::try_from(pause_if_blocks_gap_lower_than)
-                                .unwrap_or(u64::max_value()),
+                            u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::max_value()),
                         )
                     {
                         return None;
