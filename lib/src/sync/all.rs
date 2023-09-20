@@ -2644,7 +2644,7 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
     ) -> (AllSync<TRq, TSrc, TBl>, Result<(), warp_sync::Error>) {
-        let (warp_sync_status, error) = self.inner.build(exec_hint, allow_unresolved_imports);
+        let (warp_sync_status, outcome) = self.inner.build(exec_hint, allow_unresolved_imports);
 
         (
             AllSync {
@@ -2654,10 +2654,7 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
                 },
                 shared: self.shared,
             },
-            match error {
-                Some(err) => Err(err),
-                None => Ok(()),
-            },
+            outcome,
         )
     }
 }

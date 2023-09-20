@@ -1596,7 +1596,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         mut self,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
-    ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    ) -> (WarpSync<TSrc, TRq>, Result<(), Error>) {
         let RuntimeDownload::NotVerified {
             hint_doesnt_match,
             trie_proof,
@@ -1615,7 +1615,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Some(Error::InvalidMerkleProof(err)));
+                    return (self.inner, Err(Error::InvalidMerkleProof(err)));
                 }
             };
 
@@ -1644,7 +1644,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
                                 hint_doesnt_match: *hint_doesnt_match,
                             };
-                            return (self.inner, Some(Error::MissingCode));
+                            return (self.inner, Err(Error::MissingCode));
                         }
                     }
                 }
@@ -1653,13 +1653,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Some(Error::MissingCode));
+                    return (self.inner, Err(Error::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Some(Error::MerkleProofEntriesMissing));
+                    return (self.inner, Err(Error::MerkleProofEntriesMissing));
                 }
             }
         };
@@ -1673,7 +1673,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: true,
                 };
-                return (self.inner, None);
+                return (self.inner, Ok(()));
             }
         } else {
             match decoded_downloaded_runtime
@@ -1685,10 +1685,10 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Some(Error::MissingCode));
+                    return (self.inner, Err(Error::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
-                    return (self.inner, Some(Error::MerkleProofEntriesMissing));
+                    return (self.inner, Err(Error::MerkleProofEntriesMissing));
                 }
             }
         };
@@ -1698,7 +1698,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         {
             Ok(val) => val.map(|(v, _)| v),
             Err(proof_decode::IncompleteProofError { .. }) => {
-                return (self.inner, Some(Error::MerkleProofEntriesMissing));
+                return (self.inner, Err(Error::MerkleProofEntriesMissing));
             }
         };
 
@@ -1710,7 +1710,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Some(Error::InvalidHeapPages(err)));
+                    return (self.inner, Err(Error::InvalidHeapPages(err)));
                 }
             };
 
@@ -1726,7 +1726,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: *hint_doesnt_match,
                 };
-                return (self.inner, Some(Error::RuntimeBuild(err)));
+                return (self.inner, Err(Error::RuntimeBuild(err)));
             }
         };
 
@@ -1763,7 +1763,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             chain_info_builder,
         };
 
-        (self.inner, None)
+        (self.inner, Ok(()))
     }
 }
 
