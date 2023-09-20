@@ -726,28 +726,51 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     })
                     .unwrap_or(self.warped_header_hash);
 
-                // TODO: wrong, must take verify queue into account
-                let current_finalized_number = self.warped_header_number;
+                // Calculate the block number at the tail of the verify queue.
+                // Contains `None` if the verify queue has a problem such as an indecodable header.
+                // In that situation, we don't start any new request and wait for the verify
+                // queue to empty itself.
+                let verify_queue_tail_block_number = self
+                    .verify_queue
+                    .back()
+                    .map(|entry| {
+                        entry
+                            .fragments
+                            .last()
+                            .and_then(|fragment| {
+                                header::decode(
+                                    &fragment.scale_encoded_header,
+                                    self.block_number_bytes,
+                                )
+                                .ok()
+                            })
+                            .map(|header| header.number)
+                    })
+                    .unwrap_or(Some(self.warped_header_number));
                 let warp_sync_minimum_gap = self.warp_sync_minimum_gap;
 
-                // Combine the request with every single available source.
-                either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
-                    if src.finalized_block_height
-                        <= current_finalized_number.saturating_add(
-                            u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::max_value()),
-                        )
-                    {
-                        return None;
-                    }
+                if let Some(verify_queue_tail_block_number) = verify_queue_tail_block_number {
+                    // Combine the request with every single available source.
+                    either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
+                        if src.finalized_block_height
+                            <= verify_queue_tail_block_number.saturating_add(
+                                u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::max_value()),
+                            )
+                        {
+                            return None;
+                        }
 
-                    Some((
-                        SourceId(src_id),
-                        &src.user_data,
-                        DesiredRequest::WarpSyncRequest {
-                            block_hash: start_block_hash,
-                        },
-                    ))
-                }))
+                        Some((
+                            SourceId(src_id),
+                            &src.user_data,
+                            DesiredRequest::WarpSyncRequest {
+                                block_hash: start_block_hash,
+                            },
+                        ))
+                    }))
+                } else {
+                    either::Right(iter::empty())
+                }
             } else {
                 either::Right(iter::empty())
             }
