@@ -720,12 +720,12 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         // If we are in the fragments download phase, return a fragments download request.
-        let warp_sync_request = if self.warp_sync_fragments_download.is_none() {
-            // TODO: consider also checking whether the verifier is not at the final set of fragments
+        let mut desired_warp_sync_request = if self.warp_sync_fragments_download.is_none() {
             if self.verify_queue.iter().fold(0, |sum, entry| {
                 sum + entry.fragments.len() - entry.next_fragment_to_verify_index
             }) < self.num_download_ahead_fragments
             {
+                // Block hash to request.
                 let start_block_hash = self
                     .verify_queue
                     .back()
@@ -785,94 +785,100 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             }
         } else {
             either::Right(iter::empty())
-        };
+        }
+        .peekable();
 
         // If we are in the appropriate phase, and we are not currently downloading the runtime,
         // return a runtime download request.
-        let runtime_parameters_get =
-            if let (WarpedBlockTy::Normal, RuntimeDownload::NotStarted { hint_doesnt_match }) =
-                (&self.warped_block_ty, &self.runtime_download)
+        let desired_runtime_parameters_get = if let (
+            WarpedBlockTy::Normal,
+            RuntimeDownload::NotStarted { hint_doesnt_match },
+            None,
+            true,
+            None,
+        ) = (
+            &self.warped_block_ty,
+            &self.runtime_download,
+            self.warp_sync_fragments_download,
+            self.verify_queue.is_empty(),
+            desired_warp_sync_request.peek(),
+        ) {
+            let code_key_to_request = if let (false, Some(hint)) =
+                (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
             {
-                if self.warp_sync_fragments_download.is_none() && self.verify_queue.is_empty() {
-                    let code_key_to_request = if let (false, Some(hint)) =
-                        (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
-                    {
-                        Cow::Owned(
-                            trie::nibbles_to_bytes_truncate(
-                                hint.closest_ancestor_excluding.iter().copied(),
-                            )
-                            .collect::<Vec<_>>(),
-                        )
-                    } else {
-                        Cow::Borrowed(&b":code"[..])
-                    };
-
-                    // Sources are ordered by increasing finalized block height, in order to
-                    // have the highest chance for the block to not be pruned.
-                    let sources_with_block = self
-                        .sources_by_finalized_height
-                        .range((self.warped_header_number, SourceId(usize::min_value()))..)
-                        .map(|(_, src_id)| src_id);
-
-                    either::Left(sources_with_block.map(move |source_id| {
-                        (
-                            *source_id,
-                            &self.sources[source_id.0].user_data,
-                            DesiredRequest::StorageGetMerkleProof {
-                                block_hash: self.warped_header_hash,
-                                state_trie_root: self.warped_header_state_root,
-                                keys: vec![code_key_to_request.to_vec(), b":heappages".to_vec()],
-                            },
-                        )
-                    }))
-                } else {
-                    either::Right(iter::empty())
-                }
+                Cow::Owned(
+                    trie::nibbles_to_bytes_truncate(
+                        hint.closest_ancestor_excluding.iter().copied(),
+                    )
+                    .collect::<Vec<_>>(),
+                )
             } else {
-                either::Right(iter::empty())
+                Cow::Borrowed(&b":code"[..])
             };
+
+            // Sources are ordered by increasing finalized block height, in order to
+            // have the highest chance for the block to not be pruned.
+            let sources_with_block = self
+                .sources_by_finalized_height
+                .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                .map(|(_, src_id)| src_id);
+
+            either::Left(sources_with_block.map(move |source_id| {
+                (
+                    *source_id,
+                    &self.sources[source_id.0].user_data,
+                    DesiredRequest::StorageGetMerkleProof {
+                        block_hash: self.warped_header_hash,
+                        state_trie_root: self.warped_header_state_root,
+                        keys: vec![code_key_to_request.to_vec(), b":heappages".to_vec()],
+                    },
+                )
+            }))
+        } else {
+            either::Right(iter::empty())
+        };
 
         // Return the list of runtime calls indicated by the chain information builder state
         // machine.
-        let call_proofs = if matches!(self.warped_block_ty, WarpedBlockTy::Normal) {
-            if self.warp_sync_fragments_download.is_none() && self.verify_queue.is_empty() {
-                either::Left(
-                    self.runtime_calls
-                        .iter()
-                        .filter(|(_, v)| matches!(v, CallProof::NotStarted))
-                        .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
-                            block_hash: self.warped_header_hash,
-                            function_name: call.function_name().into(),
-                            parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
-                        })
-                        .flat_map(move |request_detail| {
-                            // Sources are ordered by increasing finalized block height, in order to
-                            // have the highest chance for the block to not be pruned.
-                            let sources_with_block = self
-                                .sources_by_finalized_height
-                                .range((self.warped_header_number, SourceId(usize::min_value()))..)
-                                .map(|(_, src_id)| src_id);
+        let desired_call_proofs = if matches!(self.warped_block_ty, WarpedBlockTy::Normal)
+            && self.warp_sync_fragments_download.is_none()
+            && self.verify_queue.is_empty()
+            && desired_warp_sync_request.peek().is_none()
+        {
+            either::Left(
+                self.runtime_calls
+                    .iter()
+                    .filter(|(_, v)| matches!(v, CallProof::NotStarted))
+                    .map(|(call, _)| DesiredRequest::RuntimeCallMerkleProof {
+                        block_hash: self.warped_header_hash,
+                        function_name: call.function_name().into(),
+                        parameter_vectored: Cow::Owned(call.parameter_vectored_vec()),
+                    })
+                    .flat_map(move |request_detail| {
+                        // Sources are ordered by increasing finalized block height, in order to
+                        // have the highest chance for the block to not be pruned.
+                        let sources_with_block = self
+                            .sources_by_finalized_height
+                            .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                            .map(|(_, src_id)| src_id);
 
-                            sources_with_block.map(move |source_id| {
-                                (
-                                    *source_id,
-                                    &self.sources[source_id.0].user_data,
-                                    request_detail.clone(),
-                                )
-                            })
-                        }),
-                )
-            } else {
-                either::Right(iter::empty())
-            }
+                        sources_with_block.map(move |source_id| {
+                            (
+                                *source_id,
+                                &self.sources[source_id.0].user_data,
+                                request_detail.clone(),
+                            )
+                        })
+                    }),
+            )
         } else {
             either::Right(iter::empty())
         };
 
         // Chain all these demanded requests together.
-        warp_sync_request
-            .chain(runtime_parameters_get)
-            .chain(call_proofs)
+        desired_warp_sync_request
+            .chain(desired_runtime_parameters_get)
+            .chain(desired_call_proofs)
     }
 
     /// Inserts a new request in the data structure.
