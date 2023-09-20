@@ -726,6 +726,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     })
                     .unwrap_or(self.warped_header_hash);
 
+                // TODO: wrong, must take verify queue into account
                 let current_finalized_number = self.warped_header_number;
                 let warp_sync_minimum_gap = self.warp_sync_minimum_gap;
 
