@@ -268,6 +268,7 @@ pub fn start_warp_sync<TSrc, TRq>(
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
+        in_progress_requests_by_source: BTreeSet::new(),
         warp_sync_fragments_download: None,
         verify_queue: VecDeque::new(),
         runtime_download: RuntimeDownload::NotStarted {
@@ -367,6 +368,8 @@ pub struct WarpSync<TSrc, TRq> {
     sources_by_finalized_height: BTreeSet<(u64, SourceId)>,
     /// List of requests that have been added using [`WarpSync::add_request`].
     in_progress_requests: slab::Slab<(SourceId, TRq, RequestDetail)>,
+    /// Identical to [`WarpSync::in_progress_requests`], but indexed differently.
+    in_progress_requests_by_source: BTreeSet<(SourceId, RequestId)>,
     /// Request that is downloading warp sync fragments, if any has been started yet.
     warp_sync_fragments_download: Option<RequestId>,
     /// Queue of fragments that have been downloaded and need to be verified.
@@ -636,15 +639,19 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             }
         }
 
-        // TODO: O(n)
         let obsolete_requests_indices = self
-            .in_progress_requests
-            .iter()
-            .filter_map(|(id, (src, _, _))| if *src == to_remove { Some(id) } else { None })
+            .in_progress_requests_by_source
+            .range(
+                (to_remove, RequestId(usize::min_value()))
+                    ..=(to_remove, RequestId(usize::max_value())),
+            )
+            .map(|(_, rq_id)| rq_id.0)
             .collect::<Vec<_>>();
         let mut obsolete_requests = Vec::with_capacity(obsolete_requests_indices.len());
         for index in obsolete_requests_indices {
             let (_, user_data, _) = self.in_progress_requests.remove(index);
+            self.in_progress_requests_by_source
+                .remove(&(to_remove, RequestId(index)));
             if self.warp_sync_fragments_download == Some(RequestId(index)) {
                 self.warp_sync_fragments_download = None;
             }
@@ -956,6 +963,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         }
 
         request_slot.insert((source_id, user_data, detail));
+        let _was_inserted = self
+            .in_progress_requests_by_source
+            .insert((source_id, request_id));
+        debug_assert!(_was_inserted);
         request_id
     }
 
@@ -989,7 +1000,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             }
         }
 
-        self.in_progress_requests.remove(id.0).1
+        let (source_id, user_data, _) = self.in_progress_requests.remove(id.0);
+        let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+        debug_assert!(_was_removed);
+        user_data
     }
 
     /// Injects a successful Merkle proof and removes the given request from the state machine.
@@ -1004,18 +1018,22 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // Remove the request from the list, obtaining its user data.
         // If the request corresponds to the runtime parameters we're looking for, the function
         // continues below, otherwise we return early.
-        let (hint_doesnt_match, user_data) = match (
+        let (source_id, hint_doesnt_match, user_data) = match (
             self.in_progress_requests.remove(id.0),
             &self.runtime_download,
         ) {
             (
-                (_, user_data, _),
+                (source_id, user_data, _),
                 RuntimeDownload::Downloading {
                     request_id,
                     hint_doesnt_match,
                 },
-            ) if *request_id == id => (*hint_doesnt_match, user_data),
-            ((_, user_data, RequestDetail::StorageGetMerkleProof { .. }), _) => return user_data,
+            ) if *request_id == id => (source_id, *hint_doesnt_match, user_data),
+            ((source_id, user_data, RequestDetail::StorageGetMerkleProof { .. }), _) => {
+                let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+                debug_assert!(_was_removed);
+                return user_data;
+            }
             (
                 (
                     _,
@@ -1031,6 +1049,9 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             hint_doesnt_match,
             trie_proof: merkle_proof,
         };
+
+        let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+        debug_assert!(_was_removed);
 
         user_data
     }
@@ -1048,7 +1069,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         request_id: RequestId,
         response: Vec<u8>,
     ) -> TRq {
-        let (_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }) =
+        let (source_id, user_data, RequestDetail::RuntimeCallMerkleProof { .. }) =
             self.in_progress_requests.remove(request_id.0)
         else {
             // Wrong request type.
@@ -1061,6 +1082,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 break;
             }
         }
+
+        let _was_removed = self
+            .in_progress_requests_by_source
+            .remove(&(source_id, request_id));
+        debug_assert!(_was_removed);
 
         user_data
     }
@@ -1099,6 +1125,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 next_fragment_to_verify_index: 0,
             });
         }
+
+        let _was_removed = self
+            .in_progress_requests_by_source
+            .remove(&(rq_source_id, request_id));
+        debug_assert!(_was_removed);
 
         user_data
     }
