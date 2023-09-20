@@ -33,6 +33,7 @@
 use crate::{
     chain::{blocks_tree, chain_information},
     executor::host,
+    finality::grandpa,
     header,
     sync::{all_forks, optimistic, warp_sync},
     trie::Nibble,
@@ -1381,11 +1382,26 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }
                 }
             }
+            (
+                AllSyncInner::GrandpaWarpSync { inner, .. },
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => {
+                let block_number = match grandpa::commit::decode::decode_grandpa_commit(
+                    &scale_encoded_message,
+                    inner.block_number_bytes(),
+                ) {
+                    Ok(msg) => msg.message.target_number,
+                    Err(_) => return GrandpaCommitMessageOutcome::Discarded,
+                };
+
+                inner.set_source_finality_state(*source_id, block_number);
+                GrandpaCommitMessageOutcome::Discarded
+            }
             (AllSyncInner::Optimistic { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
-            (AllSyncInner::GrandpaWarpSync { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
 
             // Invalid internal states.
             (AllSyncInner::AllForks(_), _) => unreachable!(),
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => unreachable!(),
             (AllSyncInner::Poisoned, _) => unreachable!(),
         }
     }
