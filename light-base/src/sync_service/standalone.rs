@@ -755,26 +755,30 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 });
                 self.sync = sync;
 
-                if let Err(err) = result {
-                    let maybe_forced_change =
-                        matches!(err, all::VerifyFragmentError::JustificationVerify(_));
-                    log::warn!(
-                        target: &self.log_target,
-                        "Failed to verify warp sync fragment from {}: {}{}",
-                        sender_peer_id,
-                        err,
-                        if maybe_forced_change {
-                            ". This might be caused by a forced GrandPa authorities change having \
-                            been enacted on the chain. If this is the case, please update the \
-                            chain specification with a checkpoint past this forced change."
-                        } else { "" }
-                    );
-                } else {
-                    log::debug!(
-                        target: &self.log_target,
-                        "Sync => WarpSyncFragmentVerified(sender={})",
-                        sender_peer_id,
-                    );
+                match result {
+                    Ok((fragment_hash, fragment_number)) => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
+                            sender_peer_id,
+                            HashDisplay(&fragment_hash)
+                        );
+                    }
+                    Err(err) => {
+                        let maybe_forced_change =
+                            matches!(err, all::VerifyFragmentError::JustificationVerify(_));
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to verify warp sync fragment from {}: {}{}",
+                            sender_peer_id,
+                            err,
+                            if maybe_forced_change {
+                                ". This might be caused by a forced GrandPa authorities change having \
+                                been enacted on the chain. If this is the case, please update the \
+                                chain specification with a checkpoint past this forced change."
+                            } else { "" }
+                        );
+                    }
                 }
             }
 

@@ -2597,11 +2597,17 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
     /// verification is nonetheless deterministic.
+    ///
+    /// On success, returns the block hash and height that have been verified as being part of
+    /// the chain.
     pub fn perform(
         self,
         randomness_seed: [u8; 32],
-    ) -> (AllSync<TRq, TSrc, TBl>, Result<(), VerifyFragmentError>) {
-        let (next_grandpa_warp_sync, error) = self.inner.verify(randomness_seed);
+    ) -> (
+        AllSync<TRq, TSrc, TBl>,
+        Result<([u8; 32], u64), VerifyFragmentError>,
+    ) {
+        let (next_grandpa_warp_sync, result) = self.inner.verify(randomness_seed);
 
         (
             AllSync {
@@ -2611,7 +2617,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
                 },
                 shared: self.shared,
             },
-            error.map_or(Ok(()), Result::Err),
+            result,
         )
     }
 }

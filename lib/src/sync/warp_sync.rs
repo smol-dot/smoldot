@@ -1240,11 +1240,17 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     ///
     /// Must be passed a randomly-generated value that is used by the verification process. Note
     /// that the verification is still deterministic.
+    ///
+    /// On success, returns the block hash and height that have been verified as being part of
+    /// the chain.
     // TODO: does this API make sense? refactor or explain what this error is
     pub fn verify(
         mut self,
         randomness_seed: [u8; 32],
-    ) -> (WarpSync<TSrc, TRq>, Option<VerifyFragmentError>) {
+    ) -> (
+        WarpSync<TSrc, TRq>,
+        Result<([u8; 32], u64), VerifyFragmentError>,
+    ) {
         // A `VerifyWarpSyncFragment` is only ever created if `verify_queue` is non-empty.
         debug_assert!(!self.inner.verify_queue.is_empty());
         let fragments_to_verify = self
@@ -1262,9 +1268,13 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             // is `true`, meaning that the source has no further data.
             // TODO: is that true? shouldn't we send targeted requests so that we're guaranteed a response?
             if final_set_of_fragments {
-                return (self.inner, None);
+                let result = Ok((
+                    self.inner.warped_header_hash,
+                    self.inner.warped_header_number,
+                ));
+                return (self.inner, result);
             } else {
-                return (self.inner, Some(VerifyFragmentError::EmptyProof));
+                return (self.inner, Err(VerifyFragmentError::EmptyProof));
             }
         }
 
@@ -1298,7 +1308,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             Err(err) => {
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
-                return (self.inner, Some(VerifyFragmentError::InvalidHeader(err)));
+                return (self.inner, Err(VerifyFragmentError::InvalidHeader(err)));
             }
         };
         let fragment_decoded_justification = match justification::decode::decode_grandpa(
@@ -1311,7 +1321,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 self.inner.warp_sync_fragments_download = None;
                 return (
                     self.inner,
-                    Some(VerifyFragmentError::InvalidJustification(err)),
+                    Err(VerifyFragmentError::InvalidJustification(err)),
                 );
             }
         };
@@ -1328,7 +1338,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             };
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
-            return (self.inner, Some(error));
+            return (self.inner, Err(error));
         }
 
         // Check whether the justification is valid.
@@ -1345,7 +1355,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             self.inner.warp_sync_fragments_download = None;
             return (
                 self.inner,
-                Some(VerifyFragmentError::JustificationVerify(err)),
+                Err(VerifyFragmentError::JustificationVerify(err)),
             );
         }
 
@@ -1379,7 +1389,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         {
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
-            return (self.inner, Some(VerifyFragmentError::NonMinimalProof));
+            return (self.inner, Err(VerifyFragmentError::NonMinimalProof));
         }
 
         // Verification of the fragment has succeeded 🎉. We can now update `self`.
@@ -1403,7 +1413,12 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             self.inner.verify_queue.pop_front().unwrap();
         }
 
-        (self.inner, None)
+        // Returning.
+        let result = Ok((
+            self.inner.warped_header_hash,
+            self.inner.warped_header_number,
+        ));
+        (self.inner, result)
     }
 }
 
