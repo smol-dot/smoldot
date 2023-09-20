@@ -336,7 +336,7 @@ pub struct RuntimeInformation {
 /// Warp syncing process state machine.
 pub struct WarpSync<TSrc, TRq> {
     /// SCALE-encoded header of the finalized block of the chain we warp synced to. Initially
-    /// identical to the value in [`WarpSync::start_chain_information`].
+    /// identical to the value in [`WarpSync::verified_chain_information`].
     warped_header: Vec<u8>,
     /// Hash of the block in [`WarpSync::warped_header`].
     warped_header_hash: [u8; 32],
@@ -345,7 +345,7 @@ pub struct WarpSync<TSrc, TRq> {
     /// Number of the block in [`WarpSync::warped_header`].
     warped_header_number: u64,
     /// Information about the finality of the chain at the point where we warp synced to.
-    /// Initially identical to the value in [`WarpSync::start_chain_information`].
+    /// Initially identical to the value in [`WarpSync::verified_chain_information`].
     warped_finality: ChainInformationFinality,
     /// Information about the block described by [`WarpSync::warped_header`] and
     /// [`WarpSync::warped_finality`].
