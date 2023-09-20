@@ -1325,7 +1325,8 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     ///
     /// On success, returns the block hash and height that have been verified as being part of
     /// the chain.
-    // TODO: does this API make sense? refactor or explain what this error is
+    /// On error, returns why the verification has failed. The warp syncing process still
+    /// continues.
     pub fn verify(
         mut self,
         randomness_seed: [u8; 32],
