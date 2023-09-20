@@ -215,9 +215,10 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                         let _ = outcome.send(Ok(()));
                     }
                 }
-                WhatHappened::ConsensusNotification(consensus_service::Notification::Block(
+                WhatHappened::ConsensusNotification(consensus_service::Notification::Block {
                     block,
-                )) => {
+                    ..
+                }) => {
                     pinned_blocks.insert(block.block_hash);
                     json_rpc_subscription
                         .send_notification(
@@ -254,7 +255,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                 }
                 WhatHappened::ConsensusNotification(
                     consensus_service::Notification::Finalized {
-                        finalized_blocks_hashes,
+                        finalized_blocks_newest_to_oldest,
                         pruned_blocks_hashes,
                         best_block_hash,
                     },
@@ -264,9 +265,13 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                             methods::ServerToClient::chainHead_unstable_followEvent {
                                 subscription: (&json_rpc_subscription_id).into(),
                                 result: methods::FollowEvent::Finalized {
-                                    finalized_blocks_hashes: finalized_blocks_hashes
+                                    // As specified in the JSON-RPC spec, the list must be ordered
+                                    // in increasing block number. Consequently we have to reverse
+                                    // the list.
+                                    finalized_blocks_hashes: finalized_blocks_newest_to_oldest
                                         .into_iter()
                                         .map(methods::HashHexString)
+                                        .rev()
                                         .collect(),
                                     pruned_blocks_hashes: pruned_blocks_hashes
                                         .into_iter()

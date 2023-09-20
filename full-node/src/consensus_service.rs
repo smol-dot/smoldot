@@ -28,7 +28,8 @@ use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLe
 
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
-use futures_util::{future, stream, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_lite::FutureExt as _;
+use futures_util::{future, stream, SinkExt as _, StreamExt as _};
 use hashbrown::HashSet;
 use smol::lock::Mutex;
 use smoldot::{
@@ -42,7 +43,7 @@ use smoldot::{
     network::{self, protocol::BlockData},
     sync::all,
     trie,
-    verify::body_only::{self, TrieEntryVersion},
+    verify::body_only::{self, StorageChanges, TrieEntryVersion},
 };
 use std::{
     array,
@@ -147,6 +148,9 @@ enum ToBackground {
         /// Sends back `()` if the unpinning was successful or the subscription no longer exists.
         /// The sender is silently destroyed if the block hash was invalid.
         result_tx: oneshot::Sender<()>,
+    },
+    IsMajorSyncingHint {
+        result_tx: oneshot::Sender<bool>,
     },
 }
 
@@ -431,6 +435,22 @@ impl ConsensusService {
             .await;
         result_rx.await.unwrap()
     }
+
+    /// Returns `true` if the syncing is currently downloading blocks at a high rate in order to
+    /// catch up with the head of the chain.
+    ///
+    /// > **Note**: This function is used to implement the `system_health` JSON-RPC function and
+    /// >           is basically a hack that shouldn't be relied upon.
+    pub async fn is_major_syncing_hint(&self) -> bool {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::IsMajorSyncingHint { result_tx })
+            .await;
+        result_rx.await.unwrap()
+    }
 }
 
 /// Return value of [`ConsensusService::subscribe_all`].
@@ -471,15 +491,14 @@ pub struct SubscriptionId(u64);
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// BLAKE2 hash of the blocks that have been finalized, in increasing block number. In
-        /// other words, each block in this list is a child of the previous one. The first block
-        /// in this list is a child of the previous finalized block. The last block in this list
-        /// is the new finalized block.
+        /// BLAKE2 hash of the blocks that have been finalized, in deceasing block number. In
+        /// other words, each block in this list is the parent of the previous one. The first block
+        /// in this list is the new finalized block.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
-        finalized_blocks_hashes: Vec<[u8; 32]>,
+        finalized_blocks_newest_to_oldest: Vec<[u8; 32]>,
 
         /// Hash of the best block after the finalization.
         ///
@@ -498,7 +517,15 @@ pub enum Notification {
     },
 
     /// A new block has been added to the list of unfinalized blocks.
-    Block(BlockNotification),
+    Block {
+        /// Information about the block.
+        block: BlockNotification,
+
+        /// Changes to the storage that the block has performed.
+        ///
+        /// Note that this field is only available when a new block is available.
+        storage_changes: Arc<StorageChanges>,
+    },
 }
 
 /// Notification about a new block.
@@ -683,296 +710,394 @@ impl SyncBackground {
     }
 
     async fn run(mut self) {
+        let mut process_sync = true;
+
         loop {
             self.start_network_requests().await;
-            let (new_self, must_loop_again_asap) = self.process_blocks().await;
-            self = new_self;
 
-            // Creating the block authoring state and prepare a future that is ready when something
-            // related to the block authoring is ready.
-            // TODO: refactor as a separate task?
-            let mut authoring_ready_future = {
-                // TODO: overhead to call best_block_consensus() multiple times
-                let local_authorities = {
-                    let namespace_filter = match self.sync.best_block_consensus() {
-                        chain_information::ChainInformationConsensusRef::Aura { .. } => {
-                            Some(keystore::KeyNamespace::Aura)
-                        }
-                        chain_information::ChainInformationConsensusRef::Babe { .. } => {
-                            Some(keystore::KeyNamespace::Babe)
-                        }
-                        chain_information::ChainInformationConsensusRef::Unknown => {
-                            // In `Unknown` mode, all keys are accepted and there is no
-                            // filter on the namespace, as we can't author blocks anyway.
-                            // TODO: is that correct?
-                            None
-                        }
+            enum WhatHappened {
+                ReadyToAuthor,
+                FrontendEvent(ToBackground),
+                FrontendClosed,
+                NetworkEvent(network_service::Event),
+                RequestFinished(
+                    all::RequestId,
+                    all::SourceId,
+                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
+                ),
+                SyncProcess,
+            }
+
+            let what_happened: WhatHappened = {
+                // Creating the block authoring state and prepare a future that is ready when something
+                // related to the block authoring is ready.
+                // TODO: refactor as a separate task?
+                let authoring_ready_future = {
+                    // TODO: overhead to call best_block_consensus() multiple times
+                    let local_authorities = {
+                        let namespace_filter = match self.sync.best_block_consensus() {
+                            chain_information::ChainInformationConsensusRef::Aura { .. } => {
+                                Some(keystore::KeyNamespace::Aura)
+                            }
+                            chain_information::ChainInformationConsensusRef::Babe { .. } => {
+                                Some(keystore::KeyNamespace::Babe)
+                            }
+                            chain_information::ChainInformationConsensusRef::Unknown => {
+                                // In `Unknown` mode, all keys are accepted and there is no
+                                // filter on the namespace, as we can't author blocks anyway.
+                                // TODO: is that correct?
+                                None
+                            }
+                        };
+
+                        // Calling `keys()` on the keystore is racy, but that's considered
+                        // acceptable and part of the design of the node.
+                        self.keystore
+                            .keys()
+                            .await
+                            .filter(|(namespace, _)| {
+                                namespace_filter.map_or(true, |n| *namespace == n)
+                            })
+                            .map(|(_, key)| key)
+                            .collect::<Vec<_>>() // TODO: collect overhead :-/
                     };
 
-                    // Calling `keys()` on the keystore is racy, but that's considered
-                    // acceptable and part of the design of the node.
-                    self.keystore
-                        .keys()
-                        .await
-                        .filter(|(namespace, _)| namespace_filter.map_or(true, |n| *namespace == n))
-                        .map(|(_, key)| key)
-                        .collect::<Vec<_>>() // TODO: collect overhead :-/
+                    let block_authoring =
+                        match (&mut self.block_authoring, self.sync.best_block_consensus()) {
+                            (Some(ba), _) => Some(ba),
+                            (
+                                block_authoring @ None,
+                                chain_information::ChainInformationConsensusRef::Aura {
+                                    finalized_authorities_list, // TODO: field name not appropriate; should probably change the chain_information module
+                                    slot_duration,
+                                },
+                            ) => Some(
+                                block_authoring.insert((
+                                    author::build::Builder::new(author::build::Config {
+                                        consensus: author::build::ConfigConsensus::Aura {
+                                            current_authorities: finalized_authorities_list,
+                                            local_authorities: local_authorities.iter(),
+                                            now_from_unix_epoch: SystemTime::now()
+                                                .duration_since(SystemTime::UNIX_EPOCH)
+                                                .unwrap(),
+                                            slot_duration,
+                                        },
+                                    }),
+                                    local_authorities,
+                                )),
+                            ),
+                            (
+                                None,
+                                chain_information::ChainInformationConsensusRef::Babe { .. },
+                            ) => {
+                                None // TODO: the block authoring doesn't support Babe at the moment
+                            }
+                            (None, _) => todo!(),
+                        };
+
+                    match &block_authoring {
+                        Some((author::build::Builder::Ready(_), _)) => future::Either::Left(
+                            future::Either::Left(future::ready(Instant::now())),
+                        ),
+                        Some((author::build::Builder::WaitSlot(when), _)) => {
+                            let delay = (UNIX_EPOCH + when.when())
+                                .duration_since(SystemTime::now())
+                                .unwrap_or_else(|_| Duration::new(0, 0));
+                            future::Either::Right(future::FutureExt::fuse(smol::Timer::after(
+                                delay,
+                            )))
+                        }
+                        None => future::Either::Left(future::Either::Right(future::pending())),
+                        Some((author::build::Builder::Idle, _)) => {
+                            // If the block authoring is idle, which happens in case of error,
+                            // sleep for an arbitrary duration before resetting it.
+                            // This prevents the authoring from trying over and over again to generate
+                            // a bad block.
+                            let delay = Duration::from_secs(2);
+                            future::Either::Right(future::FutureExt::fuse(smol::Timer::after(
+                                delay,
+                            )))
+                        }
+                    }
                 };
 
-                let block_authoring =
-                    match (&mut self.block_authoring, self.sync.best_block_consensus()) {
-                        (Some(ba), _) => Some(ba),
-                        (
-                            block_authoring @ None,
-                            chain_information::ChainInformationConsensusRef::Aura {
-                                finalized_authorities_list, // TODO: field name not appropriate; should probably change the chain_information module
-                                slot_duration,
-                            },
-                        ) => Some(
-                            block_authoring.insert((
-                                author::build::Builder::new(author::build::Config {
-                                    consensus: author::build::ConfigConsensus::Aura {
-                                        current_authorities: finalized_authorities_list,
-                                        local_authorities: local_authorities.iter(),
-                                        now_from_unix_epoch: SystemTime::now()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap(),
-                                        slot_duration,
-                                    },
-                                }),
-                                local_authorities,
-                            )),
-                        ),
-                        (None, chain_information::ChainInformationConsensusRef::Babe { .. }) => {
-                            None // TODO: the block authoring doesn't support Babe at the moment
-                        }
-                        (None, _) => todo!(),
-                    };
-
-                match &block_authoring {
-                    Some((author::build::Builder::Ready(_), _)) => {
-                        future::Either::Left(future::Either::Left(future::ready(Instant::now())))
-                    }
-                    Some((author::build::Builder::WaitSlot(when), _)) => {
-                        let delay = (UNIX_EPOCH + when.when())
-                            .duration_since(SystemTime::now())
-                            .unwrap_or_else(|_| Duration::new(0, 0));
-                        future::Either::Right(future::FutureExt::fuse(smol::Timer::after(delay)))
-                    }
-                    None => future::Either::Left(future::Either::Right(future::pending())),
-                    Some((author::build::Builder::Idle, _)) => {
-                        // If the block authoring is idle, which happens in case of error,
-                        // sleep for an arbitrary duration before resetting it.
-                        // This prevents the authoring from trying over and over again to generate
-                        // a bad block.
-                        let delay = Duration::from_secs(2);
-                        future::Either::Right(future::FutureExt::fuse(smol::Timer::after(delay)))
-                    }
+                async move {
+                    authoring_ready_future.await;
+                    WhatHappened::ReadyToAuthor
                 }
+                .or(async {
+                    self.to_background_rx
+                        .next()
+                        .await
+                        .map_or(WhatHappened::FrontendClosed, WhatHappened::FrontendEvent)
+                })
+                .or(async {
+                    WhatHappened::NetworkEvent(self.from_network_service.next().await.unwrap())
+                })
+                .or(async {
+                    let (request_id, source_id, result) =
+                        self.block_requests_finished_rx.select_next_some().await;
+                    WhatHappened::RequestFinished(request_id, source_id, result)
+                })
+                .or(async {
+                    if !process_sync {
+                        future::pending().await
+                    }
+                    WhatHappened::SyncProcess
+                })
+                .await
             };
 
-            futures_util::select! {
-                _ = authoring_ready_future => {
+            match what_happened {
+                WhatHappened::ReadyToAuthor => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is
                     // deliberately frozen.
                     match self.block_authoring {
                         Some((author::build::Builder::Ready(_), _)) => {
                             self.author_block().await;
-                            continue;
                         }
                         Some((author::build::Builder::WaitSlot(when), local_authorities)) => {
-                            self.block_authoring = Some((author::build::Builder::Ready(when.start()), local_authorities));
+                            self.block_authoring = Some((
+                                author::build::Builder::Ready(when.start()),
+                                local_authorities,
+                            ));
                             self.author_block().await;
-                            continue;
                         }
                         Some((author::build::Builder::Idle, _)) => {
                             self.block_authoring = None;
-                            continue;
                         }
                         None => {
                             unreachable!()
                         }
                     }
-                },
 
-                frontend_event = self.to_background_rx.next().fuse() => {
-                    // TODO: this isn't processed quickly enough when under load
-                    match frontend_event {
-                        Some(ToBackground::SubscribeAll { buffer_size, _max_finalized_pinned_blocks: _, result_tx }) => {
-                            let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+                    process_sync = true;
+                }
 
-                            // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
-                            let finalized_block_scale_encoded_header = self
-                                .sync
-                                .finalized_block_header()
-                                .scale_encoding_vec(self.sync.block_number_bytes());
-                            let finalized_block_hash = header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header);
+                WhatHappened::FrontendClosed => {
+                    // Shutdown.
+                    return;
+                }
 
-                            let non_finalized_blocks_ancestry_order = {
-                                let best_hash = self.sync.best_block_hash();
-                                let blocks_in = self.sync.non_finalized_blocks_ancestry_order()
-                                    .map(|h| (h.number, h.scale_encoding_vec(self.sync.block_number_bytes()), *h.parent_hash)).collect::<Vec<_>>();
-                                let mut blocks_out = Vec::new();
-                                for (number, scale_encoding, parent_hash) in blocks_in {
-                                    let hash = header::hash_from_scale_encoded_header(&scale_encoding);
-                                    let runtime = match &self.sync[(number, &hash)] {
-                                        NonFinalizedBlock::Verified { runtime } => runtime.clone(),
-                                        _ => unreachable!()
-                                    };
-                                    let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
-                                        None
-                                    } else {
-                                        Some(Arc::new(runtime.lock().await.clone().unwrap()))
-                                    };
-                                    blocks_out.push(BlockNotification {
-                                        is_new_best: header::hash_from_scale_encoded_header(
-                                            &scale_encoding,
-                                        ) == best_hash,
-                                        block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
-                                        scale_encoded_header: scale_encoding,
-                                        runtime_update,
-                                        parent_hash,
-                                    });
-                                }
-                                blocks_out
+                WhatHappened::FrontendEvent(ToBackground::SubscribeAll {
+                    buffer_size,
+                    _max_finalized_pinned_blocks: _,
+                    result_tx,
+                }) => {
+                    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+
+                    // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
+                    let finalized_block_scale_encoded_header = self
+                        .sync
+                        .finalized_block_header()
+                        .scale_encoding_vec(self.sync.block_number_bytes());
+                    let finalized_block_hash = header::hash_from_scale_encoded_header(
+                        &finalized_block_scale_encoded_header,
+                    );
+
+                    let non_finalized_blocks_ancestry_order = {
+                        let best_hash = self.sync.best_block_hash();
+                        let blocks_in = self
+                            .sync
+                            .non_finalized_blocks_ancestry_order()
+                            .map(|h| {
+                                (
+                                    h.number,
+                                    h.scale_encoding_vec(self.sync.block_number_bytes()),
+                                    *h.parent_hash,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let mut blocks_out = Vec::new();
+                        for (number, scale_encoding, parent_hash) in blocks_in {
+                            let hash = header::hash_from_scale_encoded_header(&scale_encoding);
+                            let runtime = match &self.sync[(number, &hash)] {
+                                NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                                _ => unreachable!(),
                             };
-
-                            self.blocks_notifications.push(tx);
-                            let _ = result_tx.send(SubscribeAll {
-                                id: SubscriptionId(0), // TODO:
-                                finalized_block_hash,
-                                finalized_block_scale_encoded_header,
-                                finalized_block_runtime: Arc::new(self.finalized_runtime.lock().await.clone().unwrap()),
-                                non_finalized_blocks_ancestry_order,
-                                new_blocks,
-                            });
-                        },
-                        Some(ToBackground::GetSyncState { result_tx }) => {
-                            let _ = result_tx.send(SyncState {
-                                best_block_hash: self.sync.best_block_hash(),
-                                best_block_number: self.sync.best_block_number(),
-                                finalized_block_hash: self.sync.finalized_block_header().hash(self.sync.block_number_bytes()),
-                                finalized_block_number: self.sync.finalized_block_header().number,
-                            });
-                        },
-                        Some(ToBackground::Unpin { result_tx, .. }) => {
-                            // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
-                            let _ = result_tx.send(());
-                        },
-                        None => {
-                            // Shutdown.
-                            return
-                        },
-                    }
-                },
-
-                network_event = self.from_network_service.next().fuse() => {
-                    // We expect the network events channel to never shut down.
-                    let network_event = network_event.unwrap();
-
-                    match network_event {
-                        network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            // Most of the time, we insert a new source in the state machine.
-                            // However, a source of that `PeerId` might already exist but be
-                            // considered as disconnected. If that is the case, we simply mark it
-                            // as no longer disconnected.
-                            match self.peers_source_id_map.entry(peer_id) {
-                                hashbrown::hash_map::Entry::Occupied(entry) => {
-                                    let id = *entry.get();
-                                    let is_disconnected = &mut self.sync[id].as_mut().unwrap().is_disconnected;
-                                    debug_assert!(*is_disconnected);
-                                    *is_disconnected = false;
-                                }
-                                hashbrown::hash_map::Entry::Vacant(entry) => {
-                                    let id = self.sync.add_source(Some(NetworkSourceInfo {
-                                        peer_id: entry.key().clone(),
-                                        is_disconnected: false,
-                                    }), best_block_number, best_block_hash);
-                                    entry.insert(id);
-                                }
-                            }
-                        },
-                        network_service::Event::Disconnected { peer_id, chain_index }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            // Sources that disconnect are only immediately removed from the sync
-                            // state machine if they have no request in progress. If that is not
-                            // the case, they are instead only marked as disconnected.
-                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            if self.sync.source_num_ongoing_requests(id) == 0 {
-                                self.peers_source_id_map.remove(&peer_id).unwrap();
-                                let (_, mut _requests) = self.sync.remove_source(id);
-                                debug_assert!(_requests.next().is_none());
+                            let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
+                                None
                             } else {
-                                let is_disconnected = &mut self.sync[id].as_mut().unwrap().is_disconnected;
-                                debug_assert!(!*is_disconnected);
-                                *is_disconnected = true;
-                            }
-                        },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, scale_encoded_header, is_best }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let _jaeger_span = self
-                                .jaeger_service
-                                .block_announce_process_span(&header::hash_from_scale_encoded_header(&scale_encoded_header));
+                                Some(Arc::new(runtime.lock().await.clone().unwrap()))
+                            };
+                            blocks_out.push(BlockNotification {
+                                is_new_best: header::hash_from_scale_encoded_header(
+                                    &scale_encoding,
+                                ) == best_hash,
+                                block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
+                                scale_encoded_header: scale_encoding,
+                                runtime_update,
+                                parent_hash,
+                            });
+                        }
+                        blocks_out
+                    };
 
-                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            // TODO: log the outcome
-                            match self.sync.block_announce(id, scale_encoded_header, is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify => {},
-                                all::BlockAnnounceOutcome::TooOld { .. } => {},
-                                all::BlockAnnounceOutcome::AlreadyInChain => {},
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::Discarded => {},
-                                all::BlockAnnounceOutcome::StoredForLater {} => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
-                            }
-                        },
-                        _ => {
-                            // Different chain index.
+                    self.blocks_notifications.push(tx);
+                    let _ = result_tx.send(SubscribeAll {
+                        id: SubscriptionId(0), // TODO:
+                        finalized_block_hash,
+                        finalized_block_scale_encoded_header,
+                        finalized_block_runtime: Arc::new(
+                            self.finalized_runtime.lock().await.clone().unwrap(),
+                        ),
+                        non_finalized_blocks_ancestry_order,
+                        new_blocks,
+                    });
+                }
+                WhatHappened::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
+                    let _ = result_tx.send(SyncState {
+                        best_block_hash: self.sync.best_block_hash(),
+                        best_block_number: self.sync.best_block_number(),
+                        finalized_block_hash: self
+                            .sync
+                            .finalized_block_header()
+                            .hash(self.sync.block_number_bytes()),
+                        finalized_block_number: self.sync.finalized_block_header().number,
+                    });
+                }
+                WhatHappened::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
+                    // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
+                    let _ = result_tx.send(());
+                }
+                WhatHappened::FrontendEvent(ToBackground::IsMajorSyncingHint { result_tx }) => {
+                    // As documented, the value returned doesn't need to be precise.
+                    let result = match self.sync.status() {
+                        all::Status::Sync => false,
+                        all::Status::WarpSyncFragments { .. }
+                        | all::Status::WarpSyncChainInformation { .. } => true,
+                    };
+
+                    let _ = result_tx.send(result);
+                }
+
+                WhatHappened::NetworkEvent(network_service::Event::Connected {
+                    peer_id,
+                    chain_index,
+                    best_block_number,
+                    best_block_hash,
+                }) if chain_index == self.network_chain_index => {
+                    // Most of the time, we insert a new source in the state machine.
+                    // However, a source of that `PeerId` might already exist but be considered as
+                    // disconnected. If that is the case, we simply mark it as no
+                    // longer disconnected.
+                    match self.peers_source_id_map.entry(peer_id) {
+                        hashbrown::hash_map::Entry::Occupied(entry) => {
+                            let id = *entry.get();
+                            let is_disconnected =
+                                &mut self.sync[id].as_mut().unwrap().is_disconnected;
+                            debug_assert!(*is_disconnected);
+                            *is_disconnected = false;
+                        }
+                        hashbrown::hash_map::Entry::Vacant(entry) => {
+                            let id = self.sync.add_source(
+                                Some(NetworkSourceInfo {
+                                    peer_id: entry.key().clone(),
+                                    is_disconnected: false,
+                                }),
+                                best_block_number,
+                                best_block_hash,
+                            );
+                            entry.insert(id);
                         }
                     }
-                },
+                }
+                WhatHappened::NetworkEvent(network_service::Event::Disconnected {
+                    peer_id,
+                    chain_index,
+                }) if chain_index == self.network_chain_index => {
+                    // Sources that disconnect are only immediately removed from the sync state
+                    // machine if they have no request in progress. If that is not the case, they
+                    // are instead only marked as disconnected.
+                    let id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                    if self.sync.source_num_ongoing_requests(id) == 0 {
+                        self.peers_source_id_map.remove(&peer_id).unwrap();
+                        let (_, mut _requests) = self.sync.remove_source(id);
+                        debug_assert!(_requests.next().is_none());
+                    } else {
+                        let is_disconnected = &mut self.sync[id].as_mut().unwrap().is_disconnected;
+                        debug_assert!(!*is_disconnected);
+                        *is_disconnected = true;
+                    }
+                }
+                WhatHappened::NetworkEvent(network_service::Event::BlockAnnounce {
+                    chain_index,
+                    peer_id,
+                    scale_encoded_header,
+                    is_best,
+                }) if chain_index == self.network_chain_index => {
+                    let _jaeger_span = self.jaeger_service.block_announce_process_span(
+                        &header::hash_from_scale_encoded_header(&scale_encoded_header),
+                    );
 
-                (request_id, source_id, result) = self.block_requests_finished_rx.select_next_some() => {
+                    let id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                    // TODO: log the outcome
+                    match self.sync.block_announce(id, scale_encoded_header, is_best) {
+                        all::BlockAnnounceOutcome::HeaderVerify => {}
+                        all::BlockAnnounceOutcome::TooOld { .. } => {}
+                        all::BlockAnnounceOutcome::AlreadyInChain => {}
+                        all::BlockAnnounceOutcome::NotFinalizedChain => {}
+                        all::BlockAnnounceOutcome::Discarded => {}
+                        all::BlockAnnounceOutcome::StoredForLater {} => {}
+                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
+                    }
+                }
+                WhatHappened::NetworkEvent(_) => {
+                    // Different chain index.
+                }
+
+                WhatHappened::RequestFinished(request_id, source_id, result) => {
                     // TODO: clarify this piece of code
                     let result = result.map_err(|_| ());
-                    let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
-                        scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                        scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                        scale_encoded_justifications: block.justifications
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
-                            .collect(),
-                        user_data: NonFinalizedBlock::NotVerified,
-                    })));
+                    let (_, response_outcome) = self.sync.blocks_request_response(
+                        request_id,
+                        result.map(|v| {
+                            v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                                scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                                scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                                scale_encoded_justifications: block
+                                    .justifications
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|j| all::Justification {
+                                        engine_id: j.engine_id,
+                                        justification: j.justification,
+                                    })
+                                    .collect(),
+                                user_data: NonFinalizedBlock::NotVerified,
+                            })
+                        }),
+                    );
 
                     match response_outcome {
                         all::ResponseOutcome::Outdated
                         | all::ResponseOutcome::Queued
                         | all::ResponseOutcome::NotFinalizedChain { .. }
-                        | all::ResponseOutcome::AllAlreadyInChain { .. } => {
-                        }
+                        | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
                     }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
-                    if self.sync[source_id].as_ref().map_or(false, |info| info.is_disconnected)
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
                         && self.sync.source_num_ongoing_requests(source_id) == 0
                     {
                         let (info, mut _requests) = self.sync.remove_source(source_id);
                         debug_assert!(_requests.next().is_none());
-                        self.peers_source_id_map.remove(&info.unwrap().peer_id).unwrap();
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
                     }
-                },
 
-                () = if must_loop_again_asap { either::Left(future::ready(())) } else { either::Right(future::pending()) }.fuse() => {
-                    // This block exists just so that we continue looping if `must_loop_again_asap`
-                    // is `true`.
+                    process_sync = true;
+                }
+
+                WhatHappened::SyncProcess => {
+                    let (new_self, maybe_more_to_process) = self.process_blocks().await;
+                    process_sync = maybe_more_to_process;
+                    self = new_self;
                 }
             }
         }
@@ -1577,10 +1702,13 @@ impl SyncBackground {
                             new_runtime,
                             ..
                         })) => {
+                            let storage_changes = Arc::new(storage_changes);
+
                             // Insert the block in the database.
                             let when_database_access_started = Instant::now();
                             self.database
                                 .with_database_detached({
+                                    let storage_changes = storage_changes.clone();
                                     let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
                                     move |database| {
                                         // TODO: overhead for building the SCALE encoding of the header
@@ -1641,8 +1769,7 @@ impl SyncBackground {
                                             Err(err) => panic!("{}", err),
                                         }
                                     }
-                                })
-                                .await;
+                                }).await;
                             database_accesses_duration += when_database_access_started.elapsed();
 
                             let height = header_verification_success.height();
@@ -1675,13 +1802,16 @@ impl SyncBackground {
                             for index in (0..self.blocks_notifications.len()).rev() {
                                 let subscription = self.blocks_notifications.swap_remove(index);
                                 if subscription
-                                    .try_send(Notification::Block(BlockNotification {
-                                        is_new_best,
-                                        scale_encoded_header: scale_encoded_header.clone(),
-                                        block_hash: header_verification_success.hash(),
-                                        runtime_update: runtime_to_notify.clone(),
-                                        parent_hash,
-                                    }))
+                                    .try_send(Notification::Block {
+                                        block: BlockNotification {
+                                            is_new_best,
+                                            scale_encoded_header: scale_encoded_header.clone(),
+                                            block_hash: header_verification_success.hash(),
+                                            runtime_update: runtime_to_notify.clone(),
+                                            parent_hash,
+                                        },
+                                        storage_changes: storage_changes.clone(),
+                                    })
                                     .is_err()
                                 {
                                     continue;
@@ -1897,16 +2027,25 @@ impl SyncBackground {
                     (
                         sync_out,
                         all::FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest,
                             pruned_blocks,
                             updates_best_block,
                         },
                     ) => {
+                        self.sync = sync_out;
+
+                        let new_finalized_hash = finalized_blocks_newest_to_oldest
+                            .first()
+                            .unwrap()
+                            .header
+                            .hash(self.sync.block_number_bytes());
                         self.log_callback.log(
                             LogLevel::Debug,
-                            "finality-proof-verification; outcome=success".to_string(),
+                            format!(
+                                "finality-proof-verification; outcome=success; new-finalized={}",
+                                HashDisplay(&new_finalized_hash)
+                            ),
                         );
-                        self.sync = sync_out;
 
                         if updates_best_block {
                             let fut = self.network_service.set_local_best_block(
@@ -1921,15 +2060,11 @@ impl SyncBackground {
                             self.block_authoring = None;
                         }
 
-                        self.finalized_runtime = match &finalized_blocks.last().unwrap().user_data {
-                            NonFinalizedBlock::Verified { runtime } => runtime.clone(),
-                            _ => unreachable!(),
-                        };
-                        let new_finalized_hash = finalized_blocks
-                            .last()
-                            .unwrap()
-                            .header
-                            .hash(self.sync.block_number_bytes());
+                        self.finalized_runtime =
+                            match &finalized_blocks_newest_to_oldest.first().unwrap().user_data {
+                                NonFinalizedBlock::Verified { runtime } => runtime.clone(),
+                                _ => unreachable!(),
+                            };
                         // TODO: what if best block changed?
                         self.database
                             .with_database_detached(move |database| {
@@ -1942,11 +2077,11 @@ impl SyncBackground {
                             let subscription = self.blocks_notifications.swap_remove(index);
                             if subscription
                                 .try_send(Notification::Finalized {
-                                    finalized_blocks_hashes: finalized_blocks
-                                        .iter()
-                                        .map(|b| b.header.hash(self.sync.block_number_bytes()))
-                                        .rev()
-                                        .collect::<Vec<_>>(),
+                                    finalized_blocks_newest_to_oldest:
+                                        finalized_blocks_newest_to_oldest
+                                            .iter()
+                                            .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                            .collect::<Vec<_>>(),
                                     pruned_blocks_hashes: pruned_blocks.clone(),
                                     best_block_hash: self.sync.best_block_hash(),
                                 })

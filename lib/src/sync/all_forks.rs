@@ -2180,7 +2180,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                                 finalized_blocks.last().unwrap().0.number,
                             );
                         FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest: finalized_blocks,
                             pruned_blocks,
                             updates_best_block,
                         }
@@ -2244,7 +2244,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                                 finalized_blocks.last().unwrap().0.number,
                             );
                         FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest: finalized_blocks,
                             pruned_blocks,
                             updates_best_block,
                         }
@@ -2337,7 +2337,7 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
         // TODO: use `Vec<u8>` instead of `Header`?
-        finalized_blocks: Vec<(header::Header, TBl)>,
+        finalized_blocks_newest_to_oldest: Vec<(header::Header, TBl)>,
         /// List of blocks that aren't descendant of the latest finalized block, in an unspecified order.
         pruned_blocks: Vec<(header::Header, TBl)>,
         /// If `true`, this operation modifies the best block of the non-finalized chain.

@@ -941,7 +941,10 @@ pub struct Header {
     pub extrinsics_root: HashHexString,
     #[serde(rename = "stateRoot")]
     pub state_root: HashHexString,
-    #[serde(serialize_with = "hex_num")]
+    #[serde(
+        serialize_with = "hex_num_serialize",
+        deserialize_with = "hex_num_deserialize"
+    )]
     pub number: u64,
     pub digest: HeaderDigest,
 }
@@ -1216,20 +1219,20 @@ impl serde::Serialize for RuntimeDispatchInfo {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerdeSystemHealth {
+    #[serde(rename = "isSyncing")]
+    is_syncing: bool,
+    peers: u64,
+    #[serde(rename = "shouldHavePeers")]
+    should_have_peers: bool,
+}
+
 impl serde::Serialize for SystemHealth {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        #[derive(serde::Serialize)]
-        struct SerdeSystemHealth {
-            #[serde(rename = "isSyncing")]
-            is_syncing: bool,
-            peers: u64,
-            #[serde(rename = "shouldHavePeers")]
-            should_have_peers: bool,
-        }
-
         SerdeSystemHealth {
             is_syncing: self.is_syncing,
             peers: self.peers,
@@ -1239,11 +1242,46 @@ impl serde::Serialize for SystemHealth {
     }
 }
 
-fn hex_num<S>(num: &u64, serializer: S) -> Result<S::Ok, S::Error>
+impl<'a> serde::Deserialize<'a> for SystemHealth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let h: SerdeSystemHealth = serde::Deserialize::deserialize(deserializer)?;
+        Ok(SystemHealth {
+            is_syncing: h.is_syncing,
+            peers: h.peers,
+            should_have_peers: h.should_have_peers,
+        })
+    }
+}
+
+fn hex_num_serialize<S>(num: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     serde::Serialize::serialize(&format!("0x{:x}", *num), serializer)
+}
+
+fn hex_num_deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut string: String = serde::Deserialize::deserialize(deserializer)?;
+    if !string.starts_with("0x") {
+        return Err(serde::de::Error::custom("number doesn't start with 0x"));
+    }
+    if string.len() % 2 != 0 {
+        string.insert(2, '0');
+    }
+    let decoded = hex::decode(&string[2..]).map_err(|err| serde::de::Error::custom(err))?;
+    if decoded.len() > 8 {
+        return Err(serde::de::Error::custom("number overflow"));
+    }
+
+    let mut num = [0u8; 8];
+    num[..decoded.len()].copy_from_slice(&decoded);
+    Ok(u64::from_be_bytes(num))
 }
 
 #[cfg(test)]

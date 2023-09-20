@@ -936,7 +936,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         sync,
                         all::FinalityProofVerifyOutcome::NewFinalized {
                             updates_best_block,
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest,
                             ..
                         },
                     ) => {
@@ -945,7 +945,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(
                             target: &self.log_target,
                             "Sync => FinalityProofVerified(finalized_blocks={})",
-                            finalized_blocks.len(),
+                            finalized_blocks_newest_to_oldest.len(),
                         );
 
                         if updates_best_block {
@@ -954,7 +954,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.network_up_to_date_finalized = false;
                         // Invalidate the cache of the runtime of the finalized blocks if any
                         // of the finalized blocks indicates that a runtime update happened.
-                        if finalized_blocks
+                        if finalized_blocks_newest_to_oldest
                             .iter()
                             .any(|b| b.header.digest.has_runtime_environment_updated())
                         {
