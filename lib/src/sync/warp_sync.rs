@@ -414,6 +414,8 @@ enum RuntimeDownload {
         request_id: RequestId,
     },
     NotVerified {
+        /// Source the runtime has been obtained from. `None` if the source has been removed.
+        downloaded_source: Option<SourceId>,
         hint_doesnt_match: bool,
         trie_proof: Vec<u8>,
     },
@@ -454,7 +456,11 @@ struct DownloadedRuntime {
 enum CallProof {
     NotStarted,
     Downloading(RequestId),
-    Downloaded(Vec<u8>),
+    Downloaded {
+        /// Source the proof has been obtained from. `None` if the source has been removed.
+        downloaded_source: Option<SourceId>,
+        proof: Vec<u8>,
+    },
 }
 
 /// Returns the default value for [`WarpSync::runtime_calls`].
@@ -643,6 +649,24 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         for item in &mut self.verify_queue {
             if item.downloaded_source == Some(to_remove) {
                 item.downloaded_source = None;
+            }
+        }
+        if let RuntimeDownload::NotVerified {
+            downloaded_source, ..
+        } = &mut self.runtime_download
+        {
+            if *downloaded_source == Some(to_remove) {
+                *downloaded_source = None;
+            }
+        }
+        for (_, call_proof) in &mut self.runtime_calls {
+            if let CallProof::Downloaded {
+                downloaded_source, ..
+            } = call_proof
+            {
+                if *downloaded_source == Some(to_remove) {
+                    *downloaded_source = None;
+                }
             }
         }
 
@@ -1066,6 +1090,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         };
 
         self.runtime_download = RuntimeDownload::NotVerified {
+            downloaded_source: Some(source_id),
             hint_doesnt_match,
             trie_proof: merkle_proof,
         };
@@ -1098,7 +1123,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
 
         for call in self.runtime_calls.values_mut() {
             if matches!(call, CallProof::Downloading(rq_id) if *rq_id == request_id) {
-                *call = CallProof::Downloaded(response);
+                *call = CallProof::Downloaded {
+                    downloaded_source: Some(source_id),
+                    proof: response,
+                };
                 break;
             }
         }
@@ -1207,7 +1235,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             && self
                 .runtime_calls
                 .values()
-                .all(|c| matches!(c, CallProof::Downloaded(_)))
+                .all(|c| matches!(c, CallProof::Downloaded { .. }))
         {
             return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
         }
@@ -1658,6 +1686,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc, TRq>, Result<(), Error>) {
         let RuntimeDownload::NotVerified {
+            downloaded_source,
             hint_doesnt_match,
             trie_proof,
         } = &mut self.inner.runtime_download
@@ -1672,6 +1701,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             }) {
                 Ok(p) => p,
                 Err(err) => {
+                    if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
+                    }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1716,6 +1748,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     return (self.inner, Err(Error::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
+                    if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
+                    }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1748,6 +1783,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     return (self.inner, Err(Error::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
+                    if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
+                    }
                     return (self.inner, Err(Error::MerkleProofEntriesMissing));
                 }
             }
@@ -1758,6 +1796,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         {
             Ok(val) => val.map(|(v, _)| v),
             Err(proof_decode::IncompleteProofError { .. }) => {
+                if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                    self.inner.sources[downloaded_source].finalized_block_height = Err(());
+                }
                 return (self.inner, Err(Error::MerkleProofEntriesMissing));
             }
         };
@@ -1854,7 +1895,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
 
         debug_assert!(runtime_calls
             .values()
-            .all(|c| matches!(c, CallProof::Downloaded(_))));
+            .all(|c| matches!(c, CallProof::Downloaded { .. })));
 
         // Decode all the Merkle proofs that have been received.
         let calls = {
@@ -1864,19 +1905,29 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             );
 
             for (call, proof) in runtime_calls {
-                let CallProof::Downloaded(proof) = proof else {
+                let CallProof::Downloaded {
+                    proof,
+                    downloaded_source,
+                } = proof
+                else {
                     unreachable!()
                 };
+
                 let decoded_proof =
                     match proof_decode::decode_and_verify_proof(proof_decode::Config {
                         proof: proof.into_iter(),
                     }) {
                         Ok(d) => d,
                         Err(err) => {
+                            if let Some(SourceId(downloaded_source)) = downloaded_source {
+                                self.inner.sources[downloaded_source].finalized_block_height =
+                                    Err(());
+                            }
                             return (self.inner, Err(Error::InvalidMerkleProof(err)));
                         }
                     };
-                decoded_proofs.insert(call, decoded_proof);
+
+                decoded_proofs.insert(call, (decoded_proof, downloaded_source));
             }
 
             decoded_proofs
@@ -1928,12 +1979,16 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             chain_info_builder = match in_progress {
                 chain_information::build::InProgress::StorageGet(get) => {
                     // TODO: child tries not supported
-                    let proof = calls.get(&get.call_in_progress()).unwrap();
+                    let (proof, downloaded_source) = calls.get(&get.call_in_progress()).unwrap();
                     let value = match proof
                         .storage_value(&self.inner.warped_header_state_root, get.key().as_ref())
                     {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
+                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                                self.inner.sources[downloaded_source].finalized_block_height =
+                                    Err(());
+                            }
                             return (self.inner, Err(Error::MerkleProofEntriesMissing));
                         }
                     };
@@ -1942,7 +1997,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 }
                 chain_information::build::InProgress::NextKey(nk) => {
                     // TODO: child tries not supported
-                    let proof = calls.get(&nk.call_in_progress()).unwrap();
+                    let (proof, downloaded_source) = calls.get(&nk.call_in_progress()).unwrap();
                     let value = match proof.next_key(
                         &self.inner.warped_header_state_root,
                         &nk.key().collect::<Vec<_>>(), // TODO: overhead
@@ -1952,6 +2007,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
+                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                                self.inner.sources[downloaded_source].finalized_block_height =
+                                    Err(());
+                            }
                             return (self.inner, Err(Error::MerkleProofEntriesMissing));
                         }
                     };
@@ -1959,13 +2018,17 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 }
                 chain_information::build::InProgress::ClosestDescendantMerkleValue(mv) => {
                     // TODO: child tries not supported
-                    let proof = calls.get(&mv.call_in_progress()).unwrap();
+                    let (proof, downloaded_source) = calls.get(&mv.call_in_progress()).unwrap();
                     let value = match proof.closest_descendant_merkle_value(
                         &self.inner.warped_header_state_root,
                         &mv.key().collect::<Vec<_>>(), // TODO: overhead
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
+                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                                self.inner.sources[downloaded_source].finalized_block_height =
+                                    Err(());
+                            }
                             return (self.inner, Err(Error::MerkleProofEntriesMissing));
                         }
                     };
