@@ -91,6 +91,8 @@
 //! previously been downloaded.
 //!
 
+// TODO: this module is "vulnerable" to situations where new malicious sources are continuously added with a high finalized block, as the state machine will repeatedly try to download from that source and fail
+
 use crate::{
     chain::chain_information::{
         self, ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
