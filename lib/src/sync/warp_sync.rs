@@ -119,39 +119,6 @@ use core::{cmp, fmt, iter, mem, ops};
 
 pub use trie::Nibble;
 
-/// Problem encountered during a call to [`start_warp_sync()`].
-#[derive(Debug, derive_more::Display)]
-pub enum Error {
-    /// The chain doesn't include any storage item at `:code`.
-    #[display(fmt = "The chain doesn't include any storage item at `:code`")]
-    MissingCode,
-    /// The storage item at `:heappages` is in an incorrect format.
-    #[display(fmt = "Invalid heap pages value: {_0}")]
-    InvalidHeapPages(executor::InvalidHeapPagesError),
-    /// Error building the runtime of the chain.
-    #[display(fmt = "Error building the runtime: {_0}")]
-    RuntimeBuild(executor::host::NewErr),
-    /// Error building the chain information.
-    #[display(fmt = "Error building the chain information: {_0}")]
-    ChainInformationBuild(chain_information::build::Error),
-    /// Failed to verify Merkle proof.
-    // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    InvalidMerkleProof(proof_decode::Error),
-    /// Merkle proof is missing the necessary entries.
-    // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    MerkleProofEntriesMissing,
-}
-
-/// Fragment to be verified.
-#[derive(Debug)]
-pub struct WarpSyncFragment {
-    /// Header of a block in the chain.
-    pub scale_encoded_header: Vec<u8>,
-
-    /// Justification that proves the finality of [`WarpSyncFragment::scale_encoded_header`].
-    pub scale_encoded_justification: Vec<u8>,
-}
-
 /// The configuration for [`start_warp_sync()`].
 #[derive(Debug)]
 pub struct Config {
@@ -335,6 +302,16 @@ pub struct RuntimeInformation {
 
     /// Closest ancestor of the `:code` trie node of the finalized block excluding `:code` itself.
     pub finalized_storage_code_closest_ancestor_excluding: Option<Vec<Nibble>>,
+}
+
+/// Fragment to be verified.
+#[derive(Debug)]
+pub struct WarpSyncFragment {
+    /// Header of a block in the chain.
+    pub scale_encoded_header: Vec<u8>,
+
+    /// Justification that proves the finality of [`WarpSyncFragment::scale_encoded_header`].
+    pub scale_encoded_justification: Vec<u8>,
 }
 
 /// Warp syncing process state machine.
@@ -1663,6 +1640,30 @@ impl fmt::Display for VerifyFragmentError {
             }
         }
     }
+}
+
+/// Problem encountered during a call to [`BuildRuntime::build`] or
+/// [`BuildChainInformation::build`].
+#[derive(Debug, derive_more::Display)]
+pub enum Error {
+    /// The chain doesn't include any storage item at `:code`.
+    #[display(fmt = "The chain doesn't include any storage item at `:code`")]
+    MissingCode,
+    /// The storage item at `:heappages` is in an incorrect format.
+    #[display(fmt = "Invalid heap pages value: {_0}")]
+    InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error building the runtime of the chain.
+    #[display(fmt = "Error building the runtime: {_0}")]
+    RuntimeBuild(executor::host::NewErr),
+    /// Error building the chain information.
+    #[display(fmt = "Error building the chain information: {_0}")]
+    ChainInformationBuild(chain_information::build::Error),
+    /// Failed to verify Merkle proof.
+    // TODO: this is a non-fatal error contrary to all the other errors in this enum
+    InvalidMerkleProof(proof_decode::Error),
+    /// Merkle proof is missing the necessary entries.
+    // TODO: this is a non-fatal error contrary to all the other errors in this enum
+    MerkleProofEntriesMissing,
 }
 
 /// Ready to build the runtime of the finalized chain.
