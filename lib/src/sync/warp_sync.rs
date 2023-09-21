@@ -1357,6 +1357,9 @@ pub enum ProcessOne<TSrc, TRq> {
     /// Nothing to verify at the moment. The state machine is yielded back.
     Idle(WarpSync<TSrc, TRq>),
     /// Ready to verify a warp sync fragment.
+    ///
+    /// > **Note**: In case where a source has sent an empty list of fragment, which is invalid,
+    /// >           this variant will "verify" the list and produce an error.
     VerifyWarpSyncFragment(VerifyWarpSyncFragment<TSrc, TRq>),
     /// Ready to build the runtime of the chain..
     BuildRuntime(BuildRuntime<TSrc, TRq>),
@@ -1365,6 +1368,9 @@ pub enum ProcessOne<TSrc, TRq> {
 }
 
 /// Ready to verify a warp sync fragment.
+///
+/// > **Note**: In case where a source has sent an empty list of fragment, which is invalid,
+/// >           this variant will "verify" the list and produce an error.
 pub struct VerifyWarpSyncFragment<TSrc, TRq> {
     inner: WarpSync<TSrc, TRq>,
 }
@@ -1404,24 +1410,13 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             .front_mut()
             .unwrap_or_else(|| unreachable!());
 
-        // The source has sent an empty list of fragments.
+        // The source has sent an empty list of fragments. This is invalid.
         if fragments_to_verify.fragments.is_empty() {
-            let final_set_of_fragments = fragments_to_verify.final_set_of_fragments;
-            self.inner.verify_queue.pop_front().unwrap();
-
-            // It is acceptable to send an empty list of fragments only if `final_set_of_fragments`
-            // is `true`, meaning that the source has no further data.
-            // TODO: is that true? shouldn't we send targeted requests so that we're guaranteed a response?
-            if final_set_of_fragments {
-                let result = Ok((
-                    self.inner.warped_header_hash,
-                    self.inner.warped_header_number,
-                ));
-                return (self.inner, result);
-            } else {
-                // TODO: must punish source
-                return (self.inner, Err(VerifyFragmentError::EmptyProof));
+            if let Some(SourceId(downloaded_source)) = fragments_to_verify.downloaded_source {
+                self.inner.sources[downloaded_source].finalized_block_height = Err(());
             }
+            self.inner.verify_queue.pop_front().unwrap();
+            return (self.inner, Err(VerifyFragmentError::EmptyProof));
         }
 
         // Given that the list of fragments is non-empty, we are assuming that there are still
