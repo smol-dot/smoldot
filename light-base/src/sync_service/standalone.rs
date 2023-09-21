@@ -315,6 +315,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             .1
                     }
                     RequestOutcome::Block(Err(_)) => {
+                        // TODO: should disconnect peer
                         task.sync
                             .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()))
                             .1
@@ -338,6 +339,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             .1
                     }
                     RequestOutcome::WarpSync(Err(_)) => {
+                        // TODO: should disconnect peer
                         task.sync.grandpa_warp_sync_response_err(request_id);
                         continue;
                     }
@@ -683,8 +685,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                        if !matches!(err, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
+                            log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -697,8 +702,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                        if !matches!(
+                            err,
+                            all::WarpSyncBuildChainInformationError::SourceMisbehavior(_)
+                        ) {
+                            log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -766,6 +777,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         let maybe_forced_change =
                             matches!(err, all::VerifyFragmentError::JustificationVerify(_));
                         log::warn!(

@@ -49,7 +49,11 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
-pub use warp_sync::{ConfigCodeTrieNodeHint, VerifyFragmentError, WarpSyncFragment};
+pub use warp_sync::{
+    BuildChainInformationError as WarpSyncBuildChainInformationError,
+    BuildRuntimeError as WarpSyncBuildRuntimeError, ConfigCodeTrieNodeHint, VerifyFragmentError,
+    WarpSyncFragment,
+};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -2654,12 +2658,14 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
     /// Assuming that the warp syncing goes to completion, the provided parameters are used to
     /// compile the runtime that will be yielded in
     /// [`ProcessOne::WarpSyncFinished::finalized_block_runtime`].
-    // TODO: better error type
     pub fn build(
         self,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
-    ) -> (AllSync<TRq, TSrc, TBl>, Result<(), warp_sync::Error>) {
+    ) -> (
+        AllSync<TRq, TSrc, TBl>,
+        Result<(), WarpSyncBuildRuntimeError>,
+    ) {
         let (warp_sync_status, outcome) = self.inner.build(exec_hint, allow_unresolved_imports);
 
         (
@@ -2688,8 +2694,12 @@ pub struct WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
     /// Builds the chain information.
-    // TODO: better error type
-    pub fn build(self) -> (AllSync<TRq, TSrc, TBl>, Result<(), warp_sync::Error>) {
+    pub fn build(
+        self,
+    ) -> (
+        AllSync<TRq, TSrc, TBl>,
+        Result<(), WarpSyncBuildChainInformationError>,
+    ) {
         let (warp_sync_status, outcome) = self.inner.build();
 
         let (ready_to_transition, outcome) = match outcome {

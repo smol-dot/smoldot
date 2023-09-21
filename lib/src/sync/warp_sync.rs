@@ -1643,9 +1643,29 @@ impl fmt::Display for VerifyFragmentError {
 }
 
 /// Problem encountered during a call to [`BuildRuntime::build`] or
-/// [`BuildChainInformation::build`].
+/// [`BuildChainInformation::build`] that can be attributed to the source sending invalid data.
 #[derive(Debug, derive_more::Display)]
-pub enum Error {
+#[display(fmt = "{error}")]
+pub struct SourceMisbehavior {
+    /// Source that committed the felony. `None` if the source has been removed between the moment
+    /// when the request has succeeded and when it has been verified.
+    pub source_id: Option<SourceId>,
+    /// Error that the source made.
+    pub error: SourceMisbehaviorTy,
+}
+
+/// See [`SourceMisbehavior::error`].
+#[derive(Debug, derive_more::Display)]
+pub enum SourceMisbehaviorTy {
+    /// Failed to verify Merkle proof.
+    InvalidMerkleProof(proof_decode::Error),
+    /// Merkle proof is missing the necessary entries.
+    MerkleProofEntriesMissing,
+}
+
+/// Problem encountered during a call to [`BuildRuntime::build`].
+#[derive(Debug, derive_more::Display)]
+pub enum BuildRuntimeError {
     /// The chain doesn't include any storage item at `:code`.
     #[display(fmt = "The chain doesn't include any storage item at `:code`")]
     MissingCode,
@@ -1655,15 +1675,8 @@ pub enum Error {
     /// Error building the runtime of the chain.
     #[display(fmt = "Error building the runtime: {_0}")]
     RuntimeBuild(executor::host::NewErr),
-    /// Error building the chain information.
-    #[display(fmt = "Error building the chain information: {_0}")]
-    ChainInformationBuild(chain_information::build::Error),
-    /// Failed to verify Merkle proof.
-    // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    InvalidMerkleProof(proof_decode::Error),
-    /// Merkle proof is missing the necessary entries.
-    // TODO: this is a non-fatal error contrary to all the other errors in this enum
-    MerkleProofEntriesMissing,
+    /// Source that has sent a proof didn't behave properly.
+    SourceMisbehavior(SourceMisbehavior),
 }
 
 /// Ready to build the runtime of the finalized chain.
@@ -1677,12 +1690,11 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
     /// Must be passed parameters used for the construction of the runtime: a hint as to whether
     /// the runtime is trusted and/or will be executed again, and whether unresolved function
     /// imports are allowed.
-    // TODO: refactor this error or explain what it is
     pub fn build(
         mut self,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
-    ) -> (WarpSync<TSrc, TRq>, Result<(), Error>) {
+    ) -> (WarpSync<TSrc, TRq>, Result<(), BuildRuntimeError>) {
         let RuntimeDownload::NotVerified {
             downloaded_source,
             hint_doesnt_match,
@@ -1699,13 +1711,20 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             }) {
                 Ok(p) => p,
                 Err(err) => {
-                    if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                    let downloaded_source = *downloaded_source;
+                    if let Some(SourceId(downloaded_source)) = downloaded_source {
                         self.inner.sources[downloaded_source].finalized_block_height = Err(());
                     }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Err(Error::InvalidMerkleProof(err)));
+                    return (
+                        self.inner,
+                        Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
+                            source_id: downloaded_source,
+                            error: SourceMisbehaviorTy::InvalidMerkleProof(err),
+                        })),
+                    );
                 }
             };
 
@@ -1734,7 +1753,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
                                 hint_doesnt_match: *hint_doesnt_match,
                             };
-                            return (self.inner, Err(Error::MissingCode));
+                            return (self.inner, Err(BuildRuntimeError::MissingCode));
                         }
                     }
                 }
@@ -1743,16 +1762,23 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Err(Error::MissingCode));
+                    return (self.inner, Err(BuildRuntimeError::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
-                    if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                    let downloaded_source = *downloaded_source;
+                    if let Some(SourceId(downloaded_source)) = downloaded_source {
                         self.inner.sources[downloaded_source].finalized_block_height = Err(());
                     }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Err(Error::MerkleProofEntriesMissing));
+                    return (
+                        self.inner,
+                        Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
+                            source_id: downloaded_source,
+                            error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                        })),
+                    );
                 }
             }
         };
@@ -1778,13 +1804,20 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Err(Error::MissingCode));
+                    return (self.inner, Err(BuildRuntimeError::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
-                    if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                    let downloaded_source = *downloaded_source;
+                    if let Some(SourceId(downloaded_source)) = downloaded_source {
                         self.inner.sources[downloaded_source].finalized_block_height = Err(());
                     }
-                    return (self.inner, Err(Error::MerkleProofEntriesMissing));
+                    return (
+                        self.inner,
+                        Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
+                            source_id: downloaded_source,
+                            error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                        })),
+                    );
                 }
             }
         };
@@ -1794,10 +1827,17 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
         {
             Ok(val) => val.map(|(v, _)| v),
             Err(proof_decode::IncompleteProofError { .. }) => {
-                if let Some(SourceId(downloaded_source)) = *downloaded_source {
+                let downloaded_source = *downloaded_source;
+                if let Some(SourceId(downloaded_source)) = downloaded_source {
                     self.inner.sources[downloaded_source].finalized_block_height = Err(());
                 }
-                return (self.inner, Err(Error::MerkleProofEntriesMissing));
+                return (
+                    self.inner,
+                    Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
+                        source_id: downloaded_source,
+                        error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                    })),
+                );
             }
         };
 
@@ -1809,7 +1849,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
-                    return (self.inner, Err(Error::InvalidHeapPages(err)));
+                    return (self.inner, Err(BuildRuntimeError::InvalidHeapPages(err)));
                 }
             };
 
@@ -1825,7 +1865,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: *hint_doesnt_match,
                 };
-                return (self.inner, Err(Error::RuntimeBuild(err)));
+                return (self.inner, Err(BuildRuntimeError::RuntimeBuild(err)));
             }
         };
 
@@ -1866,6 +1906,16 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
     }
 }
 
+/// Problem encountered during a call to [`BuildChainInformation::build`].
+#[derive(Debug, derive_more::Display)]
+pub enum BuildChainInformationError {
+    /// Error building the chain information.
+    #[display(fmt = "Error building the chain information: {_0}")]
+    ChainInformationBuild(chain_information::build::Error),
+    /// Source that has sent a proof didn't behave properly.
+    SourceMisbehavior(SourceMisbehavior),
+}
+
 /// Ready to verify the parameters of the chain against the finalized block.
 pub struct BuildChainInformation<TSrc, TRq> {
     inner: WarpSync<TSrc, TRq>,
@@ -1873,8 +1923,12 @@ pub struct BuildChainInformation<TSrc, TRq> {
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
     /// Build the information about the chain.
-    // TODO: refactor this error or explain what it is
-    pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Result<RuntimeInformation, Error>) {
+    pub fn build(
+        mut self,
+    ) -> (
+        WarpSync<TSrc, TRq>,
+        Result<RuntimeInformation, BuildChainInformationError>,
+    ) {
         let RuntimeDownload::Verified {
             mut chain_info_builder,
             downloaded_runtime,
@@ -1921,7 +1975,15 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 self.inner.sources[downloaded_source].finalized_block_height =
                                     Err(());
                             }
-                            return (self.inner, Err(Error::InvalidMerkleProof(err)));
+                            return (
+                                self.inner,
+                                Err(BuildChainInformationError::SourceMisbehavior(
+                                    SourceMisbehavior {
+                                        source_id: downloaded_source,
+                                        error: SourceMisbehaviorTy::InvalidMerkleProof(err),
+                                    },
+                                )),
+                            );
                         }
                     };
 
@@ -1967,7 +2029,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     ..
                 } => {
                     self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
-                    return (self.inner, Err(Error::ChainInformationBuild(err)));
+                    return (
+                        self.inner,
+                        Err(BuildChainInformationError::ChainInformationBuild(err)),
+                    );
                 }
                 chain_information::build::ChainInformationBuild::InProgress(in_progress) => {
                     in_progress
@@ -1987,7 +2052,15 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 self.inner.sources[downloaded_source].finalized_block_height =
                                     Err(());
                             }
-                            return (self.inner, Err(Error::MerkleProofEntriesMissing));
+                            return (
+                                self.inner,
+                                Err(BuildChainInformationError::SourceMisbehavior(
+                                    SourceMisbehavior {
+                                        source_id: *downloaded_source,
+                                        error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                                    },
+                                )),
+                            );
                         }
                     };
 
@@ -2009,7 +2082,15 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 self.inner.sources[downloaded_source].finalized_block_height =
                                     Err(());
                             }
-                            return (self.inner, Err(Error::MerkleProofEntriesMissing));
+                            return (
+                                self.inner,
+                                Err(BuildChainInformationError::SourceMisbehavior(
+                                    SourceMisbehavior {
+                                        source_id: *downloaded_source,
+                                        error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                                    },
+                                )),
+                            );
                         }
                     };
                     nk.inject_key(value.map(|v| v.iter().copied()))
@@ -2027,7 +2108,15 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                 self.inner.sources[downloaded_source].finalized_block_height =
                                     Err(());
                             }
-                            return (self.inner, Err(Error::MerkleProofEntriesMissing));
+                            return (
+                                self.inner,
+                                Err(BuildChainInformationError::SourceMisbehavior(
+                                    SourceMisbehavior {
+                                        source_id: *downloaded_source,
+                                        error: SourceMisbehaviorTy::MerkleProofEntriesMissing,
+                                    },
+                                )),
+                            );
                         }
                     };
                     mv.inject_merkle_value(value)
