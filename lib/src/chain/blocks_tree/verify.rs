@@ -38,7 +38,7 @@ impl<T> NonFinalizedTree<T> {
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
     pub fn verify_header(
-        &mut self,
+        &self,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
