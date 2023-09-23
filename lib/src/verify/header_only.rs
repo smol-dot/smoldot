@@ -21,6 +21,7 @@ use crate::{
     verify::{aura, babe},
 };
 
+use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for a block verification.

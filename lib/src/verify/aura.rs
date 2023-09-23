@@ -47,6 +47,7 @@
 
 use crate::header;
 
+use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for [`verify_header`].
