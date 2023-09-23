@@ -82,9 +82,9 @@ pub struct VerifyConfig<'a, TAuthList> {
 /// Information yielded back after successfully verifying a block.
 #[derive(Debug)]
 pub struct VerifySuccess {
-    /// If true, the block has a change of authorities that must be reflected when verifying the
-    /// following block.
-    pub authorities_change: bool,
+    /// `Some` if the list of authorities is modified by this block. Contains the new list of
+    /// authorities.
+    pub authorities_change: Option<Vec<header::AuraAuthority>>,
 }
 
 /// Failure to verify a block.
@@ -106,6 +106,8 @@ pub enum VerifyError {
     BadPublicKey,
     /// List of authorities is empty.
     EmptyAuthorities,
+    /// Header contains more than one new list of authorities.
+    MultipleAuthoritiesChangeDigestItems,
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
@@ -156,12 +158,20 @@ pub fn verify_header<'a>(
 
     // Check whether there is an authority change in the block.
     // This information is used in case of success.
-    let authorities_change = config.header.digest.logs().any(|item| {
-        matches!(
-            item,
-            header::DigestItemRef::AuraConsensus(header::AuraConsensusLogRef::AuthoritiesChange(_))
-        )
-    });
+    let mut authorities_change = None;
+    for digest_item in config.header.digest.logs() {
+        if let header::DigestItemRef::AuraConsensus(
+            header::AuraConsensusLogRef::AuthoritiesChange(new_list),
+        ) = digest_item
+        {
+            if authorities_change.is_some() {
+                return Err(VerifyError::MultipleAuthoritiesChangeDigestItems);
+            }
+
+            authorities_change = Some(new_list.map(Into::into).collect());
+            // We continue looping even after finding a list, to make sure there is only one list.
+        }
+    }
 
     // The signature in the seal applies to the header from where the signature isn't present.
     // Extract the signature and build the hash that is expected to be signed.

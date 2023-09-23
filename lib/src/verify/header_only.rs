@@ -114,8 +114,9 @@ pub enum ConfigFinality {
 pub enum Success {
     /// Chain is using the Aura consensus engine.
     Aura {
-        /// True if the list of authorities is modified by this block.
-        authorities_change: bool,
+        /// `Some` if the list of authorities is modified by this block. Contains the new list of
+        /// authorities.
+        authorities_change: Option<Vec<header::AuraAuthority>>,
     },
 
     /// Chain is using the Babe consensus engine.
