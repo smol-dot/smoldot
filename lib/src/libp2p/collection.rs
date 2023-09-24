@@ -133,50 +133,6 @@ pub struct Config {
     pub ping_protocol: String,
 }
 
-/// Configuration for a request-response protocol.
-#[derive(Debug, Clone)]
-pub struct ConfigRequestResponse {
-    /// Name of the protocol transferred on the wire.
-    pub name: String,
-
-    /// Configuration related to sending out requests through this protocol.
-    ///
-    /// > **Note**: This is used even if `inbound_allowed` is `false` when performing outgoing
-    /// >           requests.
-    pub inbound_config: ConfigRequestResponseIn,
-
-    pub max_response_size: usize,
-
-    /// If true, incoming substreams are allowed to negotiate this protocol.
-    pub inbound_allowed: bool,
-}
-
-/// See [`ConfigRequestResponse::inbound_config`].
-#[derive(Debug, Clone)]
-pub enum ConfigRequestResponseIn {
-    /// Request must be completely empty, not even a length prefix.
-    Empty,
-    /// Request must contain a length prefix plus a potentially empty payload.
-    Payload {
-        /// Maximum allowed size for the payload in bytes.
-        max_size: usize,
-    },
-}
-
-/// Configuration for a specific overlay network.
-///
-/// See [`Config::notification_protocols`].
-pub struct NotificationProtocolConfig {
-    /// Name of the protocol negotiated on the wire.
-    pub protocol_name: String,
-
-    /// Maximum size, in bytes, of the handshake that can be received.
-    pub max_handshake_size: usize,
-
-    /// Maximum size, in bytes, of a notification that can be received.
-    pub max_notification_size: usize,
-}
-
 /// Identifier of a connection spawned by the [`Network`].
 //
 // Identifiers are never reused.
