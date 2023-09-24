@@ -718,7 +718,6 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if `overlay_network_index` isn't a valid index in [`Config::notification_protocols`].
     /// Panics if the [`ConnectionId`] is invalid or is a connection that hasn't finished its
     /// handshake or is shutting down.
     ///
