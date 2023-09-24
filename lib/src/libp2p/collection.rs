@@ -83,6 +83,9 @@ pub enum SingleStreamHandshakeKind<'a> {
     /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
     /// multistream-select protocol to negotiate the Yamux multiplexing.
     MultistreamSelectNoiseYamux {
+        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
+        /// initiated by the remote.
+        is_initiator: bool,
         /// Local secret key to use for the handshake.
         noise_key: &'a noise::NoiseKey,
     },
@@ -97,6 +100,9 @@ pub enum MultiStreamHandshakeKind<'a> {
     /// The reading and writing side of substreams must never be closed. Substreams can only be
     /// abruptly destroyed by either side.
     WebRtc {
+        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
+        /// initiated by the remote.
+        is_initiator: bool,
         /// Local secret key to use for the handshake.
         noise_key: &'a noise::NoiseKey,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -380,14 +386,10 @@ where
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    ///
-    /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
-    /// it has been initiated by the remote.
     pub fn insert_single_stream(
         &mut self,
         when_connected: TNow,
         handshake_kind: SingleStreamHandshakeKind,
-        is_initiator: bool,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         let connection_id = self.next_connection_id;
@@ -395,7 +397,10 @@ where
 
         // We only support one kind of handshake at the moment. Make sure (at compile time) that
         // the value provided as parameter is indeed the one expected.
-        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key } = handshake_kind;
+        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+            is_initiator,
+            noise_key,
+        } = handshake_kind;
 
         // TODO: could be precalculated
         let max_protocol_name_len = self
@@ -459,7 +464,6 @@ where
         &mut self,
         now: TNow,
         handshake_kind: MultiStreamHandshakeKind,
-        is_initiator: bool,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -472,9 +476,10 @@ where
         // followed with the multihash-encoded fingerprints of the initiator's certificate
         // and the receiver's certificate.
         // See <https://github.com/libp2p/specs/pull/412>.
-        let (noise_key, noise_prologue) = {
+        let (noise_key, noise_prologue, local_is_noise_initiator) = {
             let MultiStreamHandshakeKind::WebRtc {
                 noise_key,
+                is_initiator,
                 local_tls_certificate_multihash,
                 remote_tls_certificate_multihash,
             } = handshake_kind;
@@ -492,7 +497,11 @@ where
                 out.extend_from_slice(&remote_tls_certificate_multihash);
                 out.extend_from_slice(&local_tls_certificate_multihash);
             }
-            (noise_key, out)
+
+            // In the WebRTC libp2p protocol, the initiator of the connection is *not* the
+            // initiator of the Noise handshake. Instead, it's the "server" that initiates the
+            // Noise handshake. This saves a round-trip.
+            (noise_key, out, !is_initiator)
         };
 
         // TODO: could be precalculated
@@ -520,8 +529,7 @@ where
             self.randomness_seeds.fill_bytes(&mut *noise_ephemeral_key);
             noise::HandshakeInProgress::new(noise::Config {
                 key: noise_key,
-                // It's the "server" that initiates the Noise handshake.
-                is_initiator: !is_initiator,
+                is_initiator: local_is_noise_initiator,
                 prologue: &noise_prologue,
                 ephemeral_secret_key: &noise_ephemeral_key,
             })
