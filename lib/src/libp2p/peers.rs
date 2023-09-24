@@ -955,16 +955,16 @@ where
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn add_single_stream_incoming_connection(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         self.inner.insert_single_stream(
-            when_connected,
+            when_connection_start,
             match handshake_kind {
                 SingleStreamHandshakeKind::MultistreamSelectNoiseYamux => {
                     collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
@@ -988,11 +988,11 @@ where
     /// called, the provided `expected_peer_id` will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn add_single_stream_outgoing_connection(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
         expected_peer_id: &PeerId,
         user_data: TConn,
@@ -1002,7 +1002,7 @@ where
         self.unfulfilled_desired_peers.remove(&peer_index);
 
         let (connection_id, connection_task) = self.inner.insert_single_stream(
-            when_connected,
+            when_connection_start,
             match handshake_kind {
                 SingleStreamHandshakeKind::MultistreamSelectNoiseYamux => {
                     collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
@@ -1029,11 +1029,11 @@ where
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn add_multi_stream_incoming_connection<TSubId>(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
@@ -1041,7 +1041,7 @@ where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
         self.inner.insert_multi_stream(
-            when_connected,
+            when_connection_start,
             match handshake_kind {
                 MultiStreamHandshakeKind::WebRtc {
                     local_tls_certificate_multihash,
@@ -1068,11 +1068,11 @@ where
     /// called, the provided `expected_peer_id` will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
         expected_peer_id: &PeerId,
         user_data: TConn,
@@ -1085,7 +1085,7 @@ where
         self.unfulfilled_desired_peers.remove(&peer_index);
 
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
-            when_connected,
+            when_connection_start,
             match handshake_kind {
                 MultiStreamHandshakeKind::WebRtc {
                     local_tls_certificate_multihash,

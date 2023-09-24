@@ -384,11 +384,11 @@ where
 
     /// Adds a new single-stream connection to the collection.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn insert_single_stream(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
@@ -437,7 +437,7 @@ where
                     is_initiator,
                 )
             },
-            handshake_timeout: when_connected + self.handshake_timeout,
+            handshake_timeout: when_connection_start + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
             substreams_capacity,
             max_protocol_name_len,
@@ -458,11 +458,11 @@ where
 
     /// Adds a new multi-stream connection to the collection.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn insert_multi_stream<TSubId>(
         &mut self,
-        now: TNow,
+        when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
@@ -541,7 +541,7 @@ where
                 self.randomness_seeds.fill_bytes(&mut seed);
                 seed
             },
-            now,
+            when_connection_start,
             handshake,
             self.max_inbound_substreams,
             substreams_capacity,

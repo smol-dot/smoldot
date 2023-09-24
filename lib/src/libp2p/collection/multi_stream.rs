@@ -144,7 +144,7 @@ where
     // a function only called from the parent module.
     pub(super) fn new(
         randomness_seed: [u8; 32],
-        now: TNow,
+        when_connection_start: TNow,
         handshake: noise::HandshakeInProgress,
         max_inbound_substreams: usize,
         substreams_capacity: usize,
@@ -153,6 +153,7 @@ where
     ) -> Self {
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
+                // TODO: the handshake doesn't have a timeout
                 handshake: Some(handshake),
                 opened_substream: None,
                 handshake_read_buffer: Vec::new(),
@@ -168,7 +169,7 @@ where
                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded
                     ping_timeout: Duration::from_secs(10),    // TODO: hardcoded
-                    first_out_ping: now + Duration::from_secs(2), // TODO: hardcoded
+                    first_out_ping: when_connection_start, // TODO: only start the ping after the Noise handshake has ended
                 })),
             },
         }
