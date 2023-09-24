@@ -660,6 +660,10 @@ where
                 Some(s) => s,
                 None => panic!(),
             };
+        let _was_in = self
+            .ingoing_negotiated_substreams_by_connection
+            .remove(&(connection_id, inner_substream_id));
+        debug_assert!(_was_in.is_some());
         assert!(!already_accepted);
 
         self.messages_to_connections.push_back((
