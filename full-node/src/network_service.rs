@@ -423,11 +423,15 @@ impl NetworkService {
 
                         let (socket, addr) = match accept_result {
                             Ok(v) => v,
-                            Err(_) => {
+                            Err(error) => {
                                 // Errors here can happen if the accept failed, for example if no
                                 // file descriptor is available.
                                 // A wait is added in order to avoid having a busy-loop failing to
                                 // accept connections.
+                                log_callback.log(
+                                    LogLevel::Warn,
+                                    format!("tcp-accept-error; error={}", error),
+                                );
                                 smol::Timer::after(Duration::from_secs(2)).await;
                                 continue;
                             }
