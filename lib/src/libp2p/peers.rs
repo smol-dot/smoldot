@@ -968,11 +968,11 @@ where
             match handshake_kind {
                 SingleStreamHandshakeKind::MultistreamSelectNoiseYamux => {
                     collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                        is_initiator: false,
                         noise_key: &self.noise_key,
                     }
                 }
             },
-            false,
             Connection {
                 peer_index: None,
                 user_data,
@@ -1006,11 +1006,11 @@ where
             match handshake_kind {
                 SingleStreamHandshakeKind::MultistreamSelectNoiseYamux => {
                     collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                        is_initiator: true,
                         noise_key: &self.noise_key,
                     }
                 }
             },
-            true,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
@@ -1048,11 +1048,11 @@ where
                     remote_tls_certificate_multihash,
                 } => collection::MultiStreamHandshakeKind::WebRtc {
                     noise_key: &self.noise_key,
+                    is_initiator: false,
                     local_tls_certificate_multihash,
                     remote_tls_certificate_multihash,
                 },
             },
-            false,
             Connection {
                 peer_index: None,
                 user_data,
@@ -1092,11 +1092,11 @@ where
                     remote_tls_certificate_multihash,
                 } => collection::MultiStreamHandshakeKind::WebRtc {
                     noise_key: &self.noise_key,
+                    is_initiator: true,
                     local_tls_certificate_multihash,
                     remote_tls_certificate_multihash,
                 },
             },
-            true,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
