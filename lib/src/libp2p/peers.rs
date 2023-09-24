@@ -61,7 +61,7 @@ pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
     CoordinatorToConnection, MultiStreamConnectionTask, NotificationProtocolConfig,
     NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError,
-    SingleStreamConnectionTask, StartRequestError, SubstreamId,
+    SingleStreamConnectionTask, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -106,6 +106,15 @@ pub struct Peers<TConn, TNow> {
     /// Underlying state machine that manages connections.
     inner: collection::Network<Connection<TConn>, TNow>,
 
+    /// See [`Config::notification_protocols`].
+    notification_protocols: Vec<NotificationProtocolConfig>,
+
+    /// See [`Config::request_response_protocols`].
+    request_response_protocols: Vec<ConfigRequestResponse>,
+
+    /// See [`Config::ping_protocol`].
+    ping_protocol: String,
+
     /// See [`Config::noise_key`].
     // TODO: eventually make it possible for the API user to choose a separate noise key per connection; this is extra hard because the same remote peerid could open multiple incoming substreams to multiple different local peerids without it being a protocol violation
     noise_key: libp2p::connection::NoiseKey,
@@ -137,13 +146,13 @@ pub struct Peers<TConn, TNow> {
     /// prevent a peer from opening multiple inbound substreams.
     peers_notifications_in: BTreeSet<(usize, usize)>,
 
-    /// For each inner notification protocol substream, the connection id and the
-    /// `notifications_protocol_index`.
+    /// For each inner negotiated substream and inner notification protocol substream, the
+    /// connection id and the protocol _index.
     ///
     /// This applies to both inbound and outbound notification substreams, both pending and
-    /// established.
+    /// established, and inbound negotiated substreams.
     // TODO: this could be a user data in `collection`
-    inner_notification_substreams: hashbrown::HashMap<
+    inner_negotiated_substreams: hashbrown::HashMap<
         collection::SubstreamId,
         (collection::ConnectionId, usize),
         fnv::FnvBuildHasher,
@@ -240,16 +249,14 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         Peers {
-            inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+            inner_negotiated_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.notification_protocols.len() * config.peers_capacity,
                 Default::default(),
             ),
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 max_inbound_substreams: config.max_inbound_substreams,
-                notification_protocols: config.notification_protocols,
-                request_response_protocols: config.request_response_protocols,
-                ping_protocol: config.ping_protocol,
+                ping_protocol: config.ping_protocol.clone(), // TODO: duplicate info
                 handshake_timeout: config.handshake_timeout,
                 randomness_seed: {
                     let mut seed = [0; 32];
@@ -257,6 +264,9 @@ where
                     seed
                 },
             }),
+            notification_protocols: config.notification_protocols,
+            request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
+            ping_protocol: config.ping_protocol,
             noise_key: config.noise_key,
             connections_by_peer: BTreeSet::new(),
             peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
@@ -290,7 +300,7 @@ where
     pub fn notification_protocols(
         &self,
     ) -> impl ExactSizeIterator<Item = &NotificationProtocolConfig> {
-        self.inner.notification_protocols()
+        self.notification_protocols.iter()
     }
 
     /// Returns the list the request-response protocols originally passed as
@@ -298,7 +308,7 @@ where
     pub fn request_response_protocols(
         &self,
     ) -> impl ExactSizeIterator<Item = &ConfigRequestResponse> {
-        self.inner.request_response_protocols()
+        self.request_response_protocols.iter()
     }
 
     /// Returns the Noise key originally passed as [`Config::noise_key`].
@@ -660,6 +670,67 @@ where
                     });
                 }
 
+                collection::Event::InboundNegotiated {
+                    id,
+                    substream_id,
+                    protocol_name,
+                } => {
+                    if let Some((protocol_index, protocol)) = self
+                        .request_response_protocols
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.inbound_allowed && p.name == protocol_name)
+                    {
+                        self.inner.accept_inbound(
+                            substream_id,
+                            collection::InboundTy::Request {
+                                request_max_size: match protocol.inbound_config {
+                                    ConfigRequestResponseIn::Empty => None,
+                                    ConfigRequestResponseIn::Payload { max_size } => Some(max_size),
+                                },
+                            },
+                        );
+
+                        let _was_in = self
+                            .inner_negotiated_substreams
+                            .insert(substream_id, (id, protocol_index));
+                        debug_assert!(_was_in.is_none());
+                    } else if let Some((protocol_index, protocol)) = self
+                        .notification_protocols
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.protocol_name == protocol_name)
+                    {
+                        self.inner.accept_inbound(
+                            substream_id,
+                            collection::InboundTy::Notifications {
+                                max_handshake_size: protocol.max_handshake_size,
+                            },
+                        );
+
+                        let _was_in = self
+                            .inner_negotiated_substreams
+                            .insert(substream_id, (id, protocol_index));
+                        debug_assert!(_was_in.is_none());
+                    } else if *self.ping_protocol == *protocol_name {
+                        self.inner
+                            .accept_inbound(substream_id, collection::InboundTy::Ping);
+                    } else {
+                        self.inner.reject_inbound(substream_id);
+                    }
+                }
+
+                collection::Event::InboundNegotiatedCancel { .. } => {
+                    // We immediately answer any request, therefore this can't happen.
+                    unreachable!()
+                }
+
+                collection::Event::InboundAcceptedCancel { substream_id, .. } => {
+                    // Note: the ping substream is specifically not in this map.
+                    self.inner_negotiated_substreams.remove(&substream_id);
+                    // TODO: report event for diagnostic purposes?
+                }
+
                 collection::Event::Response {
                     substream_id,
                     response,
@@ -671,11 +742,14 @@ where
                 }
 
                 collection::Event::RequestIn {
-                    id: connection_id,
                     substream_id,
-                    protocol_index,
                     request_payload,
                 } => {
+                    let (connection_id, protocol_index) = self
+                        .inner_negotiated_substreams
+                        .remove(&substream_id)
+                        .unwrap_or_else(|| panic!());
+
                     let peer_id = {
                         // Incoming requests can only happen if the connection is no longer
                         // handshaking, in which case `peer_index` is guaranteed to be `Some`.
@@ -702,10 +776,8 @@ where
                     substream_id,
                     result,
                 } => {
-                    let (connection_id, notifications_protocol_index) = *self
-                        .inner_notification_substreams
-                        .get(&substream_id)
-                        .unwrap();
+                    let (connection_id, notifications_protocol_index) =
+                        *self.inner_negotiated_substreams.get(&substream_id).unwrap();
                     let peer_index = self.inner[connection_id].peer_index.unwrap();
                     let notification_out = self
                         .peers_notifications_out
@@ -722,7 +794,7 @@ where
                         notification_out.open = NotificationsOutOpenState::Open(substream_id);
                     } else {
                         notification_out.open = NotificationsOutOpenState::ClosedByRemote;
-                        self.inner_notification_substreams
+                        self.inner_negotiated_substreams
                             .remove(&substream_id)
                             .unwrap();
 
@@ -778,7 +850,7 @@ where
                     }
 
                     let (connection_id, notifications_protocol_index) = self
-                        .inner_notification_substreams
+                        .inner_negotiated_substreams
                         .remove(&substream_id)
                         .unwrap();
                     let peer_index = self.inner[connection_id].peer_index.unwrap();
@@ -834,12 +906,15 @@ where
                 }
 
                 collection::Event::NotificationsInOpen {
-                    id: connection_id,
                     substream_id,
-                    notifications_protocol_index,
                     remote_handshake: handshake,
                     ..
                 } => {
+                    let (connection_id, notifications_protocol_index) = *self
+                        .inner_negotiated_substreams
+                        .get(&substream_id)
+                        .unwrap_or_else(|| panic!());
+
                     // Incoming substreams can only happen if the connection is no longer
                     // handshaking, in which case `peer_index` is guaranteed to be `Some`.
                     let peer_index = self.inner[connection_id].peer_index.unwrap();
@@ -851,6 +926,7 @@ where
                         .insert((peer_index, notifications_protocol_index))
                     {
                         self.inner.reject_in_notifications(substream_id);
+                        self.inner_negotiated_substreams.remove(&substream_id);
                         return Some(Event::InboundError {
                             connection_id,
                             peer_id: self.peers[peer_index].peer_id.clone(),
@@ -859,11 +935,6 @@ where
                             },
                         });
                     }
-
-                    let _was_in = self
-                        .inner_notification_substreams
-                        .insert(substream_id, (connection_id, notifications_protocol_index));
-                    debug_assert!(_was_in.is_none());
 
                     return Some(Event::NotificationsInOpen {
                         id: substream_id,
@@ -877,10 +948,8 @@ where
                     substream_id,
                     notification,
                 } => {
-                    let (connection_id, notifications_protocol_index) = *self
-                        .inner_notification_substreams
-                        .get(&substream_id)
-                        .unwrap();
+                    let (connection_id, notifications_protocol_index) =
+                        *self.inner_negotiated_substreams.get(&substream_id).unwrap();
 
                     let peer_id = {
                         // Incoming notifications can only happen if the connection is no longer
@@ -898,7 +967,7 @@ where
 
                 collection::Event::NotificationsInOpenCancel { substream_id } => {
                     let (connection_id, notifications_protocol_index) = self
-                        .inner_notification_substreams
+                        .inner_negotiated_substreams
                         .remove(&substream_id)
                         .unwrap();
 
@@ -921,7 +990,7 @@ where
                     outcome,
                 } => {
                     let (connection_id, notifications_protocol_index) = self
-                        .inner_notification_substreams
+                        .inner_negotiated_substreams
                         .remove(&substream_id)
                         .unwrap();
 
@@ -963,6 +1032,26 @@ where
         handshake_kind: SingleStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
+        // TODO: could be precalculated
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         self.inner.insert_single_stream(
             when_connected,
             match handshake_kind {
@@ -973,6 +1062,8 @@ where
                     }
                 }
             },
+            substreams_capacity,
+            max_protocol_name_len,
             Connection {
                 peer_index: None,
                 user_data,
@@ -1001,6 +1092,26 @@ where
 
         self.unfulfilled_desired_peers.remove(&peer_index);
 
+        // TODO: could be precalculated
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         let (connection_id, connection_task) = self.inner.insert_single_stream(
             when_connected,
             match handshake_kind {
@@ -1011,6 +1122,8 @@ where
                     }
                 }
             },
+            substreams_capacity,
+            max_protocol_name_len,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
@@ -1040,6 +1153,26 @@ where
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
+        // TODO: could be precalculated
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         self.inner.insert_multi_stream(
             when_connected,
             match handshake_kind {
@@ -1053,6 +1186,8 @@ where
                     remote_tls_certificate_multihash,
                 },
             },
+            substreams_capacity,
+            max_protocol_name_len,
             Connection {
                 peer_index: None,
                 user_data,
@@ -1084,6 +1219,26 @@ where
 
         self.unfulfilled_desired_peers.remove(&peer_index);
 
+        // TODO: could be precalculated
+        let max_protocol_name_len = self
+            .request_response_protocols
+            .iter()
+            .map(|r| r.name.len())
+            .chain(
+                self.notification_protocols
+                    .iter()
+                    .map(|n| n.protocol_name.len()),
+            )
+            .chain(iter::once(self.ping_protocol.len()))
+            .max()
+            .unwrap_or(0);
+
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
+        // TODO: could be precalculated
+        let substreams_capacity =
+            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
             when_connected,
             match handshake_kind {
@@ -1097,6 +1252,8 @@ where
                     remote_tls_certificate_multihash,
                 },
             },
+            substreams_capacity,
+            max_protocol_name_len,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
@@ -1444,7 +1601,7 @@ where
         self.inner.reject_in_notifications(id);
 
         let (connection_id, notifications_protocol_index) =
-            self.inner_notification_substreams.remove(&id).unwrap();
+            self.inner_negotiated_substreams.remove(&id).unwrap();
         let peer_index = self.inner[connection_id].peer_index.unwrap();
 
         let _was_in = self
@@ -1524,15 +1681,24 @@ where
             NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote
         ));
 
+        let (protocol_name, max_handshake_size) = {
+            let info = self
+                .notification_protocols
+                .get(notifications_protocol_index)
+                .unwrap_or_else(|| panic!());
+            (info.protocol_name.clone(), info.max_handshake_size)
+        };
+
         let substream_id = self.inner.open_out_notifications(
             connection_id,
-            notifications_protocol_index,
+            protocol_name,
             now,
             handshake,
+            max_handshake_size,
         );
 
         let _prev_value = self
-            .inner_notification_substreams
+            .inner_negotiated_substreams
             .insert(substream_id, (connection_id, notifications_protocol_index));
         debug_assert!(_prev_value.is_none());
 
@@ -1827,12 +1993,37 @@ where
             None => panic!(), // As documented.
         };
 
+        let protocol_info = self
+            .request_response_protocols
+            .get(protocol_index)
+            .unwrap_or_else(|| unreachable!());
+
+        let has_length_prefix = match protocol_info.inbound_config {
+            ConfigRequestResponseIn::Payload { max_size } => {
+                if request_data.len() > max_size {
+                    return Err(StartRequestError::RequestTooLarge);
+                }
+                true
+            }
+            ConfigRequestResponseIn::Empty => {
+                if !request_data.is_empty() {
+                    return Err(StartRequestError::RequestTooLarge);
+                }
+                false
+            }
+        };
+
         Ok(OutRequestId(self.inner.start_request(
             target_connection_id,
-            protocol_index,
-            request_data,
+            protocol_info.name.clone(),
+            if has_length_prefix {
+                Some(request_data)
+            } else {
+                None
+            },
             timeout,
-        )?))
+            protocol_info.max_response_size,
+        )))
     }
 
     /// Returns `true` if if it possible to send requests (i.e. through [`Peers::start_request`])
@@ -1986,6 +2177,13 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Peers<TConn, TNow> {
     fn index_mut(&mut self, id: ConnectionId) -> &mut TConn {
         &mut self.inner[id].user_data
     }
+}
+
+/// Error potentially returned when starting a request.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum StartRequestError {
+    /// Size of the request is over maximum allowed by the protocol.
+    RequestTooLarge,
 }
 
 /// See [`Peers::connection_state`].
