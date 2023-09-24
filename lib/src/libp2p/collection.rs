@@ -386,9 +386,6 @@ where
     ///
     /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
     /// order to determine when the handshake timeout expires.
-    ///
-    /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
-    /// it has been initiated by the remote.
     pub fn insert_single_stream(
         &mut self,
         when_connection_start: TNow,
