@@ -200,7 +200,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     requests_capacity: config.sources_capacity, // TODO: ?! add as config?
                     code_trie_node_hint: config.code_trie_node_hint,
                     num_download_ahead_fragments: 128, // TODO: make configurable?
-                    warp_sync_minimum_gap: 64,         // TODO: make configurable?
+                    // TODO: make configurable?
+                    // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
+                    warp_sync_minimum_gap: 0,
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync {
                         inner,
