@@ -872,7 +872,12 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to an inbound notifications substream.
     ///
     #[track_caller]
-    pub fn accept_in_notifications(&mut self, substream_id: SubstreamId, handshake: Vec<u8>) {
+    pub fn accept_in_notifications(
+        &mut self,
+        substream_id: SubstreamId,
+        handshake: Vec<u8>,
+        max_notification_size: usize,
+    ) {
         let (connection_id, state, inner_substream_id) =
             match self.ingoing_notification_substreams.get_mut(&substream_id) {
                 Some(s) => s,
@@ -885,7 +890,7 @@ where
             CoordinatorToConnectionInner::AcceptInNotifications {
                 substream_id: *inner_substream_id,
                 handshake,
-                max_notification_size: 16 * 1024 * 1024, // TODO: obtain from protocol configuration
+                max_notification_size,
             },
         ));
 
