@@ -87,7 +87,7 @@ impl PublicKey {
                         |(field_num, _)| *field_num == 1,
                     )),
                     nom::combinator::map_res(protobuf::enum_tag_decode, |val| match val {
-                        0 | 1 | 2 | 3 => Ok(val),
+                        0..=3 => Ok(val),
                         _ => Err(FromProtobufEncodingError::UnknownAlgorithm),
                     }),
                 ),

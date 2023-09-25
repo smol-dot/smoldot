@@ -1274,7 +1274,7 @@ where
     if string.len() % 2 != 0 {
         string.insert(2, '0');
     }
-    let decoded = hex::decode(&string[2..]).map_err(|err| serde::de::Error::custom(err))?;
+    let decoded = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
     if decoded.len() > 8 {
         return Err(serde::de::Error::custom("number overflow"));
     }

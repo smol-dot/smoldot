@@ -240,7 +240,7 @@ where
                         let buffers = this
                             .write_buffers
                             .iter()
-                            .map(|buf| io::IoSlice::new(&buf))
+                            .map(|buf| io::IoSlice::new(buf))
                             .collect::<Vec<_>>();
                         AsyncWrite::poll_write_vectored(this.socket.as_mut(), cx, &buffers)
                     };
@@ -391,7 +391,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
                 .map_or(false, |b| b <= self.read_buffer.len()))
             || (self.write_buffers_len_before != self.write_buffers.len() && !*self.write_closed)
         {
-            *self.read_write_wake_up_after = Some(self.read_write.now.clone());
+            *self.read_write_wake_up_after = Some(self.read_write.now);
         }
     }
 }

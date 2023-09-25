@@ -617,11 +617,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         database,
         consensus_service: consensus_service.clone(),
         network_service: (network_service.clone(), 0),
-        bind_address: config
-            .chain
-            .json_rpc_listen
-            .as_ref()
-            .map(|cfg| cfg.address.clone()),
+        bind_address: config.chain.json_rpc_listen.as_ref().map(|cfg| cfg.address),
         max_parallel_requests: 32,
         max_json_rpc_clients: config
             .chain
@@ -653,7 +649,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 bind_address: relay_chain_cfg
                     .json_rpc_listen
                     .as_ref()
-                    .map(|cfg| cfg.address.clone()),
+                    .map(|cfg| cfg.address),
                 max_parallel_requests: 32,
                 max_json_rpc_clients: relay_chain_cfg
                     .json_rpc_listen
