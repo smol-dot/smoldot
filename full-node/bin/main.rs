@@ -19,7 +19,6 @@
 // TODO: #![deny(unused_crate_dependencies)] doesn't work because some deps are used only by the library, figure if this can be fixed?
 
 use std::{
-    borrow::Cow,
     fs, io,
     sync::Arc,
     thread,
@@ -40,6 +39,11 @@ async fn async_main() {
         cli::CliOptionsCommand::Run(r) => run(*r).await,
         cli::CliOptionsCommand::Blake264BitsHash(opt) => {
             let hash = blake2_rfc::blake2b::blake2b(8, &[], opt.payload.as_bytes());
+            println!("0x{}", hex::encode(hash));
+        }
+        cli::CliOptionsCommand::Blake2256BitsHash(opt) => {
+            let content = fs::read(opt.file).expect("Failed to read file content");
+            let hash = blake2_rfc::blake2b::blake2b(32, &[], &content);
             println!("0x{}", hex::encode(hash));
         }
     }
@@ -186,17 +190,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
         cli::Output::Auto => unreachable!(), // Handled above.
     };
 
-    let chain_spec: Cow<[u8]> = match &cli_options.chain {
-        cli::CliChain::Polkadot => {
-            (&include_bytes!("../../demo-chain-specs/polkadot.json")[..]).into()
-        }
-        cli::CliChain::Kusama => (&include_bytes!("../../demo-chain-specs/kusama.json")[..]).into(),
-        cli::CliChain::Westend => {
-            (&include_bytes!("../../demo-chain-specs/westend.json")[..]).into()
-        }
-        cli::CliChain::Custom(path) => fs::read(path).expect("Failed to read chain specs").into(),
-    };
-
+    let chain_spec =
+        fs::read(&cli_options.path_to_chain_spec).expect("Failed to read chain specification");
     let parsed_chain_spec = {
         smoldot::chain_spec::ChainSpec::from_json_bytes(&chain_spec)
             .expect("Failed to decode chain specification")
@@ -235,18 +230,13 @@ async fn run(cli_options: cli::CliOptionsRun) {
     // Build the relay chain information if relevant.
     let (relay_chain, relay_chain_name) =
         if let Some((relay_chain_name, _parachain_id)) = parsed_chain_spec.relay_chain() {
-            let spec_json: Cow<[u8]> = match &cli_options.chain {
-                cli::CliChain::Custom(parachain_path) => {
-                    // TODO: this is a bit of a hack
-                    let relay_chain_path = parachain_path
-                        .parent()
-                        .unwrap()
-                        .join(format!("{relay_chain_name}.json"));
-                    fs::read(&relay_chain_path)
-                        .expect("Failed to read relay chain specs")
-                        .into()
-                }
-                _ => panic!("Unexpected relay chain specified in hard-coded specs"),
+            let spec_json = {
+                let relay_chain_path = cli_options
+                    .path_to_chain_spec
+                    .parent()
+                    .unwrap()
+                    .join(format!("{relay_chain_name}.json"));
+                fs::read(&relay_chain_path).expect("Failed to read relay chain specification")
             };
 
             let parsed_relay_spec = smoldot::chain_spec::ChainSpec::from_json_bytes(&spec_json)
@@ -262,7 +252,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
             }
 
             let cfg = smoldot_full_node::ChainConfig {
-                chain_spec: spec_json,
+                chain_spec: spec_json.into(),
                 additional_bootnodes: Vec::new(),
                 keystore_memory: Vec::new(),
                 sqlite_database_path: base_storage_directory.as_ref().map(|d| {
@@ -274,6 +264,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 keystore_path: base_storage_directory
                     .as_ref()
                     .map(|path| path.join(parsed_relay_spec.id()).join("keys")),
+                json_rpc_listen: None,
             };
 
             (Some(cfg), Some(relay_chain_name.to_owned()))
@@ -301,8 +292,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
             let mut actual_key = Box::new([0u8; 32]);
             rand::Fill::try_fill(&mut *actual_key, &mut rand::thread_rng()).unwrap();
             let mut hex_encoded = Box::new([0; 64]);
-            hex::encode_to_slice(&*actual_key, &mut *hex_encoded).unwrap();
-            fs::write(&path, &*hex_encoded).expect("failed to write libp2p secret key file");
+            hex::encode_to_slice(*actual_key, &mut *hex_encoded).unwrap();
+            fs::write(&path, *hex_encoded).expect("failed to write libp2p secret key file");
             zeroize::Zeroize::zeroize(&mut *hex_encoded);
             actual_key
         };
@@ -371,9 +362,9 @@ async fn run(cli_options: cli::CliOptionsRun) {
             .to_string(),
     );
 
-    let client = smoldot_full_node::start(smoldot_full_node::Config {
+    let client_init_result = smoldot_full_node::start(smoldot_full_node::Config {
         chain: smoldot_full_node::ChainConfig {
-            chain_spec,
+            chain_spec: chain_spec.into(),
             additional_bootnodes: cli_options
                 .additional_bootnode
                 .iter()
@@ -383,18 +374,18 @@ async fn run(cli_options: cli::CliOptionsRun) {
             sqlite_database_path,
             sqlite_cache_size: cli_options.database_cache_size.0,
             keystore_path,
+            json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
+                Some(smoldot_full_node::JsonRpcListenConfig {
+                    address,
+                    max_json_rpc_clients: cli_options.json_rpc_max_clients,
+                })
+            } else {
+                None
+            },
         },
         relay_chain,
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
-        json_rpc: if let Some(address) = cli_options.json_rpc_address.0 {
-            Some(smoldot_full_node::JsonRpcConfig {
-                address,
-                max_json_rpc_clients: cli_options.json_rpc_max_clients,
-            })
-        } else {
-            None
-        },
         tasks_executor: {
             let executor = executor.clone();
             Arc::new(move |task| executor.spawn(task).detach())
@@ -403,6 +394,17 @@ async fn run(cli_options: cli::CliOptionsRun) {
         jaeger_agent: cli_options.jaeger,
     })
     .await;
+
+    let client = match client_init_result {
+        Ok(c) => c,
+        Err(err) => {
+            log_callback.log(
+                smoldot_full_node::LogLevel::Error,
+                format!("Failed to initialize client: {}", err),
+            );
+            panic!("Failed to initialize client: {}", err);
+        }
+    };
 
     if let Some(addr) = client.json_rpc_server_addr() {
         log_callback.log(

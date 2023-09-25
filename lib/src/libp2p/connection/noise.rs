@@ -57,8 +57,6 @@
 //! [`PeerId`] of the remote, which is known to be legitimate, and a [`Noise`] object through
 //! which all further communications should go through.
 //!
-//! Use [`Noise::encrypt`] in order to send out data to the remote, and
-//! [`Noise::decrypt_to_vecdeque`] when data is received.
 
 // # Q&A
 //
@@ -77,13 +75,13 @@
 use crate::{
     libp2p::{
         peer_id::{PeerId, PublicKey, SignatureVerifyFailed},
-        read_write::ReadWrite,
+        read_write::{self, ReadWrite},
     },
     util::protobuf,
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, fmt, iter, mem};
+use core::{cmp, fmt, iter, mem, ops};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
@@ -251,119 +249,94 @@ pub struct Noise {
     /// Cipher used to decrypt incoming data.
     in_cipher_state: CipherState,
 
-    /// Buffer of data containing data received on the wire (still encrypted) but that isn't
-    /// enough to form a full message. Includes the two bytes of libp2p length prefix.
-    rx_buffer_encrypted: Vec<u8>,
+    /// Size in bytes of the next message to receive. `None` if unknown. If `Some`, the libp2p
+    /// length prefix has already been stripped from the incoming stream.
+    next_in_message_size: Option<u16>,
+
+    /// Buffer of data containing data that has been decrypted.
+    rx_buffer_decrypted: Vec<u8>,
+
+    /// Value of [`ReadWrite::expected_incoming_bytes`] of the inner stream the last time that
+    /// [`Noise::read_write`] was called. Encrypted data will be read until the length of
+    /// [`Noise::rx_buffer_decrypted`] reaches the value in this field.
+    inner_stream_expected_incoming_bytes: usize,
 }
 
 impl Noise {
-    /// Feeds encrypted data received from the wire and writes the decrypted data into `out`.
-    ///
-    /// Returns the number of bytes from `encrypted_data` that it has processed. These bytes must
-    /// be discarded and not passed again.
-    ///
-    /// The [`Noise`] state machine might copy some of the encrypted data internally for later.
-    /// Consequently, be aware that it is not possible to (easily) predict how much `out` is going
-    /// to grow based on the size of `encrypted_data`.
-    ///
-    /// This function always writes as much data to `out` as possible. In other words, calling
-    /// this function with an empty `encrypted_data` always has no effect.
-    ///
-    /// An error is returned if part of the payload fails to decode, which can happen if a
-    /// malicious actor has added or modified data to the stream of encrypted data. You are
-    /// encouraged to shut down the connection altogether if that happens.
-    // TODO: this API is very specific, maybe provide a way to decode into slices?
-    pub fn decrypt_to_vecdeque(
-        &mut self,
-        mut encrypted_data: &[u8],
-        out: &mut VecDeque<u8>,
-    ) -> Result<usize, CipherError> {
-        let mut total_read = 0;
-
-        loop {
-            // Try to construct the length prefix in `rx_buffer_encrypted` by moving bytes from
-            // `payload`.
-            while self.rx_buffer_encrypted.len() < 2 {
-                if encrypted_data.is_empty() {
-                    return Ok(total_read);
-                }
-
-                self.rx_buffer_encrypted.push(encrypted_data[0]);
-                encrypted_data = &encrypted_data[1..];
-                total_read += 1;
-            }
-
-            // Length of the message currently being received.
-            let expected_len = usize::from(u16::from_be_bytes(
-                <[u8; 2]>::try_from(&self.rx_buffer_encrypted[..2]).unwrap(),
-            ));
-
-            // If there isn't enough data available for the full message, copy the partial message
-            // to `rx_buffer_encrypted` and return early.
-            if self.rx_buffer_encrypted.len() + encrypted_data.len() < expected_len + 2 {
-                self.rx_buffer_encrypted.extend_from_slice(encrypted_data);
-                total_read += encrypted_data.len();
-                return Ok(total_read);
-            }
-
-            // Construct the encrypted slice of data to decode.
-            let to_decode_slice = if self.rx_buffer_encrypted.len() == 2 {
-                // If the entirety of the message is in `payload`, decode it from there without
-                // moving data. This is the most common situation.
-                debug_assert!(encrypted_data.len() >= expected_len);
-                let decode = &encrypted_data[..expected_len];
-                encrypted_data = &encrypted_data[expected_len..];
-                total_read += expected_len;
-                decode
-            } else {
-                // Otherwise, copy the rest of the message to `rx_buffer_encrypted`.
-                let remains = expected_len - (self.rx_buffer_encrypted.len() - 2);
-                self.rx_buffer_encrypted
-                    .extend_from_slice(&encrypted_data[..remains]);
-                encrypted_data = &encrypted_data[remains..];
-                total_read += remains;
-                &self.rx_buffer_encrypted[2..]
-            };
-
-            // Read and decrypt the message.
-            // Note that `out` isn't modified if an error is returned.
-            let result =
-                self.in_cipher_state
-                    .read_chachapoly_message_to_vecdeque(&[], to_decode_slice, out);
-
-            // Clear the now-decoded message. This is done even on failure, in order to potentially
-            // continue receiving messages if it is desired.
-            self.rx_buffer_encrypted.clear();
-
-            result?;
-        }
-    }
-
     /// Returns true if the local side has opened the connection.
     pub fn is_initiator(&self) -> bool {
         self.is_initiator
     }
 
-    /// Start the encryption process.
+    /// Feeds data coming from a socket and outputs data to write to the socket.
     ///
-    /// Must provide two destination buffers where the encrypted data will be written. The
-    /// implementation will try fill the first buffer until it is full, then switch to the second
-    /// buffer.
+    /// Returns an object that implements `Deref<Target = ReadWrite>`. This object represents the
+    /// decrypted stream of data.
     ///
-    /// Call [`Encrypt::unencrypted_write_buffers`] in order to obtain an iterator of sub-slices.
-    /// These sub-slices always point within `destination`. Write the unencrypted data to the
-    /// buffers returned by this iterator. Once done, call [`Encrypt::encrypt`], providing the
-    /// amount of unencrypted data that was written.
-    ///
-    /// Returns an error if the nonce has overflowed and that no more message can be written.
-    // TODO: write to temporary buffer if destination is too small
-    pub fn encrypt<'a>(
+    /// An error is returned if the protocol is being violated by the remote or if the nonce
+    /// overflows. When that happens, the connection should be closed altogether.
+    pub fn read_write<'a, TNow: Clone>(
         &'a mut self,
-        destination: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<Encrypt<'a>, EncryptError> {
-        Ok(Encrypt {
-            out_cipher_state: &mut self.out_cipher_state,
-            destination,
+        outer_read_write: &'a mut ReadWrite<TNow>,
+    ) -> Result<InnerReadWrite<'a, TNow>, CipherError> {
+        // Try to pull data from `outer_read_write` to decrypt it.
+        while self.rx_buffer_decrypted.is_empty()
+            || self.inner_stream_expected_incoming_bytes > self.rx_buffer_decrypted.len()
+        {
+            // TODO: what if EOF in the middle of a message?
+            if let Some(next_in_message_size) = self.next_in_message_size {
+                if let Ok(Some(encrypted_message)) =
+                    outer_read_write.incoming_bytes_take(usize::from(next_in_message_size))
+                {
+                    self.next_in_message_size = None;
+
+                    // Read and decrypt the message.
+                    // TODO: decipher progressively, based on the inner `expected_incoming_bytes` value
+                    self.in_cipher_state.read_chachapoly_message_to_vec_append(
+                        &[],
+                        &encrypted_message,
+                        &mut self.rx_buffer_decrypted,
+                    )?;
+                } else {
+                    break;
+                }
+            } else {
+                if let Ok(Some(next_frame_length)) =
+                    outer_read_write.incoming_bytes_take_array::<2>()
+                {
+                    self.next_in_message_size = Some(u16::from_be_bytes(next_frame_length));
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Check ahead of time if writing out a message would panic.
+        if self.out_cipher_state.nonce_has_overflowed {
+            return Err(CipherError::NonceOverflow);
+        }
+
+        Ok(InnerReadWrite {
+            inner_read_write: ReadWrite {
+                now: outer_read_write.now.clone(),
+                incoming_buffer: mem::take(&mut self.rx_buffer_decrypted),
+                read_bytes: 0,
+                expected_incoming_bytes: if outer_read_write.expected_incoming_bytes.is_some()
+                    || !outer_read_write.incoming_buffer.is_empty()
+                {
+                    Some(self.inner_stream_expected_incoming_bytes)
+                } else {
+                    None
+                },
+                write_buffers: Vec::new(),
+                write_bytes_queued: 0,
+                write_bytes_queueable: outer_read_write.write_bytes_queueable.map(
+                    |outer_writable| cmp::min(outer_writable.saturating_sub(16 + 2), 65535 - 16),
+                ),
+                wake_up_after: outer_read_write.wake_up_after.clone(),
+            },
+            noise: self,
+            outer_read_write,
         })
     }
 }
@@ -374,144 +347,86 @@ impl fmt::Debug for Noise {
     }
 }
 
-#[must_use]
-pub struct Encrypt<'a> {
-    out_cipher_state: &'a mut CipherState,
-    destination: (&'a mut [u8], &'a mut [u8]),
+/// Stream of decrypted data. See [`Noise::read_write`].
+pub struct InnerReadWrite<'a, TNow: Clone> {
+    noise: &'a mut Noise,
+    outer_read_write: &'a mut ReadWrite<TNow>,
+    inner_read_write: ReadWrite<TNow>,
 }
 
-impl<'a> Encrypt<'a> {
-    /// Returns an iterator to a list of buffers where the unencrypted data must be written.
-    ///
-    /// All the buffers are subslices of the `destination` parameter that was provided.
-    pub fn unencrypted_write_buffers(&'_ mut self) -> impl Iterator<Item = &'_ mut [u8]> + '_ {
-        let full_message_len = usize::from(u16::max_value()) + 2;
+impl<'a, TNow: Clone> ops::Deref for InnerReadWrite<'a, TNow> {
+    type Target = ReadWrite<TNow>;
 
-        let max_messages_before_nonce_overflow =
-            usize::try_from(u64::max_value() - self.out_cipher_state.nonce)
-                .unwrap_or(usize::max_value())
-                .saturating_add(1);
-
-        let dest0_len = self.destination.0.len();
-        let dest1_len = self.destination.1.len();
-
-        let dest0 = self
-            .destination
-            .0
-            .chunks_mut(full_message_len)
-            .filter_map(move |buffer| {
-                let len = buffer.len();
-                let len_avail = cmp::min(len.saturating_add(dest1_len), full_message_len);
-                // The minium message size is 18, but that would give an empty message.
-                if len_avail < 19 {
-                    return None;
-                }
-                Some(&mut buffer[2..cmp::min(len, len_avail - 16)])
-            });
-
-        let (dest1_first, dest1_rest) = self.destination.1.split_at_mut(cmp::min(
-            dest1_len,
-            full_message_len - (dest0_len % full_message_len),
-        ));
-
-        let dest1_first = iter::once(dest1_first).filter_map(move |buf| {
-            let len = buf.len();
-            let start_discard = 2usize.saturating_sub(dest0_len % full_message_len);
-            if len < 17 {
-                return None;
-            }
-            Some(&mut buf[start_discard..len - 16])
-        });
-
-        let dest1_rest = dest1_rest
-            .chunks_mut(full_message_len)
-            .filter_map(move |buffer| {
-                let len = buffer.len();
-                // The minium message size is 18, but that would give an empty message.
-                if len < 19 {
-                    return None;
-                }
-                Some(&mut buffer[2..len - 16])
-            });
-
-        dest0
-            .chain(dest1_first)
-            .chain(dest1_rest)
-            .take(max_messages_before_nonce_overflow)
+    fn deref(&self) -> &Self::Target {
+        &self.inner_read_write
     }
+}
 
-    /// Performs the actual encryption. Must be passed the number of bytes that were written to the
-    /// buffers returned by [`Encrypt::unencrypted_write_buffers`]. Returns the total number of
-    /// bytes written to `destination`.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `num_written` is larger than the sum of the buffers that were returned by
-    /// [`Encrypt::unencrypted_write_buffers`].
-    ///
-    pub fn encrypt(mut self, mut num_written: usize) -> usize {
-        let mut num_written_encrypted = 0;
+impl<'a, TNow: Clone> ops::DerefMut for InnerReadWrite<'a, TNow> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner_read_write
+    }
+}
 
-        loop {
-            if num_written == 0 {
-                break;
-            }
+impl<'a, TNow: Clone> Drop for InnerReadWrite<'a, TNow> {
+    fn drop(&mut self) {
+        self.outer_read_write.wake_up_after = self.inner_read_write.wake_up_after.clone();
+        self.noise.rx_buffer_decrypted = mem::take(&mut self.inner_read_write.incoming_buffer);
+        self.noise.inner_stream_expected_incoming_bytes =
+            self.inner_read_write.expected_incoming_bytes.unwrap_or(0);
 
-            // This debug_assert! can trigger if `num_written` is out of bounds. However, passing
-            // a correct `num_written` is rather easy, and so it might most likely detect a bug
-            // in the Noise code.
-            debug_assert!(self.destination.0.len() + self.destination.1.len() >= 19);
-
-            // Number of unencrypted bytes to include in the next message out.
-            let next_message_payload_size =
-                cmp::min(num_written, usize::from(u16::max_value() - 16));
-            num_written -= next_message_payload_size;
-            let next_message_size = next_message_payload_size + 16;
-
-            // Write the libp2p length prefix and advance `self.destination`.
-            {
-                let message_length_prefix = u16::try_from(next_message_size).unwrap().to_be_bytes();
-                if !self.destination.0.is_empty() {
-                    self.destination.0[0] = message_length_prefix[0];
-                    self.destination.0 = &mut self.destination.0[1..];
-                } else {
-                    self.destination.1[0] = message_length_prefix[0];
-                    self.destination.1 = &mut self.destination.1[1..];
-                }
-                if !self.destination.0.is_empty() {
-                    self.destination.0[0] = message_length_prefix[1];
-                    self.destination.0 = &mut self.destination.0[1..];
-                } else {
-                    self.destination.1[0] = message_length_prefix[1];
-                    self.destination.1 = &mut self.destination.1[1..];
-                }
-                num_written_encrypted += 2;
-            }
-
-            // `self.destination` now points to slices that contain `next_message_payload_size`
-            // bytes of unencrypted data plus 16 bytes reserved for the HMAC, which we can write
-            // in place.
-            let destination0_message_end = cmp::min(next_message_size, self.destination.0.len());
-            let destination1_message_end = next_message_size - destination0_message_end;
-            // `write_chachapoly_message_in_place` can only fail if the nonce overflowed, which
-            // can happen only if the user has passed a `num_written` too large.
-            self.out_cipher_state
-                .write_chachapoly_message_in_place(&[], {
-                    let message_dest0 = &mut self.destination.0[..destination0_message_end];
-                    let message_dest1 = &mut self.destination.1[..destination1_message_end];
-                    (message_dest0, message_dest1)
-                })
-                .unwrap();
-
-            // Update `destination` to be after these bytes.
-            self.destination = (
-                &mut self.destination.0[destination0_message_end..],
-                &mut self.destination.1[destination1_message_end..],
-            );
-            num_written_encrypted += next_message_size;
+        // It is possible that the inner stream processes some bytes of `self.rx_buffer_decrypted`
+        // and expects to be called again while no bytes was pulled from the outer `ReadWrite`.
+        // If that happens, the API user will not call `read_write` again and we will have a stall.
+        // For this reason, if the inner stream has read some bytes, we make sure that the outer
+        // `ReadWrite` wakes up as soon as possible.
+        if self.inner_read_write.read_bytes != 0 {
+            self.outer_read_write.wake_up_asap();
         }
 
-        num_written_encrypted
+        // Encrypt the data, transferring it from the inner `ReadWrite` to the outer `ReadWrite`.
+        if self
+            .inner_read_write
+            .write_buffers
+            .iter()
+            .any(|b| !b.is_empty())
+        {
+            self.outer_read_write
+                .write_buffers
+                .reserve(2 + self.inner_read_write.write_buffers.len() * 2);
+
+            // We push a dummy buffer to `outer_read_write.write_buffers`. This dummy buffer
+            // will later be overwritten with the actual message length.
+            let message_length_prefix_index = self.outer_read_write.write_buffers.len();
+            self.outer_read_write.write_buffers.push(Vec::new());
+
+            // Encrypt the message.
+            // `write_chachapoly_message` returns an error if the nonce has overflowed. It has
+            // been checked in the body of `read_write` that this can't happen.
+            let mut total_size = 0;
+            for encrypted_buffer in self
+                .noise
+                .out_cipher_state
+                .write_chachapoly_message(&[], self.inner_read_write.write_buffers.drain(..))
+                .unwrap_or_else(|_| unreachable!())
+            {
+                total_size += encrypted_buffer.len();
+                self.outer_read_write.write_buffers.push(encrypted_buffer);
+            }
+
+            // Now write the message length.
+            let message_length_prefix = u16::try_from(total_size).unwrap().to_be_bytes().to_vec();
+            self.outer_read_write.write_buffers[message_length_prefix_index] =
+                message_length_prefix;
+
+            // Properly update the outer `ReadWrite`.
+            self.outer_read_write.write_bytes_queued += total_size + 2;
+            *self
+                .outer_read_write
+                .write_bytes_queueable
+                .as_mut()
+                .unwrap() -= total_size + 2;
+        }
     }
 }
 
@@ -541,10 +456,11 @@ struct HandshakeInProgressInner {
     /// Queued data that should be sent out as soon as possible.
     pending_out_data: VecDeque<u8>,
 
-    /// Buffer of data containing data received on the wire. This buffer is only used in rare
-    /// situations where Noise handshake messages are split and received in multiple calls
-    /// to `read_write`.
-    receive_buffer: Vec<u8>,
+    /// Size of the next message being received, if already known.
+    ///
+    /// If `Some`, the libp2p size prefix has already been extracted from the incoming buffer.
+    /// If `None`, this hasn't been done yet.
+    next_in_message_size: Option<u16>,
 
     /// Progression of the handshake.
     ///
@@ -663,7 +579,7 @@ impl HandshakeInProgress {
             remote_public_key: None,
             is_initiator: config.is_initiator,
             pending_out_data: VecDeque::with_capacity(usize::from(u16::max_value()) + 2),
-            receive_buffer: Vec::with_capacity(usize::from(u16::max_value()) + 2),
+            next_in_message_size: None,
             num_buffered_or_transmitted_messages: 0,
             libp2p_handshake_message: config.key.handshake_message.clone(),
         }))
@@ -677,7 +593,7 @@ impl HandshakeInProgress {
     /// the connection should be closed altogether.
     pub fn read_write<TNow>(
         mut self,
-        read_write: &mut ReadWrite<'_, TNow>,
+        read_write: &mut ReadWrite<TNow>,
     ) -> Result<NoiseHandshake, HandshakeError> {
         loop {
             // Write out the data currently buffered waiting to be written out.
@@ -685,7 +601,7 @@ impl HandshakeInProgress {
             // Don't even read the data from the remote.
             read_write.write_from_vec_deque(&mut self.0.pending_out_data);
             if !self.0.pending_out_data.is_empty() {
-                if read_write.outgoing_buffer.is_none() {
+                if read_write.write_bytes_queueable.is_none() {
                     return Err(HandshakeError::WriteClosed);
                 }
                 return Ok(NoiseHandshake::InProgress(self));
@@ -694,7 +610,7 @@ impl HandshakeInProgress {
             // If the handshake has finished, we return successfully here.
             if self.0.num_buffered_or_transmitted_messages == 3 {
                 debug_assert!(self.0.pending_out_data.is_empty());
-                debug_assert!(self.0.receive_buffer.is_empty());
+                debug_assert!(self.0.next_in_message_size.is_none());
 
                 // Perform the `Split()`.
                 let HkdfOutput {
@@ -718,8 +634,9 @@ impl HandshakeInProgress {
                             nonce: 0,
                             nonce_has_overflowed: false,
                         },
-                        // We reuse `self.receive_buffer` as it already has the correct capacity.
-                        rx_buffer_encrypted: mem::take(&mut self.0.receive_buffer),
+                        rx_buffer_decrypted: Vec::with_capacity(65535 - 16),
+                        next_in_message_size: None,
+                        inner_stream_expected_incoming_bytes: 0,
                     },
                     remote_peer_id: {
                         // The logic of this module guarantees that `remote_peer_id` has
@@ -906,65 +823,44 @@ impl HandshakeInProgress {
 
             // Since we have no more data to write out, and that the handshake isn't finished yet,
             // the next step is necessarily receiving a message sent by the remote.
-            // Most of the time, `incoming_buffer` will contain an entire Noise handshake message.
-            // However, it is also possible that the Noise message is split into multiple chunks
-            // received over time. When that is the case, we have to fall back to `receive_buffer`.
-            let available_message: &[u8] = {
-                // The remaining of the body requires reading from `read_write`. As such, error if
-                // the reading side is closed.
-                let Some(incoming_buffer) = read_write.incoming_buffer else {
-                    return Err(HandshakeError::ReadClosed);
+
+            // Grab the size of the next message, either from `self` or by extracting 2 bytes from
+            // the incoming buffer.
+            let next_in_message_size =
+                if let Some(next_in_message_size) = self.0.next_in_message_size {
+                    next_in_message_size
+                } else {
+                    match read_write.incoming_bytes_take(2) {
+                        Ok(Some(size_buffer)) => *self.0.next_in_message_size.insert(
+                            u16::from_be_bytes(<[u8; 2]>::try_from(&size_buffer[..2]).unwrap()),
+                        ),
+                        Ok(None) => {
+                            // Not enough data in incoming buffer.
+                            return Ok(NoiseHandshake::InProgress(self));
+                        }
+                        Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            return Err(HandshakeError::ReadClosed)
+                        }
+                    }
                 };
 
-                // If `self.receive_buffer` is empty and `incoming_data` contains at least a
-                // whole message, we can directly extract said message.
-                if self.0.receive_buffer.is_empty()
-                    && incoming_buffer.len() >= 2
-                    && incoming_buffer.len()
-                        >= usize::from(u16::from_be_bytes(
-                            <[u8; 2]>::try_from(&incoming_buffer[..2]).unwrap(),
-                        )) + 2
-                {
-                    let message_length = usize::from(u16::from_be_bytes(
-                        <[u8; 2]>::try_from(&incoming_buffer[..2]).unwrap(),
-                    )) + 2;
-                    read_write.read_bytes += message_length;
-                    read_write.incoming_buffer = Some(&incoming_buffer[message_length..]);
-                    &incoming_buffer[2..message_length]
-                } else {
-                    // The incoming buffer only contains a partial message, or we have started
-                    // reading a partial message in a previous iteration.
-                    // This is the more uncommon and complicated situation. We need to copy the
-                    // data from the incoming buffer to the receive buffer.
-                    let mut incoming_buffer_iter = incoming_buffer.iter();
-                    while self.0.receive_buffer.len() < 2 {
-                        let Some(byte) = incoming_buffer_iter.next() else {
-                            read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
-                            return Ok(NoiseHandshake::InProgress(self));
-                        };
-                        read_write.read_bytes += 1;
-                        self.0.receive_buffer.push(*byte);
+            // Extract the message from the incoming buffer.
+            let available_message =
+                match read_write.incoming_bytes_take(usize::from(next_in_message_size)) {
+                    Ok(Some(available_message)) => {
+                        self.0.next_in_message_size = None;
+                        available_message
                     }
-
-                    let message_length = usize::from(u16::from_be_bytes(
-                        <[u8; 2]>::try_from(&self.0.receive_buffer[..2]).unwrap(),
-                    )) + 2;
-                    while self.0.receive_buffer.len() < message_length {
-                        let Some(byte) = incoming_buffer_iter.next() else {
-                            read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
-                            return Ok(NoiseHandshake::InProgress(self));
-                        };
-                        read_write.read_bytes += 1;
-                        self.0.receive_buffer.push(*byte);
+                    Ok(None) => {
+                        // Not enough data in incoming buffer.
+                        return Ok(NoiseHandshake::InProgress(self));
                     }
+                    Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                        return Err(HandshakeError::ReadClosed)
+                    }
+                };
 
-                    // A full message is available in `receive_buffer`.
-                    read_write.incoming_buffer = Some(incoming_buffer_iter.as_slice());
-                    &self.0.receive_buffer[2..]
-                }
-            };
-
-            // The rest of the function depends on the current handshake phase.
+            // How to parse the message depends on the current handshake phase.
             match (
                 self.0.num_buffered_or_transmitted_messages,
                 self.0.is_initiator,
@@ -980,10 +876,10 @@ impl HandshakeInProgress {
                             (&[u8], nom::error::ErrorKind),
                             _,
                         >(nom::combinator::map(
-                            nom::bytes::complete::take(32u32),
+                            nom::bytes::streaming::take(32u32),
                             |k| <&[u8; 32]>::try_from(k).unwrap(),
                         ));
-                        match parser(available_message) {
+                        match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
@@ -999,7 +895,6 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, &[]);
 
                     // Message has been fully processed.
-                    self.0.receive_buffer.clear();
                     self.0.num_buffered_or_transmitted_messages += 1;
                     continue;
                 }
@@ -1018,15 +913,15 @@ impl HandshakeInProgress {
                             (&[u8], nom::error::ErrorKind),
                             _,
                         >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::complete::take(32u32), |k| {
+                            nom::combinator::map(nom::bytes::streaming::take(32u32), |k| {
                                 <&[u8; 32]>::try_from(k).unwrap()
                             }),
-                            nom::combinator::map(nom::bytes::complete::take(48u32), |k| {
+                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
                                 <&[u8; 48]>::try_from(k).unwrap()
                             }),
                             nom::combinator::rest,
                         )));
-                        match parser(available_message) {
+                        match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
@@ -1129,7 +1024,6 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, libp2p_handshake_encrypted);
 
                     // Message has been fully processed.
-                    self.0.receive_buffer.clear();
                     self.0.num_buffered_or_transmitted_messages += 1;
                     continue;
                 }
@@ -1146,12 +1040,12 @@ impl HandshakeInProgress {
                             (&[u8], nom::error::ErrorKind),
                             _,
                         >(nom::sequence::tuple((
-                            nom::combinator::map(nom::bytes::complete::take(48u32), |k| {
+                            nom::combinator::map(nom::bytes::streaming::take(48u32), |k| {
                                 <&[u8; 48]>::try_from(k).unwrap()
                             }),
                             nom::combinator::rest,
                         )));
-                        match parser(available_message) {
+                        match parser(&available_message) {
                             Ok((_, out)) => out,
                             Err(_) => {
                                 return Err(HandshakeError::PayloadDecode(PayloadDecodeError))
@@ -1232,7 +1126,6 @@ impl HandshakeInProgress {
                     mix_hash(&mut self.0.hash, libp2p_handshake_encrypted);
 
                     // Message has been fully processed.
-                    self.0.receive_buffer.clear();
                     self.0.num_buffered_or_transmitted_messages += 1;
                     continue;
                 }
@@ -1305,107 +1198,150 @@ struct CipherState {
 }
 
 impl CipherState {
-    /// Accepts two `destination` buffers that contain unencrypted data plus 16 unused bytes where
-    /// the HMAC will be written. Encrypts the data in place and writes the HMAC.
+    /// Accepts a list of input buffers, and returns output buffers that contain the encrypted data
+    /// and the HMAC will be written.
     ///
     /// Does *not* include the libp2p-specific message length prefix.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `destination.0.len() + destination.1.len() < 16`.
-    /// Panics if `destination.0.len() + destination.1.len() > 1 << 16`.
-    ///
-    fn write_chachapoly_message_in_place(
+    fn write_chachapoly_message(
         &'_ mut self,
         associated_data: &[u8],
-        destination: (&'_ mut [u8], &'_ mut [u8]),
-    ) -> Result<(), EncryptError> {
-        debug_assert!(destination.0.len() + destination.1.len() <= usize::from(u16::max_value()));
-
+        decrypted_buffers: impl Iterator<Item = Vec<u8>>,
+    ) -> Result<impl Iterator<Item = Vec<u8>>, EncryptError> {
         if self.nonce_has_overflowed {
             return Err(EncryptError::NonceOverflow);
         }
 
-        let (mut cipher, mut mac) = self.prepare(associated_data);
+        let (mut cipher, mac) = self.prepare(associated_data);
+        let associated_data_len = associated_data.len();
 
-        // The difficulty in this function implementation is that the cipher and MAC operate on
-        // 64 bytes blocks (in other words, the data passed to them must have a size multiple of
-        // 64), and unfortunately `destination` might be weirdly aligned.
-        // To overcome this, if there's an alignment issue, we copy the data to an intermediary
-        // buffer, encrypt it, then copy it back.
-
-        // The function below does a maximum of three passes: one on `destination.0`, one on a
-        // copy of the block that overlaps between `destination.0` and `destination.1`, and one
-        // on `destination.1`.
-        // Most of the time, only one or two passes are necessary as the API user is expected to
-        // provide buffers that are aligned over 64 bytes.
-
-        // To start find where the payload ends in `destination.0` and `destination.1` by removing
-        // 16 bytes from them.
-        let payload0_length = destination.0.len() - 16usize.saturating_sub(destination.1.len());
-        let payload1_length = destination.1.len().saturating_sub(16);
-
-        // If `destination.1` is empty, we only need a single pass which processes all the bytes
-        // of `destination.0` at once. Otherwise, the first pass ends at a multiple of 64 bytes.
-        let first_chunk_end_offset = if destination.1.is_empty() {
-            payload0_length
-        } else {
-            64 * (payload0_length / 64)
-        };
-        let first_chunk = &mut destination.0[..first_chunk_end_offset];
-        chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, first_chunk);
-        poly1305::universal_hash::UniversalHash::update_padded(&mut mac, first_chunk);
-
-        // Process bytes of frames that are in the block that overlaps `destination.0`
-        // and `destination.1`.
-        if first_chunk_end_offset != payload0_length {
-            let intermediary_buffer_len = (payload0_length + payload1_length) % 64;
-            let mut intermediary_buffer = vec![0; intermediary_buffer_len];
-            intermediary_buffer[..payload0_length - first_chunk_end_offset]
-                .copy_from_slice(&destination.0[first_chunk_end_offset..payload0_length]);
-            intermediary_buffer[payload0_length - first_chunk_end_offset..].copy_from_slice(
-                &destination.1
-                    [..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)],
-            );
-            chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, &mut intermediary_buffer);
-            poly1305::universal_hash::UniversalHash::update_padded(&mut mac, &intermediary_buffer);
-            destination.0[first_chunk_end_offset..payload0_length]
-                .copy_from_slice(&intermediary_buffer[..payload0_length - first_chunk_end_offset]);
-            destination.1[..intermediary_buffer_len - (payload0_length - first_chunk_end_offset)]
-                .copy_from_slice(&intermediary_buffer[payload0_length - first_chunk_end_offset..]);
-        }
-
-        // Process bytes aligned on a 64 bytes boundary in `destination.1`.
-        let second_chunk_start_offset = cmp::min(
-            payload1_length,
-            64 - (payload0_length - first_chunk_end_offset),
-        );
-        let second_chunk = &mut destination.1[second_chunk_start_offset..payload1_length];
-        chacha20::cipher::StreamCipher::apply_keystream(&mut cipher, second_chunk);
-        poly1305::universal_hash::UniversalHash::update_padded(&mut mac, second_chunk);
-
-        // Update the MAC with the length of the associated data and input data.
-        let mut block = poly1305::universal_hash::generic_array::GenericArray::default();
-        block[..8].copy_from_slice(&u64::try_from(associated_data.len()).unwrap().to_le_bytes());
-        block[8..].copy_from_slice(
-            &u64::try_from(payload0_length + payload1_length)
-                .unwrap()
-                .to_le_bytes(),
-        );
-        poly1305::universal_hash::UniversalHash::update(&mut mac, &[block]);
-
-        // Write the HMAC.
-        let mac_bytes: [u8; 16] = poly1305::universal_hash::UniversalHash::finalize(mac).into();
-        let destination1_length = destination.1.len();
-        destination.0[payload0_length..]
-            .copy_from_slice(&mac_bytes[..16usize.saturating_sub(destination1_length)]);
-        destination.1[payload1_length..]
-            .copy_from_slice(&mac_bytes[16usize.saturating_sub(destination1_length)..]);
-
-        // Increment the nonce by 1.
+        // Increment the nonce by 1. This is done ahead of time in order to be sure that the same
+        // nonce is never re-used even if the API user drops the returned iterator before it ends.
         (self.nonce, self.nonce_has_overflowed) = self.nonce.overflowing_add(1);
 
-        Ok(())
+        // The difficulty in this function implementation is that the cipher operates on 64 bytes
+        // blocks (in other words, the data passed to them must have a size multiple of 64), and
+        // unfortunately the input buffers might be weirdly aligned.
+        // To overcome this, when there's an alignment issue, we copy the data to a contiguous
+        // slice.
+
+        // Each input buffer is encrypted in place as much as possible. Due to alignment issues,
+        // each input buffer is split in three parts: the data that is appended to the previous
+        // buffer's data in order to align it, the data that can be encrypted in place, and the
+        // data that must be prepanded to the start of the next buffer.
+        // Furthermore, note that the third part of the last buffer can always be encrypted in
+        // place.
+
+        // The implementation below requires `decrypted_buffers` to be peekable.
+        let mut decrypted_buffers = decrypted_buffers.peekable();
+        // Counter for total input decrypted data increased when iterating over the input.
+        // Necessary at the very end of the calculation.
+        let mut total_decrypted_data = 0;
+        // Data that was copied from the end of the previous buffer.
+        // TODO: ideally we would avoid copying the end of the previous buffer, and instead only copy the start of the next one, but this means that we couldn't return concrete `Vec`s anymore, and this API change is complicated
+        let mut overlapping_data = Vec::new();
+        // `None` if the HMAC has already been returned from the iterator.
+        let mut mac = Some(mac);
+
+        // Iterator being returned.
+        Ok(iter::from_fn(move || {
+            loop {
+                debug_assert!(overlapping_data.len() < 64);
+
+                // Return if iterator has finished.
+                let Some(mac_deref) = mac.as_mut() else {
+                    return None;
+                };
+
+                if !overlapping_data.is_empty() {
+                    // Copy data from the start of the next buffer to the end
+                    // of `overlapping_data`.
+                    if let Some(next_buffer) = decrypted_buffers.peek_mut() {
+                        let missing_data_for_full_frame = 64 - overlapping_data.len();
+                        if next_buffer.len() >= missing_data_for_full_frame {
+                            // Enough data in next buffer to fill a frame in `overlapping_data`.
+                            // Extract data from the next buffer.
+                            overlapping_data
+                                .extend_from_slice(&next_buffer[..missing_data_for_full_frame]);
+                            next_buffer.copy_within(missing_data_for_full_frame.., 0);
+                            next_buffer.truncate(next_buffer.len() - missing_data_for_full_frame);
+
+                            // Encrypt `overlapping_data` in place and return it.
+                            chacha20::cipher::StreamCipher::apply_keystream(
+                                &mut cipher,
+                                &mut overlapping_data,
+                            );
+                            poly1305::universal_hash::UniversalHash::update_padded(
+                                mac_deref,
+                                &overlapping_data,
+                            );
+                            debug_assert_eq!(overlapping_data.len(), 64);
+                            total_decrypted_data += 64;
+                            return Some(mem::take(&mut overlapping_data));
+                        } else {
+                            // Not enough data in next buffer to fill `overlapping_data`.
+                            // Copy the data and continue looping.
+                            overlapping_data.extend_from_slice(next_buffer);
+                            let _ = decrypted_buffers.next();
+                        }
+                    } else {
+                        // Input is empty. `overlapping_data` is the last buffer.
+                        chacha20::cipher::StreamCipher::apply_keystream(
+                            &mut cipher,
+                            &mut overlapping_data,
+                        );
+                        poly1305::universal_hash::UniversalHash::update_padded(
+                            mac_deref,
+                            &overlapping_data,
+                        );
+                        total_decrypted_data += overlapping_data.len();
+                        return Some(mem::take(&mut overlapping_data));
+                    }
+                } else if let Some(mut buffer) = decrypted_buffers.next() {
+                    // Number of bytes of `next_buffer` that can be encrypted in place.
+                    let encryptable_in_place = 64 * (buffer.len() / 64);
+
+                    // Perform the encryption.
+                    chacha20::cipher::StreamCipher::apply_keystream(
+                        &mut cipher,
+                        &mut buffer[..encryptable_in_place],
+                    );
+                    poly1305::universal_hash::UniversalHash::update_padded(
+                        mac_deref,
+                        &buffer[..encryptable_in_place],
+                    );
+
+                    // Copy the non-encryptable-in-place data to `overlapping_data`.
+                    if encryptable_in_place != buffer.len() {
+                        overlapping_data.reserve(64);
+                        overlapping_data.extend_from_slice(&buffer[encryptable_in_place..]);
+                        buffer.truncate(encryptable_in_place);
+                    }
+
+                    // And return.
+                    total_decrypted_data += encryptable_in_place;
+                    return Some(buffer);
+                } else {
+                    // No more encrypted data to return.
+
+                    // Update the MAC with the length of the associated data and input data.
+                    let mut block =
+                        poly1305::universal_hash::generic_array::GenericArray::default();
+                    block[..8].copy_from_slice(
+                        &u64::try_from(associated_data_len).unwrap().to_le_bytes(),
+                    );
+                    block[8..].copy_from_slice(
+                        &u64::try_from(total_decrypted_data).unwrap().to_le_bytes(),
+                    );
+                    poly1305::universal_hash::UniversalHash::update(mac_deref, &[block]);
+
+                    // Return the HMAC.
+                    let mac_bytes =
+                        poly1305::universal_hash::UniversalHash::finalize(mac.take().unwrap())
+                            .to_vec();
+                    return Some(mac_bytes);
+                }
+            }
+        }))
     }
 
     /// Creates a ChaChaPoly1305 frame as a `Vec`.
@@ -1416,10 +1352,16 @@ impl CipherState {
         associated_data: &[u8],
         data: &[u8],
     ) -> Result<Vec<u8>, EncryptError> {
-        let mut out = vec![0; data.len() + 16];
-        out[..data.len()].copy_from_slice(data);
-        self.write_chachapoly_message_in_place(associated_data, (&mut out, &mut []))?;
-        Ok(out)
+        Ok(self
+            .write_chachapoly_message(associated_data, iter::once(data.to_vec()))?
+            .fold(Vec::new(), |mut a, b| {
+                if a.is_empty() {
+                    b
+                } else {
+                    a.extend_from_slice(&b);
+                    a
+                }
+            }))
     }
 
     /// Highly-specific function when the message to decode is 32 bytes.
@@ -1433,36 +1375,6 @@ impl CipherState {
         Ok(out)
     }
 
-    fn read_chachapoly_message_to_vecdeque(
-        &'_ mut self,
-        associated_data: &[u8],
-        message_data: &[u8],
-        destination: &mut VecDeque<u8>,
-    ) -> Result<(), CipherError> {
-        let original_dest_len = destination.len();
-        destination.resize(original_dest_len + message_data.len().saturating_sub(16), 0);
-
-        if destination.as_mut_slices().1.is_empty() {
-            match self.read_chachapoly_message_to_slice(
-                associated_data,
-                message_data,
-                &mut destination.as_mut_slices().0[original_dest_len..],
-            ) {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    destination.truncate(original_dest_len);
-                    Err(err)
-                }
-            }
-        } else {
-            destination.truncate(original_dest_len);
-            let intermediary =
-                self.read_chachapoly_message_to_vec(associated_data, message_data)?;
-            destination.extend(intermediary.into_iter());
-            Ok(())
-        }
-    }
-
     fn read_chachapoly_message_to_vec(
         &'_ mut self,
         associated_data: &[u8],
@@ -1471,6 +1383,25 @@ impl CipherState {
         let mut destination = vec![0; message_data.len().saturating_sub(16)];
         self.read_chachapoly_message_to_slice(associated_data, message_data, &mut destination)?;
         Ok(destination)
+    }
+
+    fn read_chachapoly_message_to_vec_append(
+        &'_ mut self,
+        associated_data: &[u8],
+        message_data: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CipherError> {
+        let len_before = out.len();
+        out.resize(len_before + message_data.len().saturating_sub(16), 0);
+        let result = self.read_chachapoly_message_to_slice(
+            associated_data,
+            message_data,
+            &mut out[len_before..],
+        );
+        if result.is_err() {
+            out.truncate(len_before);
+        }
+        result
     }
 
     fn read_chachapoly_message_to_slice(
@@ -1633,11 +1564,13 @@ struct HkdfOutput {
 
 #[cfg(test)]
 mod tests {
+    use core::{cmp, mem};
+
     use super::{Config, NoiseHandshake, NoiseKey, ReadWrite};
 
     #[test]
     fn handshake_basic_works() {
-        fn test_with_buffer_sizes(size1: usize, size2: usize) {
+        fn test_with_buffer_sizes(mut size1: usize, mut size2: usize) {
             let key1 = NoiseKey::new(&rand::random(), &rand::random());
             let key2 = NoiseKey::new(&rand::random(), &rand::random());
 
@@ -1667,78 +1600,50 @@ mod tests {
                 match handshake1 {
                     NoiseHandshake::Success { .. } => {}
                     NoiseHandshake::InProgress(nego) => {
-                        if buf_1_to_2.is_empty() {
-                            buf_1_to_2.resize(size1, 0);
-
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_2_to_1),
-                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-
-                            handshake1 = nego.read_write(&mut read_write).unwrap();
-                            let (read_bytes, written_bytes) =
-                                (read_write.read_bytes, read_write.written_bytes);
-                            for _ in 0..read_bytes {
-                                buf_2_to_1.remove(0);
-                            }
-                            buf_1_to_2.truncate(written_bytes);
-                        } else {
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_2_to_1),
-                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-                            handshake1 = nego.read_write(&mut read_write).unwrap();
-                            for _ in 0..read_write.read_bytes {
-                                buf_2_to_1.remove(0);
-                            }
-                        }
+                        let mut read_write = ReadWrite {
+                            now: 0,
+                            incoming_buffer: buf_2_to_1,
+                            expected_incoming_bytes: Some(0),
+                            read_bytes: 0,
+                            write_bytes_queued: buf_1_to_2.len(),
+                            write_bytes_queueable: Some(size1 - buf_1_to_2.len()),
+                            write_buffers: vec![mem::take(&mut buf_1_to_2)],
+                            wake_up_after: None,
+                        };
+                        handshake1 = nego.read_write(&mut read_write).unwrap();
+                        buf_2_to_1 = read_write.incoming_buffer;
+                        buf_1_to_2.extend(
+                            read_write
+                                .write_buffers
+                                .drain(..)
+                                .flat_map(|b| b.into_iter()),
+                        );
+                        size2 = cmp::max(size2, read_write.expected_incoming_bytes.unwrap_or(0));
                     }
                 }
 
                 match handshake2 {
                     NoiseHandshake::Success { .. } => {}
                     NoiseHandshake::InProgress(nego) => {
-                        if buf_2_to_1.is_empty() {
-                            buf_2_to_1.resize(size2, 0);
-
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_1_to_2),
-                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-
-                            handshake2 = nego.read_write(&mut read_write).unwrap();
-                            let (read_bytes, written_bytes) =
-                                (read_write.read_bytes, read_write.written_bytes);
-                            for _ in 0..read_bytes {
-                                buf_1_to_2.remove(0);
-                            }
-                            buf_2_to_1.truncate(written_bytes);
-                        } else {
-                            let mut read_write = ReadWrite {
-                                now: 0,
-                                incoming_buffer: Some(&buf_1_to_2),
-                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
-                                read_bytes: 0,
-                                written_bytes: 0,
-                                wake_up_after: None,
-                            };
-                            handshake2 = nego.read_write(&mut read_write).unwrap();
-                            for _ in 0..read_write.read_bytes {
-                                buf_1_to_2.remove(0);
-                            }
-                        }
+                        let mut read_write = ReadWrite {
+                            now: 0,
+                            incoming_buffer: buf_1_to_2,
+                            expected_incoming_bytes: Some(0),
+                            read_bytes: 0,
+                            write_bytes_queued: buf_2_to_1.len(),
+                            write_bytes_queueable: Some(size2 - buf_2_to_1.len()),
+                            write_buffers: vec![mem::take(&mut buf_2_to_1)],
+                            wake_up_after: None,
+                        };
+                        handshake2 = nego.read_write(&mut read_write).unwrap();
+                        buf_1_to_2 = read_write.incoming_buffer;
+                        buf_2_to_1.extend(
+                            read_write
+                                .write_buffers
+                                .drain(..)
+                                .flat_map(|b| b.into_iter()),
+                        );
+                        size1 = cmp::max(size1, read_write.expected_incoming_bytes.unwrap_or(0));
                     }
                 }
             }

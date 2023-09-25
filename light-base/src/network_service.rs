@@ -96,9 +96,6 @@ pub struct ConfigChain {
     /// >           in the chain.
     pub genesis_block_hash: [u8; 32],
 
-    /// Number of the finalized block at the time of the initialization.
-    pub finalized_block_height: u64,
-
     /// Number and hash of the current best block. Can later be updated with
     /// [`NetworkService::set_local_best_block`].
     pub best_block: (u64, [u8; 32]),
@@ -110,8 +107,9 @@ pub struct ConfigChain {
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
 
-    /// If true, the chain uses the GrandPa networking protocol.
-    pub has_grandpa_protocol: bool,
+    /// Must be `Some` if and only if the chain uses the GrandPa networking protocol. Contains the
+    /// number of the finalized block at the time of the initialization.
+    pub grandpa_protocol_finalized_block_height: Option<u64>,
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
@@ -145,10 +143,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chains.push(service::ChainConfig {
                 in_slots: 3,
                 out_slots: 4,
-                grandpa_protocol_config: if chain.has_grandpa_protocol {
+                grandpa_protocol_config: if let Some(commit_finalized_height) =
+                    chain.grandpa_protocol_finalized_block_height
+                {
                     // TODO: dummy values
                     Some(service::GrandpaState {
-                        commit_finalized_height: chain.finalized_block_height,
+                        commit_finalized_height,
                         round_number: 1,
                         set_id: 0,
                     })
@@ -199,58 +199,59 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         );
 
         // Spawn main task that processes the network service.
-        config.platform.spawn_task(
-            "network-service".into(),
-            Box::pin(
-                background_task(BackgroundTask {
-                    identify_agent_version: config.identify_agent_version,
-                    log_chain_names: log_chain_names.clone(),
-                    messages_tx: messages_tx.clone(),
-                    network: service::ChainNetwork::new(service::Config {
-                        now: config.platform.now(),
-                        chains,
-                        connections_capacity: 32,
-                        peers_capacity: 8,
-                        max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
-                        noise_key: config.noise_key,
-                        handshake_timeout: Duration::from_secs(8),
-                        randomness_seed: {
-                            let mut seed = [0; 32];
-                            config.platform.fill_random_bytes(&mut seed);
-                            seed
-                        },
+        let task = Box::pin(
+            background_task(BackgroundTask {
+                identify_agent_version: config.identify_agent_version,
+                log_chain_names: log_chain_names.clone(),
+                messages_tx: messages_tx.clone(),
+                network: service::ChainNetwork::new(service::Config {
+                    now: config.platform.now(),
+                    chains,
+                    connections_capacity: 32,
+                    peers_capacity: 8,
+                    max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
+                    noise_key: config.noise_key,
+                    handshake_timeout: Duration::from_secs(8),
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
+                    },
+                }),
+                platform: config.platform.clone(),
+                event_senders: either::Left(event_senders),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(
+                    32,
+                    util::SipHasherBuild::new({
+                        let mut seed = [0; 16];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
                     }),
-                    platform: config.platform.clone(),
-                    event_senders: either::Left(event_senders),
-                    slots_assign_backoff: HashMap::with_capacity_and_hasher(
-                        32,
-                        util::SipHasherBuild::new({
-                            let mut seed = [0; 16];
-                            config.platform.fill_random_bytes(&mut seed);
-                            seed
-                        }),
-                    ),
-                    important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
-                    active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
-                    messages_rx,
-                    blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                    grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
-                        8,
-                        Default::default(),
-                    ),
-                    storage_proof_requests: HashMap::with_capacity_and_hasher(
-                        8,
-                        Default::default(),
-                    ),
-                    call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                    kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
-                        2,
-                        Default::default(),
-                    ),
-                })
-                .or(on_service_killed.listen()),
-            ),
+                ),
+                important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+                active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
+                messages_rx,
+                blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
+                    8,
+                    Default::default(),
+                ),
+                storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
+                    2,
+                    Default::default(),
+                ),
+            })
+            .or(on_service_killed.listen()),
         );
+
+        config
+            .platform
+            .spawn_task("network-service".into(), async move {
+                task.await;
+                log::debug!(target: "network", "Shutdown")
+            });
 
         let final_network_service = Arc::new(NetworkService {
             log_chain_names,
@@ -988,10 +989,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
             let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                if let (true, Some(event)) = (
-                    can_generate_event,
-                    task.network.next_event(task.platform.now()),
-                ) {
+                if let Some(event) = if can_generate_event {
+                    task.network.next_event(task.platform.now())
+                } else {
+                    None
+                } {
                     WhatHappened::NetworkEvent(event)
                 } else if let Some(start_connect) =
                     task.network.next_start_connect(|| task.platform.now())
@@ -1059,6 +1061,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "".into(),
                     tasks::single_stream_connection_task::<TPlat>(
                         connection,
+                        multiaddr.to_string(),
                         task.platform.clone(),
                         connection_id,
                         connection_task,
@@ -1099,6 +1102,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "".into(),
                     tasks::webrtc_multi_stream_connection_task::<TPlat>(
                         connection,
+                        multiaddr.to_string(),
                         task.platform.clone(),
                         connection_id,
                         connection_task,

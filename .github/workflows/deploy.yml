@@ -34,17 +34,17 @@ jobs:
       contents: read
       packages: write
     steps:
-    - uses: docker/setup-qemu-action@v2
-    - uses: docker/setup-buildx-action@v2
-    - uses: actions/checkout@v3
-    - uses: docker/login-action@v2 
+    - uses: docker/setup-qemu-action@v3
+    - uses: docker/setup-buildx-action@v3
+    - uses: actions/checkout@v4
+    - uses: docker/login-action@v3 
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v4.1.1
+    - uses: docker/build-push-action@v5.0.0
       with:
         context: .
         file: ./full-node/Dockerfile
@@ -56,12 +56,13 @@ jobs:
   build-js-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.70
+      image: rust:1.72
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           path: repo
-      - uses: actions/setup-node@v3.7.0
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: actions/setup-node@v3.8.1
         with:
           node-version: current
       - run: npm install
@@ -82,15 +83,15 @@ jobs:
   build-rust-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.70
+      image: rust:1.72
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./repo -> target
-      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light
+      - run: cargo doc --verbose --all-features --no-deps --package smoldot --package smoldot-light --package smoldot-full-node
         working-directory: ./repo
       - run: |
           mkdir -p ./doc
@@ -103,11 +104,11 @@ jobs:
   build-tests-coverage:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.70
+      image: rust:1.72
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           path: repo
       - uses: Swatinem/rust-cache@v2
@@ -133,7 +134,7 @@ jobs:
     permissions:
       contents: write   # Necessary to push on the `gh-pages` branch.
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           path: repo
       - run: |
@@ -173,18 +174,14 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.70
+      image: rust:1.72
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3.7.0
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: actions/setup-node@v3.8.1
         with:
           # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 16
-      - uses: actions-rs/toolchain@v1
-        with:
-          # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: stable
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - run: npm install
         working-directory: ./wasm-node/javascript
@@ -206,19 +203,21 @@ jobs:
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
-      - uses: actions/setup-node@v3.7.0
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: actions/setup-node@v3.8.1
         with:
           node-version: 16
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
+      # TODO: do not use `actions-rs/toolchain` but instead use `image: rust:...` like all the other stages; unfortunately this causes incomprehensible `detected dubious ownership in repository` git errors
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: stable
+          toolchain: 1.72
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
@@ -242,10 +241,37 @@ jobs:
       - run: git push origin ${{ steps.compute-tag.outputs.tag }}
         if: ${{ steps.check-tag-exists.outputs.num-existing == 0 && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+  crates-io-publish:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.72
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo publish --dry-run --locked
+        working-directory: ./lib
+        # Note that no dry run is performed for the crates that have dependencies towards the
+        # library, as `cargo publish --dry-run` tries to build them against the version on
+        # `crates.io`, which causes build failures if its public API has changed.
+        # TODO: is there a way to solve that? ^
+      - run: cargo login ${{ secrets.CRATES_IO_TOKEN }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: cargo publish --no-verify
+        working-directory: ./lib
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+      - run: cargo publish --no-verify
+        working-directory: ./light-base
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+      - run: cargo publish --no-verify
+        working-directory: ./full-node
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish]
+    needs: [build-push-docker-image, docs-publish, npm-publish, deno-publish, crates-io-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

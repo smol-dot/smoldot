@@ -407,7 +407,7 @@ impl ProofBuilder {
                 // and the storage value.
                 either::Left(
                     iter::once(trie_structure_value.node_value)
-                        .chain(trie_structure_value.storage_value_node.into_iter()),
+                        .chain(trie_structure_value.storage_value_node),
                 )
             })
             .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();

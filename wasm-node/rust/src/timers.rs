@@ -31,7 +31,7 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use std::{collections::BTreeSet, sync::Mutex, time::Instant};
+use std::{collections::BTreeSet, sync::Mutex};
 
 pub(crate) fn timer_finished() {
     process_timers();
@@ -46,15 +46,16 @@ pub struct Delay {
 
 impl Delay {
     pub fn new(after: Duration) -> Self {
-        let now = Instant::now();
+        let now = unsafe { Duration::from_micros(bindings::monotonic_clock_us()) };
         Self::new_inner(now + after, now)
     }
 
-    pub fn new_at(when: Instant) -> Self {
-        Self::new_inner(when, Instant::now())
+    pub fn new_at_monotonic_clock(when: Duration) -> Self {
+        let now = unsafe { Duration::from_micros(bindings::monotonic_clock_us()) };
+        Self::new_inner(when, now)
     }
 
-    fn new_inner(when: Instant, now: Instant) -> Self {
+    fn new_inner(when: Duration, now: Duration) -> Self {
         // Small optimization because sleeps of 0 seconds are frequent.
         if when <= now {
             return Delay { timer_id: None };
@@ -162,7 +163,7 @@ struct Timer {
 }
 
 struct QueuedTimer {
-    when: Instant,
+    when: Duration,
 
     // Entry in `TIMERS::timers`. Guaranteed to always have `is_finished` equal to `false`.
     timer_id: usize,
@@ -198,7 +199,7 @@ fn process_timers() {
     let mut lock = TIMERS.try_lock().unwrap();
     let lock = &mut *lock;
 
-    let now = Instant::now();
+    let now = unsafe { Duration::from_micros(bindings::monotonic_clock_us()) };
 
     // Note that this function can be called spuriously.
     // For example, `process_timers` can be scheduled twice from two different timers, and the
@@ -232,7 +233,7 @@ fn process_timers() {
     // Figure out the next time we should call `process_timers`.
     //
     // This iterates through all the elements in `timers_queue` until a valid one is found.
-    let next_wakeup: Option<Instant> = loop {
+    let next_wakeup: Option<Duration> = loop {
         let next_timer = match lock.timers_queue.first() {
             Some(t) => t,
             None => break None,

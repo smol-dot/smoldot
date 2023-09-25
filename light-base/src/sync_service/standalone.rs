@@ -21,12 +21,20 @@ use super::{
 };
 use crate::{network_service, platform::PlatformRef, util};
 
-use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned as _},
+    boxed::Box,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     iter,
     num::{NonZeroU32, NonZeroU64},
+    pin::Pin,
     time::Duration,
 };
+use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
@@ -47,7 +55,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     mut from_foreground: async_channel::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
-    from_network_service: stream::BoxStream<'static, network_service::Event>,
+    mut from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
@@ -95,9 +103,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         network_up_to_date_finalized: true,
         known_finalized_runtime: None,
         pending_requests: stream::FuturesUnordered::new(),
-        warp_sync_taking_long_time_warning: future::Either::Left(
+        warp_sync_taking_long_time_warning: future::Either::Left(Box::pin(
             platform.sleep(Duration::from_secs(10)),
-        )
+        ))
         .fuse(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
@@ -113,9 +121,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         ),
         platform,
     };
-
-    // Necessary for the `select!` loop below.
-    let mut from_network_service = from_network_service.fuse();
 
     // Main loop of the syncing logic.
     //
@@ -210,87 +215,154 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        let response_outcome = futures_util::select! {
-            network_event = from_network_service.next() => {
-                // Something happened on the network.
+        enum WhatHappened {
+            NetworkEvent(network_service::Event),
+            ForegroundMessage(ToBackground),
+            ForegroundClosed,
+            RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
+            WarpSyncTakingLongTimeWarning,
+            MustLoopAgain,
+        }
+
+        let what_happened = {
+            async {
                 // We expect the networking channel to never close, so the event is unwrapped.
-                task.inject_network_event(network_event.unwrap());
+                WhatHappened::NetworkEvent(from_network_service.next().await.unwrap())
+            }
+            .or(async {
+                from_foreground.next().await.map_or(
+                    WhatHappened::ForegroundClosed,
+                    WhatHappened::ForegroundMessage,
+                )
+            })
+            .or(async {
+                if task.pending_requests.is_empty() {
+                    future::pending::<()>().await
+                }
+                let (request_id, result) = task.pending_requests.select_next_some().await;
+                WhatHappened::RequestFinished(request_id, result)
+            })
+            .or(async {
+                (&mut task.warp_sync_taking_long_time_warning).await;
+                task.warp_sync_taking_long_time_warning =
+                    future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
+                        .fuse();
+                WhatHappened::WarpSyncTakingLongTimeWarning
+            })
+            .or(async {
+                // If the list of CPU-heavy operations to perform is potentially non-empty,
+                // then we wait for a future that is always instantly ready, in order to loop
+                // again and perform the next CPU-heavy operation.
+                // Note that if any of the other futures is ready, then that other ready
+                // future will take precedence.
+                if queue_empty {
+                    future::pending::<()>().await;
+                }
+                WhatHappened::MustLoopAgain
+            })
+            .await
+        };
+
+        let response_outcome = match what_happened {
+            WhatHappened::NetworkEvent(network_event) => {
+                // Something happened on the networking.
+                task.inject_network_event(network_event);
                 continue;
             }
 
-            message = from_foreground.next() => {
+            WhatHappened::ForegroundMessage(message) => {
                 // Received message from the front `SyncService`.
-                let message = match message {
-                    Some(m) => m,
-                    None => {
-                        // The channel with the frontend sync service has been closed.
-                        // Closing the sync background task as a result.
-                        return
-                    },
-                };
-
                 task.process_foreground_message(message);
                 continue;
-            },
+            }
 
-            (request_id, result) = task.pending_requests.select_next_some() => {
+            WhatHappened::ForegroundClosed => {
+                // The channel with the frontend sync service has been closed.
+                // Closing the sync background task as a result.
+                return;
+            }
+
+            WhatHappened::RequestFinished(request_id, result) => {
                 // A request has been finished.
                 // `result` is an error if the request got cancelled by the sync state machine.
-                let Ok(result) = result else { continue; };
+                let Ok(result) = result else {
+                    continue;
+                };
 
                 // Inject the result of the request into the sync state machine.
                 match result {
                     RequestOutcome::Block(Ok(v)) => {
-                        task.sync.blocks_request_response(
-                            request_id,
-                            Ok(v.into_iter().filter_map(|block| {
-                                Some(all::BlockRequestSuccessBlock {
-                                    scale_encoded_header: block.header?,
-                                    scale_encoded_justifications: block.justifications
-                                        .unwrap_or(Vec::new())
-                                        .into_iter()
-                                        .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
-                                        .collect(),
-                                    scale_encoded_extrinsics: Vec::new(),
-                                    user_data: (),
-                                })
-                            }))
-                        ).1
-                    },
+                        task.sync
+                            .blocks_request_response(
+                                request_id,
+                                Ok(v.into_iter().filter_map(|block| {
+                                    Some(all::BlockRequestSuccessBlock {
+                                        scale_encoded_header: block.header?,
+                                        scale_encoded_justifications: block
+                                            .justifications
+                                            .unwrap_or(Vec::new())
+                                            .into_iter()
+                                            .map(|j| all::Justification {
+                                                engine_id: j.engine_id,
+                                                justification: j.justification,
+                                            })
+                                            .collect(),
+                                        scale_encoded_extrinsics: Vec::new(),
+                                        user_data: (),
+                                    })
+                                })),
+                            )
+                            .1
+                    }
                     RequestOutcome::Block(Err(_)) => {
-                        task.sync.blocks_request_response(request_id, Err::<iter::Empty<_>, _>(())).1
-                    },
+                        // TODO: should disconnect peer
+                        task.sync
+                            .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()))
+                            .1
+                    }
                     RequestOutcome::WarpSync(Ok(result)) => {
                         let decoded = result.decode();
-                        let fragments = decoded.fragments
+                        let fragments = decoded
+                            .fragments
                             .into_iter()
                             .map(|f| all::WarpSyncFragment {
                                 scale_encoded_header: f.scale_encoded_header.to_vec(),
                                 scale_encoded_justification: f.scale_encoded_justification.to_vec(),
                             })
                             .collect();
-                        task.sync.grandpa_warp_sync_response_ok(
-                            request_id,
-                            fragments,
-                            decoded.is_finished,
-                        ).1
+                        task.sync
+                            .grandpa_warp_sync_response_ok(
+                                request_id,
+                                fragments,
+                                decoded.is_finished,
+                            )
+                            .1
                     }
                     RequestOutcome::WarpSync(Err(_)) => {
-                        task.sync.grandpa_warp_sync_response_err(
-                            request_id,
-                        );
+                        // TODO: should disconnect peer
+                        task.sync.grandpa_warp_sync_response_err(request_id);
                         continue;
                     }
                     RequestOutcome::Storage(r) => task.sync.storage_get_response(request_id, r).1,
-                    RequestOutcome::CallProof(Ok(r)) => task.sync.call_proof_response(request_id, Ok(r.decode().to_owned())).1, // TODO: need help from networking service to avoid this to_owned
-                    RequestOutcome::CallProof(Err(err)) => task.sync.call_proof_response(request_id, Err(err)).1,
+                    RequestOutcome::CallProof(Ok(r)) => {
+                        task.sync
+                            .call_proof_response(request_id, Ok(r.decode().to_owned()))
+                            .1
+                    } // TODO: need help from networking service to avoid this to_owned
+                    RequestOutcome::CallProof(Err(err)) => {
+                        task.sync.call_proof_response(request_id, Err(err)).1
+                    }
                 }
-            },
+            }
 
-            () = &mut task.warp_sync_taking_long_time_warning => {
+            WhatHappened::WarpSyncTakingLongTimeWarning => {
                 match task.sync.status() {
-                    all::Status::Sync => {},
-                    all::Status::WarpSyncFragments { source: None, finalized_block_hash, finalized_block_number } => {
+                    all::Status::Sync => {}
+                    all::Status::WarpSyncFragments {
+                        source: None,
+                        finalized_block_hash,
+                        finalized_block_number,
+                    } => {
                         log::warn!(
                             target: &task.log_target,
                             "GrandPa warp sync idle at block #{} (0x{})",
@@ -298,33 +370,28 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             HashDisplay(&finalized_block_hash),
                         );
                     }
-                    all::Status::WarpSyncFragments { source: Some((_, (peer_id, _))), finalized_block_hash, finalized_block_number } |
-                    all::Status::WarpSyncChainInformation { source: (_, (peer_id, _)), finalized_block_hash, finalized_block_number } => {
+                    all::Status::WarpSyncFragments {
+                        finalized_block_hash,
+                        finalized_block_number,
+                        ..
+                    }
+                    | all::Status::WarpSyncChainInformation {
+                        finalized_block_hash,
+                        finalized_block_number,
+                    } => {
                         log::warn!(
                             target: &task.log_target,
-                            "GrandPa warp sync in progress. Block: #{} (0x{}). Peer attempt: {}.",
+                            "GrandPa warp sync in progress. Block: #{} (0x{}).",
                             finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
-                            peer_id
+                            HashDisplay(&finalized_block_hash)
                         );
-                    },
+                    }
                 };
 
-                task.warp_sync_taking_long_time_warning =
-                    future::Either::Left(task.platform.sleep(Duration::from_secs(10))).fuse();
                 continue;
-            },
+            }
 
-            // If the list of CPU-heavy operations to perform is potentially non-empty, then we
-            // wait for a future that is always instantly ready, in order to loop again and
-            // perform the next CPU-heavy operation.
-            // Note that if any of the other futures in that `select!` block is ready, then that
-            // other ready future might take precedence (or not, it is pseudo-random). This
-            // guarantees proper interleaving between CPU-heavy operations and responding to
-            // other kind of events.
-            () = if queue_empty { future::Either::Left(future::pending()) }
-                 else { future::Either::Right(future::ready(())) } =>
-            {
+            WhatHappened::MustLoopAgain => {
                 continue;
             }
         };
@@ -374,7 +441,7 @@ struct Task<TPlat: PlatformRef> {
     /// time. Set to `Pending` after the warp sync has finished, so that future remains pending
     /// forever.
     warp_sync_taking_long_time_warning:
-        future::Fuse<future::Either<TPlat::Delay, future::Pending<()>>>,
+        future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
 
     /// Network service. Used to send out requests to peers.
     network_service: Arc<network_service::NetworkService<TPlat>>,
@@ -469,10 +536,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_requests.push(
-                    async move { (request_id, block_request.await.map(RequestOutcome::Block)) }
-                        .boxed(),
-                );
+                self.pending_requests.push(Box::pin(async move {
+                    (request_id, block_request.await.map(RequestOutcome::Block))
+                }));
             }
 
             all::DesiredRequest::GrandpaWarpSync {
@@ -496,15 +562,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_requests.push(
-                    async move {
-                        (
-                            request_id,
-                            grandpa_request.await.map(RequestOutcome::WarpSync),
-                        )
-                    }
-                    .boxed(),
-                );
+                self.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        grandpa_request.await.map(RequestOutcome::WarpSync),
+                    )
+                }));
             }
 
             all::DesiredRequest::StorageGetMerkleProof {
@@ -538,15 +601,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_requests.push(
-                    async move {
-                        (
-                            request_id,
-                            storage_request.await.map(RequestOutcome::Storage),
-                        )
-                    }
-                    .boxed(),
-                );
+                self.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        storage_request.await.map(RequestOutcome::Storage),
+                    )
+                }));
             }
 
             all::DesiredRequest::RuntimeCallMerkleProof {
@@ -584,15 +644,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     .sync
                     .add_request(source_id, request_detail.into(), abort);
 
-                self.pending_requests.push(
-                    async move {
-                        (
-                            request_id,
-                            call_proof_request.await.map(RequestOutcome::CallProof),
-                        )
-                    }
-                    .boxed(),
-                );
+                self.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        call_proof_request.await.map(RequestOutcome::CallProof),
+                    )
+                }));
             }
         }
 
@@ -628,8 +685,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                        if !matches!(err, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
+                            log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -642,8 +702,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                        if !matches!(
+                            err,
+                            all::WarpSyncBuildChainInformationError::SourceMisbehavior(_)
+                        ) {
+                            log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -688,7 +754,10 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                 // Grandpa warp sync fragment to verify.
-                let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
+                let sender_peer_id = verify
+                    .proof_sender()
+                    .map(|(_, (peer_id, _))| Cow::Owned(peer_id.to_string())) // TODO: unnecessary cloning most of the time
+                    .unwrap_or(Cow::Borrowed("<disconnected>"));
 
                 let (sync, result) = verify.perform({
                     let mut seed = [0; 32];
@@ -697,25 +766,32 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 });
                 self.sync = sync;
 
-                if let Err(err) = result {
-                    let maybe_forced_change = matches!(err, all::WarpSyncFragmentError::Verify(_));
-                    log::warn!(
-                        target: &self.log_target,
-                        "Failed to verify warp sync fragment from {}: {}{}",
-                        sender_peer_id,
-                        err,
-                        if maybe_forced_change {
-                            ". This might be caused by a forced GrandPa authorities change having \
-                            been enacted on the chain. If this is the case, please update the \
-                            chain specification with a checkpoint past this forced change."
-                        } else { "" }
-                    );
-                } else {
-                    log::debug!(
-                        target: &self.log_target,
-                        "Sync => WarpSyncFragmentVerified(sender={})",
-                        sender_peer_id,
-                    );
+                match result {
+                    Ok((fragment_hash, fragment_number)) => {
+                        // TODO: must call `set_local_grandpa_state` and `set_local_best_block` so that other peers notify us of neighbor packets
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
+                            sender_peer_id,
+                            HashDisplay(&fragment_hash)
+                        );
+                    }
+                    Err(err) => {
+                        // TODO: should disconnect peer
+                        let maybe_forced_change =
+                            matches!(err, all::VerifyFragmentError::JustificationVerify(_));
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to verify warp sync fragment from {}: {}{}",
+                            sender_peer_id,
+                            err,
+                            if maybe_forced_change {
+                                ". This might be caused by a forced GrandPa authorities change having \
+                                been enacted on the chain. If this is the case, please update the \
+                                chain specification with a checkpoint past this forced change."
+                            } else { "" }
+                        );
+                    }
                 }
             }
 
@@ -877,7 +953,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         sync,
                         all::FinalityProofVerifyOutcome::NewFinalized {
                             updates_best_block,
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest,
                             ..
                         },
                     ) => {
@@ -886,7 +962,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(
                             target: &self.log_target,
                             "Sync => FinalityProofVerified(finalized_blocks={})",
-                            finalized_blocks.len(),
+                            finalized_blocks_newest_to_oldest.len(),
                         );
 
                         if updates_best_block {
@@ -895,7 +971,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.network_up_to_date_finalized = false;
                         // Invalidate the cache of the runtime of the finalized blocks if any
                         // of the finalized blocks indicates that a runtime update happened.
-                        if finalized_blocks
+                        if finalized_blocks_newest_to_oldest
                             .iter()
                             .any(|b| b.header.digest.has_runtime_environment_updated())
                         {

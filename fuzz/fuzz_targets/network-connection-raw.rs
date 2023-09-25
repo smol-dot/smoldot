@@ -35,8 +35,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             randomness_seed: [0; 32],
             capacity: 0,
             max_inbound_substreams: 10,
-            notification_protocols: Vec::new(),
-            request_response_protocols: Vec::new(),
             // This timeout doesn't matter as we pass dummy time values.
             handshake_timeout: Duration::from_secs(5),
             ping_protocol: "ping".into(),
@@ -56,28 +54,34 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let (_id, mut task) = collection.insert_single_stream(
         Duration::new(0, 0),
         smoldot::libp2p::collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+            is_initiator,
             noise_key: &smoldot::libp2p::connection::NoiseKey::new(&[0; 32], &[0; 32]),
         },
-        is_initiator,
+        0,
+        128,
         (),
     );
 
-    let mut out_buffer = vec![0; 4096];
+    let mut read_write = smoldot::libp2p::read_write::ReadWrite {
+        now: Duration::new(0, 0),
+        incoming_buffer: data.to_vec(),
+        expected_incoming_bytes: Some(0),
+        read_bytes: 0,
+        write_buffers: Vec::new(),
+        write_bytes_queued: 0,
+        write_bytes_queueable: Some(4096),
+        wake_up_after: None,
+    };
 
     loop {
-        let mut read_write = smoldot::libp2p::read_write::ReadWrite {
-            now: Duration::new(0, 0),
-            incoming_buffer: Some(data),
-            outgoing_buffer: Some((&mut out_buffer, &mut [])),
-            read_bytes: 0,
-            written_bytes: 0,
-            wake_up_after: None,
-        };
-        task.read_write(&mut read_write);
+        read_write.expected_incoming_bytes = Some(0);
+        read_write.read_bytes = 0;
+        read_write.write_buffers.clear();
+        read_write.write_bytes_queued = 0;
+        read_write.write_bytes_queueable = Some(4096);
+        read_write.wake_up_after = None;
 
-        let read_bytes = read_write.read_bytes;
-        let written_bytes = read_write.written_bytes;
-        data = &data[read_bytes..];
+        task.read_write(&mut read_write);
 
         // We need to call `pull_message_to_coordinator()`, as the connection state machine might
         // refuse to process more incoming data before events have been pulled.
@@ -87,7 +91,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             None => break,
         }
 
-        if event.is_none() && read_bytes == 0 && written_bytes == 0 {
+        if event.is_none() && read_write.read_bytes == 0 && read_write.write_bytes_queued == 0 {
             // Stop the test.
             break;
         }

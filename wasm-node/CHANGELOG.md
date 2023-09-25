@@ -2,6 +2,91 @@
 
 ## Unreleased
 
+### Changed
+
+- During the warp syncing process, smoldot will now download the runtime and call proofs from any peer whose finalized block is superior or equal to the target block, rather than always the peer that was used to download the warp sync fragments. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- During the warp syncing process, smoldot will now download warp sync fragments in parallel of verifying previously-downloaded fragments. This is expected to speed up the warp syncing process. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- When a warp sync response contains an invalid warp sync fragment, the earlier valid fragments are now still used to make the warp syncing progress instead of being thrown away. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- During the warp sync process, the runtime call Merkle proofs are now downloaded in parallel of the runtime. This should save several networking round trips. Because the list of runtime calls to perform depend on the runtime version, starting to download the Merkle proofs before the runtime has been fully obtained is built upon the assumption that the runtime is at the latest version. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+- The `index` field of `bestChainBlockIncluded` events of `chainHead_unstable_follow` subscriptions is now a number rather than a string, in accordance with the latest changes in the JSON-RPC API specification. ([#1097](https://github.com/smol-dot/smoldot/pull/1097))
+
+### Fixed
+
+- Justifications are no longer downloaded for blocks that can't be finalized because an earlier block needs to be finalized first. ([#1127](https://github.com/smol-dot/smoldot/pull/1127))
+- Fix warp sync process stagnating if a source sends a header whose height is inferior or equal to the currently warp synced block. ([#1060](https://github.com/smol-dot/smoldot/pull/1060))
+
+## 2.0.1 - 2023-09-08
+
+### Fixed
+
+- Fix panic in Yamux state machine when a remote closes a substream with an active timeout. ([#1122](https://github.com/smol-dot/smoldot/pull/1122))
+
+## 2.0.0 - 2023-09-07
+
+### Remove
+
+- Removed `MalformedJsonRpcError`. Malformed JSON-RPC requests now later generate an error JSON-RPC response where the `id` field is equal to `null`, in accordance with the JSON-RPC 2.0 specification. ([#1116](https://github.com/smol-dot/smoldot/pull/1116))
+
+### Changed
+
+- Transactions submitted through the JSON-RPC server before the warp syncing process is finished will now immediately be dropped. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+- JSON-RPC requests that are very large are no longer rejected. In case where the JSON-RPC client is trusted, then there is nothing to do, and the potential lack of memory space will become a non-issue once the `Memory64` WebAssembly proposal becomes widely available. In case where the JSON-RPC client is not trusted, the API user is encouraged to manually implement a limit to the size of JSON-RPC requests, as it should do already right now anyway. ([#1115](https://github.com/smol-dot/smoldot/pull/1115))
+
+### Fixed
+
+- Fix `Chain.remove()` not actually removing the chain until the warp syncing process is finished (which might never happen if for example bootnodes are misconfigured). ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+- Fix JSON-RPC server not processing requests if many transactions are submitted before the warp syncing process is finished. ([#1110](https://github.com/smol-dot/smoldot/pull/1110))
+
+## 1.0.17 - 2023-08-25
+
+### Changed
+
+- It is now possible for parachain chain specifications to include just a `genesis.stateRootHash` field (and no `genesis.raw` field). A warning in the logs is now printed for all chain specifications that include a `genesis.raw` field. ([#1034](https://github.com/smol-dot/smoldot/pull/1034))
+
+### Fixed
+
+- Fix WebRTC addresses failing to be be parsed. ([#1036](https://github.com/smol-dot/smoldot/pull/1036))
+
+## 1.0.16 - 2023-08-14
+
+### Changed
+
+- Removed the `chainHead_unstable_genesisHash` JSON-RPC function, in accordance with the latest changes in the JSON-RPC API specification. ([#1010](https://github.com/smol-dot/smoldot/pull/1010))
+- The database of a parachain now contains a list of known peer-to-peer nodes and a cache of the runtime code of the parachain, similar to the database of a relay chain. The database of a parachain was previously always empty. ([#1018](https://github.com/smol-dot/smoldot/pull/1018))
+
+### Fixed
+
+- The block announces substream handshake of a parachain peer-to-peer network now properly contains the block that smoldot thinks is the best. The genesis block was previously always reported. ([#1012](https://github.com/smol-dot/smoldot/pull/1012))
+- Fix panic when removing a chain while a networking connection is being opened. ([#1011](https://github.com/smol-dot/smoldot/pull/1011))
+- Fix epoch start slot calculation when epochs have been skipped. ([#1015](https://github.com/smol-dot/smoldot/pull/1015))
+- Fix timeouts not working properly in the networking. ([#1023](https://github.com/smol-dot/smoldot/pull/1023), [#1026](https://github.com/smol-dot/smoldot/pull/1026))
+- Fix panic when calling `Chain.remove` while `Chain.nextJsonRpcResponse` is in progress. ([#1025](https://github.com/smol-dot/smoldot/pull/1025))
+
+## 1.0.15 - 2023-08-08
+
+### Changed
+
+- The `operation-body-done`, `operation-call-done`, `operation-storage-done`, `operation-storage-items`, `operation-waiting-for-continue`, `operation-inaccessible`, and `operation-error` events, and the `closest-descendant-merkle-value`, `descendants-values`, and `descendants-hashes` item types of the new JSON-RPC API have been renamed and are now camelCased (`operationBodyDone`, `operationStorageItems`, `descendantsValues`, etc.), in accordance with the latest changes in the JSON-RPC API specification. ([#973](https://github.com/smol-dot/smoldot/pull/973))
+- The `chainSpec_unstable` JSON-RPC functions have been renamed to `chainSpec_v1`, in accordance with the latest changes in the JSON-RPC API specification. ([#989](https://github.com/smol-dot/smoldot/pull/989))
+
+### Fixed
+
+- A change in the logic of BABE has been backported. Smoldot no longer considers blocks as invalid after no block has been authored for an entire epoch. ([#991](https://github.com/smol-dot/smoldot/pull/991))
+
+## 1.0.14 - 2023-07-26
+
+### Changed
+
+- Remove `networkConfig` parameter from all `chainHead` JSON-RPC functions, in accordance with the latest changes to the JSON-RPC API specification. ([#963](https://github.com/smol-dot/smoldot/pull/963))
+- A JSON-RPC error is now returned if the JSON-RPC client tries to open more than two simultaneous `chainHead_unstable_follow` subscriptions, in accordance with the latest changes in the JSON-RPC API specification. ([#962](https://github.com/smol-dot/smoldot/pull/962))
+- Rename `chainHead_unstable_storageContinue` to `chainHead_unstable_continue`, in accordance with the latest changes in the JSON-RPC API specification. ([#965](https://github.com/smol-dot/smoldot/pull/965))
+- Merge `chainHead_unstable_stopBody`, `chainHead_unstable_stopCall`, and `chainHead_unstable_stopStorage` into `chainHead_unstable_stopOperation`, in accordance with the latest changes in the JSON-RPC API specification. ([#966](https://github.com/smol-dot/smoldot/pull/966))
+- Merge `chainHead_unstable_body`, `chainHead_unstable_call`, and `chainHead_unstable_storage` are now simple request-response functions that generate their notifications onto the corresponding `chainHead_unstable_follow` subscription, in accordance with the latest changes in the JSON-RPC API specification. ([#966](https://github.com/smol-dot/smoldot/pull/966))
+
+### Fixed
+
+- Fix several potential panics due to mismatches in the state of the networking. ([#967](https://github.com/smol-dot/smoldot/pull/967))
+
 ## 1.0.13 - 2023-07-16
 
 ### Added

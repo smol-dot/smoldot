@@ -291,8 +291,8 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 // from within the events callback itself.
                 // TODO: do better than setTimeout?
                 setTimeout(() => {
-                    const numAccepted = state.acceptedJsonRpcResponses.get(event.chainId)!;
-                    if (numAccepted == 0)
+                    const numAccepted = state.acceptedJsonRpcResponses.get(event.chainId);
+                    if (numAccepted === undefined || numAccepted === 0)
                         return;
                     const response = state.instance!.peekJsonRpcResponse(event.chainId);
                     if (response) {
@@ -345,6 +345,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 break;
             }
             case "remove-chain": {
+                state.acceptedJsonRpcResponses.delete(message.chainId);
                 state.instance!.removeChain(message.chainId);
                 break;
             }

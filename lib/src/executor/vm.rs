@@ -761,7 +761,7 @@ impl ExecHint {
     ///
     /// > **Note**: This function is most useful for testing purposes.
     pub fn available_engines() -> impl Iterator<Item = ExecHint> {
-        iter::once(ExecHint::ForceWasmi).chain(Self::force_wasmtime_if_available().into_iter())
+        iter::once(ExecHint::ForceWasmi).chain(Self::force_wasmtime_if_available())
     }
 
     /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.
@@ -1171,6 +1171,11 @@ pub enum NewErr {
     /// Contains an opaque error message.
     #[display(fmt = "{_0}")]
     InvalidWasm(String),
+    /// Error while instantiating the WebAssembly module.
+    ///
+    /// Contains an opaque error message.
+    #[display(fmt = "{_0}")]
+    Instantiation(String),
     /// Failed to resolve a function imported by the module.
     #[display(fmt = "Unresolved function `{module_name}`:`{function}`")]
     UnresolvedFunctionImport {
@@ -1197,11 +1202,6 @@ pub enum NewErr {
     CouldntAllocateMemory,
     /// The Wasm module requires importing a global or a table, which isn't supported.
     ImportTypeNotSupported,
-    /// Other error. This error is unfortunately necessary due to the underlying implementation
-    /// returning an opaque error without explaining what can error.
-    // TODO: remove as too imprecise?
-    #[display(fmt = "{_0}")]
-    Other(String),
 }
 
 // TODO: an implementation of the `Error` trait is required in order to interact with wasmtime, but it's not possible to implement this trait on non-std yet

@@ -20,12 +20,13 @@
 use super::{
     super::super::read_write::ReadWrite, substream, Config, Event, SubstreamId, SubstreamIdInner,
 };
-use crate::util::{self, protobuf};
+use crate::util::{self, leb128, protobuf};
 
-use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{
     cmp, fmt,
     hash::Hash,
+    mem,
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
@@ -97,11 +98,6 @@ struct Substream<TNow, TSubUd> {
     /// All incoming data is first transferred to this buffer.
     // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
     read_buffer: Vec<u8>,
-    /// The buffer within `read_buffer` might contain a full Protobuf frame, but not all of the
-    /// data within that frame was processed by the underlying substream.
-    /// Contains the number of bytes of the message in `read_buffer` that the substream state
-    /// machine has already processed.
-    read_buffer_partial_read: usize,
     remote_writing_side_closed: bool,
     local_writing_side_closed: bool,
 }
@@ -200,7 +196,6 @@ where
                 inner: Some(substream::Substream::ingoing(self.max_protocol_name_len)),
                 user_data: None,
                 read_buffer: Vec::new(),
-                read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
                 remote_writing_side_closed: false,
             }
@@ -215,7 +210,6 @@ where
                 inner: Some(substream::Substream::ping_out(self.ping_protocol.clone())),
                 user_data: None,
                 read_buffer: Vec::new(),
-                read_buffer_partial_read: 0,
                 local_writing_side_closed: false,
                 remote_writing_side_closed: false,
             }
@@ -275,7 +269,7 @@ where
     /// [`MultiStream::pull_event`] to empty the queue of events between calls to this method.
     ///
     /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
-    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    /// [`ReadWrite::write_bytes_queueable`] must always be `Some`.
     ///
     /// # Panic
     ///
@@ -286,12 +280,15 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<'_, TNow>,
+        read_write: &'_ mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         let substream = self.in_substreams.get_mut(substream_id).unwrap();
 
         // In WebRTC, the reading and writing side is never closed.
-        assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
+        assert!(
+            read_write.expected_incoming_bytes.is_some()
+                && read_write.write_bytes_queueable.is_some()
+        );
 
         // Reading/writing the ping substream is used to queue new outgoing pings.
         if Some(substream_id) == self.ping_substream.as_ref() {
@@ -320,7 +317,7 @@ where
             // This is necessary because calling `substream.read_write` can generate a write
             // close message.
             // TODO: this is error-prone, as we have no guarantee that the outgoing buffer will ever be > 6 bytes, for example in principle the API user could decide to use only a write buffer of 2 bytes, although that would be a very stupid thing to do
-            if read_write.outgoing_buffer_available() < 6 {
+            if read_write.write_bytes_queueable.unwrap_or(0) < 6 {
                 return SubstreamFate::Continue;
             }
 
@@ -333,75 +330,48 @@ where
             //
             // According to the libp2p WebRTC spec, a frame and its length prefix must not be
             // larger than 16kiB, meaning that the read buffer never has to exceed this size.
+            //
+            // Try to add data to `substream.read_buffer`.
             // TODO: this is very suboptimal; improve
-            if let Some(incoming_buffer) = read_write.incoming_buffer {
-                // TODO: reset the substream if `remote_writing_side_closed`
-                let max_to_transfer =
-                    cmp::min(incoming_buffer.len(), 16384 - substream.read_buffer.len());
-                substream
-                    .read_buffer
-                    .extend_from_slice(&incoming_buffer[..max_to_transfer]);
-                debug_assert!(substream.read_buffer.len() <= 16384);
-                if max_to_transfer != incoming_buffer.len() {
-                    continue_looping = true;
-                }
-                read_write.advance_read(max_to_transfer);
-            }
+            // TODO: this doesn't properly back-pressure, because we read unconditionally
+            let must_reset = {
+                let (protobuf_frame_size, flags) = {
+                    let mut parser =
+                        nom::combinator::map_parser::<_, _, _, nom::error::Error<&[u8]>, _, _>(
+                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                            protobuf::message_decode! {
+                                #[optional] flags = 1 => protobuf::enum_tag_decode,
+                                #[optional] message = 2 => protobuf::bytes_tag_decode,
+                            },
+                        );
+                    match parser(&read_write.incoming_buffer) {
+                        Ok((rest, framed_message)) => {
+                            if let Some(message) = framed_message.message {
+                                substream.read_buffer.extend_from_slice(message);
+                            }
 
-            // Try to parse the content of `self.read_buffer`.
-            // If the content of `self.read_buffer` is an incomplete frame, the flags will be
-            // `None` and the message will be `&[]`.
-            let (protobuf_frame_size, flags, message_within_frame) = {
-                let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
-                    nom::combinator::map_parser(
-                        nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                        protobuf::message_decode! {
-                            #[optional] flags = 1 => protobuf::enum_tag_decode,
-                            #[optional] message = 2 => protobuf::bytes_tag_decode,
-                        },
-                    ),
-                );
-
-                match nom::Finish::finish(parser(&substream.read_buffer)) {
-                    Ok((rest, framed_message)) => {
-                        let protobuf_frame_size = substream.read_buffer.len() - rest.len();
-                        (
-                            protobuf_frame_size,
-                            framed_message.flags,
-                            framed_message.message.unwrap_or(&[][..]),
-                        )
+                            let protobuf_frame_size = read_write.incoming_buffer.len() - rest.len();
+                            (protobuf_frame_size, framed_message.flags)
+                        }
+                        Err(nom::Err::Incomplete(needed)) => {
+                            read_write.expected_incoming_bytes = Some(
+                                read_write.incoming_buffer.len()
+                                    + match needed {
+                                        nom::Needed::Size(s) => s.get(),
+                                        nom::Needed::Unknown => 1,
+                                    },
+                            );
+                            return SubstreamFate::Continue;
+                        }
+                        Err(_) => {
+                            // Message decoding error.
+                            // TODO: no, must ask the state machine to reset
+                            return SubstreamFate::Reset;
+                        }
                     }
-                    Err(err) if err.code == nom::error::ErrorKind::Eof => {
-                        // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large, and remove the debug_assert below
-                        debug_assert!(substream.read_buffer.len() < 16384);
-                        (0, None, &[][..])
-                    }
-                    Err(_) => {
-                        // Message decoding error.
-                        // TODO: no, must ask the state machine to reset
-                        return SubstreamFate::Reset;
-                    }
-                }
-            };
+                };
 
-            let event = if protobuf_frame_size != 0
-                && message_within_frame.len() <= substream.read_buffer_partial_read
-            {
-                // If the substream state machine has already processed all the data within
-                // `read_buffer`, process the flags of the current protobuf frame, discard that
-                // protobuf frame, and loop again.
-                continue_looping = true;
-
-                // Discard the data.
-                substream.read_buffer_partial_read = 0;
-                substream.read_buffer = substream
-                    .read_buffer
-                    .split_at(protobuf_frame_size)
-                    .1
-                    .to_vec();
-
-                // Process the flags.
-                // Note that the `STOP_SENDING` flag is ignored.
+                let _ = read_write.incoming_bytes_take(protobuf_frame_size);
 
                 // If the remote has sent a `FIN` or `RESET_STREAM` flag, mark the remote writing
                 // side as closed.
@@ -410,35 +380,33 @@ where
                 }
 
                 // If the remote has sent a `RESET_STREAM` flag, also reset the substream.
-                if flags.map_or(false, |f| f == 2) {
-                    substream.inner.take().unwrap().reset()
-                } else {
-                    None
-                }
-            } else {
-                // We allocate a buffer where the substream state machine will temporarily write
-                // out its data. The size of the buffer is capped in order to prevent the substream
-                // from generating data that wouldn't fit in a single protobuf frame.
-                let mut intermediary_write_buffer =
-                    vec![
-                        0;
-                        cmp::min(read_write.outgoing_buffer_available(), 16384).saturating_sub(10)
-                    ]; // TODO: this -10 calculation is hacky because we need to account for the variable length prefixes everywhere
+                flags.map_or(false, |f| f == 2)
+            };
 
+            let event = if must_reset {
+                substream.inner.take().unwrap().reset()
+            } else {
                 let mut sub_read_write = ReadWrite {
                     now: read_write.now.clone(),
-                    incoming_buffer: if substream.remote_writing_side_closed {
-                        None
-                    } else {
-                        Some(&message_within_frame[substream.read_buffer_partial_read..])
-                    },
-                    outgoing_buffer: if substream.local_writing_side_closed {
-                        None
-                    } else {
-                        Some((&mut intermediary_write_buffer, &mut []))
-                    },
+                    incoming_buffer: mem::take(&mut substream.read_buffer),
                     read_bytes: 0,
-                    written_bytes: 0,
+                    expected_incoming_bytes: if substream.remote_writing_side_closed {
+                        None
+                    } else {
+                        Some(0)
+                    },
+                    write_buffers: Vec::new(),
+                    write_bytes_queued: read_write.write_bytes_queued,
+                    // Don't write out more than one frame.
+                    // TODO: this `10` is here for the length and protobuf frame size and is a bit hacky
+                    write_bytes_queueable: if !substream.local_writing_side_closed {
+                        Some(
+                            cmp::min(read_write.write_bytes_queueable.unwrap(), 16384)
+                                .saturating_sub(10),
+                        )
+                    } else {
+                        None
+                    },
                     wake_up_after: None,
                 };
 
@@ -449,27 +417,22 @@ where
                     .read_write(&mut sub_read_write);
 
                 substream.inner = substream_update;
-                substream.read_buffer_partial_read += sub_read_write.read_bytes;
+                substream.read_buffer = sub_read_write.incoming_buffer;
                 if let Some(wake_up_after) = &sub_read_write.wake_up_after {
                     read_write.wake_up_after(wake_up_after)
-                }
-
-                // Continue looping as the substream might have more data to read or write.
-                if sub_read_write.read_bytes != 0 || sub_read_write.written_bytes != 0 {
-                    continue_looping = true;
                 }
 
                 // Determine whether we should send a message on that substream with a specific
                 // flag.
                 let flag_to_write_out = if substream.inner.is_none()
                     && (!substream.remote_writing_side_closed
-                        || sub_read_write.outgoing_buffer.is_some())
+                        || !substream.local_writing_side_closed)
                 {
                     // Send a `RESET_STREAM` if the state machine has reset while a side was still
                     // open.
                     Some(2)
                 } else if !substream.local_writing_side_closed
-                    && sub_read_write.outgoing_buffer.is_none()
+                    && sub_read_write.write_bytes_queueable.is_none()
                 {
                     // Send a `FIN` if the state machine has closed the writing side while it
                     // wasn't closed before.
@@ -480,47 +443,26 @@ where
                 };
 
                 // Send out message.
-                if flag_to_write_out.is_some() || sub_read_write.written_bytes != 0 {
-                    let written_bytes = sub_read_write.written_bytes;
-                    drop(sub_read_write);
+                if flag_to_write_out.is_some()
+                    || sub_read_write.write_bytes_queued != read_write.write_bytes_queued
+                {
+                    let written_bytes =
+                        sub_read_write.write_bytes_queued - read_write.write_bytes_queued;
 
-                    debug_assert!(written_bytes <= intermediary_write_buffer.len());
-
-                    let protobuf_frame = {
-                        let flag_out = flag_to_write_out
-                            .into_iter()
-                            .flat_map(|f| protobuf::enum_tag_encode(1, f));
-                        let message_out = if written_bytes != 0 {
-                            Some(&intermediary_write_buffer[..written_bytes])
-                        } else {
-                            None
-                        }
-                        .into_iter()
-                        .flat_map(|m| protobuf::bytes_tag_encode(2, m));
-                        flag_out
-                            .map(either::Left)
-                            .chain(message_out.map(either::Right))
-                    };
-
-                    let protobuf_frame_len = protobuf_frame.clone().fold(0, |mut l, b| {
-                        l += AsRef::<[u8]>::as_ref(&b).len();
-                        l
-                    });
+                    // TODO: don't do the encoding manually but use the protobuf module?
+                    let tag = protobuf::tag_encode(2, 2).collect::<Vec<_>>();
+                    let data_len = leb128::encode_usize(written_bytes).collect::<Vec<_>>();
+                    let libp2p_prefix =
+                        leb128::encode_usize(tag.len() + data_len.len()).collect::<Vec<_>>();
 
                     // The spec mentions that a frame plus its length prefix shouldn't exceed
                     // 16kiB. This is normally ensured by forbidding the substream from writing
                     // more data than would fit in 16kiB.
-                    debug_assert!(protobuf_frame_len <= 16384);
-                    debug_assert!(
-                        util::leb128::encode_usize(protobuf_frame_len).count() + protobuf_frame_len
-                            <= 16384
-                    );
-                    for byte in util::leb128::encode_usize(protobuf_frame_len) {
-                        read_write.write_out(&[byte]);
-                    }
-                    for buffer in protobuf_frame {
-                        read_write.write_out(AsRef::<[u8]>::as_ref(&buffer));
-                    }
+                    debug_assert!(libp2p_prefix.len() + tag.len() + data_len.len() <= 16384);
+
+                    read_write.write_out(libp2p_prefix);
+                    read_write.write_out(tag);
+                    read_write.write_out(data_len);
 
                     // We continue looping because the substream might have more data to send.
                     continue_looping = true;
@@ -543,7 +485,7 @@ where
             }
 
             // WebRTC never closes the writing side.
-            debug_assert!(read_write.outgoing_buffer.is_some());
+            debug_assert!(read_write.write_bytes_queueable.is_none());
 
             if substream.inner.is_none() {
                 if Some(substream_id) == self.ping_substream.as_ref() {
@@ -673,7 +615,6 @@ where
             )),
             user_data: Some(user_data),
             read_buffer: Vec::new(),
-            read_buffer_partial_read: 0,
             local_writing_side_closed: false,
             remote_writing_side_closed: false,
         });
@@ -737,7 +678,6 @@ where
             )),
             user_data: Some(user_data),
             read_buffer: Vec::new(),
-            read_buffer_partial_read: 0,
             local_writing_side_closed: false,
             remote_writing_side_closed: false,
         });

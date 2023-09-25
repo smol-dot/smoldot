@@ -34,34 +34,8 @@ if (process.argv.slice(2).indexOf("--release") !== -1) {
 if (buildProfile != 'debug' && buildProfile != 'min-size-release')
     throw new Error("Either --debug or --release must be passed");
 
-// The Rust version to use.
-// The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
-// possible for the wasm-js bindings to change between two Rust versions. Feel free to update
-// this version pin whenever you like, provided it continues to build.
-const rustVersion = '1.70.0';
-
-// Assume that the user has `rustup` installed and make sure that `rust_version` is available.
-// Because `rustup install` requires an Internet connection, check whether the toolchain is
-// already installed before attempting it.
-try {
-    child_process.execSync(
-        "rustup which --toolchain " + rustVersion + " cargo",
-        { 'stdio': 'inherit' }
-    );
-} catch (error) {
-    child_process.execSync(
-        "rustup install --no-self-update --profile=minimal " + rustVersion,
-        { 'stdio': 'inherit' }
-    );
-}
-// `rustup target add` doesn't require an Internet connection if the target is already installed.
-child_process.execSync(
-    "rustup target add --toolchain=" + rustVersion + " wasm32-wasi",
-    { 'stdio': 'inherit' }
-);
-
-// The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
-// code. This generates a `wasm` file in `target/wasm32-wasi`.
+// The important step in this script is running `cargo build --target wasm32-unknown-unknown` on
+// the Rust code. This generates a `wasm` file in `target/wasm32-unknown-unknown`.
 // Some optional Wasm features are enabled during the compilation in order to speed up the
 // execution of smoldot.
 // SIMD is intentionally not enabled, because WASM engines seem to allow only SIMD instructions
@@ -72,16 +46,17 @@ child_process.execSync(
 // precompiled), but the missing optimizations shouldn't be too much of a problem. The Rust
 // standard library could be compiled with these features using the `-Z build-std` flag, but at
 // the time of the writing of this comment this would require an unstable version of Rust.
-// Use `rustc --print target-features --target wasm32-wasi` to see the list of target features.
+// Use `rustc --print target-features --target wasm32-unknown-unknown` to see the list of target
+// features.
 // See <https://webassembly.org/roadmap/> to know which version of which engine supports which
 // feature.
 // See also the issue: <https://github.com/smol-dot/smoldot/issues/350>
 child_process.execSync(
-    "cargo +" + rustVersion + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
+    "cargo build --package smoldot-light-wasm --target wasm32-unknown-unknown --no-default-features " +
     (buildProfile == 'debug' ? '' : ("--profile " + buildProfile)),
     { 'stdio': 'inherit', 'env': { 'RUSTFLAGS': '-C target-feature=+bulk-memory,+sign-ext', ...process.env } }
 );
-const rustOutput = "../../target/wasm32-wasi/" + buildProfile + "/smoldot_light_wasm.wasm";
+const rustOutput = "../../target/wasm32-unknown-unknown/" + buildProfile + "/smoldot_light_wasm.wasm";
 
 // The code below will write a variable number of files to the `src/internals/bytecode` directory.
 // Start by clearing all existing files from this directory in case there are some left from past
