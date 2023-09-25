@@ -280,8 +280,8 @@ impl ChainSpec {
     /// default value is returned.
     ///
     /// > **Note**: This mechanism is legacy and no longer used.
-    pub fn protocol_id(&self) -> &str {
-        self.client_spec.protocol_id.as_deref().unwrap_or("sup")
+    pub fn protocol_id(&self) -> Option<&str> {
+        self.client_spec.protocol_id.as_deref()
     }
 
     /// Returns the "fork id" of the chain. This is arbitrary string that can be used in order to

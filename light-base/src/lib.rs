@@ -695,6 +695,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     let fork_id = chain_spec.fork_id().map(|f| f.to_owned());
                     let chain_name = chain_spec.name().to_owned();
                     let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
+                    let has_protocol_id = chain_spec.protocol_id().is_some();
                     let log_name = log_name.clone();
                     let block_number_bytes = usize::from(chain_spec.block_number_bytes());
                     let starting_block_number = chain_information
@@ -806,6 +807,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 `\"stateRootHash\": \"0x{}\"`",
                                 log_name, hex::encode(genesis_block_state_root)
                             )
+                        }
+
+                        if has_protocol_id {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain specification of {} contains a `protocolId` field. This \
+                                field is deprecated and its value is no longer used. It can be \
+                                safely removed from the JSON document.", log_name
+                            );
                         }
 
                         // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
