@@ -1272,7 +1272,7 @@ impl CipherState {
                             );
                             poly1305::universal_hash::UniversalHash::update_padded(
                                 mac_deref,
-                                &mut overlapping_data,
+                                &overlapping_data,
                             );
                             debug_assert_eq!(overlapping_data.len(), 64);
                             total_decrypted_data += 64;
@@ -1291,7 +1291,7 @@ impl CipherState {
                         );
                         poly1305::universal_hash::UniversalHash::update_padded(
                             mac_deref,
-                            &mut overlapping_data,
+                            &overlapping_data,
                         );
                         total_decrypted_data += overlapping_data.len();
                         return Some(mem::take(&mut overlapping_data));
@@ -1307,7 +1307,7 @@ impl CipherState {
                     );
                     poly1305::universal_hash::UniversalHash::update_padded(
                         mac_deref,
-                        &mut buffer[..encryptable_in_place],
+                        &buffer[..encryptable_in_place],
                     );
 
                     // Copy the non-encryptable-in-place data to `overlapping_data`.

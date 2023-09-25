@@ -292,8 +292,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
             let mut actual_key = Box::new([0u8; 32]);
             rand::Fill::try_fill(&mut *actual_key, &mut rand::thread_rng()).unwrap();
             let mut hex_encoded = Box::new([0; 64]);
-            hex::encode_to_slice(&*actual_key, &mut *hex_encoded).unwrap();
-            fs::write(&path, &*hex_encoded).expect("failed to write libp2p secret key file");
+            hex::encode_to_slice(*actual_key, &mut *hex_encoded).unwrap();
+            fs::write(&path, *hex_encoded).expect("failed to write libp2p secret key file");
             zeroize::Zeroize::zeroize(&mut *hex_encoded);
             actual_key
         };

@@ -761,7 +761,7 @@ impl ExecHint {
     ///
     /// > **Note**: This function is most useful for testing purposes.
     pub fn available_engines() -> impl Iterator<Item = ExecHint> {
-        iter::once(ExecHint::ForceWasmi).chain(Self::force_wasmtime_if_available().into_iter())
+        iter::once(ExecHint::ForceWasmi).chain(Self::force_wasmtime_if_available())
     }
 
     /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.

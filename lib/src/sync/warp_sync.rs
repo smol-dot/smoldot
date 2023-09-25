@@ -1873,7 +1873,7 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             chain_information::build::Config {
                 finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
                     scale_encoded_header: self.inner.warped_header.clone(),
-                    known_finality: Some((&self.inner.warped_finality).clone()),
+                    known_finality: Some(self.inner.warped_finality.clone()),
                 },
                 block_number_bytes: self.inner.block_number_bytes,
                 runtime,

@@ -681,10 +681,8 @@ impl<TUd> TrieStructure<TUd> {
         // nibble, otherwise the iteration should have ended.
         let mut end_key = match end_bound {
             ops::Bound::Unbounded => either::Left(iter::repeat(Nibble::max())),
-            ops::Bound::Excluded(end_key) => either::Right(end_key.chain(None.into_iter())),
-            ops::Bound::Included(end_key) => {
-                either::Right(end_key.chain(Some(Nibble::zero()).into_iter()))
-            }
+            ops::Bound::Excluded(end_key) => either::Right(end_key.chain(None)),
+            ops::Bound::Included(end_key) => either::Right(end_key.chain(Some(Nibble::zero()))),
         }
         .peekable();
 
