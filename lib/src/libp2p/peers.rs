@@ -1626,7 +1626,9 @@ where
     /// [`Event::NotificationsInOpenCancel`].
     ///
     pub fn in_notification_accept(&mut self, id: SubstreamId, handshake_back: Vec<u8>) {
-        self.inner.accept_in_notifications(id, handshake_back);
+        // TODO: arbitrary maximum notification size
+        self.inner
+            .accept_in_notifications(id, handshake_back, 16 * 1024 * 1024);
     }
 
     /// Responds to a [`Event::NotificationsInOpen`] by refusing the request for an inbound
