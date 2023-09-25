@@ -726,7 +726,7 @@ where
         &mut self,
         connection_id: ConnectionId,
         protocol_name: String,
-        now: TNow,
+        handshake_timeout: TNow,
         handshake: impl Into<Vec<u8>>,
         max_handshake_size: usize,
     ) -> SubstreamId {
@@ -756,7 +756,7 @@ where
             CoordinatorToConnectionInner::OpenOutNotifications {
                 protocol_name,
                 handshake: handshake.into(),
-                now,
+                handshake_timeout,
                 max_handshake_size,
                 substream_id,
             },
@@ -1804,7 +1804,7 @@ enum CoordinatorToConnectionInner<TNow> {
         substream_id: SubstreamId,
         protocol_name: String,
         max_handshake_size: usize,
-        now: TNow,
+        handshake_timeout: TNow,
         handshake: Vec<u8>,
     },
     CloseOutNotifications {

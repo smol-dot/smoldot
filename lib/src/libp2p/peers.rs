@@ -1735,7 +1735,7 @@ where
         let substream_id = self.inner.open_out_notifications(
             connection_id,
             protocol_name,
-            now,
+            now + Duration::from_secs(20), // TODO: make configurable
             handshake,
             max_handshake_size,
         );
