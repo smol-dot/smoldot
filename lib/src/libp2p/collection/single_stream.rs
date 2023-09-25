@@ -279,7 +279,7 @@ where
                     protocol_name,
                     max_handshake_size,
                     handshake,
-                    now,
+                    handshake_timeout,
                     substream_id: outer_substream_id,
                 },
                 SingleStreamConnectionTaskInner::Established {
@@ -292,7 +292,7 @@ where
                     protocol_name,
                     handshake,
                     max_handshake_size,
-                    now + Duration::from_secs(20), // TODO: make configurable
+                    handshake_timeout,
                     Some(outer_substream_id),
                 );
 

@@ -441,7 +441,7 @@ where
                     max_handshake_size,
                     protocol_name,
                     handshake,
-                    now,
+                    handshake_timeout,
                     substream_id: outer_substream_id,
                 },
                 MultiStreamConnectionTaskInner::Established {
@@ -454,7 +454,7 @@ where
                     protocol_name,
                     max_handshake_size,
                     handshake,
-                    now + Duration::from_secs(20), // TODO: make configurable
+                    handshake_timeout,
                     Some(outer_substream_id),
                 );
 
