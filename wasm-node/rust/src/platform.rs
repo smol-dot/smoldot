@@ -292,6 +292,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         connection_id,
                         stream_id: None,
                         read_buffer: Vec::new(),
+                        inner_expected_incoming_bytes: Some(1),
                         is_reset: false,
                         writable_bytes: 0,
                         write_closable,
@@ -458,6 +459,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     connection_id,
                     stream_id: Some(stream_id),
                     read_buffer: Vec::new(),
+                    inner_expected_incoming_bytes: Some(1),
                     is_reset: false,
                     writable_bytes: usize::try_from(initial_writable_bytes).unwrap(),
                     write_closable: false, // Note: this is currently hardcoded for WebRTC.
@@ -521,13 +523,17 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                             .reserve(stream_inner.messages_queue_total_size);
 
                         while let Some(msg) = stream_inner.messages_queue.pop_front() {
+                            stream_inner.messages_queue_total_size -= msg.len();
                             // TODO: could be optimized by reworking the bindings
                             stream.read_buffer.extend_from_slice(&msg);
-                            // TODO: only wake up if `read_bytes >= expected_incoming_bytes`
-                            shall_return = true;
+                            if stream
+                                .inner_expected_incoming_bytes
+                                .map_or(false, |expected| expected <= stream.read_buffer.len())
+                            {
+                                shall_return = true;
+                                break;
+                            }
                         }
-
-                        stream_inner.messages_queue_total_size = 0;
                     }
 
                     if stream_inner.writable_bytes_extra != 0 {
@@ -626,8 +632,13 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .get_mut(&(self.stream.connection_id, self.stream.stream_id))
             .unwrap();
 
-        // TODO: only wake up if `read_bytes >= expected_incoming_bytes`
-        if (self.read_write.read_bytes != 0 && !self.read_write.incoming_buffer.is_empty())
+        if (self.read_write.read_bytes != 0
+            && self
+                .read_write
+                .expected_incoming_bytes
+                .map_or(false, |expected| {
+                    expected >= self.read_write.incoming_buffer.len()
+                }))
             || (self.read_write.write_bytes_queued != 0
                 && self.read_write.write_bytes_queueable.is_some())
         {
@@ -640,6 +651,8 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             .map(|when| Delay::new_at_monotonic_clock(when));
 
         self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
+
+        self.stream.inner_expected_incoming_bytes = self.read_write.expected_incoming_bytes;
 
         for buffer in self.read_write.write_buffers.drain(..) {
             assert!(buffer.len() <= self.stream.writable_bytes);
@@ -679,6 +692,7 @@ pub(crate) struct StreamWrapper {
     connection_id: u32,
     stream_id: Option<u32>,
     read_buffer: Vec<u8>,
+    inner_expected_incoming_bytes: Option<usize>,
     /// `true` if the remote has reset the stream and `update_stream` has since then been called.
     is_reset: bool,
     writable_bytes: usize,
