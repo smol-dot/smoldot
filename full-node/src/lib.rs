@@ -292,6 +292,47 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         None => None,
     };
 
+    // The `protocolId` field of chain specifications is deprecated. Print a warning.
+    if chain_spec.protocol_id().is_some() {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!("chain-spec-has-protocol-id; chain={}", chain_spec.name()),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.protocol_id().is_some() {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-protocol-id; chain={}",
+                    relay_chain_spec.name()
+                ),
+            );
+        }
+    }
+
+    // The `telemetryEndpoints` field of chain specifications isn't supported.
+    if chain_spec.telemetry_endpoints().count() != 0 {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!(
+                "chain-spec-has-telemetry-endpoints; chain={}",
+                chain_spec.name()
+            ),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.telemetry_endpoints().count() != 0 {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-telemetry-endpoints; chain={}",
+                    relay_chain_spec.name()
+                ),
+            );
+        }
+    }
+
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
     config.log_callback.log(
