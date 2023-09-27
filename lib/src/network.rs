@@ -23,3 +23,4 @@
 pub mod kademlia;
 pub mod protocol;
 pub mod service;
+pub mod service2;
