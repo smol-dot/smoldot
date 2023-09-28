@@ -124,9 +124,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     )
                 }
 
-                let before_polling = Instant::now();
+                let before_polling = unsafe { bindings::monotonic_clock_us() };
                 let out = this.future.poll(cx);
-                let poll_duration = Instant::now() - before_polling;
+                let poll_duration = Duration::from_micros(
+                    unsafe { bindings::monotonic_clock_us() } - before_polling,
+                );
 
                 unsafe {
                     bindings::current_task_exit();
