@@ -134,6 +134,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     bindings::current_task_exit();
                 }
 
+                // Print a warning if polling the task takes a long time.
+                // It has been noticed that sometimes in Firefox polling a task takes a 16ms + a
+                // small amount. This most likely indicates that Firefox does something like
+                // freezing the JS/Wasm execution before resuming it at the next frame, thus adding
+                // 16ms to the execution time.
+                // For this reason, the threshold above which a task takes too long must be
+                // above 16ms no matter what.
                 if poll_duration.as_millis() >= 20 {
                     log::warn!(
                         "The task named `{}` has occupied the CPU for an unreasonable amount \
