@@ -224,8 +224,8 @@ pub struct Config<'a> {
     /// re-used between multiple handshakes.
     pub ephemeral_secret_key: &'a [u8; 32],
 
-    /// `true` if this side of the handshake has initiated the connection or substream onto which
-    /// the handshake is performed.
+    /// `true` if this side of the connection must initiate the Noise handshake. `false` if it's
+    /// the remote.
     pub is_initiator: bool,
 
     /// Prologue data. The prologue data must be identical on both sides of the handshake,
@@ -263,7 +263,7 @@ pub struct Noise {
 }
 
 impl Noise {
-    /// Returns true if the local side has opened the connection.
+    /// Returns the value that was provided as [`Config::is_initiator`].
     pub fn is_initiator(&self) -> bool {
         self.is_initiator
     }

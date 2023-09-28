@@ -19,7 +19,7 @@
 
 import * as smoldot from '../dist/mjs/index-nodejs.js';
 import { WebSocketServer } from 'ws';
-import * as process from 'node:process';
+import process from 'node:process';
 import * as fs from 'node:fs';
 import { Worker } from 'node:worker_threads';
 
@@ -98,6 +98,15 @@ const defaultChain = client
         console.error("Error while adding chain: " + error);
         process.exit(1);
     });
+
+// Catch SIGINT in order to call `remove` and `terminate`. This is mostly a way to test whether
+// these two functions work as intended or if they crash/panic.
+process.on("SIGINT", () => {
+    defaultChain
+        .then((chain) => chain.remove())
+        .then(() => client.terminate())
+        .then(() => process.exit(0))
+});
 
 // Uncomment if you want to test the database.
 /*defaultChain.then(async (chain) => {

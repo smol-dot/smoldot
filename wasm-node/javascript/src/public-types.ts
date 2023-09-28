@@ -182,12 +182,20 @@ export interface Chain {
      * The JSON-RPC callback will no longer be called. This is the case immediately after this
      * function is called. Any on-going JSON-RPC request is instantaneously aborted.
      *
-     * Trying to use the chain again will lead to an exception being thrown.
+     * Trying to use the chain again will lead to a {@link AlreadyDestroyedError} exception
+     * being thrown.
      *
-     * If this chain is a relay chain, then all parachains that use it will continue to work. Smoldot
-     * automatically keeps alive all relay chains that have an active parachains. There is no need
-     * to track parachains and relay chains, or to destroy them in the correct order, as this is
-     * handled automatically internally.
+     * While the chain instantaneously disappears from the public API as soon as this function is
+     * called, its shutdown process actually happens asynchronously in the background. This means
+     * for example that networking connections to the chain will remain open for a little bit even
+     * after this function returns.
+     *
+     * If the chain is a relay chain, and that there exists {@link Chain} instances corresponding
+     * to parachains that are using this relay chain, then these parachains will continue to work
+     * and the relay chain will actually remain connected in the background.
+     * Smoldot automatically keeps alive all relay chains that have an active parachains. There
+     * is no need to track parachains and relay chains, or to destroy them in the correct order,
+     * as this is handled automatically internally.
      *
      * @throws {@link AlreadyDestroyedError} If the chain has already been removed or the client has been terminated.
      * @throws {@link CrashError} If the background client has crashed.
