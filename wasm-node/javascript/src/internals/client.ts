@@ -592,11 +592,18 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             if (state.instance.status !== "ready")
                 throw new Error(); // Internal error. Never supposed to happen.
             state.instance.instance.shutdownExecutor();
-            state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
+
+            // Wait for the `executor-shutdown` event to be generated.
+            await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
+
+            // In case the instance crashes while we were waiting, we don't want to overwrite
+            // the error.
+            if (state.instance.status === "ready")
+                state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
             state.connections.forEach((connec) => connec.reset());
             state.connections.clear();
             for (const addChainResult of state.addChainResults) {
-                addChainResult({ success: false, error: "Smoldot has crashed" });
+                addChainResult({ success: false, error: "Client.terminate() has been called" });
             }
             state.addChainResults = [];
             for (const chain of Array.from(state.chains.values())) {
@@ -606,9 +613,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 chain.jsonRpcResponsesPromises = [];
             }
             state.chains.clear();
-
-            // Wait for the `executor-shutdown` event to be generated.
-            await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
         }
     }
 }
