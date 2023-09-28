@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.3 - 2023-09-28
+
 ### Fixed
 
 - Fix JavaScript error being thrown when `Client.terminate` is called while the client is not idle. ([#1197](https://github.com/smol-dot/smoldot/pull/1197))
