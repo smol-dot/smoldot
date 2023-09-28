@@ -192,7 +192,7 @@ export interface Chain {
      *
      * If the chain is a relay chain, and that there exists {@link Chain} instances corresponding
      * to parachains that are using this relay chain, then these parachains will continue to work
-     * and the relay chain will actually remain connected in the backround.
+     * and the relay chain will actually remain connected in the background.
      * Smoldot automatically keeps alive all relay chains that have an active parachains. There
      * is no need to track parachains and relay chains, or to destroy them in the correct order,
      * as this is handled automatically internally.
