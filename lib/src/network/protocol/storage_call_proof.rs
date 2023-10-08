@@ -105,18 +105,16 @@ pub fn decode_storage_or_call_proof_response(
         StorageOrCallProof::StorageProof => 2,
     };
 
-    // TODO: while the `proof` field is correctly optional, the `response` field isn't supposed to be optional; make it `#[required]` again once https://github.com/paritytech/substrate/pull/12732 has been merged and released
-
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode! {
-            #[optional] response = field_num => protobuf::message_tag_decode(protobuf::message_decode!{
+            #[required] response = field_num => protobuf::message_tag_decode(protobuf::message_decode!{
                 #[optional] proof = 2 => protobuf::bytes_tag_decode
             }),
         }),
     );
 
     let proof = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, out)) => out.response.and_then(|r| r.proof),
+        Ok((_, out)) => out.response.proof,
         Err(_) => return Err(DecodeStorageCallProofResponseError::ProtobufDecode),
     };
 
