@@ -29,7 +29,7 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
@@ -434,7 +434,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         _max_parallel: NonZeroU32,
     ) -> Result<Vec<StorageResultItem>, StorageQueryError> {
         // TODO: this should probably be extracted to a state machine in `/lib`, with unit tests
-        // TODO: big requests should be split into multiple smaller ones
         // TODO: handle max_parallel
         enum RequestImpl {
             PrefixScan {
@@ -484,6 +483,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut final_results =
             Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
 
+        // Number of nodes that are possible in a response before exceeding the response size
+        // limit. Because the size of a trie node is unknown, this can only ever be a gross
+        // estimate.
+        let mut response_nodes_cap = (1024 * 1024) / 164;
+
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
             let mut seed = [0; 32];
             self.platform.fill_random_bytes(&mut seed);
@@ -517,27 +521,50 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
             // Build the list of keys to request.
             let keys_to_request = {
+                // Keep track of the number of nodes that might be found in the response.
+                // This is a generous overestimation of the actual number.
+                let mut max_reponse_nodes = 0;
+
                 let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
                     requests_remaining.len() * 4,
                     fnv::FnvBuildHasher::default(),
                 );
 
                 for request in &requests_remaining {
+                    if max_reponse_nodes >= response_nodes_cap {
+                        break;
+                    }
+
                     match request {
                         RequestImpl::PrefixScan { scan, .. } => {
-                            keys.extend(scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
-                            }));
+                            for scan_key in scan.requested_keys() {
+                                if max_reponse_nodes >= response_nodes_cap {
+                                    break;
+                                }
+
+                                let scan_key = trie::nibbles_to_bytes_suffix_extend(scan_key)
+                                    .collect::<Vec<_>>();
+                                let scan_key_len = scan_key.len();
+                                if keys.insert(scan_key) {
+                                    max_reponse_nodes += scan_key_len * 2;
+                                }
+                            }
                         }
                         RequestImpl::ValueOrHash { key, .. } => {
-                            keys.insert(key.clone());
+                            if keys.insert(key.clone()) {
+                                max_reponse_nodes += key.len() * 2;
+                            }
                         }
                         RequestImpl::ClosestDescendantMerkleValue { key } => {
                             // We query the parent of `key`.
                             if key.is_empty() {
-                                keys.insert(Vec::new());
+                                if keys.insert(Vec::new()) {
+                                    max_reponse_nodes += 1;
+                                }
                             } else {
-                                keys.insert(key[..key.len() - 1].to_owned());
+                                if keys.insert(key[..key.len() - 1].to_owned()) {
+                                    max_reponse_nodes += key.len() * 2 - 1;
+                                }
                             }
                         }
                     }
@@ -563,7 +590,28 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let proof = match result {
                 Ok(r) => r,
                 Err(err) => {
-                    outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    // In case of error that isn't a protocol error, we reduce the number of
+                    // trie node items to request.
+                    let reduce_max = match &err {
+                        network_service::StorageProofRequestError::RequestTooLarge => true,
+                        network_service::StorageProofRequestError::Request(
+                            service::StorageProofRequestError::Request(err),
+                        ) => !err.is_protocol_error(),
+                        _ => false,
+                    };
+
+                    if !matches!(
+                        err,
+                        network_service::StorageProofRequestError::RequestTooLarge
+                    ) || response_nodes_cap == 1
+                    {
+                        outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    }
+
+                    if reduce_max {
+                        response_nodes_cap = cmp::max(1, response_nodes_cap / 2);
+                    }
+
                     continue;
                 }
             };
