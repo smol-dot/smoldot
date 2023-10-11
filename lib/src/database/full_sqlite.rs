@@ -145,6 +145,24 @@ impl SqliteFullDatabase {
         Ok(out)
     }
 
+    /// Returns the hash of the parent of the given block, or `None` if the block is unknown.
+    ///
+    /// > **Note**: If this method is called twice times in a row with the same block hash, it
+    /// >           is possible for the first time to return `Some` and the second time to return
+    /// >           `None`, in case the block has since been removed from the database.
+    pub fn block_parent(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, CorruptedError> {
+        let connection = self.database.lock();
+
+        let out = connection
+            .prepare_cached(r#"SELECT parent_hash FROM blocks WHERE hash = ?"#)
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_row((&block_hash[..],), |row| row.get::<_, [u8; 32]>(0))
+            .optional()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        Ok(out)
+    }
+
     /// Returns the list of extrinsics of the given block, or `None` if the block is unknown.
     ///
     /// > **Note**: The list of extrinsics of a block is also known as its *body*.
