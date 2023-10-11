@@ -573,3 +573,4 @@ fn system_version() {
 // TODO: add tests for `chain_subscribeAllHeads`
 // TODO: add tests for `chain_subscribeFinalizedHeads`
 // TODO: add tests for `chain_subscribeNewHeads`
+// TODO: add tests for `state_queryStorageAt`
