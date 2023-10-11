@@ -3465,7 +3465,6 @@
     "tokenDecimals": 12,
     "tokenSymbol": "KSM"
   },
-  "protocolId": "ksmcc3",
   "telemetryEndpoints": [
     [
       "/dns/telemetry.polkadot.io/tcp/443/x-parity-wss/%2Fsubmit%2F",

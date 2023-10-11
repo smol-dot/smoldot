@@ -172,7 +172,7 @@ enum ToBackground {
     IncomingConnection {
         socket: TcpStream,
         multiaddr: Multiaddr,
-        when_connected: Instant,
+        when_accepted: Instant,
     },
     StartKademliaDiscoveries {
         when_done: oneshot::Sender<()>,
@@ -421,13 +421,19 @@ impl NetworkService {
                             break;
                         };
 
+                        let when_accepted = Instant::now();
+
                         let (socket, addr) = match accept_result {
                             Ok(v) => v,
-                            Err(_) => {
+                            Err(error) => {
                                 // Errors here can happen if the accept failed, for example if no
                                 // file descriptor is available.
                                 // A wait is added in order to avoid having a busy-loop failing to
                                 // accept connections.
+                                log_callback.log(
+                                    LogLevel::Warn,
+                                    format!("tcp-accept-error; error={}", error),
+                                );
                                 smol::Timer::after(Duration::from_secs(2)).await;
                                 continue;
                             }
@@ -461,7 +467,7 @@ impl NetworkService {
                             .send(ToBackground::IncomingConnection {
                                 socket,
                                 multiaddr,
-                                when_connected: Instant::now(),
+                                when_accepted,
                             })
                             .await;
                     }
@@ -1281,11 +1287,11 @@ async fn background_task(mut inner: Inner) {
             ToBackground::IncomingConnection {
                 socket,
                 multiaddr,
-                when_connected,
+                when_accepted,
             } => {
                 let (connection_id, connection_task) =
                     inner.network.add_single_stream_incoming_connection(
-                        when_connected,
+                        when_accepted,
                         service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                         multiaddr.clone(),
                     );

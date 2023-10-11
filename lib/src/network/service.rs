@@ -410,20 +410,20 @@ where
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection has first been opened, in
+    /// order to determine when the handshake timeout expires.
     ///
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
     pub fn add_single_stream_incoming_connection(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
         remote_addr: multiaddr::Multiaddr,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         self.inner.add_single_stream_incoming_connection(
-            when_connected,
+            when_connection_start,
             handshake_kind,
             remote_addr,
         )
@@ -434,23 +434,26 @@ where
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection has first been opened, in
+    /// order to determine when the handshake timeout expires.
     ///
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
     pub fn add_multi_stream_incoming_connection<TSubId>(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
         remote_addr: multiaddr::Multiaddr,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
-        self.inner
-            .add_multi_stream_incoming_connection(when_connected, handshake_kind, remote_addr)
+        self.inner.add_multi_stream_incoming_connection(
+            when_connection_start,
+            handshake_kind,
+            remote_addr,
+        )
     }
 
     pub fn pull_message_to_connection(
@@ -504,10 +507,10 @@ where
         id: PendingId,
         handshake_kind: SingleStreamHandshakeKind,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
+        let (expected_peer_id, multiaddr, when_connection_start) = self.pending_ids.remove(id.0);
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
-            when_connected,
+            when_connection_start,
             handshake_kind,
             &expected_peer_id,
             multiaddr,
@@ -546,10 +549,10 @@ where
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
-        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
+        let (expected_peer_id, multiaddr, when_connection_start) = self.pending_ids.remove(id.0);
 
         let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
-            when_connected,
+            when_connection_start,
             handshake_kind,
             &expected_peer_id,
             multiaddr,

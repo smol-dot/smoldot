@@ -120,7 +120,7 @@ impl JsonRpcService {
                         Ok(addr) => addr,
                         Err(error) => {
                             return Err(InitError::ListenError {
-                                bind_address: addr.clone(),
+                                bind_address: *addr,
                                 error,
                             })
                         }
@@ -130,7 +130,7 @@ impl JsonRpcService {
                 }
                 Err(error) => {
                     return Err(InitError::ListenError {
-                        bind_address: addr.clone(),
+                        bind_address: *addr,
                         error,
                     })
                 }
@@ -212,7 +212,7 @@ impl JsonRpcService {
     /// Returns `None` if and only if [`Config::bind_address`] was `None`. However, if `Some`,
     /// the address is not necessarily equal to the one in [`Config::bind_address`].
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        self.listen_addr.clone()
+        self.listen_addr
     }
 
     /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint.

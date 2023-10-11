@@ -38,7 +38,7 @@ impl<T> NonFinalizedTree<T> {
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
     pub fn verify_header(
-        &mut self,
+        &self,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
@@ -196,7 +196,7 @@ impl<T> NonFinalizedTree<T> {
                 // No Aura epoch transition. Just a regular block.
                 (
                     verify::header_only::Success::Aura {
-                        authorities_change: false,
+                        authorities_change: None,
                     },
                     Some(BlockConsensus::Aura {
                         authorities_list: parent_authorities,
@@ -214,17 +214,18 @@ impl<T> NonFinalizedTree<T> {
                 // Aura epoch transition.
                 (
                     verify::header_only::Success::Aura {
-                        authorities_change: true,
+                        authorities_change: Some(new_authorities_list),
                     },
                     Some(BlockConsensus::Aura { .. }),
                     FinalizedConsensus::Aura { .. },
                     _,
-                ) => {
-                    todo!() // TODO: fetch from header
-                            /*BlockConsensus::Aura {
-                                authorities_list:
-                            }*/
-                }
+                ) => (
+                    parent_best_score.num_primary_slots + 1,
+                    parent_best_score.num_secondary_slots,
+                    BlockConsensus::Aura {
+                        authorities_list: Arc::new(new_authorities_list),
+                    },
+                ),
 
                 // No Babe epoch transition. Just a regular block.
                 (

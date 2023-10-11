@@ -236,7 +236,7 @@ where
         let handshake_out = {
             let handshake_len = handshake.len();
             leb128::encode_usize(handshake_len)
-                .chain(handshake.into_iter())
+                .chain(handshake)
                 .collect::<VecDeque<_>>()
         };
 
@@ -272,7 +272,7 @@ where
         let request_payload = if let Some(request) = request {
             let request_len = request.len();
             leb128::encode_usize(request_len)
-                .chain(request.into_iter())
+                .chain(request)
                 .collect::<VecDeque<_>>()
         } else {
             VecDeque::new()
@@ -980,7 +980,7 @@ where
                 read_write.write_from_vec_deque(&mut payload_out);
                 if payload_out.is_empty() {
                     if let Ok(Some(ping)) = read_write.incoming_bytes_take(32) {
-                        payload_out.extend(ping.into_iter());
+                        payload_out.extend(ping);
                     }
                 }
 
@@ -1149,7 +1149,7 @@ where
                 handshake: {
                     let handshake_len = handshake.len();
                     leb128::encode_usize(handshake_len)
-                        .chain(handshake.into_iter())
+                        .chain(handshake)
                         .collect::<VecDeque<_>>()
                 },
                 max_notification_size,
@@ -1187,7 +1187,7 @@ where
             SubstreamInner::NotificationsOut { notifications, .. } => {
                 // TODO: expensive copying?
                 notifications.extend(leb128::encode_usize(notification.len()));
-                notifications.extend(notification.into_iter());
+                notifications.extend(notification);
             }
             _ => panic!(),
         }
@@ -1280,9 +1280,7 @@ where
                 self.inner = SubstreamInner::RequestInRespond {
                     response: if let Ok(response) = response {
                         let response_len = response.len();
-                        leb128::encode_usize(response_len)
-                            .chain(response.into_iter())
-                            .collect()
+                        leb128::encode_usize(response_len).chain(response).collect()
                     } else {
                         // An error is indicated by closing the substream without even sending
                         // back the length of the response.

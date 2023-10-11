@@ -169,7 +169,7 @@ impl<T> NonFinalizedTree<T> {
                 }
                 grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
                     let to_find = is_authority.authority_public_key();
-                    let result = authorities_list.clone().any(|a| a.as_ref() == to_find);
+                    let result = authorities_list.clone().any(|a| a == to_find);
                     verification = is_authority.resume(result);
                 }
                 grandpa::commit::verify::InProgress::IsParent(is_parent) => {
@@ -575,36 +575,35 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
     type Item = RemovedBlock<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let pruned = self.iter.next()?;
-            let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
-            debug_assert_eq!(_removed, Some(pruned.index));
+        let pruned = self.iter.next()?;
+        let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
+        debug_assert_eq!(_removed, Some(pruned.index));
+        let _removed = self
+            .blocks_by_best_score
+            .remove(&pruned.user_data.best_score);
+        debug_assert_eq!(_removed, Some(pruned.index));
+        if let BlockFinality::Grandpa {
+            prev_auth_change_trigger_number,
+            triggers_change: true,
+            ..
+        } = pruned.user_data.finality
+        {
             let _removed = self
-                .blocks_by_best_score
-                .remove(&pruned.user_data.best_score);
-            debug_assert_eq!(_removed, Some(pruned.index));
-            if let BlockFinality::Grandpa {
-                prev_auth_change_trigger_number,
-                triggers_change: true,
-                ..
-            } = pruned.user_data.finality
-            {
-                let _removed = self
-                    .blocks_trigger_gp_change
-                    .remove(&(prev_auth_change_trigger_number, pruned.index));
-                debug_assert!(_removed);
-            }
-            break Some(RemovedBlock {
-                block_hash: pruned.user_data.hash,
-                scale_encoded_header: pruned.user_data.header,
-                user_data: pruned.user_data.user_data,
-                ty: if pruned.is_prune_target_ancestor {
-                    RemovedBlockType::Finalized
-                } else {
-                    RemovedBlockType::Pruned
-                },
-            });
+                .blocks_trigger_gp_change
+                .remove(&(prev_auth_change_trigger_number, pruned.index));
+            debug_assert!(_removed);
         }
+
+        Some(RemovedBlock {
+            block_hash: pruned.user_data.hash,
+            scale_encoded_header: pruned.user_data.header,
+            user_data: pruned.user_data.user_data,
+            ty: if pruned.is_prune_target_ancestor {
+                RemovedBlockType::Finalized
+            } else {
+                RemovedBlockType::Pruned
+            },
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

@@ -292,6 +292,47 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         None => None,
     };
 
+    // The `protocolId` field of chain specifications is deprecated. Print a warning.
+    if chain_spec.protocol_id().is_some() {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!("chain-spec-has-protocol-id; chain={}", chain_spec.name()),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.protocol_id().is_some() {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-protocol-id; chain={}",
+                    relay_chain_spec.name()
+                ),
+            );
+        }
+    }
+
+    // The `telemetryEndpoints` field of chain specifications isn't supported.
+    if chain_spec.telemetry_endpoints().count() != 0 {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!(
+                "chain-spec-has-telemetry-endpoints; chain={}",
+                chain_spec.name()
+            ),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.telemetry_endpoints().count() != 0 {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-telemetry-endpoints; chain={}",
+                    relay_chain_spec.name()
+                ),
+            );
+        }
+    }
+
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
     config.log_callback.log(
@@ -617,11 +658,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         database,
         consensus_service: consensus_service.clone(),
         network_service: (network_service.clone(), 0),
-        bind_address: config
-            .chain
-            .json_rpc_listen
-            .as_ref()
-            .map(|cfg| cfg.address.clone()),
+        bind_address: config.chain.json_rpc_listen.as_ref().map(|cfg| cfg.address),
         max_parallel_requests: 32,
         max_json_rpc_clients: config
             .chain
@@ -653,7 +690,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 bind_address: relay_chain_cfg
                     .json_rpc_listen
                     .as_ref()
-                    .map(|cfg| cfg.address.clone()),
+                    .map(|cfg| cfg.address),
                 max_parallel_requests: 32,
                 max_json_rpc_clients: relay_chain_cfg
                     .json_rpc_listen

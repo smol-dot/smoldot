@@ -1246,7 +1246,7 @@ fn set_best_chain(
     new_best_block_hash: &[u8],
 ) -> Result<(), CorruptedError> {
     // TODO: can this not be embedded in the SQL statement below?
-    let current_best = meta_get_blob(&database, "best")?.ok_or(CorruptedError::MissingMetaKey)?;
+    let current_best = meta_get_blob(database, "best")?.ok_or(CorruptedError::MissingMetaKey)?;
 
     // TODO: untested except in the most basic situation
     // In the SQL below, the temporary table `changes` is built by walking down (highest to lowest
@@ -1299,7 +1299,7 @@ fn set_best_chain(
         })
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
-    meta_set_blob(&database, "best", new_best_block_hash)?;
+    meta_set_blob(database, "best", new_best_block_hash)?;
     Ok(())
 }
 
@@ -1451,12 +1451,12 @@ fn purge_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<(), Corru
     database
         .prepare_cached("DELETE FROM blocks_body WHERE hash = ?")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute((&hash[..],))
+        .execute((hash,))
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     database
         .prepare_cached("DELETE FROM blocks WHERE hash = ?")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute((&hash[..],))
+        .execute((hash,))
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
 }
@@ -1479,7 +1479,7 @@ fn purge_block_storage(database: &rusqlite::Connection, hash: &[u8]) -> Result<(
         )
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute(rusqlite::named_params! {
-            ":block_hash": &hash[..],
+            ":block_hash": hash,
         })
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 

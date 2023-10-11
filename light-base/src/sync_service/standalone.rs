@@ -21,7 +21,13 @@ use super::{
 };
 use crate::{network_service, platform::PlatformRef, util};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned as _},
+    boxed::Box,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     iter,
     num::{NonZeroU32, NonZeroU64},
@@ -309,6 +315,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             .1
                     }
                     RequestOutcome::Block(Err(_)) => {
+                        // TODO: should disconnect peer
                         task.sync
                             .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()))
                             .1
@@ -332,6 +339,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             .1
                     }
                     RequestOutcome::WarpSync(Err(_)) => {
+                        // TODO: should disconnect peer
                         task.sync.grandpa_warp_sync_response_err(request_id);
                         continue;
                     }
@@ -363,21 +371,19 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         );
                     }
                     all::Status::WarpSyncFragments {
-                        source: Some((_, (peer_id, _))),
                         finalized_block_hash,
                         finalized_block_number,
+                        ..
                     }
                     | all::Status::WarpSyncChainInformation {
-                        source: (_, (peer_id, _)),
                         finalized_block_hash,
                         finalized_block_number,
                     } => {
                         log::warn!(
                             target: &task.log_target,
-                            "GrandPa warp sync in progress. Block: #{} (0x{}). Peer attempt: {}.",
+                            "GrandPa warp sync in progress. Block: #{} (0x{}).",
                             finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
-                            peer_id
+                            HashDisplay(&finalized_block_hash)
                         );
                     }
                 };
@@ -679,8 +685,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                        if !matches!(err, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
+                            log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -693,8 +702,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
                     }
                     Err(err) => {
+                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                        if !matches!(
+                            err,
+                            all::WarpSyncBuildChainInformationError::SourceMisbehavior(_)
+                        ) {
+                            log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -739,7 +754,10 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                 // Grandpa warp sync fragment to verify.
-                let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
+                let sender_peer_id = verify
+                    .proof_sender()
+                    .map(|(_, (peer_id, _))| Cow::Owned(peer_id.to_string())) // TODO: unnecessary cloning most of the time
+                    .unwrap_or(Cow::Borrowed("<disconnected>"));
 
                 let (sync, result) = verify.perform({
                     let mut seed = [0; 32];
@@ -748,25 +766,32 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 });
                 self.sync = sync;
 
-                if let Err(err) = result {
-                    let maybe_forced_change = matches!(err, all::WarpSyncFragmentError::Verify(_));
-                    log::warn!(
-                        target: &self.log_target,
-                        "Failed to verify warp sync fragment from {}: {}{}",
-                        sender_peer_id,
-                        err,
-                        if maybe_forced_change {
-                            ". This might be caused by a forced GrandPa authorities change having \
-                            been enacted on the chain. If this is the case, please update the \
-                            chain specification with a checkpoint past this forced change."
-                        } else { "" }
-                    );
-                } else {
-                    log::debug!(
-                        target: &self.log_target,
-                        "Sync => WarpSyncFragmentVerified(sender={})",
-                        sender_peer_id,
-                    );
+                match result {
+                    Ok((fragment_hash, fragment_number)) => {
+                        // TODO: must call `set_local_grandpa_state` and `set_local_best_block` so that other peers notify us of neighbor packets
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
+                            sender_peer_id,
+                            HashDisplay(&fragment_hash)
+                        );
+                    }
+                    Err(err) => {
+                        // TODO: should disconnect peer
+                        let maybe_forced_change =
+                            matches!(err, all::VerifyFragmentError::JustificationVerify(_));
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to verify warp sync fragment from {}: {}{}",
+                            sender_peer_id,
+                            err,
+                            if maybe_forced_change {
+                                ". This might be caused by a forced GrandPa authorities change having \
+                                been enacted on the chain. If this is the case, please update the \
+                                chain specification with a checkpoint past this forced change."
+                            } else { "" }
+                        );
+                    }
                 }
             }
 
