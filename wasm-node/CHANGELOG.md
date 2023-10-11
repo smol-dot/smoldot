@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.4 - 2023-10-11
+
 ### Changed
 
 - When asking for Merkle proofs from full nodes, smoldot will now automatically and dynamically split big requests into multiple smaller requests. This should avoid timeout errors in case of big requests. ([#1209](https://github.com/smol-dot/smoldot/pull/1209))
