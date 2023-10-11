@@ -356,11 +356,11 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
-    ) -> Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
+    ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::StartGrandpaWarpSyncRequest {
+            .send(ToBackground::StartWarpSyncRequest {
                 target: target.clone(),
                 chain_index,
                 begin_hash,
@@ -378,7 +378,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 let decoded = response.decode();
                 log::debug!(
                     target: "network",
-                    "Connection({}) => GrandpaWarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
+                    "Connection({}) => WarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
                     target,
                     self.log_chain_names[chain_index],
                     decoded.fragments.len(),
@@ -388,7 +388,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => GrandpaWarpSyncRequest(chain={}, error={:?})",
+                    "Connection({}) => WarpSyncRequest(chain={}, error={:?})",
                     target,
                     self.log_chain_names[chain_index],
                     err,
@@ -713,7 +713,7 @@ pub enum BlocksRequestError {
 
 /// Error returned by [`NetworkService::grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
-pub enum GrandpaWarpSyncRequestError {
+pub enum WarpSyncRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
@@ -800,14 +800,13 @@ enum ToBackground<TPlat: PlatformRef> {
         result: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
     },
     // TODO: serialize the request before sending over channel
-    StartGrandpaWarpSyncRequest {
+    StartWarpSyncRequest {
         target: PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
-        result: oneshot::Sender<
-            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
-        >,
+        result:
+            oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
     },
     // TODO: serialize the request before sending over channel
     StartStorageProofRequest {
@@ -913,9 +912,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     grandpa_warp_sync_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<
-            Result<service::EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
-        >,
+        oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -1179,7 +1176,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.blocks_requests.insert(request_id, result);
                 continue;
             }
-            WhatHappened::Message(ToBackground::StartGrandpaWarpSyncRequest {
+            WhatHappened::Message(ToBackground::StartWarpSyncRequest {
                 target,
                 chain_index,
                 begin_hash,
@@ -1189,12 +1186,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // The call to `start_grandpa_warp_sync_request` below panics if we have no
                 // active connection.
                 if !task.network.can_start_requests(&target) {
-                    let _ = result.send(Err(GrandpaWarpSyncRequestError::NoConnection));
+                    let _ = result.send(Err(WarpSyncRequestError::NoConnection));
                     continue;
                 }
 
                 log::debug!(
-                    target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
+                    target: "network", "Connection({}) <= WarpSyncRequest(chain={}, start={})",
                     target, task.log_chain_names[chain_index], HashDisplay(&begin_hash)
                 );
 
@@ -1557,7 +1554,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .grandpa_warp_sync_requests
                     .remove(&request_id)
                     .unwrap()
-                    .send(response.map_err(GrandpaWarpSyncRequestError::Request));
+                    .send(response.map_err(WarpSyncRequestError::Request));
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
