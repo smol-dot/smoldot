@@ -1573,7 +1573,7 @@ impl SyncBackground {
                         }
                     }));
                 }
-                all::DesiredRequest::GrandpaWarpSync { .. }
+                all::DesiredRequest::WarpSync { .. }
                 | all::DesiredRequest::StorageGetMerkleProof { .. }
                 | all::DesiredRequest::RuntimeCallMerkleProof { .. } => {
                     // Not used in "full" mode.

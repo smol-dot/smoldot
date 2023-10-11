@@ -460,7 +460,7 @@ enum RequestOutcome {
     WarpSync(
         Result<
             network::service::EncodedGrandpaWarpSyncResponse,
-            network_service::GrandpaWarpSyncRequestError,
+            network_service::WarpSyncRequestError,
         >,
     ),
     Storage(Result<Vec<u8>, ()>),
@@ -541,7 +541,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }));
             }
 
-            all::DesiredRequest::GrandpaWarpSync {
+            all::DesiredRequest::WarpSync {
                 sync_start_block_hash,
             } => {
                 let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
