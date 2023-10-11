@@ -599,15 +599,17 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         ) => !err.is_protocol_error(),
                         _ => false,
                     };
-                    if reduce_max {
-                        response_nodes_cap = cmp::max(1, response_nodes_cap / 2);
-                    }
 
                     if !matches!(
                         err,
                         network_service::StorageProofRequestError::RequestTooLarge
-                    ) {
+                    ) || response_nodes_cap == 1
+                    {
                         outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    }
+
+                    if reduce_max {
+                        response_nodes_cap = cmp::max(1, response_nodes_cap / 2);
                     }
 
                     continue;
