@@ -538,23 +538,22 @@ pub fn spawn_requests_handler(mut config: Config) {
                                 for (key_nibbles, key) in
                                     keys_nibbles.into_iter().zip(keys.into_iter())
                                 {
-                                    let before =
-                                        match db.block_storage_get(
-                                            &parent,
-                                            iter::empty::<iter::Empty<_>>(),
-                                            key_nibbles.iter().copied(),
-                                        ) {
-                                            Ok(v) => v,
-                                            Err(
-                                                database_thread::StorageAccessError::UnknownBlock,
-                                            ) if parent == [0; 32] => {
-                                                // In case where `at` is the genesis block, we
-                                                // assume that its "parent" (which doesn't exist)
-                                                // has an empty storage.
-                                                None
-                                            },
-                                            Err(err) => return Err(err),
-                                        };
+                                    let before = match db.block_storage_get(
+                                        &parent,
+                                        iter::empty::<iter::Empty<_>>(),
+                                        key_nibbles.iter().copied(),
+                                    ) {
+                                        Ok(v) => v,
+                                        Err(database_thread::StorageAccessError::UnknownBlock)
+                                            if parent == [0; 32] =>
+                                        {
+                                            // In case where `at` is the genesis block, we
+                                            // assume that its "parent" (which doesn't exist)
+                                            // has an empty storage.
+                                            None
+                                        }
+                                        Err(err) => return Err(err),
+                                    };
 
                                     let after = db.block_storage_get(
                                         &at,
