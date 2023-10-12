@@ -486,7 +486,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         // Number of nodes that are possible in a response before exceeding the response size
         // limit. Because the size of a trie node is unknown, this can only ever be a gross
         // estimate.
-        let mut response_nodes_cap = (1024 * 1024) / 164;
+        let mut response_nodes_cap = (16 * 1024 * 1024) / 164;
 
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
             let mut seed = [0; 32];
