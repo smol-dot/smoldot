@@ -626,6 +626,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 }
             };
 
+            let mut proof_has_advanced_verification = false;
+
             for request in mem::take(&mut requests_remaining) {
                 match request {
                     RequestImpl::PrefixScan {
@@ -634,6 +636,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     } => {
                         match scan.resume(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                proof_has_advanced_verification = true;
                                 requests_remaining.push(RequestImpl::PrefixScan {
                                     scan,
                                     requested_key,
@@ -643,6 +646,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 entries,
                                 full_storage_values_required,
                             }) => {
+                                proof_has_advanced_verification = true;
                                 // The value of `full_storage_values_required` determines whether
                                 // we wanted full values (`true`) or hashes (`false`).
                                 for (key, value) in entries {
@@ -681,15 +685,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                     }
                                 }
                             }
-                            Err((_, prefix_proof::Error::InvalidProof(err))) => {
+                            Err((_, prefix_proof::Error::InvalidProof(_))) => {
                                 // Since we decode the proof above, this is never supposed to
                                 // be reachable.
-                                debug_assert!(false);
-                                outcome_errors
-                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                                unreachable!()
                             }
-                            Err((_, prefix_proof::Error::MissingProofEntry)) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            Err((scan, prefix_proof::Error::MissingProofEntry)) => {
+                                requests_remaining.push(RequestImpl::PrefixScan {
+                                    requested_key,
+                                    scan,
+                                });
                             }
                         }
                     }
@@ -701,15 +706,17 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         ) {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
+                                    proof_has_advanced_verification = true;
                                     final_results.push(StorageResultItem::Hash {
                                         key,
                                         hash: Some(*h),
                                     });
                                 }
                                 proof_decode::StorageValue::HashKnownValueMissing(_) => {
-                                    outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                    requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
                                 }
                                 proof_decode::StorageValue::Known { value, .. } => {
+                                    proof_has_advanced_verification = true;
                                     if hash {
                                         let hashed_value =
                                             blake2_rfc::blake2b::blake2b(32, &[], value);
@@ -728,6 +735,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                     }
                                 }
                                 proof_decode::StorageValue::None => {
+                                    proof_has_advanced_verification = true;
                                     if hash {
                                         final_results
                                             .push(StorageResultItem::Hash { key, hash: None });
@@ -738,7 +746,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 }
                             },
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
                             }
                         }
                     }
@@ -752,7 +760,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining
+                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
                                 continue;
                             }
                         };
@@ -763,10 +772,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             Ok(Some(ancestor)) => Some(ancestor.to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining
+                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
                                 continue;
                             }
                         };
+
+                        proof_has_advanced_verification = true;
 
                         final_results.push(StorageResultItem::ClosestDescendantMerkleValue {
                             requested_key: key,
@@ -775,6 +787,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         })
                     }
                 }
+            }
+
+            // If the proof doesn't contain any item that reduces the number of things to request,
+            // then we push an error.
+            if !proof_has_advanced_verification {
+                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
             }
         }
     }
