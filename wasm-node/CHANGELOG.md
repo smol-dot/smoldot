@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix storage items requested through JSON-RPC functions not being sent to the JSON-RPC client when the full node doesn't send it back in the Merkle proof.
+- Fix storage items requested through JSON-RPC functions not being sent to the JSON-RPC client when the full node doesn't send it back in the Merkle proof. ([#1216](https://github.com/smol-dot/smoldot/pull/1216))
 
 ## 2.0.4 - 2023-10-11
 
