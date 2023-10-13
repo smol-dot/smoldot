@@ -634,7 +634,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         scan,
                         requested_key,
                     } => {
-                        match scan.resume(proof.decode()) {
+                        // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
+                        match scan.resume_partial(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 proof_has_advanced_verification = true;
                                 requests_remaining.push(RequestImpl::PrefixScan {
