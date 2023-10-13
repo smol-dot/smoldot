@@ -298,7 +298,7 @@ impl fmt::Debug for PrefixScan {
     }
 }
 
-/// Outcome of calling [`PrefixScan::resume`].
+/// Outcome of calling [`PrefixScan::resume_all_keys`] or [`PrefixScan::resume_partial`].
 #[derive(Debug)]
 pub enum ResumeOutcome {
     /// Scan must continue with the next storage proof query.
@@ -323,7 +323,7 @@ pub enum StorageValue {
     Hash([u8; 32]),
 }
 
-/// Possible error returned by [`PrefixScan::resume`].
+/// Possible error returned by [`PrefixScan::resume_all_keys`] or [`PrefixScan::resume_partial`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// The proof has an invalid format.
