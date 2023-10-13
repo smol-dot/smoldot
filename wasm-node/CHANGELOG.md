@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix iterating over storage keys through Merkle proofs considering incomplete proofs as invalid even when said proofs are intentionally invalid. ([#1221](https://github.com/smol-dot/smoldot/pull/1221))
+
 ## 2.0.5 - 2023-10-12
 
 ### Fixed
