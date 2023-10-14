@@ -134,7 +134,7 @@ impl Frontend {
     /// isn't called often enough.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let log_friendly_request =
-            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
+            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 250)
                 .to_string();
 
         match self
@@ -177,7 +177,7 @@ impl Frontend {
             "JSON-RPC <= {}",
             crate::util::truncated_str(
                 message.chars().filter(|c| !c.is_control()),
-                100,
+                250,
             )
         );
 
