@@ -253,6 +253,12 @@ impl StorageChanges {
             .remove(&None)
             .unwrap_or(storage_diff::TrieDiff::empty())
     }
+
+    pub fn trie_diffs(
+        &self,
+    ) -> &hashbrown::HashMap<Option<Vec<u8>>, storage_diff::TrieDiff, fnv::FnvBuildHasher> {
+        &self.inner.trie_diffs
+    }
 }
 
 impl fmt::Debug for StorageChanges {
