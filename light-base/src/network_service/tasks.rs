@@ -24,12 +24,12 @@ use alloc::{boxed::Box, string::String};
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream::FuturesUnordered, FutureExt as _, StreamExt as _};
-use smoldot::{libp2p::collection::SubstreamFate, network::service};
+use smoldot::{libp2p::collection::SubstreamFate, network::service2};
 
 /// Asynchronous task managing a specific connection, including the connection process and the
 /// processing of the connection after it's been open.
 pub(super) async fn connection_task<TPlat: PlatformRef>(
-    start_connect: service::StartConnect<TPlat::Instant>,
+    start_connect: service2::StartConnect<TPlat::Instant>,
     platform: TPlat,
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
     is_important: bool,
@@ -143,7 +143,10 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     connection,
                     expected_peer_id: start_connect.expected_peer_id,
                     multiaddr: start_connect.multiaddr,
-                    handshake_kind: service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+                    handshake_kind:
+                        service2::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                            is_initiator: true,
+                        },
                 })
                 .await;
         }
@@ -167,7 +170,8 @@ pub(super) async fn connection_task<TPlat: PlatformRef>(
                     connection,
                     expected_peer_id: start_connect.expected_peer_id,
                     multiaddr: start_connect.multiaddr,
-                    handshake_kind: service::MultiStreamHandshakeKind::WebRtc {
+                    handshake_kind: service2::MultiStreamHandshakeKind::WebRtc {
+                        is_initiator: true,
                         local_tls_certificate_multihash,
                         remote_tls_certificate_multihash,
                     },
@@ -182,10 +186,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     mut socket: TPlat::Stream,
     address: String,
     platform: TPlat,
-    connection_id: service::ConnectionId,
-    mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
+    connection_id: service2::ConnectionId,
+    mut connection_task: service2::SingleStreamConnectionTask<TPlat::Instant>,
     mut coordinator_to_connection: async_channel::Receiver<
-        service::CoordinatorToConnection<TPlat::Instant>,
+        service2::CoordinatorToConnection<TPlat::Instant>,
     >,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
@@ -259,7 +263,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         // Now wait for something interesting to happen before looping again.
 
         enum WhatHappened<TPlat: PlatformRef> {
-            CoordinatorMessage(service::CoordinatorToConnection<TPlat::Instant>),
+            CoordinatorMessage(service2::CoordinatorToConnection<TPlat::Instant>),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
@@ -331,10 +335,10 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     mut connection: TPlat::MultiStream,
     address: String,
     platform: TPlat,
-    connection_id: service::ConnectionId,
-    mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
+    connection_id: service2::ConnectionId,
+    mut connection_task: service2::MultiStreamConnectionTask<TPlat::Instant, usize>,
     mut coordinator_to_connection: async_channel::Receiver<
-        service::CoordinatorToConnection<TPlat::Instant>,
+        service2::CoordinatorToConnection<TPlat::Instant>,
     >,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
@@ -365,7 +369,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // Now wait for something interesting to happen before looping again.
 
         enum WhatHappened<TPlat: PlatformRef> {
-            CoordinatorMessage(service::CoordinatorToConnection<TPlat::Instant>),
+            CoordinatorMessage(service2::CoordinatorToConnection<TPlat::Instant>),
             CoordinatorDead,
             SocketEvent(pin::Pin<Box<TPlat::Stream>>, usize),
             MessageSent,
