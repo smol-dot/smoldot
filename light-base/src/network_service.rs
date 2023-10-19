@@ -141,9 +141,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut log_chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
 
-        let mut address_books =
-            hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
-
         let network = service2::ChainNetwork::new(service2::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
@@ -184,8 +181,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 .unwrap();
 
             log_chain_names.insert(chain_id, chain.log_name);
-
-            address_books.insert(chain_id, address_book::AddressBook::new());
         }
 
         let on_service_killed = event_listener::Event::new();
@@ -225,7 +220,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 identify_agent_version: config.identify_agent_version,
                 log_chain_names: log_chain_names.clone(),
                 messages_tx: messages_tx.clone(),
-                address_books,
+                address_book: address_book::AddressBook::new(),
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),
@@ -851,8 +846,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     network: service2::ChainNetwork<TPlat::Instant>,
 
     /// All known peers and their addresses.
-    // TODO: add a user data to the network state machine
-    address_books: hashbrown::HashMap<ChainId, address_book::AddressBook, fnv::FnvBuildHasher>,
+    address_book: address_book::AddressBook<ChainId>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -922,7 +916,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id = task.address_books[chain_id].random_peer().cloned(); // TODO: spurious cloning
+                let peer_id = task.address_book.random_peer(chain_id).cloned(); // TODO: spurious cloning
 
                 let Some(peer_id) = peer_id else { break };
 
@@ -1256,14 +1250,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
-                for chain_index in 0..task.log_chain_names.len() {
-                    let operation_id = task
+                for chain_id in task.log_chain_names.keys() {
+                    let substream_id = task
                         .network
-                        .start_kademlia_discovery_round(task.platform.now(), chain_index);
+                        .start_kademlia_find_node_request(
+                            task.platform.now(),
+                            todo!(),
+                            *chain_id,
+                            todo!(),
+                            Duration::from_secs(20),
+                        )
+                        .unwrap(); // TODO: explain the unwrap
 
                     let _prev_value = task
                         .kademlia_find_node_requests
-                        .insert(operation_id, chain_index);
+                        .insert(substream_id, *chain_id);
                     debug_assert!(_prev_value.is_none());
                 }
 
@@ -1601,7 +1602,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WhatHappened::StartConnect(peer_id) => {
                 // TODO: restore rate limiting
                 let is_important = task.important_nodes.contains(&peer_id);
-                let multiaddr = todo!(); // TODO:
+
+                // TODO: unwrap()? is that correct?
+                let multiaddr = task.address_book.addr_to_pending(&peer_id).unwrap();
 
                 let address = address_parse::multiaddr_to_address(&multiaddr)
                     .ok()

@@ -15,23 +15,49 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{borrow::ToOwned as _, collections::BTreeSet};
+use alloc::{
+    borrow::ToOwned as _,
+    collections::{btree_map, BTreeMap},
+};
 
 pub use crate::libp2p::PeerId;
 
-pub struct AddressBook {
-    addresses: BTreeSet<(PeerId, Vec<u8>)>,
+pub struct AddressBook<TChainId> {
+    addresses: BTreeMap<(PeerId, Vec<u8>), AddressState>,
+
+    foo: core::marker::PhantomData<TChainId>,
 }
 
-impl AddressBook {
+enum AddressState {
+    Connected,
+    Pending,
+    Disconnected,
+}
+
+impl<TChainId> AddressBook<TChainId> {
     pub fn new() -> Self {
         AddressBook {
-            addresses: BTreeSet::new(),
+            addresses: BTreeMap::new(),
+            foo: core::marker::PhantomData,
         }
     }
 
+    pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
+        
+    }
+
     pub fn insert_address(&mut self, peer_id: &PeerId, multiaddr: &[u8]) {
-        self.addresses
-            .insert((peer_id.clone(), multiaddr.to_owned()));
+        if let btree_map::Entry::Vacant(entry) = self
+            .addresses
+            .entry((peer_id.clone(), multiaddr.to_owned()))
+        {
+            entry.insert(AddressState::Disconnected);
+        }
+    }
+
+    /// Picks an address from the list whose state is "not connected", and switches it to
+    /// "pending". Returns `None` if no such address is available.
+    pub fn addr_to_pending(&mut self, peer_id: &PeerId) -> Option<Vec<u8>> {
+        todo!()
     }
 }

@@ -1623,7 +1623,7 @@ where
         chain_id: ChainId,
         peer_id_to_find: &PeerId,
         timeout: Duration,
-    ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
+    ) -> Result<SubstreamId, StartRequestError> {
         let request_data = protocol::build_find_node_request(peer_id_to_find.as_bytes());
 
         // The request data can possibly by higher than the protocol limit, especially due to the
