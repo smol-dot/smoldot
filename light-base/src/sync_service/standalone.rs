@@ -201,7 +201,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 task.network_service
                     .set_local_grandpa_state(
                         network_chain_id,
-                        network::service::GrandpaState {
+                        network::service2::GrandpaState {
                             set_id,
                             round_number: 1, // TODO:
                             commit_finalized_height,
@@ -459,12 +459,12 @@ enum RequestOutcome {
     Block(Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>),
     WarpSync(
         Result<
-            network::service::EncodedGrandpaWarpSyncResponse,
+            network::service2::EncodedGrandpaWarpSyncResponse,
             network_service::WarpSyncRequestError,
         >,
     ),
     Storage(Result<Vec<u8>, ()>),
-    CallProof(Result<network::service::EncodedMerkleProof, ()>),
+    CallProof(Result<network::service2::EncodedMerkleProof, ()>),
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {

@@ -441,12 +441,13 @@ where
     ///
     /// Panics if the given [`ChainId`] is invalid.
     ///
-    pub fn gossip_remove_desired(&mut self, chain_id: ChainId, peer_id: PeerId, kind: GossipKind) {
+    pub fn gossip_remove_desired(&mut self, chain_id: ChainId, peer_id: &PeerId, kind: GossipKind) {
         assert!(self.chains.contains(chain_id.0));
 
         if !self
             .gossip_desired_peers_by_chain
-            .remove(&(chain_id.0, peer_id, kind))
+            .remove(&(chain_id.0, peer_id.clone(), kind))
+        // TODO: spurious cloning
         {
             // Return if wasn't marked as desired, as there's nothing more to update.
             return;

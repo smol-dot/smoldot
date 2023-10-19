@@ -38,7 +38,7 @@ use smoldot::{
     chain,
     executor::host,
     libp2p::PeerId,
-    network::{protocol, service},
+    network::{protocol, service2},
     trie::{self, prefix_proof, proof_decode, Nibble},
 };
 
@@ -598,7 +598,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     let reduce_max = match &err {
                         network_service::StorageProofRequestError::RequestTooLarge => true,
                         network_service::StorageProofRequestError::Request(
-                            service::StorageProofRequestError::Request(err),
+                            service2::StorageProofRequestError::Request(err),
                         ) => !err.is_protocol_error(),
                         _ => false,
                     };
@@ -839,7 +839,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
-                    service::CallProofRequestError::Request(
+                    service2::CallProofRequestError::Request(
                         smoldot::libp2p::peers::RequestError::Substream(
                             smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                         ),
@@ -968,8 +968,8 @@ impl StorageQueryError {
         self.errors.iter().all(|err| match err {
             StorageQueryErrorDetail::Network(
                 network_service::StorageProofRequestError::Request(
-                    service::StorageProofRequestError::Request(_)
-                    | service::StorageProofRequestError::RemoteCouldntAnswer,
+                    service2::StorageProofRequestError::Request(_)
+                    | service2::StorageProofRequestError::RemoteCouldntAnswer,
                 ),
             )
             | StorageQueryErrorDetail::Network(
@@ -977,7 +977,7 @@ impl StorageQueryError {
             ) => true,
             StorageQueryErrorDetail::Network(
                 network_service::StorageProofRequestError::Request(
-                    service::StorageProofRequestError::Decode(_),
+                    service2::StorageProofRequestError::Decode(_),
                 )
                 | network_service::StorageProofRequestError::RequestTooLarge,
             ) => false,

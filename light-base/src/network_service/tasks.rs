@@ -16,18 +16,20 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::platform::{Address, MultiStreamAddress, PlatformRef, SubstreamDirection};
+use crate::platform::{address_parse, PlatformRef, SubstreamDirection};
 
-use alloc::{boxed::Box, string::String};
+use alloc::boxed::Box;
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream::FuturesUnordered, StreamExt as _};
-use smoldot::{libp2p::collection::SubstreamFate, network::service2};
+use smoldot::{
+    libp2p::{collection::SubstreamFate, Multiaddr},
+    network::service2,
+};
 
 /// Asynchronous task managing a specific single-stream connection.
 pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
-    address: Address<'_>,
-    address_string: String,
+    address: Multiaddr,
     platform: TPlat,
     connection_id: service2::ConnectionId,
     mut connection_task: service2::SingleStreamConnectionTask<TPlat::Instant>,
@@ -36,6 +38,13 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     >,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
+    let address_string = address.to_string();
+    let Ok(address_parse::AddressOrMultiStreamAddress::Address(address)) =
+        address_parse::multiaddr_to_address(&address)
+    else {
+        unreachable!()
+    };
+
     let mut socket = pin::pin!(match platform.connect_stream(address).await {
         Ok(s) => s,
         Err(err) => {
@@ -197,8 +206,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 /// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
 /// >           general-purpose.
 pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
-    address: MultiStreamAddress,
-    address_string: String,
+    address: Multiaddr,
     platform: TPlat,
     connection_id: service2::ConnectionId,
     mut connection_task: service2::MultiStreamConnectionTask<TPlat::Instant, usize>,
@@ -207,6 +215,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     >,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
+    let address_string = address.to_string();
+    let Ok(address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(address)) =
+        address_parse::multiaddr_to_address(&address)
+    else {
+        unreachable!()
+    };
+
     let mut connection = match platform.connect_multistream(address).await {
         Ok(s) => s,
         Err(err) => {

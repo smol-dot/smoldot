@@ -43,7 +43,7 @@ impl<TChainId> AddressBook<TChainId> {
     }
 
     pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
-        
+
     }
 
     pub fn insert_address(&mut self, peer_id: &PeerId, multiaddr: &[u8]) {
@@ -57,7 +57,7 @@ impl<TChainId> AddressBook<TChainId> {
 
     /// Picks an address from the list whose state is "not connected", and switches it to
     /// "pending". Returns `None` if no such address is available.
-    pub fn addr_to_pending(&mut self, peer_id: &PeerId) -> Option<Vec<u8>> {
+    pub fn addr_to_pending(&mut self, peer_id: &PeerId) -> Option<&[u8]> {
         todo!()
     }
 }

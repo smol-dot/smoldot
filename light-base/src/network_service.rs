@@ -36,10 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::{
-    platform::{self, address_parse, PlatformRef},
-    util,
-};
+use crate::platform::{self, address_parse, PlatformRef};
 
 use alloc::{
     boxed::Box,
@@ -48,16 +45,21 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
-use hashbrown::{hash_map, HashMap, HashSet};
+use hashbrown::{HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
     header,
     informant::{BytesDisplay, HashDisplay},
-    libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId, peers},
+    libp2p::{
+        connection,
+        multiaddr::{self, Multiaddr},
+        peer_id::PeerId,
+        peers,
+    },
     network::{address_book, protocol, service2},
 };
 
@@ -141,7 +143,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut log_chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
 
-        let network = service2::ChainNetwork::new(service2::Config {
+        let mut network = service2::ChainNetwork::new(service2::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
             peers_capacity: 8,
@@ -916,7 +918,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id = task.address_book.random_peer(chain_id).cloned(); // TODO: spurious cloning
+                let peer_id: Option<PeerId> = todo!(); // task.address_book.random_peer(chain_id).cloned(); // TODO: spurious cloning
 
                 let Some(peer_id) = peer_id else { break };
 
@@ -951,14 +953,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
             let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
+                // TODO: move down, but causes borrowck errors
+                let start_connect = task.network.unconnected_desired().next().cloned();
                 if let Some(event) = if can_generate_event {
                     task.network.next_event()
                 } else {
                     None
                 } {
                     WhatHappened::NetworkEvent(event)
-                } else if let Some(start_connect) = task.network.unconnected_desired().next() {
-                    WhatHappened::StartConnect(start_connect.clone())
+                } else if let Some(start_connect) = start_connect {
+                    WhatHappened::StartConnect(start_connect)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -1010,7 +1014,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.platform.now(),
                     &target,
                     chain_id,
-                    config,
+                    config.clone(),
                     timeout,
                 ) {
                     Ok(substream_id) => {
@@ -1086,7 +1090,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.platform.now(),
                     &target,
                     chain_id,
-                    config,
+                    config.clone(),
                     timeout,
                 ) {
                     Ok(substream_id) => {
@@ -1122,7 +1126,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.platform.now(),
                     &target,
                     chain_id,
-                    config,
+                    config.clone(),
                     timeout,
                 ) {
                     Ok(substream_id) => {
@@ -1228,25 +1232,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.important_nodes.insert(peer_id.clone());
                     }
 
-                    task.network.discover(&now, chain_id, peer_id, addrs);
+                    for addr in addrs {
+                        task.address_book.insert_address(&peer_id, addr.as_ref());
+                    }
+
+                    task.address_book.insert_chain_peer(peer_id, chain_id);
                 }
 
                 continue;
             }
             WhatHappened::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
-                let _ = result.send(
-                    task.network
-                        .discovered_nodes(chain_id)
-                        .map(|(peer_id, addresses)| {
-                            (peer_id.clone(), addresses.cloned().collect::<Vec<_>>())
-                        })
-                        .collect::<Vec<_>>(),
-                );
-
+                let _ = result.send(todo!());
                 continue;
             }
             WhatHappened::Message(ToBackground::PeersList { result }) => {
-                let _ = result.send(task.network.peers_list().cloned().collect::<Vec<_>>());
+                let _ = result.send(todo!());
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
@@ -1339,7 +1339,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: also ban peer
                 task.network.gossip_remove_desired(
                     chain_id,
-                    peer_id,
+                    &peer_id,
                     service2::GossipKind::ConsensusTransactions,
                 );
                 continue;
@@ -1364,7 +1364,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: also ban peer
                 task.network.gossip_remove_desired(
                     chain_id,
-                    peer_id,
+                    &peer_id,
                     service2::GossipKind::ConsensusTransactions,
                 );
                 Event::Disconnected { peer_id, chain_id }
@@ -1444,8 +1444,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         }
                     }
 
-                    task.network
-                        .discover(&task.platform.now(), chain_id, peer_id, valid_addrs);
+                    for addr in valid_addrs {
+                        task.address_book.insert_address(&peer_id, addr.as_ref());
+                    }
+
+                    // TODO: only if valid addresses?
+                    task.address_book.insert_chain_peer(peer_id, chain_id);
                 }
 
                 continue;
@@ -1594,9 +1598,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     error,
                 );
 
-                for chain_index in 0..task.network.num_chains() {
-                    task.unassign_slot_and_ban(chain_id, peer_id.clone());
-                }
+                // TODO: disconnect peer
                 continue;
             }
             WhatHappened::StartConnect(peer_id) => {
@@ -1604,7 +1606,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let is_important = task.important_nodes.contains(&peer_id);
 
                 // TODO: unwrap()? is that correct?
-                let multiaddr = task.address_book.addr_to_pending(&peer_id).unwrap();
+                let multiaddr = task
+                    .address_book
+                    .addr_to_pending(&peer_id)
+                    .unwrap()
+                    .to_owned(); // TODO: to_owned overhead
+                let Ok(multiaddr) = multiaddr::Multiaddr::try_from(multiaddr) else {
+                    todo!() // TODO:
+                };
 
                 let address = address_parse::multiaddr_to_address(&multiaddr)
                     .ok()
@@ -1635,22 +1644,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let task_name = format!("connection-{}-{}", peer_id, multiaddr);
 
                 let connection_id = match address {
-                    address_parse::AddressOrMultiStreamAddress::Address(address) => {
+                    address_parse::AddressOrMultiStreamAddress::Address(_) => {
                         let (connection_id, connection_task) =
                             task.network.add_single_stream_connection(
                                 task.platform.now(),
                                 service2::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                                     is_initiator: true,
                                 },
-                                multiaddr,
+                                multiaddr.clone(),
                                 Some(peer_id.clone()),
                             );
 
                         task.platform.spawn_task(
                             task_name.into(),
                             tasks::single_stream_connection_task::<TPlat>(
-                                address,
-                                multiaddr.to_string(),
+                                multiaddr,
                                 task.platform.clone(),
                                 connection_id,
                                 connection_task,
@@ -1695,12 +1703,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.platform.spawn_task(
                             task_name.into(),
                             tasks::webrtc_multi_stream_connection_task::<TPlat>(
-                                platform::MultiStreamAddress::WebRtc {
-                                    ip,
-                                    port,
-                                    remote_certificate_sha256,
-                                },
-                                multiaddr.to_string(),
+                                multiaddr,
                                 task.platform.clone(),
                                 connection_id,
                                 connection_task,
