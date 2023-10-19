@@ -61,7 +61,7 @@ use smoldot::{
     network::{address_book, protocol, service2},
 };
 
-pub use service2::{EncodedMerkleProof, QueueNotificationError};
+pub use service2::{ChainId, EncodedMerkleProof, QueueNotificationError};
 
 mod tasks;
 

@@ -50,7 +50,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     parachain_id: u32,
     from_foreground: async_channel::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     ParachainBackgroundTask {
@@ -60,7 +60,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         relay_chain_block_number_bytes,
         parachain_id,
         network_service,
-        network_chain_index,
+        network_chain_id,
         from_network_service: from_network_service.fuse(),
         sync_sources: sources::AllForksSources::new(
             40,
@@ -125,7 +125,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     /// Index of the chain within the associated network service.
     ///
     /// Used to filter events from [`ParachainBackgroundTask::from_network_service`].
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
 
     /// Events coming from the networking service.
     from_network_service: stream::Fuse<stream::BoxStream<'static, network_service::Event>>,
@@ -620,10 +620,10 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             network_service::Event::Connected {
                 peer_id,
                 role,
-                chain_index,
+                chain_id,
                 best_block_number,
                 best_block_hash,
-            } if chain_index == self.network_chain_index => {
+            } if chain_id == self.network_chain_id => {
                 let local_id = self.sync_sources.add_source(
                     best_block_number,
                     best_block_hash,
@@ -633,17 +633,17 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             }
             network_service::Event::Disconnected {
                 peer_id,
-                chain_index,
-            } if chain_index == self.network_chain_index => {
+                chain_id,
+            } if chain_id == self.network_chain_id => {
                 let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
                 let (_peer_id, _role) = self.sync_sources.remove(local_id);
                 debug_assert_eq!(peer_id, _peer_id);
             }
             network_service::Event::BlockAnnounce {
-                chain_index,
+                chain_id,
                 peer_id,
                 announce,
-            } if chain_index == self.network_chain_index => {
+            } if chain_id == self.network_chain_id => {
                 let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
                 if let Ok(decoded_header) =
@@ -936,7 +936,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         {
                             self.network_service
                                 .set_local_best_block(
-                                    self.network_chain_index,
+                                    self.network_chain_id,
                                     parahash,
                                     header.number,
                                 )
@@ -1006,7 +1006,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             {
                                 self.network_service
                                     .set_local_best_block(
-                                        self.network_chain_index,
+                                        self.network_chain_id,
                                         parahash,
                                         header.number,
                                     )

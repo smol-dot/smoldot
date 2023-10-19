@@ -54,7 +54,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
     mut from_foreground: async_channel::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
     mut from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     let mut task = Task {
@@ -110,7 +110,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
         network_service,
-        network_chain_index,
+        network_chain_id,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
             0,
             util::SipHasherBuild::new({
@@ -169,7 +169,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             // For some reason, first building the future then executing it solves a borrow
             // checker error.
             let fut = task.network_service.set_local_best_block(
-                network_chain_index,
+                network_chain_id,
                 task.sync.best_block_hash(),
                 task.sync.best_block_number(),
             );
@@ -200,7 +200,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let commit_finalized_height = task.sync.finalized_block_header().number;
                 task.network_service
                     .set_local_grandpa_state(
-                        network_chain_index,
+                        network_chain_id,
                         network::service::GrandpaState {
                             set_id,
                             round_number: 1, // TODO:
@@ -447,7 +447,7 @@ struct Task<TPlat: PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// Index within the network service of the chain we are interested in. Must be indicated to
     /// the network service whenever a request is started.
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
 
     /// List of requests currently in progress.
     pending_requests: stream::FuturesUnordered<
@@ -506,7 +506,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
                 let block_request = self.network_service.clone().blocks_request(
                     peer_id,
-                    self.network_chain_index,
+                    self.network_chain_id,
                     network::protocol::BlocksRequestConfig {
                         start: if let Some(first_block_hash) = first_block_hash {
                             network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
@@ -548,7 +548,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
                 let grandpa_request = self.network_service.clone().grandpa_warp_sync_request(
                     peer_id,
-                    self.network_chain_index,
+                    self.network_chain_id,
                     sync_start_block_hash,
                     // The timeout needs to be long enough to potentially download the maximum
                     // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
@@ -578,7 +578,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                 let storage_request = self.network_service.clone().storage_proof_request(
-                    self.network_chain_index,
+                    self.network_chain_id,
                     peer_id,
                     network::protocol::StorageProofRequestConfig {
                         block_hash,
@@ -616,14 +616,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             } => {
                 let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
                 let network_service = self.network_service.clone();
-                let network_chain_index = self.network_chain_index;
+                let network_chain_id = self.network_chain_id;
                 // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
                 let parameter_vectored = parameter_vectored.clone();
                 let function_name = function_name.clone();
 
                 let call_proof_request = async move {
                     let rq = network_service.call_proof_request(
-                        network_chain_index,
+                        network_chain_id,
                         peer_id,
                         network::protocol::CallProofRequestConfig {
                             block_hash,
@@ -878,7 +878,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                                 .clone()
                                 .send_block_announce(
                                     source_peer_id,
-                                    self.network_chain_index,
+                                    self.network_chain_id,
                                     &scale_encoded_header,
                                     is_new_best,
                                 )
@@ -1134,10 +1134,10 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             network_service::Event::Connected {
                 peer_id,
                 role,
-                chain_index,
+                chain_id,
                 best_block_number,
                 best_block_hash,
-            } if chain_index == self.network_chain_index => {
+            } if chain_id == self.network_chain_id => {
                 self.peers_source_id_map.insert(
                     peer_id.clone(),
                     self.sync
@@ -1145,10 +1145,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 );
             }
 
-            network_service::Event::Disconnected {
-                peer_id,
-                chain_index,
-            } if chain_index == self.network_chain_index => {
+            network_service::Event::Disconnected { peer_id, chain_id }
+                if chain_id == self.network_chain_id =>
+            {
                 let sync_source_id = self.peers_source_id_map.remove(&peer_id).unwrap();
                 let (_, requests) = self.sync.remove_source(sync_source_id);
 
@@ -1162,10 +1161,10 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             }
 
             network_service::Event::BlockAnnounce {
-                chain_index,
+                chain_id,
                 peer_id,
                 announce,
-            } if chain_index == self.network_chain_index => {
+            } if chain_id == self.network_chain_id => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
@@ -1263,19 +1262,19 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             network_service::Event::GrandpaNeighborPacket {
                 peer_id,
-                chain_index,
+                chain_id,
                 finalized_block_height,
-            } if chain_index == self.network_chain_index => {
+            } if chain_id == self.network_chain_id => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 self.sync
                     .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
             network_service::Event::GrandpaCommitMessage {
-                chain_index,
+                chain_id,
                 peer_id,
                 message,
-            } if chain_index == self.network_chain_index => {
+            } if chain_id == self.network_chain_id => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 match self
                     .sync

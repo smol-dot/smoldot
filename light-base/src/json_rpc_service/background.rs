@@ -75,7 +75,7 @@ struct Background<TPlat: PlatformRef> {
     system_version: String,
 
     /// See [`StartConfig::network_service`].
-    network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    network_service: (Arc<network_service::NetworkService<TPlat>>, network_service::ChainId),
     /// See [`StartConfig::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`StartConfig::runtime_service`].
