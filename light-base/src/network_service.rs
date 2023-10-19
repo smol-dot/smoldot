@@ -39,6 +39,7 @@
 use crate::platform::{self, address_parse, PlatformRef};
 
 use alloc::{
+    borrow::ToOwned as _,
     boxed::Box,
     format,
     string::{String, ToString as _},
@@ -135,13 +136,20 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub async fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<stream::BoxStream<'static, Event>>) {
+    pub async fn new(
+        config: Config<TPlat>,
+    ) -> (
+        Arc<Self>,
+        Vec<ChainId>,
+        Vec<stream::BoxStream<'static, Event>>,
+    ) {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| async_channel::bounded(16))
             .unzip();
 
         let mut log_chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
+        let mut chain_ids = Vec::with_capacity(config.chains.len());
 
         let mut network = service2::ChainNetwork::new(service2::Config {
             chains_capacity: config.chains.len(),
@@ -183,6 +191,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 .unwrap();
 
             log_chain_names.insert(chain_id, chain.log_name);
+            chain_ids.push(chain_id);
         }
 
         let on_service_killed = event_listener::Event::new();
@@ -270,7 +279,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             })
             .collect();
 
-        (final_network_service, event_receivers)
+        (final_network_service, chain_ids, event_receivers)
     }
 
     /// Sends a blocks request to the given peer.

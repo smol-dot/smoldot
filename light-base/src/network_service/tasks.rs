@@ -18,7 +18,7 @@
 use super::ToBackground;
 use crate::platform::{address_parse, PlatformRef, SubstreamDirection};
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, string::ToString as _};
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream::FuturesUnordered, StreamExt as _};

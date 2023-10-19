@@ -18,6 +18,7 @@
 use alloc::{
     borrow::ToOwned as _,
     collections::{btree_map, BTreeMap},
+    vec::Vec,
 };
 
 pub use crate::libp2p::PeerId;
@@ -42,9 +43,7 @@ impl<TChainId> AddressBook<TChainId> {
         }
     }
 
-    pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
-
-    }
+    pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {}
 
     pub fn insert_address(&mut self, peer_id: &PeerId, multiaddr: &[u8]) {
         if let btree_map::Entry::Vacant(entry) = self
