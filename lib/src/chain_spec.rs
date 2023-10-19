@@ -85,6 +85,12 @@ impl ChainSpec {
         Ok(ChainSpec { client_spec })
     }
 
+    /// Turns this chain specification into a JSON document representing it.
+    pub fn serialize(&self) -> String {
+        // Can only panic in case of a bug in this module.
+        serde_json::to_string_pretty(&self.client_spec).unwrap()
+    }
+
     /// Builds the [`ChainInformation`] corresponding to the genesis block contained in this chain
     /// spec.
     ///
