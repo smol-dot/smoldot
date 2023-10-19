@@ -240,7 +240,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 ),
                 storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                kademlia_discovery_operations: HashMap::with_capacity_and_hasher(
+                kademlia_find_node_requests: HashMap::with_capacity_and_hasher(
                     2,
                     Default::default(),
                 ),
@@ -900,7 +900,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
         fnv::FnvBuildHasher,
     >,
 
-    kademlia_discovery_operations: HashMap<service2::OperationId, usize, fnv::FnvBuildHasher>,
+    kademlia_find_node_requests: HashMap<service2::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
@@ -1263,7 +1263,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .start_kademlia_discovery_round(task.platform.now(), chain_index);
 
                     let _prev_value = task
-                        .kademlia_discovery_operations
+                        .kademlia_find_node_requests
                         .insert(operation_id, chain_index);
                     debug_assert!(_prev_value.is_none());
                 }
@@ -1413,97 +1413,95 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(response.map_err(CallProofRequestError::Request));
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult { .. }) => {
-                // We never start any other kind of requests.
-                unreachable!()
-            }
-            WhatHappened::NetworkEvent(service2::Event::KademliaDiscoveryResult {
-                operation_id,
-                result,
+            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+                substream_id,
+                response: service2::RequestResult::KademliaFindNode(Ok(nodes)),
             }) => {
-                let chain_index = task
-                    .kademlia_discovery_operations
-                    .remove(&operation_id)
+                let chain_id = task
+                    .kademlia_find_node_requests
+                    .remove(&substream_id)
                     .unwrap();
-                match result {
-                    Ok(nodes) => {
-                        log::debug!(
-                            target: "connections", "On chain {}, discovered: {}",
-                            &task.log_chain_names[&chain_id],
-                            nodes.iter().map(|(p, _)| p.to_string()).join(", ")
-                        );
 
-                        for (peer_id, addrs) in nodes {
-                            let mut valid_addrs = Vec::with_capacity(addrs.len());
-                            for addr in addrs {
-                                match Multiaddr::try_from(addr) {
-                                    Ok(a) => valid_addrs.push(a),
-                                    Err(err) => {
-                                        log::debug!(
-                                            target: "connections",
-                                            "Discovery => InvalidAddress({})",
-                                            hex::encode(&err.addr)
-                                        );
-                                        continue;
-                                    }
-                                }
+                log::debug!(
+                    target: "connections", "On chain {}, discovered: {}",
+                    &task.log_chain_names[&chain_id],
+                    nodes.iter().map(|(p, _)| p.to_string()).join(", ")
+                );
+
+                for (peer_id, addrs) in nodes {
+                    let mut valid_addrs = Vec::with_capacity(addrs.len());
+                    for addr in addrs {
+                        match Multiaddr::try_from(addr) {
+                            Ok(a) => valid_addrs.push(a),
+                            Err(err) => {
+                                log::debug!(
+                                    target: "connections",
+                                    "Discovery => InvalidAddress({})",
+                                    hex::encode(&err.addr)
+                                );
+                                continue;
                             }
-
-                            task.network.discover(
-                                &task.platform.now(),
-                                chain_id,
-                                peer_id,
-                                valid_addrs,
-                            );
                         }
                     }
-                    Err(error) => {
-                        log::debug!(
+
+                    task.network
+                        .discover(&task.platform.now(), chain_id, peer_id, valid_addrs);
+                }
+
+                continue;
+            }
+            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+                substream_id,
+                response: service2::RequestResult::KademliaFindNode(Err(error)),
+            }) => {
+                let chain_id = task
+                    .kademlia_find_node_requests
+                    .remove(&substream_id)
+                    .unwrap();
+
+                log::debug!(
+                    target: "connections",
+                    "Discovery({}) => {:?}",
+                    &task.log_chain_names[&chain_id],
+                    error
+                );
+
+                // No error is printed if the request fails due to a benign networking error such
+                // as an unresponsive peer.
+                match error {
+                    service2::KademliaFindNodeError::RequestFailed(err)
+                        if !err.is_protocol_error() => {}
+
+                    service2::KademliaFindNodeError::RequestFailed(
+                        peers::RequestError::Substream(
+                            connection::established::RequestError::ProtocolNotAvailable,
+                        ),
+                    ) => {
+                        // TODO: remove this warning in a long time
+                        log::warn!(
                             target: "connections",
-                            "Discovery => {:?}",
+                            "Problem during discovery on {}: protocol not available. \
+                            This might indicate that the version of Substrate used by \
+                            the chain doesn't include \
+                            <https://github.com/paritytech/substrate/pull/12545>.",
+                            &task.log_chain_names[&chain_id]
+                        );
+                    }
+                    _ => {
+                        log::warn!(
+                            target: "connections",
+                            "Problem during discovery on {}: {}",
+                            &task.log_chain_names[&chain_id],
                             error
                         );
-
-                        // No error is printed if the error is about the fact that we have
-                        // 0 peers, as this tends to happen quite frequently at initialization
-                        // and there is nothing that can be done against this error anyway.
-                        // No error is printed either if the request fails due to a benign
-                        // networking error such as an unresponsive peer.
-                        match error {
-                            service2::DiscoveryError::NoPeer => {}
-                            service2::DiscoveryError::FindNode(
-                                service2::KademliaFindNodeError::RequestFailed(err),
-                            ) if !err.is_protocol_error() => {}
-                            service2::DiscoveryError::FindNode(
-                                service2::KademliaFindNodeError::RequestFailed(
-                                    peers::RequestError::Substream(
-                                        connection::established::RequestError::ProtocolNotAvailable,
-                                    ),
-                                ),
-                            ) => {
-                                // TODO: remove this warning in a long time
-                                log::warn!(
-                                    target: "connections",
-                                    "Problem during discovery on {}: protocol not available. \
-                                    This might indicate that the version of Substrate used by \
-                                    the chain doesn't include \
-                                    <https://github.com/paritytech/substrate/pull/12545>.",
-                                    &task.log_chain_names[&chain_id]
-                                );
-                            }
-                            _ => {
-                                log::warn!(
-                                    target: "connections",
-                                    "Problem during discovery on {}: {}",
-                                    &task.log_chain_names[&chain_id],
-                                    error
-                                );
-                            }
-                        }
                     }
                 }
 
                 continue;
+            }
+            WhatHappened::NetworkEvent(service2::Event::RequestResult { .. }) => {
+                // We never start any other kind of requests.
+                unreachable!()
             }
             WhatHappened::NetworkEvent(service2::Event::GossipInDesired {
                 peer_id,
@@ -1668,6 +1666,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             remote_certificate_sha256,
                         },
                     ) => {
+                        let local_tls_certificate_sha256: [u8; 32] = todo!(); // TODO: we'll probably have to add a hack here to determine this
+
                         // Convert the SHA256 hashes into multihashes.
                         let local_tls_certificate_multihash = [12u8, 32]
                             .into_iter()
