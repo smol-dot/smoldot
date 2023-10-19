@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::libp2p::collection;
-use crate::network::{kademlia, protocol};
+use crate::network::protocol;
 use crate::util::{self, SipHasherBuild};
 
 use alloc::{
@@ -125,10 +125,6 @@ pub struct ChainConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChainId(usize);
 
-/// Identifier for an operation.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OperationId(u64);
-
 /// Data structure containing the list of all connections and their latest known state. See also
 /// [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
@@ -159,14 +155,8 @@ pub struct ChainNetwork<TNow> {
     /// See [`Config::max_addresses_per_peer`].
     max_addresses_per_peer: NonZeroUsize,
 
-    /// Contains an entry for each peer present in at least one k-bucket of a chain.
-    kbuckets_peers: hashbrown::HashMap<PeerId, KBucketsPeer, SipHasherBuild>,
-
-    /// Identifier to assign to the next operation that is started.
-    next_operation_id: OperationId,
-
     /// List of all chains that have been added.
-    chains: slab::Slab<Chain<TNow>>,
+    chains: slab::Slab<Chain>,
 
     /// Chains indexed by genesis hash and fork ID.
     ///
@@ -191,7 +181,7 @@ pub struct ChainNetwork<TNow> {
     randomness: rand_chacha::ChaCha20Rng,
 }
 
-struct Chain<TNow> {
+struct Chain {
     /// See [`ChainConfig::block_number_bytes`].
     block_number_bytes: usize,
 
@@ -213,16 +203,6 @@ struct Chain<TNow> {
 
     /// See [`ChainConfig::allow_inbound_block_requests`].
     allow_inbound_block_requests: bool,
-
-    /// Kademlia k-buckets of this chain.
-    ///
-    /// Used in order to hold the list of peers that are known to be part of this chain.
-    ///
-    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open
-    /// and that the remote's handshake is valid (i.e. can be parsed and containing a correct
-    /// genesis hash), and disconnected when it is closed or that the remote's handshake isn't
-    /// satisfactory.
-    kbuckets: kademlia::kbuckets::KBuckets<PeerId, (), TNow, 20>,
 }
 
 /// See [`ChainNetwork::inner`].
@@ -335,7 +315,6 @@ enum OutRequestTy {
     StorageProof,
     CallProof,
     KademliaFindNode,
-    KademliaDiscoveryFindNode(OperationId),
 }
 
 impl<TNow> ChainNetwork<TNow>
@@ -381,15 +360,6 @@ where
                     seed
                 }),
             ),
-            kbuckets_peers: hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
-                SipHasherBuild::new({
-                    let mut seed = [0; 16];
-                    randomness.fill_bytes(&mut seed);
-                    seed
-                }),
-            ),
-            next_operation_id: OperationId(0),
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
@@ -436,10 +406,6 @@ where
             best_number: config.best_number,
             allow_inbound_block_requests: config.allow_inbound_block_requests,
             grandpa_protocol_config: config.grandpa_protocol_config,
-            kbuckets: kademlia::kbuckets::KBuckets::new(
-                local_peer_id,
-                Duration::from_secs(20), // TODO: hardcoded
-            ),
         });
 
         Ok(ChainId(chain_id))
@@ -546,9 +512,6 @@ where
 
     /// Returns the list of [`PeerId`]s that are desired (for any chain) but for which no
     /// connection exists.
-    ///
-    /// This includes the gossip-desired peers, but also connections that are necessary for
-    /// Kademlia requests.
     ///
     /// > **Note**: Connections that are currently in the process of shutting down are also
     /// >           ignored for the purpose of this function.
@@ -694,27 +657,6 @@ where
         message: ConnectionToCoordinator,
     ) {
         self.inner.inject_connection_message(connection_id, message)
-    }
-
-    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
-    /// the network.
-    ///
-    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
-    /// that a node that has been added through [`ChainNetwork::discover`] will later be returned
-    /// by [`ChainNetwork::discovered_nodes`].
-    // TODO: no, rework
-    pub fn discovered_nodes(
-        &'_ self,
-        chain_id: ChainId,
-    ) -> impl Iterator<Item = (&'_ PeerId, impl Iterator<Item = &'_ multiaddr::Multiaddr>)> + '_
-    {
-        let kbuckets = &self.chains[chain_id.0].kbuckets;
-        kbuckets.iter_ordered().map(move |(peer_id, _)| {
-            (
-                peer_id,
-                self.kbuckets_peers.get(peer_id).unwrap().addresses.iter(),
-            )
-        })
     }
 
     /// Returns the next event produced by the service.
@@ -1236,15 +1178,6 @@ where
 
                     // Generate an event if relevant.
                     if let Protocol::BlockAnnounces { chain_index } = substream_info.protocol {
-                        if let Some(entry) = self.chains[chain_index]
-                            .kbuckets
-                            .entry(peer_id)
-                            .into_occupied()
-                        {
-                            // TODO: how to get `now`?
-                            //entry.set_state(now, kademlia::kbuckets::PeerState::Disconnected);
-                        }
-
                         return Some(Event::GossipDisconnected {
                             peer_id: peer_id.clone(),
                             chain_id: ChainId(chain_index),
@@ -1715,6 +1648,40 @@ where
         )?)
     }
 
+    /// Sends a Kademlia find node request to the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn start_kademlia_find_node_request(
+        &mut self,
+        now: TNow,
+        target: &PeerId,
+        chain_id: ChainId,
+        peer_id_to_find: &PeerId,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
+        let request_data = protocol::build_find_node_request(peer_id_to_find.as_bytes());
+
+        // The request data can possibly by higher than the protocol limit, especially due to the
+        // call data.
+        // TODO: check limit
+
+        Ok(self.start_request(
+            now,
+            target,
+            request_data,
+            Protocol::Kad {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )?)
+    }
+
     /// Underlying implementation of all the functions that start requests.
     fn start_request(
         &mut self,
@@ -1918,70 +1885,6 @@ where
         };
 
         self.inner.respond_in_request(substream_id, response);
-    }
-
-    /// Performs a round of Kademlia discovery.
-    ///
-    /// This function might generate a message destined a connection. Use
-    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`ChainId`] is invalid.
-    ///
-    pub fn kademlia_start_discovery_round(&mut self, now: TNow, chain_id: ChainId) -> OperationId {
-        let random_peer_id = {
-            let mut pub_key = [0; 32];
-            self.randomness.fill_bytes(&mut pub_key);
-            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
-        };
-
-        let queried_peer = {
-            let peer_id = self.chains[chain_id.0]
-                .kbuckets
-                .closest_entries(&random_peer_id)
-                // TODO: instead of filtering by connectd only, connect to nodes if not connected
-                // TODO: additionally, this only takes outgoing connections into account
-                .find(|(peer_id, _)| {
-                    self.kbuckets_peers
-                        .get(*peer_id)
-                        .unwrap()
-                        .addresses
-                        .iter_connected()
-                        .next()
-                        .is_some()
-                })
-                .map(|(peer_id, _)| peer_id.clone());
-            peer_id
-        };
-
-        let kademlia_operation_id = self.next_operation_id;
-        self.next_operation_id.0 += 1;
-
-        if let Some(queried_peer) = queried_peer {
-            let request_data = protocol::build_find_node_request(random_peer_id.as_bytes());
-
-            // The timeout needs to be long enough to potentially download the maximum
-            // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
-            let timeout = Duration::from_secs(8);
-
-            // TODO: use result
-            self.start_request(
-                now,
-                &queried_peer,
-                request_data,
-                Protocol::Kad {
-                    chain_index: chain_id.0,
-                },
-                timeout,
-            );
-        } else {
-            todo!()
-            /*self.pending_kademlia_errors
-            .push_back((kademlia_operation_id, DiscoveryError::NoPeer))*/
-        }
-
-        kademlia_operation_id
     }
 
     /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
@@ -2578,12 +2481,6 @@ pub enum Event {
         /// This [`SubstreamId`] is considered dead and no longer valid.
         substream_id: SubstreamId,
     },
-
-    KademliaDiscoveryResult {
-        operation_id: OperationId,
-        // TODO: proper error
-        result: Result<Vec<(PeerId, Vec<Vec<u8>>)>, ()>,
-    },
     /*Transactions {
         peer_id: PeerId,
         transactions: EncodedTransactions,
@@ -2713,7 +2610,7 @@ pub enum StateRequestError {
     Decode(protocol::DecodeStateResponseError),
 }
 
-/// Error during [`ChainNetwork::start_kademlia_find_node`].
+/// Error during [`ChainNetwork::start_kademlia_find_node_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum KademliaFindNodeError {
     /// Error during the request.
