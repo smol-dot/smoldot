@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+// Copyright (C) 2023  Pierre Krieger
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,13 +15,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-/*********************************************************
-**   Prototype for a rewrite of the networking code     **
-**   Not ready yet                                      **
-*********************************************************/
+use alloc::{borrow::ToOwned as _, collections::BTreeSet};
 
-pub mod address_book;
-pub mod kademlia;
-pub mod protocol;
-pub mod service;
-pub mod service2;
+pub use crate::libp2p::PeerId;
+
+pub struct AddressBook {
+    addresses: BTreeSet<(PeerId, Vec<u8>)>,
+}
+
+impl AddressBook {
+    pub fn new() -> Self {
+        AddressBook {
+            addresses: BTreeSet::new(),
+        }
+    }
+
+    pub fn insert_address(&mut self, peer_id: &PeerId, multiaddr: &[u8]) {
+        self.addresses
+            .insert((peer_id.clone(), multiaddr.to_owned()));
+    }
+}

@@ -36,7 +36,10 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::{platform::PlatformRef, util};
+use crate::{
+    platform::{self, address_parse, PlatformRef},
+    util,
+};
 
 use alloc::{
     boxed::Box,
@@ -55,7 +58,7 @@ use smoldot::{
     header,
     informant::{BytesDisplay, HashDisplay},
     libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId, peers},
-    network::{protocol, service2},
+    network::{address_book, protocol, service2},
 };
 
 pub use service2::{EncodedMerkleProof, QueueNotificationError};
@@ -138,6 +141,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut log_chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
 
+        let mut address_book = address_book::AddressBook::new();
+
         let network = service2::ChainNetwork::new(service2::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
@@ -218,6 +223,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 identify_agent_version: config.identify_agent_version,
                 log_chain_names: log_chain_names.clone(),
                 messages_tx: messages_tx.clone(),
+                address_book,
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),
@@ -850,6 +856,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Data structure holding the entire state of the networking.
     network: service2::ChainNetwork<TPlat::Instant>,
 
+    /// All known peers and their addresses.
+    address_book: address_book::AddressBook,
+
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
@@ -910,7 +919,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
         // TODO: handle differently
         // TODO: doc
-        for chain_index in 0..task.log_chain_names.len() {
+        for chain_id in task.log_chain_names.keys() {
             let now = task.platform.now();
 
             // Clean up the content of `slots_assign_backoff`.
@@ -920,31 +929,46 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .retain(|_, expiration| *expiration > now);
 
             loop {
-                let peer_id = task
+                // TODO :4 is an arbitrary constant, make configurable
+                if task
                     .network
-                    .slots_to_assign(chain_index)
+                    .gossip_desired_num(*chain_id, service2::GossipKind::ConsensusTransactions)
+                    >= 4
+                {
+                    break;
+                }
+
+                let peer_id = task
+                    .address_book
+                    .random_peer()
                     .find(|peer_id| {
                         !task
                             .slots_assign_backoff
-                            .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                            .contains_key(&((**peer_id).clone(), chain_index))
                     })
-                    .cloned();
+                    .cloned(); // TODO: spurious cloning
 
                 let Some(peer_id) = peer_id else { break };
+
                 log::debug!(
                     target: "connections",
                     "OutSlots({}) ∋ {}",
-                    &task.log_chain_names[&chain_id],
+                    &task.log_chain_names[chain_id],
                     peer_id
                 );
-                task.network.assign_out_slot(chain_id, peer_id);
+
+                task.network.gossip_insert_desired(
+                    *chain_id,
+                    peer_id,
+                    service2::GossipKind::ConsensusTransactions,
+                );
             }
         }
 
         enum WhatHappened<TPlat: PlatformRef> {
             Message(ToBackground<TPlat>),
             NetworkEvent(service2::Event),
-            StartConnect(service2::StartConnect<TPlat::Instant>),
+            StartConnect(PeerId),
             MessageToConnection {
                 connection_id: service2::ConnectionId,
                 message: service2::CoordinatorToConnection<TPlat::Instant>,
@@ -963,10 +987,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     None
                 } {
                     WhatHappened::NetworkEvent(event)
-                } else if let Some(start_connect) =
-                    task.network.next_start_connect(|| task.platform.now())
-                {
-                    WhatHappened::StartConnect(start_connect)
+                } else if let Some(start_connect) = task.network.unconnected_desired().next() {
+                    WhatHappened::StartConnect(start_connect.clone())
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -999,99 +1021,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // Nothing to do. Just loop again, as we can now generate events.
                 continue;
             }
-            WhatHappened::Message(ToBackground::ConnectionAttemptOkSingleStream {
-                pending_id,
-                connection,
-                expected_peer_id,
-                multiaddr,
-                handshake_kind,
-            }) => {
-                let (connection_id, connection_task) = task
-                    .network
-                    .pending_outcome_ok_single_stream(pending_id, handshake_kind);
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Connection through {}",
-                    pending_id,
-                    expected_peer_id,
-                    multiaddr
-                );
-
-                let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
-                    async_channel::bounded(8);
-                let _prev_value = task
-                    .active_connections
-                    .insert(connection_id, coordinator_to_connection_tx);
-                debug_assert!(_prev_value.is_none());
-
-                //TODO: task name
-                task.platform.spawn_task(
-                    "".into(),
-                    tasks::single_stream_connection_task::<TPlat>(
-                        connection,
-                        multiaddr.to_string(),
-                        task.platform.clone(),
-                        connection_id,
-                        connection_task,
-                        coordinator_to_connection_rx,
-                        task.messages_tx.clone(),
-                    ),
-                );
-
-                continue;
-            }
-            WhatHappened::Message(ToBackground::ConnectionAttemptOkMultiStream {
-                pending_id,
-                connection,
-                expected_peer_id,
-                multiaddr,
-                handshake_kind,
-            }) => {
-                let (connection_id, connection_task) = task
-                    .network
-                    .pending_outcome_ok_multi_stream(pending_id, handshake_kind);
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Connection through {}",
-                    pending_id,
-                    expected_peer_id,
-                    multiaddr
-                );
-
-                let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
-                    async_channel::bounded(8);
-                let _prev_value = task
-                    .active_connections
-                    .insert(connection_id, coordinator_to_connection_tx);
-                debug_assert!(_prev_value.is_none());
-
-                //TODO: task name
-                task.platform.spawn_task(
-                    "".into(),
-                    tasks::webrtc_multi_stream_connection_task::<TPlat>(
-                        connection,
-                        multiaddr.to_string(),
-                        task.platform.clone(),
-                        connection_id,
-                        connection_task,
-                        coordinator_to_connection_rx,
-                        task.messages_tx.clone(),
-                    ),
-                );
-
-                continue;
-            }
-            WhatHappened::Message(ToBackground::ConnectionAttemptErr {
-                pending_id,
-                expected_peer_id,
-                is_bad_addr,
-            }) => {
-                task.network.pending_outcome_err(pending_id, is_bad_addr);
-                for chain_index in 0..task.network.num_chains() {
-                    task.unassign_slot_and_ban(chain_id, expected_peer_id.clone());
-                }
-                continue;
-            }
             WhatHappened::Message(ToBackground::ConnectionMessage {
                 connection_id,
                 message,
@@ -1107,12 +1036,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 timeout,
                 result,
             }) => {
-                // The call to `start_blocks_request` below panics if we have no active connection.
-                if !task.network.can_start_requests(&target) {
-                    let _ = result.send(Err(BlocksRequestError::NoConnection));
-                    continue;
-                }
-
                 match &config.start {
                     protocol::BlocksRequestConfigStart::Hash(hash) => {
                         log::debug!(
@@ -1718,30 +1641,121 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
                 continue;
             }
-            WhatHappened::StartConnect(start_connect) => {
+            WhatHappened::StartConnect(peer_id) => {
                 // TODO: restore rate limiting
-                let is_important = task
-                    .important_nodes
-                    .contains(&start_connect.expected_peer_id);
+                let is_important = task.important_nodes.contains(&peer_id);
+                let multiaddr = todo!(); // TODO:
 
-                let task_name = format!(
-                    "connection-{}-{}",
-                    start_connect.expected_peer_id, start_connect.multiaddr
+                let address = address_parse::multiaddr_to_address(&multiaddr)
+                    .ok()
+                    .filter(|addr| {
+                        task.platform.supports_connection_type(match &addr {
+                            address_parse::AddressOrMultiStreamAddress::Address(addr) => {
+                                From::from(addr)
+                            }
+                            address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+                                addr,
+                            ) => From::from(addr),
+                        })
+                    });
+
+                let Some(address) = address else {
+                    todo!();
+                }; // TODO:
+
+                log::debug!(
+                    target: "connections",
+                    "NewConnection({}, {})",
+                    peer_id,
+                    multiaddr
                 );
 
-                // Perform the connection process in a separate task.
-                let connect_task = tasks::connection_task(
-                    start_connect,
-                    task.platform.clone(),
-                    task.messages_tx.clone(),
-                    is_important,
-                );
+                let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
+                    async_channel::bounded(8);
+                let task_name = format!("connection-{}-{}", peer_id, multiaddr);
 
-                // Sending the new task might fail in case a shutdown is happening, in which case
-                // we don't really care about the state of anything anymore.
-                // The sending here is normally very quick.
-                task.platform
-                    .spawn_task(task_name.into(), Box::pin(connect_task));
+                let connection_id = match address {
+                    address_parse::AddressOrMultiStreamAddress::Address(address) => {
+                        let (connection_id, connection_task) =
+                            task.network.add_single_stream_connection(
+                                task.platform.now(),
+                                service2::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                                    is_initiator: true,
+                                },
+                                multiaddr,
+                                Some(peer_id.clone()),
+                            );
+
+                        task.platform.spawn_task(
+                            task_name.into(),
+                            tasks::single_stream_connection_task::<TPlat>(
+                                address,
+                                multiaddr.to_string(),
+                                task.platform.clone(),
+                                connection_id,
+                                connection_task,
+                                coordinator_to_connection_rx,
+                                task.messages_tx.clone(),
+                            ),
+                        );
+
+                        connection_id
+                    }
+                    address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
+                        platform::MultiStreamAddress::WebRtc {
+                            ip,
+                            port,
+                            remote_certificate_sha256,
+                        },
+                    ) => {
+                        // Convert the SHA256 hashes into multihashes.
+                        let local_tls_certificate_multihash = [12u8, 32]
+                            .into_iter()
+                            .chain(local_tls_certificate_sha256.into_iter())
+                            .collect();
+                        let remote_tls_certificate_multihash = [12u8, 32]
+                            .into_iter()
+                            .chain(remote_certificate_sha256.into_iter())
+                            .collect();
+
+                        let (connection_id, connection_task) =
+                            task.network.add_multi_stream_connection(
+                                task.platform.now(),
+                                service2::MultiStreamHandshakeKind::WebRtc {
+                                    is_initiator: true,
+                                    local_tls_certificate_multihash,
+                                    remote_tls_certificate_multihash,
+                                },
+                                multiaddr,
+                                Some(peer_id.clone()),
+                            );
+
+                        task.platform.spawn_task(
+                            task_name.into(),
+                            tasks::webrtc_multi_stream_connection_task::<TPlat>(
+                                platform::MultiStreamAddress::WebRtc {
+                                    ip,
+                                    port,
+                                    remote_certificate_sha256,
+                                },
+                                multiaddr.to_string(),
+                                task.platform.clone(),
+                                connection_id,
+                                connection_task,
+                                coordinator_to_connection_rx,
+                                task.messages_tx.clone(),
+                            ),
+                        );
+
+                        connection_id
+                    }
+                };
+
+                let _prev_value = task
+                    .active_connections
+                    .insert(connection_id, coordinator_to_connection_tx);
+                debug_assert!(_prev_value.is_none());
+
                 continue;
             }
             WhatHappened::MessageToConnection {

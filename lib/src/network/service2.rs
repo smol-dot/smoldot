@@ -510,6 +510,20 @@ where
         // TODO: update unconnected_desired; consider changing the fields order in the set
     }
 
+    /// Returns the number of gossip-desired peers for the given chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub fn gossip_desired_num(&mut self, chain_id: ChainId, kind: GossipKind) -> usize {
+        // TODO: O(n), optimize
+        self.gossip_desired_peers_by_chain
+            .iter()
+            .filter(|(c, _, k)| *c == chain_id.0 && *k == kind)
+            .count()
+    }
+
     /// Returns the list of [`PeerId`]s that are desired (for any chain) but for which no
     /// connection exists.
     ///
