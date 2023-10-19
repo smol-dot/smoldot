@@ -148,7 +148,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
             peers_capacity: 8,
-            max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
             noise_key: config.noise_key,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: {

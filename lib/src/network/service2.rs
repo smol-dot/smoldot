@@ -48,8 +48,6 @@ pub use crate::libp2p::{
 
 pub use crate::network::protocol::{BlockAnnouncesHandshakeDecodeError, Role};
 
-mod addresses;
-
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
     /// Capacity to initially reserve to the list of connections.
@@ -78,14 +76,6 @@ pub struct Config {
     /// Amount of time after which a connection handshake is considered to have taken too long
     /// and must be aborted.
     pub handshake_timeout: Duration,
-
-    /// Maximum number of addresses kept in memory per network identity.
-    ///
-    /// > **Note**: As the number of network identities kept in memory is capped, having a
-    /// >           maximum number of addresses per peer ensures that the total number of
-    /// >           addresses is capped as well.
-    // TODO: remove?
-    pub max_addresses_per_peer: NonZeroUsize,
 }
 
 /// Configuration for a specific overlay network.
@@ -152,9 +142,6 @@ pub struct ChainNetwork<TNow> {
     // TODO: make rotatable, see <https://github.com/smol-dot/smoldot/issues/44>
     noise_key: NoiseKey,
 
-    /// See [`Config::max_addresses_per_peer`].
-    max_addresses_per_peer: NonZeroUsize,
-
     /// List of all chains that have been added.
     chains: slab::Slab<Chain>,
 
@@ -176,9 +163,6 @@ pub struct ChainNetwork<TNow> {
     // TODO: doc
     connected_unopened_gossip_desired:
         hashbrown::HashSet<(PeerId, ChainId, GossipKind), util::SipHasherBuild>,
-
-    /// Generator for randomness.
-    randomness: rand_chacha::ChaCha20Rng,
 }
 
 struct Chain {
@@ -280,43 +264,6 @@ enum NotificationsSubstreamState {
     Open,
 }
 
-struct KBucketsPeer {
-    /// Number of k-buckets containing this peer. Used to know when to remove this entry.
-    num_references: NonZeroUsize,
-
-    /// List of addresses known for this peer, and whether we currently have an outgoing connection
-    /// to each of them. In this context, "connected" means "outgoing connection whose handshake is
-    /// finished and is not shutting down".
-    ///
-    /// It is not possible to have multiple outgoing connections for a single address.
-    /// Incoming connections are not taken into account at all.
-    ///
-    /// An address is marked as pending when there is a "pending connection" (see
-    /// [`ChainNetwork::pending_ids`]) to it, or if there is an outgoing connection to it that is
-    /// still handshaking.
-    ///
-    /// An address is marked as disconnected as soon as the shutting down is starting.
-    ///
-    /// Must never be empty.
-    addresses: addresses::Addresses,
-}
-
-enum InRequestTy {
-    Identify { observed_addr: multiaddr::Multiaddr },
-    Blocks,
-}
-
-enum OutRequestTy {
-    Blocks {
-        checked: Option<protocol::BlocksRequestConfig>,
-    },
-    GrandpaWarpSync,
-    State,
-    StorageProof,
-    CallProof,
-    KademliaFindNode,
-}
-
 impl<TNow> ChainNetwork<TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
@@ -366,8 +313,6 @@ where
                 Default::default(),
             ),
             noise_key: config.noise_key,
-            max_addresses_per_peer: config.max_addresses_per_peer,
-            randomness,
         }
     }
 
