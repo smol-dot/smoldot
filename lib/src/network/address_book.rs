@@ -21,29 +21,38 @@ use alloc::{
     vec::Vec,
 };
 
+use core::hash::Hash;
+
 pub use crate::libp2p::PeerId;
 
+#[derive(Debug)]
 pub struct AddressBook<TChainId> {
     addresses: BTreeMap<(PeerId, Vec<u8>), AddressState>,
 
-    foo: core::marker::PhantomData<TChainId>,
+    peers_chains: BTreeMap<(TChainId, PeerId), ()>, // TODO: value
 }
 
+#[derive(Debug)]
 enum AddressState {
     Connected,
     Pending,
     Disconnected,
 }
 
-impl<TChainId> AddressBook<TChainId> {
+impl<TChainId> AddressBook<TChainId>
+where
+    TChainId: PartialOrd + Ord + Eq + Hash,
+{
     pub fn new() -> Self {
         AddressBook {
             addresses: BTreeMap::new(),
-            foo: core::marker::PhantomData,
+            peers_chains: BTreeMap::new(),
         }
     }
 
-    pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {}
+    pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
+        self.peers_chains.insert((chain, peer_id), ());
+    }
 
     pub fn insert_address(&mut self, peer_id: &PeerId, multiaddr: &[u8]) {
         if let btree_map::Entry::Vacant(entry) = self
@@ -52,6 +61,15 @@ impl<TChainId> AddressBook<TChainId> {
         {
             entry.insert(AddressState::Disconnected);
         }
+    }
+
+    pub fn random_peer(&mut self, chain_id: &TChainId) -> Option<&PeerId> {
+        // TODO: should switch peer state
+        self.peers_chains
+            .iter()
+            .filter(|((c, _), _)| c == chain_id)
+            .map(|((_, p), _)| p)
+            .next()
     }
 
     /// Picks an address from the list whose state is "not connected", and switches it to

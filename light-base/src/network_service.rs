@@ -915,8 +915,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         // TODO: handle differently
         // TODO: doc
         for chain_id in task.log_chain_names.keys() {
-            let now = task.platform.now();
-
             loop {
                 // TODO :4 is an arbitrary constant, make configurable
                 if task
@@ -927,8 +925,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id: Option<PeerId> = todo!(); // task.address_book.random_peer(chain_id).cloned(); // TODO: spurious cloning
-
+                // TODO: infinite loop right now
+                let peer_id = task.address_book.random_peer(chain_id).map(|p| p.clone()); // TODO: spurious cloning
                 let Some(peer_id) = peer_id else { break };
 
                 log::debug!(
