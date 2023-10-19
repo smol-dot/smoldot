@@ -1036,38 +1036,44 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 timeout,
                 result,
             }) => {
-                match &config.start {
-                    protocol::BlocksRequestConfigStart::Hash(hash) => {
-                        log::debug!(
-                            target: "network",
-                            "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                            target, task.log_chain_names[&chain_id], HashDisplay(hash),
-                            config.desired_count.get(),
-                            matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                            config.fields.header, config.fields.body, config.fields.justifications
-                        );
-                    }
-                    protocol::BlocksRequestConfigStart::Number(number) => {
-                        log::debug!(
-                            target: "network",
-                            "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                            target, task.log_chain_names[&chain_id], number,
-                            config.desired_count.get(),
-                            matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                            config.fields.header, config.fields.body, config.fields.justifications
-                        );
-                    }
-                }
-
-                let request_id = task.network.start_blocks_request(
+                match task.network.start_blocks_request(
                     task.platform.now(),
                     &target,
                     chain_id,
                     config,
                     timeout,
-                );
+                ) {
+                    Ok(substream_id) => {
+                        match &config.start {
+                            protocol::BlocksRequestConfigStart::Hash(hash) => {
+                                log::debug!(
+                                    target: "network",
+                                    "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                                    target, task.log_chain_names[&chain_id], HashDisplay(hash),
+                                    config.desired_count.get(),
+                                    matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                                    config.fields.header, config.fields.body, config.fields.justifications
+                                );
+                            }
+                            protocol::BlocksRequestConfigStart::Number(number) => {
+                                log::debug!(
+                                    target: "network",
+                                    "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                                    target, task.log_chain_names[&chain_id], number,
+                                    config.desired_count.get(),
+                                    matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                                    config.fields.header, config.fields.body, config.fields.justifications
+                                );
+                            }
+                        }
 
-                task.blocks_requests.insert(request_id, result);
+                        task.blocks_requests.insert(substream_id, result);
+                    }
+                    Err(service2::StartRequestError::NoConnection) => {
+                        let _ = result.send(Err(BlocksRequestError::NoConnection));
+                    }
+                }
+
                 continue;
             }
             WhatHappened::Message(ToBackground::StartWarpSyncRequest {
