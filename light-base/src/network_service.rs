@@ -278,7 +278,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
     /// Sends a blocks request to the given peer.
     // TODO: more docs
-    // TODO: unverified /!\
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId,
@@ -287,6 +286,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let (tx, rx) = oneshot::channel();
+
+        todo!(); // TODO: the block requests results are now unverified, fix the upper layers
 
         self.messages_tx
             .send(ToBackground::StartBlocksRequest {
