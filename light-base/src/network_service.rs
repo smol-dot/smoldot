@@ -118,7 +118,7 @@ pub struct ConfigChain {
 pub struct NetworkService<TPlat: PlatformRef> {
     /// Names of the various chains the network service connects to. Used only for logging
     /// purposes.
-    log_chain_names: hashbrown::HashMap<service2::ChainId, String, fnv::FnvBuildHasher>,
+    log_chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
@@ -141,7 +141,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut log_chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
 
-        let mut address_book = address_book::AddressBook::new();
+        let mut address_books =
+            hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
 
         let network = service2::ChainNetwork::new(service2::Config {
             chains_capacity: config.chains.len(),
@@ -184,6 +185,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 .unwrap();
 
             log_chain_names.insert(chain_id, chain.log_name);
+
+            address_books.insert(chain_id, address_book::AddressBook::new());
         }
 
         let on_service_killed = event_listener::Event::new();
@@ -223,18 +226,10 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 identify_agent_version: config.identify_agent_version,
                 log_chain_names: log_chain_names.clone(),
                 messages_tx: messages_tx.clone(),
-                address_book,
+                address_books,
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),
-                slots_assign_backoff: HashMap::with_capacity_and_hasher(
-                    32,
-                    util::SipHasherBuild::new({
-                        let mut seed = [0; 16];
-                        config.platform.fill_random_bytes(&mut seed);
-                        seed
-                    }),
-                ),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_rx,
@@ -287,7 +282,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
@@ -359,7 +354,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn grandpa_warp_sync_request(
         self: Arc<Self>,
         target: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         begin_hash: [u8; 32],
         timeout: Duration,
     ) -> Result<service2::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
@@ -407,7 +402,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
     pub async fn set_local_best_block(
         &self,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         best_hash: [u8; 32],
         best_number: u64,
     ) {
@@ -423,7 +418,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
     pub async fn set_local_grandpa_state(
         &self,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         grandpa_state: service2::GrandpaState,
     ) {
         self.messages_tx
@@ -439,7 +434,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn storage_proof_request(
         self: Arc<Self>,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
@@ -497,7 +492,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn call_proof_request(
         self: Arc<Self>,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
@@ -561,7 +556,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// a transaction not being received are extremely low. This can be considered as known flaw.
     pub async fn announce_transaction(
         self: Arc<Self>,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         transaction: &[u8],
     ) -> Vec<PeerId> {
         let (tx, rx) = oneshot::channel();
@@ -582,7 +577,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn send_block_announce(
         self: Arc<Self>,
         target: &PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         scale_encoded_header: &[u8],
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
@@ -609,7 +604,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn discover(
         &self,
         now: &TPlat::Instant,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
         important_nodes: bool,
     ) {
@@ -639,7 +634,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// returned by [`NetworkService::discovered_nodes`].
     pub async fn discovered_nodes(
         &self,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
     ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
         let (tx, rx) = oneshot::channel();
 
@@ -680,29 +675,29 @@ impl<TPlat: PlatformRef> Drop for NetworkService<TPlat> {
 pub enum Event {
     Connected {
         peer_id: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         role: protocol::Role,
         best_block_number: u64,
         best_block_hash: [u8; 32],
     },
     Disconnected {
         peer_id: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
     },
     BlockAnnounce {
         peer_id: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         announce: service2::EncodedBlockAnnounce,
     },
     GrandpaNeighborPacket {
         peer_id: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         finalized_block_height: u64,
     },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
         peer_id: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         message: service2::EncodedGrandpaCommitMessage,
     },
 }
@@ -771,7 +766,7 @@ enum ToBackground<TPlat: PlatformRef> {
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
         target: PeerId, // TODO: takes by value because of future longevity issue
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
         result: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
@@ -779,7 +774,7 @@ enum ToBackground<TPlat: PlatformRef> {
     // TODO: serialize the request before sending over channel
     StartWarpSyncRequest {
         target: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         begin_hash: [u8; 32],
         timeout: Duration,
         result:
@@ -787,7 +782,7 @@ enum ToBackground<TPlat: PlatformRef> {
     },
     // TODO: serialize the request before sending over channel
     StartStorageProofRequest {
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         target: PeerId,
         config: protocol::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
@@ -795,41 +790,41 @@ enum ToBackground<TPlat: PlatformRef> {
     },
     // TODO: serialize the request before sending over channel
     StartCallProofRequest {
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
         result: oneshot::Sender<Result<service2::EncodedMerkleProof, CallProofRequestError>>,
     },
     SetLocalBestBlock {
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         best_hash: [u8; 32],
         best_number: u64,
     },
     SetLocalGrandpaState {
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         grandpa_state: service2::GrandpaState,
     },
     AnnounceTransaction {
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         transaction: Vec<u8>,
         result: oneshot::Sender<Vec<PeerId>>,
     },
     SendBlockAnnounce {
         target: PeerId,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         scale_encoded_header: Vec<u8>,
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
     Discover {
         now: TPlat::Instant,
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
         important_nodes: bool,
     },
     DiscoveredNodes {
-        chain_id: service2::ChainId,
+        chain_id: ChainId,
         result: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
     },
     PeersList {
@@ -848,7 +843,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Names of the various chains the network service connects to. Used only for logging
     /// purposes.
     // TODO: add a user data to the network state machine
-    log_chain_names: hashbrown::HashMap<service2::ChainId, String, fnv::FnvBuildHasher>,
+    log_chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
@@ -857,16 +852,12 @@ struct BackgroundTask<TPlat: PlatformRef> {
     network: service2::ChainNetwork<TPlat::Instant>,
 
     /// All known peers and their addresses.
-    address_book: address_book::AddressBook,
+    // TODO: add a user data to the network state machine
+    address_books: hashbrown::HashMap<ChainId, address_book::AddressBook, fnv::FnvBuildHasher>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
-
-    /// List of peer and chain index tuples for which no outbound slot should be assigned.
-    ///
-    /// The values are the moment when the ban expires.
-    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, util::SipHasherBuild>,
 
     /// Sending events through the public API.
     ///
@@ -922,12 +913,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         for chain_id in task.log_chain_names.keys() {
             let now = task.platform.now();
 
-            // Clean up the content of `slots_assign_backoff`.
-            // TODO: the background task should be woken up when the ban expires
-            // TODO: O(n)
-            task.slots_assign_backoff
-                .retain(|_, expiration| *expiration > now);
-
             loop {
                 // TODO :4 is an arbitrary constant, make configurable
                 if task
@@ -938,15 +923,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id = task
-                    .address_book
-                    .random_peer()
-                    .find(|peer_id| {
-                        !task
-                            .slots_assign_backoff
-                            .contains_key(&((**peer_id).clone(), chain_index))
-                    })
-                    .cloned(); // TODO: spurious cloning
+                let peer_id = task.address_books[chain_id].random_peer().cloned(); // TODO: spurious cloning
 
                 let Some(peer_id) = peer_id else { break };
 
@@ -1294,34 +1271,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::NetworkEvent(service2::Event::HandshakeFinished { peer_id, .. }) => {
-                log::debug!(target: "network", "Connected({})", peer_id);
+                // TODO: handle peer id mismatch
+                log::debug!(target: "network", "HandshakeFinished({})", peer_id);
                 continue;
-            }
-            WhatHappened::NetworkEvent(service2::Event::Disconnected {
-                peer_id,
-                chain_indices,
-            }) => {
-                log::debug!(target: "network", "Disconnected({})", peer_id);
-                if !chain_indices.is_empty() {
-                    // TODO: properly implement when multiple chains
-                    if chain_indices.len() == 1 {
-                        log::debug!(
-                            target: "network",
-                            "Connection({}, {}) => GossipDisconnected",
-                            peer_id,
-                            &task.log_chain_names[chain_indices[0]],
-                        );
-
-                        Event::Disconnected {
-                            peer_id,
-                            chain_index: chain_indices[0],
-                        }
-                    } else {
-                        todo!()
-                    }
-                } else {
-                    continue;
-                }
             }
             WhatHappened::NetworkEvent(service2::Event::BlockAnnounce {
                 chain_id,
@@ -1380,15 +1332,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 log::debug!(
                     target: "connections",
-                    "{}Slots({}) ∌ {}",
-                    match unassigned_slot_ty {
-                        service2::SlotTy::Inbound => "In",
-                        service2::SlotTy::Outbound => "Out",
-                    },
+                    "{}Slots ∌ {}",
                     &task.log_chain_names[&chain_id],
                     peer_id
                 );
-                task.unassign_slot_and_ban(chain_id, peer_id);
+                // TODO: also ban peer
+                task.network.gossip_remove_desired(
+                    chain_id,
+                    peer_id,
+                    service2::GossipKind::ConsensusTransactions,
+                );
                 continue;
             }
             WhatHappened::NetworkEvent(service2::Event::GossipDisconnected {
@@ -1404,15 +1357,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 log::debug!(
                     target: "connections",
-                    "{}Slots({}) ∌ {}",
-                    match unassigned_slot_ty {
-                        service2::SlotTy::Inbound => "In",
-                        service2::SlotTy::Outbound => "Out",
-                    },
+                    "{}Slots ∌ {}",
                     &task.log_chain_names[&chain_id],
                     peer_id
                 );
-                task.unassign_slot_and_ban(chain_id, peer_id.clone());
+                // TODO: also ban peer
+                task.network.gossip_remove_desired(
+                    chain_id,
+                    peer_id,
+                    service2::GossipKind::ConsensusTransactions,
+                );
                 Event::Disconnected { peer_id, chain_id }
             }
             WhatHappened::NetworkEvent(service2::Event::RequestResult {
@@ -1808,22 +1762,5 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
             event_senders
         }));
-    }
-}
-
-impl<TPlat: PlatformRef> BackgroundTask<TPlat> {
-    fn unassign_slot_and_ban(&mut self, chain_id: service2::ChainId, peer_id: PeerId) {
-        self.network.unassign_slot(chain_id, &peer_id);
-
-        let new_expiration = self.platform.now() + Duration::from_secs(20); // TODO: arbitrary constant
-        match self.slots_assign_backoff.entry((peer_id, chain_index)) {
-            hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
-                *e.into_mut() = new_expiration;
-            }
-            hash_map::Entry::Occupied(_) => {}
-            hash_map::Entry::Vacant(e) => {
-                e.insert(new_expiration);
-            }
-        }
     }
 }
