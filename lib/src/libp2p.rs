@@ -91,12 +91,13 @@
 //! See also the documentation of [`peers`] for more information.
 //!
 
+// TODO: update doc with removal of `peers`
+
 pub mod collection;
 pub mod connection;
 pub mod multiaddr;
 pub mod multihash;
 pub mod peer_id;
-pub mod peers;
 pub mod read_write;
 pub mod websocket;
 pub mod with_buffers;

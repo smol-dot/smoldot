@@ -23,5 +23,4 @@
 pub mod basic_peering_strategy;
 pub mod kademlia;
 pub mod protocol;
-pub mod service;
 pub mod service2;
