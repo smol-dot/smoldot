@@ -885,7 +885,7 @@ where
                     // Decode/verify the response.
                     let response = match substream_info.protocol {
                         Protocol::Identify => todo!(), // TODO: we don't send identify requests yet, so it's fine to leave this unimplemented
-                        Protocol::Sync { chain_index } => RequestResult::Blocks(
+                        Protocol::Sync { .. } => RequestResult::Blocks(
                             response
                                 .map_err(BlocksRequestError::Request)
                                 .and_then(|response| {
@@ -894,7 +894,7 @@ where
                                 }),
                         ),
                         Protocol::LightUnknown { .. } => unreachable!(),
-                        Protocol::LightStorage { chain_index } => RequestResult::StorageProof(
+                        Protocol::LightStorage { .. } => RequestResult::StorageProof(
                             response
                                 .map_err(StorageProofRequestError::Request)
                                 .and_then(|payload| {
@@ -913,7 +913,7 @@ where
                                     }
                                 }),
                         ),
-                        Protocol::LightCall { chain_index } => {
+                        Protocol::LightCall { .. } => {
                             RequestResult::CallProof(
                                 response.map_err(CallProofRequestError::Request).and_then(
                                     |payload| match protocol::decode_storage_or_call_proof_response(
@@ -930,7 +930,16 @@ where
                                 ),
                             )
                         }
-                        Protocol::Kad { chain_index } => todo!(), // TODO: implement /!\
+                        Protocol::Kad { .. } => RequestResult::KademliaFindNode(
+                            response
+                                .map_err(KademliaFindNodeError::RequestFailed)
+                                .and_then(|payload| {
+                                    match protocol::decode_find_node_response(&payload) {
+                                        Err(err) => Err(KademliaFindNodeError::DecodeError(err)),
+                                        Ok(nodes) => Ok(nodes),
+                                    }
+                                }),
+                        ),
                         Protocol::SyncWarp { chain_index } => RequestResult::GrandpaWarpSync(
                             response
                                 .map_err(GrandpaWarpSyncRequestError::Request)
@@ -949,7 +958,7 @@ where
                                     }
                                 }),
                         ),
-                        Protocol::State { chain_index } => RequestResult::State(
+                        Protocol::State { .. } => RequestResult::State(
                             response
                                 .map_err(StateRequestError::Request)
                                 .and_then(|payload| {
@@ -1060,6 +1069,35 @@ where
                         .as_ref()
                         .unwrap_or_else(|| unreachable!());
 
+                    let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                        match substream_info.protocol {
+                            Protocol::BlockAnnounces { chain_index } => {
+                                NotificationsProtocol::BlockAnnounces { chain_index }
+                            }
+                            Protocol::Transactions { chain_index } => {
+                                NotificationsProtocol::Transactions { chain_index }
+                            }
+                            Protocol::Grandpa { chain_index } => {
+                                NotificationsProtocol::Grandpa { chain_index }
+                            }
+                            // Other protocols aren't notification protocols.
+                            Protocol::Identify
+                            | Protocol::Ping
+                            | Protocol::Sync { .. }
+                            | Protocol::LightUnknown { .. }
+                            | Protocol::LightStorage { .. }
+                            | Protocol::LightCall { .. }
+                            | Protocol::Kad { .. }
+                            | Protocol::SyncWarp { .. }
+                            | Protocol::State { .. } => unreachable!(),
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::Pending,
+                        substream_id,
+                    ));
+                    debug_assert!(_was_in);
+
                     // The behaviour is very specific to the protocol.
                     match substream_info.protocol {
                         Protocol::BlockAnnounces { chain_index } => {
@@ -1090,6 +1128,16 @@ where
 
                             match result {
                                 Ok(decoded_handshake) => {
+                                    let _was_inserted =
+                                        self.notification_substreams_by_peer_id.insert((
+                                            NotificationsProtocol::BlockAnnounces { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Open,
+                                            substream_id,
+                                        ));
+                                    debug_assert!(_was_inserted);
+
                                     return Some(Event::GossipConnected {
                                         peer_id: peer_id.clone(),
                                         chain_id: ChainId(chain_index),
@@ -1125,8 +1173,10 @@ where
                                         }
                                     }
 
+                                    let peer_id = peer_id.clone();
+                                    self.inner.close_out_notifications(substream_id);
                                     return Some(Event::GossipOpenFailed {
-                                        peer_id: peer_id.clone(),
+                                        peer_id,
                                         chain_id: ChainId(chain_index),
                                         kind: GossipKind::ConsensusTransactions,
                                         error,
