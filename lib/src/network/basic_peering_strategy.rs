@@ -116,6 +116,27 @@ where
         }
     }
 
+    // TODO: unused at the moment
+    pub fn assign_in_slot(&mut self, chain: TChainId, peer_id: &PeerId) -> Result<(), ()> {
+        // TODO: check against maximum
+        match self.peers_chains.entry((chain, peer_id.clone())) {
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(PeerChainState::InSlot);
+                Ok(())
+            }
+            btree_map::Entry::Occupied(mut entry) => {
+                match entry.get() {
+                    PeerChainState::Belongs => {}
+                    PeerChainState::InSlot => {}
+                    PeerChainState::OutSlot => return Err(()),
+                };
+
+                entry.insert(PeerChainState::InSlot);
+                Ok(())
+            }
+        }
+    }
+
     /// Picks an address from the list whose state is "not connected", and switches it to
     /// "pending". Returns `None` if no such address is available.
     pub fn addr_to_pending(&mut self, peer_id: &PeerId) -> Option<&[u8]> {
