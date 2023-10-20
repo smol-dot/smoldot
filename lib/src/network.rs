@@ -20,7 +20,7 @@
 **   Not ready yet                                      **
 *********************************************************/
 
-pub mod address_book;
+pub mod basic_peering_strategy;
 pub mod kademlia;
 pub mod protocol;
 pub mod service;

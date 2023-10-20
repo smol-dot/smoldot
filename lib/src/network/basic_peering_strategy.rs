@@ -26,7 +26,7 @@ use core::hash::Hash;
 pub use crate::libp2p::PeerId;
 
 #[derive(Debug)]
-pub struct AddressBook<TChainId> {
+pub struct BasicPeeringStrategy<TChainId> {
     addresses: BTreeMap<(PeerId, Vec<u8>), AddressState>,
 
     peers_chains: BTreeMap<(TChainId, PeerId), PeerChainState>,
@@ -62,12 +62,12 @@ impl ConnectionId {
     }
 }
 
-impl<TChainId> AddressBook<TChainId>
+impl<TChainId> BasicPeeringStrategy<TChainId>
 where
     TChainId: PartialOrd + Ord + Eq + Hash,
 {
     pub fn new() -> Self {
-        AddressBook {
+        BasicPeeringStrategy {
             addresses: BTreeMap::new(),
             peers_chains: BTreeMap::new(),
         }

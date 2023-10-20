@@ -61,7 +61,7 @@ use smoldot::{
         peer_id::PeerId,
         peers,
     },
-    network::{address_book, protocol, service2},
+    network::{basic_peering_strategy, protocol, service2},
 };
 
 pub use service2::{ChainId, EncodedMerkleProof, QueueNotificationError};
@@ -231,7 +231,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 identify_agent_version: config.identify_agent_version,
                 log_chain_names: log_chain_names.clone(),
                 messages_tx: messages_tx.clone(),
-                address_book: address_book::AddressBook::new(),
+                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(),
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),
@@ -857,7 +857,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     network: service2::ChainNetwork<TPlat::Instant>,
 
     /// All known peers and their addresses.
-    address_book: address_book::AddressBook<ChainId>,
+    peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -927,7 +927,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 // TODO: infinite loop right now
                 let peer_id = task
-                    .address_book
+                    .peering_strategy
                     .assign_out_slot(chain_id)
                     .map(|p| p.clone()); // TODO: spurious cloning
                 let Some(peer_id) = peer_id else { break };
@@ -1272,10 +1272,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     for addr in addrs {
-                        task.address_book.insert_address(&peer_id, addr.as_ref());
+                        task.peering_strategy
+                            .insert_address(&peer_id, addr.as_ref());
                     }
 
-                    task.address_book.insert_chain_peer(peer_id, chain_id);
+                    task.peering_strategy.insert_chain_peer(peer_id, chain_id);
                 }
 
                 continue;
@@ -1497,11 +1498,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     for addr in valid_addrs {
-                        task.address_book.insert_address(&peer_id, addr.as_ref());
+                        task.peering_strategy
+                            .insert_address(&peer_id, addr.as_ref());
                     }
 
                     // TODO: only if valid addresses?
-                    task.address_book.insert_chain_peer(peer_id, chain_id);
+                    task.peering_strategy.insert_chain_peer(peer_id, chain_id);
                 }
 
                 continue;
@@ -1659,7 +1661,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 // TODO: unwrap()? is that correct?
                 let multiaddr = task
-                    .address_book
+                    .peering_strategy
                     .addr_to_pending(&peer_id)
                     .unwrap()
                     .to_owned(); // TODO: to_owned overhead
