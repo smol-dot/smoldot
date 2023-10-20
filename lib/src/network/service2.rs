@@ -2037,6 +2037,18 @@ where
             1024 * 1024, // TODO: arbitrary
         );
 
+        let _prev_value = self.substreams.insert(
+            substream_id,
+            SubstreamInfo {
+                connection_id,
+                direction: SubstreamDirection::Out,
+                protocol: Protocol::BlockAnnounces {
+                    chain_index: chain_id.0,
+                },
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+
         let _was_inserted = self.notification_substreams_by_peer_id.insert((
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
