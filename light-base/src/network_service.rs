@@ -59,7 +59,6 @@ use smoldot::{
         connection,
         multiaddr::{self, Multiaddr},
         peer_id::PeerId,
-        peers,
     },
     network::{basic_peering_strategy, protocol, service2},
 };
@@ -1531,7 +1530,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         if !err.is_protocol_error() => {}
 
                     service2::KademliaFindNodeError::RequestFailed(
-                        peers::RequestError::Substream(
+                        service2::RequestError::Substream(
                             connection::established::RequestError::ProtocolNotAvailable,
                         ),
                     ) => {
