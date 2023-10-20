@@ -154,7 +154,10 @@ pub struct ChainNetwork<TNow> {
 
     /// List of peers that have been marked as desired. Can include peers not connected to the
     /// local node yet.
-    gossip_desired_peers_by_chain: BTreeSet<(usize, PeerId, GossipKind)>,
+    gossip_desired_peers_by_chain: BTreeSet<(usize, GossipKind, PeerId)>,
+
+    /// Same entries as [`ChainNetwork::gossip_desired_peers_by_chain`] but indexed differently.
+    gossip_desired_peers: BTreeSet<(PeerId, usize, GossipKind)>,
 
     /// Subset of peers in [`ChainNetwork::gossip_out_peers_by_chain`] for which no healthy
     /// connection exists.
@@ -264,6 +267,16 @@ enum NotificationsSubstreamState {
     Open,
 }
 
+impl NotificationsSubstreamState {
+    fn min_value() -> Self {
+        NotificationsSubstreamState::Pending
+    }
+
+    fn max_value() -> Self {
+        NotificationsSubstreamState::Open
+    }
+}
+
 impl<TNow> ChainNetwork<TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
@@ -291,6 +304,7 @@ where
             connections_by_peer_id: BTreeSet::new(),
             notification_substreams_by_peer_id: BTreeSet::new(),
             gossip_desired_peers_by_chain: BTreeSet::new(),
+            gossip_desired_peers: BTreeSet::new(),
             unconnected_desired: hashbrown::HashSet::with_capacity_and_hasher(
                 config.peers_capacity,
                 SipHasherBuild::new({
@@ -408,13 +422,16 @@ where
 
         if !self
             .gossip_desired_peers_by_chain
-            .insert((chain_id.0, peer_id.clone(), kind))
+            .insert((chain_id.0, kind, peer_id.clone()))
         {
             // Return if already marked as desired, as there's nothing more to update.
             // Note that this doesn't cover the possibility where the peer was desired with
             // another chain.
             return;
         }
+
+        self.gossip_desired_peers
+            .insert((peer_id.clone(), chain_id.0, kind));
 
         // If we have no connection or only shutting down connections, add to
         // `unconnected_desired`.
@@ -446,12 +463,18 @@ where
 
         if !self
             .gossip_desired_peers_by_chain
-            .remove(&(chain_id.0, peer_id.clone(), kind))
+            .remove(&(chain_id.0, kind, peer_id.clone()))
         // TODO: spurious cloning
         {
             // Return if wasn't marked as desired, as there's nothing more to update.
             return;
         }
+
+        self.gossip_desired_peers
+            .remove(&(peer_id.clone(), chain_id.0, kind));
+
+        self.connected_unopened_gossip_desired
+            .remove(&(peer_id.clone(), chain_id, kind)); // TODO: cloning
 
         // TODO: update unconnected_desired; consider changing the fields order in the set
     }
@@ -466,7 +489,7 @@ where
         // TODO: O(n), optimize
         self.gossip_desired_peers_by_chain
             .iter()
-            .filter(|(c, _, k)| *c == chain_id.0 && *k == kind)
+            .filter(|(c, k, _)| *c == chain_id.0 && *k == kind)
             .count()
     }
 
@@ -654,7 +677,54 @@ where
 
                     debug_assert!(!self.unconnected_desired.contains(&actual_peer_id));
 
+                    // TODO: update the unopened desired set in case of peer id mismatch
+
                     // TODO: limit the number of connections per peer?
+
+                    for (_, chain_id, _) in self.gossip_desired_peers.range(
+                        (
+                            actual_peer_id.clone(),
+                            usize::min_value(),
+                            GossipKind::ConsensusTransactions,
+                        )
+                            ..=(
+                                actual_peer_id.clone(),
+                                usize::max_value(),
+                                GossipKind::ConsensusTransactions,
+                            ),
+                    ) {
+                        if self
+                            .notification_substreams_by_peer_id
+                            .range(
+                                (
+                                    NotificationsProtocol::BlockAnnounces {
+                                        chain_index: *chain_id,
+                                    },
+                                    actual_peer_id.clone(),
+                                    SubstreamDirection::Out,
+                                    NotificationsSubstreamState::min_value(),
+                                    SubstreamId::min_value(),
+                                )
+                                    ..=(
+                                        NotificationsProtocol::BlockAnnounces {
+                                            chain_index: *chain_id,
+                                        },
+                                        actual_peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        NotificationsSubstreamState::max_value(),
+                                        SubstreamId::max_value(),
+                                    ),
+                            )
+                            .next()
+                            .is_none()
+                        {
+                            self.connected_unopened_gossip_desired.insert((
+                                actual_peer_id.clone(),
+                                ChainId(*chain_id),
+                                GossipKind::ConsensusTransactions,
+                            ));
+                        }
+                    }
 
                     return Some(Event::HandshakeFinished {
                         id,
@@ -1026,6 +1096,31 @@ where
                                     });
                                 }
                                 Err(error) => {
+                                    // TODO: lots of unnecessary cloning below
+                                    if self
+                                        .connections_by_peer_id
+                                        .range(
+                                            (peer_id.clone(), ConnectionId::min_value())
+                                                ..=(peer_id.clone(), ConnectionId::min_value()),
+                                        )
+                                        .any(|(_, c)| {
+                                            let state = self.inner.connection_state(*c);
+                                            state.established && !state.shutting_down
+                                        })
+                                    {
+                                        if self.gossip_desired_peers_by_chain.contains(&(
+                                            chain_index,
+                                            GossipKind::ConsensusTransactions,
+                                            peer_id.clone(),
+                                        )) {
+                                            self.connected_unopened_gossip_desired.insert((
+                                                peer_id.clone(),
+                                                ChainId(chain_index),
+                                                GossipKind::ConsensusTransactions,
+                                            ));
+                                        }
+                                    }
+
                                     return Some(Event::GossipOpenFailed {
                                         peer_id: peer_id.clone(),
                                         chain_id: ChainId(chain_index),
@@ -1135,6 +1230,8 @@ where
                         }
                         _ => {}
                     }
+
+                    // TODO: update connected_unopened_desired
 
                     // Generate an event if relevant.
                     if let Protocol::BlockAnnounces { chain_index } = substream_info.protocol {
@@ -1950,6 +2047,9 @@ where
             substream_id,
         ));
         debug_assert!(_was_inserted);
+
+        self.connected_unopened_gossip_desired
+            .remove(&(target.clone(), chain_id, kind)); // TODO: clone
 
         Ok(())
     }
