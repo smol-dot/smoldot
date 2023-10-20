@@ -194,7 +194,7 @@ struct Chain {
 
 /// See [`ChainNetwork::inner`].
 struct ConnectionInfo {
-    address: multiaddr::Multiaddr,
+    address: Multiaddr,
 
     /// Identity of the remote. Can be either the expected or the actual identity.
     ///
@@ -531,7 +531,7 @@ where
         &mut self,
         when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
-        remote_addr: multiaddr::Multiaddr,
+        remote_addr: Multiaddr,
         expected_peer_id: Option<PeerId>,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
@@ -580,7 +580,7 @@ where
         &mut self,
         when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
-        remote_addr: multiaddr::Multiaddr,
+        remote_addr: Multiaddr,
         expected_peer_id: Option<PeerId>,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -615,6 +615,10 @@ where
             self.connections_by_peer_id.insert((expected_peer_id, id));
         }
         (id, task)
+    }
+
+    pub fn connection_remote_addr(&self, id: ConnectionId) -> &Multiaddr {
+        &self.inner[id].address
     }
 
     /// Pulls a message that must be sent to a connection.

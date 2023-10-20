@@ -312,7 +312,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Ok(blocks) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
+                    "Connections({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
                     target,
                     self.log_chain_names[&chain_id],
                     blocks.len(),
@@ -327,7 +327,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => BlocksRequest(chain={}, error={:?})",
+                    "Connections({}) => BlocksRequest(chain={}, error={:?})",
                     target,
                     self.log_chain_names[&chain_id],
                     err
@@ -384,7 +384,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 let decoded = response.decode();
                 log::debug!(
                     target: "network",
-                    "Connection({}) => WarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
+                    "Connections({}) => WarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
                     target,
                     self.log_chain_names[&chain_id],
                     decoded.fragments.len(),
@@ -394,7 +394,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => WarpSyncRequest(chain={}, error={:?})",
+                    "Connections({}) => WarpSyncRequest(chain={}, error={:?})",
                     target,
                     self.log_chain_names[&chain_id],
                     err,
@@ -471,7 +471,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 let decoded = items.decode();
                 log::debug!(
                     target: "network",
-                    "Connection({}) => StorageProofRequest(chain={}, total_size={})",
+                    "Connections({}) => StorageProofRequest(chain={}, total_size={})",
                     target,
                     self.log_chain_names[&chain_id],
                     BytesDisplay(u64::try_from(decoded.len()).unwrap()),
@@ -480,7 +480,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => StorageProofRequest(chain={}, error={:?})",
+                    "Connections({}) => StorageProofRequest(chain={}, error={:?})",
                     target,
                     self.log_chain_names[&chain_id],
                     err
@@ -530,7 +530,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 let decoded = items.decode();
                 log::debug!(
                     target: "network",
-                    "Connection({}) => CallProofRequest({}, total_size: {})",
+                    "Connections({}) => CallProofRequest({}, total_size: {})",
                     target,
                     self.log_chain_names[&chain_id],
                     BytesDisplay(u64::try_from(decoded.len()).unwrap())
@@ -539,7 +539,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => CallProofRequest({}, {})",
+                    "Connections({}) => CallProofRequest({}, {})",
                     target,
                     self.log_chain_names[&chain_id],
                     err
@@ -967,6 +967,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service2::GossipKind::ConsensusTransactions,
                 )
                 .unwrap();
+
+            log::debug!(
+                target: "network",
+                "Connection({}, {}) <= OpenGossip",
+                peer_id,
+                &task.log_chain_names[&chain_id],
+            );
         }
 
         enum WhatHappened<TPlat: PlatformRef> {
@@ -1054,7 +1061,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             protocol::BlocksRequestConfigStart::Hash(hash) => {
                                 log::debug!(
                                     target: "network",
-                                    "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                                    "Connections({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
                                     target, task.log_chain_names[&chain_id], HashDisplay(hash),
                                     config.desired_count.get(),
                                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
@@ -1064,7 +1071,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             protocol::BlocksRequestConfigStart::Number(number) => {
                                 log::debug!(
                                     target: "network",
-                                    "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                                    "Connections({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
                                     target, task.log_chain_names[&chain_id], number,
                                     config.desired_count.get(),
                                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
@@ -1098,7 +1105,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 ) {
                     Ok(substream_id) => {
                         log::debug!(
-                            target: "network", "Connection({}) <= WarpSyncRequest(chain={}, start={})",
+                            target: "network", "Connections({}) <= WarpSyncRequest(chain={}, start={})",
                             target, task.log_chain_names[&chain_id], HashDisplay(&begin_hash)
                         );
 
@@ -1128,7 +1135,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Ok(substream_id) => {
                         log::debug!(
                             target: "network",
-                            "Connection({}) <= StorageProofRequest(chain={}, block={})",
+                            "Connections({}) <= StorageProofRequest(chain={}, block={})",
                             target,
                             task.log_chain_names[&chain_id],
                             HashDisplay(&config.block_hash)
@@ -1164,7 +1171,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Ok(substream_id) => {
                         log::debug!(
                             target: "network",
-                            "Connection({}) <= CallProofRequest({}, {}, {})",
+                            "Connections({}) <= CallProofRequest({}, {}, {})",
                             target,
                             task.log_chain_names[&chain_id],
                             HashDisplay(&config.block_hash),
@@ -1303,9 +1310,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::HandshakeFinished { peer_id, .. }) => {
+            WhatHappened::NetworkEvent(service2::Event::HandshakeFinished {
+                peer_id,
+                expected_peer_id,
+                id,
+            }) => {
+                let remote_addr = task.network.connection_remote_addr(id);
+                if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
+                {
+                    log::debug!(target: "network", "Connections({}, {}) <= HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
+                } else {
+                    log::debug!(target: "network", "Connections({}, {}) <= HandshakeFinished", peer_id, remote_addr);
+                }
+
                 // TODO: handle peer id mismatch
-                log::debug!(target: "network", "HandshakeFinished({})", peer_id);
+
                 continue;
             }
             WhatHappened::NetworkEvent(service2::Event::BlockAnnounce {
@@ -1572,7 +1591,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => IdentifyRequest",
+                    "Connections({}) => IdentifyRequest",
                     peer_id,
                 );
                 task.network
@@ -1626,7 +1645,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: handle properly?
                 log::warn!(
                     target: "network",
-                    "Connection({}) => ProtocolError(error={:?})",
+                    "Connections({}) => ProtocolError(error={:?})",
                     peer_id,
                     error,
                 );
@@ -1667,7 +1686,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 log::debug!(
                     target: "connections",
-                    "NewConnection({}, {})",
+                    "Connections({}) <= StartConnecting({})",
                     peer_id,
                     multiaddr
                 );
