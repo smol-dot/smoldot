@@ -178,7 +178,7 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
     /// Data structure containing the non-finalized blocks.
     ///
     /// If [`Config::full`], this only contains blocks whose header *and* body have been verified.
-    chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
+    chain: blocks_tree::NonFinalizedTree<TBl>,
 
     /// Extra fields. In a separate structure in order to be moved around.
     inner: Box<Inner<TBl, TRq, TSrc>>,
@@ -416,12 +416,6 @@ enum FinalityProof {
     Justification(([u8; 4], Vec<u8>)),
 }
 
-struct Block<TBl> {
-    // TODO: redundant with NonFinalizedTree
-    header: header::Header,
-    user_data: TBl,
-}
-
 impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
     pub fn new(config: Config) -> Self {
@@ -521,7 +515,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     pub fn block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
         if let Some(block) = self.chain.non_finalized_block_user_data(hash) {
-            return &block.user_data;
+            return block;
         }
 
         &self
@@ -539,7 +533,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
         if let Some(block) = self.chain.non_finalized_block_by_hash(hash) {
-            return &mut block.into_user_data().user_data;
+            return block.into_user_data();
         }
 
         &mut self
@@ -1353,14 +1347,12 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     /// Gives access to the user data of the block.
     pub fn user_data_mut(&mut self) -> &mut TBl {
         if self.is_verified {
-            &mut self
-                .inner
+            self.inner
                 .inner
                 .chain
                 .non_finalized_block_by_hash(&self.inner.expected_next_hash)
                 .unwrap()
                 .into_user_data()
-                .user_data
         } else {
             &mut self
                 .inner
@@ -1397,14 +1389,12 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
 
         let former_user_data = if self.is_verified {
             mem::replace(
-                &mut self
-                    .inner
+                self.inner
                     .inner
                     .chain
                     .non_finalized_block_by_hash(&self.inner.expected_next_hash)
                     .unwrap()
-                    .into_user_data()
-                    .user_data,
+                    .into_user_data(),
                 user_data,
             )
         } else {
@@ -1592,13 +1582,11 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     /// Gives access to the user data of the block.
     pub fn user_data_mut(&mut self) -> &mut TBl {
         if self.is_in_chain {
-            &mut self
-                .inner
+            self.inner
                 .chain
                 .non_finalized_block_by_hash(&self.announced_header_hash)
                 .unwrap()
                 .into_user_data()
-                .user_data
         } else {
             &mut self
                 .inner
@@ -1857,7 +1845,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
             .chain
             .non_finalized_block_by_hash(&self.best_block_hash)
         {
-            &mut block_access.into_user_data().user_data
+            block_access.into_user_data()
         } else {
             &mut self
                 .inner
@@ -2072,7 +2060,6 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
         self.parent
             .chain
             .non_finalized_block_user_data(&self.block_to_verify.parent_block_hash)
-            .map(|ud| &ud.user_data)
     }
 
     /// Returns the SCALE-encoded header of the block that was verified.
@@ -2100,19 +2087,9 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
         );
 
         // Now insert the block in `chain`.
-        // TODO: cloning the header :-/
-        let block = Block {
-            header: header::decode(
-                self.verified_header.scale_encoded_header(),
-                self.parent.chain.block_number_bytes(),
-            )
-            .unwrap()
-            .into(),
-            user_data: pending_block.user_data,
-        };
         self.parent
             .chain
-            .insert_verified_header(self.verified_header, block);
+            .insert_verified_header(self.verified_header, pending_block.user_data);
 
         // Because a new block is now in the chain, all the previously-unverifiable
         // finality proofs might have now become verifiable.
@@ -2155,6 +2132,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     ) {
         let outcome = match self.finality_proof_to_verify {
             FinalityProof::GrandpaCommit(scale_encoded_commit) => {
+                let block_number_bytes = self.parent.chain.block_number_bytes();
                 match self
                     .parent
                     .chain
@@ -2167,12 +2145,14 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         let mut finalized_blocks = Vec::new();
                         let mut pruned_blocks = Vec::new();
                         for block in finalized_blocks_iter {
+                            let header = header::Header::from(
+                                header::decode(&block.scale_encoded_header, block_number_bytes)
+                                    .unwrap(),
+                            );
                             if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
-                                finalized_blocks
-                                    .push((block.user_data.header, block.user_data.user_data));
+                                finalized_blocks.push((header, block.user_data));
                             } else {
-                                pruned_blocks
-                                    .push((block.user_data.header, block.user_data.user_data));
+                                pruned_blocks.push((header, block.user_data));
                             }
                         }
                         let _finalized_blocks =
@@ -2220,6 +2200,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 }
             }
             FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
+                let block_number_bytes = self.parent.chain.block_number_bytes();
                 match self.parent.chain.verify_justification(
                     consensus_engine_id,
                     &scale_encoded_justification,
@@ -2231,12 +2212,14 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         let mut finalized_blocks = Vec::new();
                         let mut pruned_blocks = Vec::new();
                         for block in finalized_blocks_iter {
+                            let header = header::Header::from(
+                                header::decode(&block.scale_encoded_header, block_number_bytes)
+                                    .unwrap(),
+                            );
                             if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
-                                finalized_blocks
-                                    .push((block.user_data.header, block.user_data.user_data));
+                                finalized_blocks.push((header, block.user_data));
                             } else {
-                                pruned_blocks
-                                    .push((block.user_data.header, block.user_data.user_data));
+                                pruned_blocks.push((header, block.user_data));
                             }
                         }
                         let _finalized_blocks =
