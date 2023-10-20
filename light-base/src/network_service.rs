@@ -60,10 +60,10 @@ use smoldot::{
         multiaddr::{self, Multiaddr},
         peer_id::PeerId,
     },
-    network::{basic_peering_strategy, protocol, service2},
+    network::{basic_peering_strategy, protocol, service},
 };
 
-pub use service2::{ChainId, EncodedMerkleProof, QueueNotificationError};
+pub use service::{ChainId, EncodedMerkleProof, QueueNotificationError};
 
 mod tasks;
 
@@ -150,7 +150,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
         let mut chain_ids = Vec::with_capacity(config.chains.len());
 
-        let mut network = service2::ChainNetwork::new(service2::Config {
+        let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
             peers_capacity: 8,
@@ -166,12 +166,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         for chain in config.chains {
             // TODO: can panic in case of duplicate chain, how do we handle that?
             let chain_id = network
-                .add_chain(service2::ChainConfig {
+                .add_chain(service::ChainConfig {
                     grandpa_protocol_config: if let Some(commit_finalized_height) =
                         chain.grandpa_protocol_finalized_block_height
                     {
                         // TODO: dummy values
-                        Some(service2::GrandpaState {
+                        Some(service::GrandpaState {
                             commit_finalized_height,
                             round_number: 1,
                             set_id: 0,
@@ -337,7 +337,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         if !log::log_enabled!(log::Level::Debug) {
             match &result {
                 Ok(_) | Err(BlocksRequestError::NoConnection) => {}
-                Err(BlocksRequestError::Request(service2::BlocksRequestError::Request(err)))
+                Err(BlocksRequestError::Request(service::BlocksRequestError::Request(err)))
                     if !err.is_protocol_error() => {}
                 Err(err) => {
                     log::warn!(
@@ -361,7 +361,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         chain_id: ChainId,
         begin_hash: [u8; 32],
         timeout: Duration,
-    ) -> Result<service2::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
+    ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -423,7 +423,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn set_local_grandpa_state(
         &self,
         chain_id: ChainId,
-        grandpa_state: service2::GrandpaState,
+        grandpa_state: service::GrandpaState,
     ) {
         self.messages_tx
             .send(ToBackground::SetLocalGrandpaState {
@@ -442,7 +442,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
-    ) -> Result<service2::EncodedMerkleProof, StorageProofRequestError> {
+    ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -577,7 +577,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// See [`service2::ChainNetwork::send_block_announce`].
+    /// See [`service::ChainNetwork::send_block_announce`].
     pub async fn send_block_announce(
         self: Arc<Self>,
         target: &PeerId,
@@ -601,7 +601,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// See [`service2::ChainNetwork::discover`].
+    /// See [`service::ChainNetwork::discover`].
     ///
     /// The `important_nodes` parameter indicates whether these nodes are considered note-worthy
     /// and should have additional logging.
@@ -691,7 +691,7 @@ pub enum Event {
     BlockAnnounce {
         peer_id: PeerId,
         chain_id: ChainId,
-        announce: service2::EncodedBlockAnnounce,
+        announce: service::EncodedBlockAnnounce,
     },
     GrandpaNeighborPacket {
         peer_id: PeerId,
@@ -702,7 +702,7 @@ pub enum Event {
     GrandpaCommitMessage {
         peer_id: PeerId,
         chain_id: ChainId,
-        message: service2::EncodedGrandpaCommitMessage,
+        message: service::EncodedGrandpaCommitMessage,
     },
 }
 
@@ -713,7 +713,7 @@ pub enum BlocksRequestError {
     NoConnection,
     /// Error during the request.
     #[display(fmt = "{_0}")]
-    Request(service2::BlocksRequestError),
+    Request(service::BlocksRequestError),
 }
 
 /// Error returned by [`NetworkService::grandpa_warp_sync_request`].
@@ -723,7 +723,7 @@ pub enum WarpSyncRequestError {
     NoConnection,
     /// Error during the request.
     #[display(fmt = "{_0}")]
-    Request(service2::GrandpaWarpSyncRequestError),
+    Request(service::GrandpaWarpSyncRequestError),
 }
 
 /// Error returned by [`NetworkService::storage_proof_request`].
@@ -735,7 +735,7 @@ pub enum StorageProofRequestError {
     RequestTooLarge,
     /// Error during the request.
     #[display(fmt = "{_0}")]
-    Request(service2::StorageProofRequestError),
+    Request(service::StorageProofRequestError),
 }
 
 /// Error returned by [`NetworkService::call_proof_request`].
@@ -747,7 +747,7 @@ pub enum CallProofRequestError {
     RequestTooLarge,
     /// Error during the request.
     #[display(fmt = "{_0}")]
-    Request(service2::CallProofRequestError),
+    Request(service::CallProofRequestError),
 }
 
 impl CallProofRequestError {
@@ -764,8 +764,8 @@ impl CallProofRequestError {
 
 enum ToBackground<TPlat: PlatformRef> {
     ConnectionMessage {
-        connection_id: service2::ConnectionId,
-        message: service2::ConnectionToCoordinator,
+        connection_id: service::ConnectionId,
+        message: service::ConnectionToCoordinator,
     },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
@@ -782,7 +782,7 @@ enum ToBackground<TPlat: PlatformRef> {
         begin_hash: [u8; 32],
         timeout: Duration,
         result:
-            oneshot::Sender<Result<service2::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+            oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
     },
     // TODO: serialize the request before sending over channel
     StartStorageProofRequest {
@@ -790,7 +790,7 @@ enum ToBackground<TPlat: PlatformRef> {
         target: PeerId,
         config: protocol::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
-        result: oneshot::Sender<Result<service2::EncodedMerkleProof, StorageProofRequestError>>,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
     },
     // TODO: serialize the request before sending over channel
     StartCallProofRequest {
@@ -798,7 +798,7 @@ enum ToBackground<TPlat: PlatformRef> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
-        result: oneshot::Sender<Result<service2::EncodedMerkleProof, CallProofRequestError>>,
+        result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
     },
     SetLocalBestBlock {
         chain_id: ChainId,
@@ -807,7 +807,7 @@ enum ToBackground<TPlat: PlatformRef> {
     },
     SetLocalGrandpaState {
         chain_id: ChainId,
-        grandpa_state: service2::GrandpaState,
+        grandpa_state: service::GrandpaState,
     },
     AnnounceTransaction {
         chain_id: ChainId,
@@ -853,7 +853,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 
     /// Data structure holding the entire state of the networking.
-    network: service2::ChainNetwork<TPlat::Instant>,
+    network: service::ChainNetwork<TPlat::Instant>,
 
     /// All known peers and their addresses.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId>,
@@ -874,36 +874,36 @@ struct BackgroundTask<TPlat: PlatformRef> {
     messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
 
     active_connections: HashMap<
-        service2::ConnectionId,
-        async_channel::Sender<service2::CoordinatorToConnection<TPlat::Instant>>,
+        service::ConnectionId,
+        async_channel::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
         fnv::FnvBuildHasher,
     >,
 
     blocks_requests: HashMap<
-        service2::SubstreamId,
+        service::SubstreamId,
         oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     grandpa_warp_sync_requests: HashMap<
-        service2::SubstreamId,
-        oneshot::Sender<Result<service2::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     storage_proof_requests: HashMap<
-        service2::SubstreamId,
-        oneshot::Sender<Result<service2::EncodedMerkleProof, StorageProofRequestError>>,
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     call_proof_requests: HashMap<
-        service2::SubstreamId,
-        oneshot::Sender<Result<service2::EncodedMerkleProof, CallProofRequestError>>,
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
-    kademlia_find_node_requests: HashMap<service2::SubstreamId, ChainId, fnv::FnvBuildHasher>,
+    kademlia_find_node_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
@@ -918,7 +918,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO :4 is an arbitrary constant, make configurable
                 if task
                     .network
-                    .gossip_desired_num(*chain_id, service2::GossipKind::ConsensusTransactions)
+                    .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
                     >= 4
                 {
                     break;
@@ -941,7 +941,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network.gossip_insert_desired(
                     *chain_id,
                     peer_id,
-                    service2::GossipKind::ConsensusTransactions,
+                    service::GossipKind::ConsensusTransactions,
                 );
             }
         }
@@ -963,7 +963,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.platform.now(),
                     chain_id,
                     &peer_id,
-                    service2::GossipKind::ConsensusTransactions,
+                    service::GossipKind::ConsensusTransactions,
                 )
                 .unwrap();
 
@@ -977,11 +977,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
         enum WhatHappened<TPlat: PlatformRef> {
             Message(ToBackground<TPlat>),
-            NetworkEvent(service2::Event),
+            NetworkEvent(service::Event),
             StartConnect(PeerId),
             MessageToConnection {
-                connection_id: service2::ConnectionId,
-                message: service2::CoordinatorToConnection<TPlat::Instant>,
+                connection_id: service::ConnectionId,
+                message: service::CoordinatorToConnection<TPlat::Instant>,
             },
             EventSendersReady,
         }
@@ -1081,7 +1081,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                         task.blocks_requests.insert(substream_id, result);
                     }
-                    Err(service2::StartRequestError::NoConnection) => {
+                    Err(service::StartRequestError::NoConnection) => {
                         let _ = result.send(Err(BlocksRequestError::NoConnection));
                     }
                 }
@@ -1110,7 +1110,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                         task.grandpa_warp_sync_requests.insert(substream_id, result);
                     }
-                    Err(service2::StartRequestError::NoConnection) => {
+                    Err(service::StartRequestError::NoConnection) => {
                         let _ = result.send(Err(WarpSyncRequestError::NoConnection));
                     }
                 }
@@ -1142,10 +1142,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                         task.storage_proof_requests.insert(substream_id, result);
                     }
-                    Err(service2::StartRequestMaybeTooLargeError::NoConnection) => {
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
                         let _ = result.send(Err(StorageProofRequestError::NoConnection));
                     }
-                    Err(service2::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
                         // TODO: consider dealing with the problem of requests too large internally by sending multiple requests
                         let _ = result.send(Err(StorageProofRequestError::RequestTooLarge));
                     }
@@ -1179,10 +1179,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                         task.call_proof_requests.insert(substream_id, result);
                     }
-                    Err(service2::StartRequestMaybeTooLargeError::NoConnection) => {
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
                         let _ = result.send(Err(CallProofRequestError::NoConnection));
                     }
-                    Err(service2::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
                         let _ = result.send(Err(CallProofRequestError::RequestTooLarge));
                     }
                 };
@@ -1228,7 +1228,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: collecting in a Vec :-/
                 for peer in task
                     .network
-                    .gossip_connected_peers(chain_id, service2::GossipKind::ConsensusTransactions)
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
                     .cloned()
                     .collect::<Vec<_>>()
                 {
@@ -1310,7 +1310,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::HandshakeFinished {
+            WhatHappened::NetworkEvent(service::Event::HandshakeFinished {
                 peer_id,
                 expected_peer_id,
                 id,
@@ -1327,7 +1327,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::BlockAnnounce {
+            WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
                 peer_id,
                 announce,
@@ -1346,13 +1346,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     announce,
                 }
             }
-            WhatHappened::NetworkEvent(service2::Event::GossipConnected {
+            WhatHappened::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
                 chain_id,
                 role,
                 best_number,
                 best_hash,
-                kind: service2::GossipKind::ConsensusTransactions,
+                kind: service::GossipKind::ConsensusTransactions,
             }) => {
                 log::debug!(
                     target: "network",
@@ -1370,11 +1370,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     best_block_hash: best_hash,
                 }
             }
-            WhatHappened::NetworkEvent(service2::Event::GossipOpenFailed {
+            WhatHappened::NetworkEvent(service::Event::GossipOpenFailed {
                 peer_id,
                 chain_id,
                 error,
-                kind: service2::GossipKind::ConsensusTransactions,
+                kind: service::GossipKind::ConsensusTransactions,
             }) => {
                 log::debug!(
                     target: "network",
@@ -1392,14 +1392,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
-                    service2::GossipKind::ConsensusTransactions,
+                    service::GossipKind::ConsensusTransactions,
                 );
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::GossipDisconnected {
+            WhatHappened::NetworkEvent(service::Event::GossipDisconnected {
                 peer_id,
                 chain_id,
-                kind: service2::GossipKind::ConsensusTransactions,
+                kind: service::GossipKind::ConsensusTransactions,
             }) => {
                 log::debug!(
                     target: "network",
@@ -1417,13 +1417,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
-                    service2::GossipKind::ConsensusTransactions,
+                    service::GossipKind::ConsensusTransactions,
                 );
                 Event::Disconnected { peer_id, chain_id }
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service2::RequestResult::Blocks(response),
+                response: service::RequestResult::Blocks(response),
             }) => {
                 let _ = task
                     .blocks_requests
@@ -1432,9 +1432,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(response.map_err(BlocksRequestError::Request));
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service2::RequestResult::GrandpaWarpSync(response),
+                response: service::RequestResult::GrandpaWarpSync(response),
             }) => {
                 let _ = task
                     .grandpa_warp_sync_requests
@@ -1443,9 +1443,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(response.map_err(WarpSyncRequestError::Request));
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service2::RequestResult::StorageProof(response),
+                response: service::RequestResult::StorageProof(response),
             }) => {
                 let _ = task
                     .storage_proof_requests
@@ -1454,9 +1454,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(response.map_err(StorageProofRequestError::Request));
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service2::RequestResult::CallProof(response),
+                response: service::RequestResult::CallProof(response),
             }) => {
                 let _ = task
                     .call_proof_requests
@@ -1465,9 +1465,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(response.map_err(CallProofRequestError::Request));
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service2::RequestResult::KademliaFindNode(Ok(nodes)),
+                response: service::RequestResult::KademliaFindNode(Ok(nodes)),
             }) => {
                 let chain_id = task
                     .kademlia_find_node_requests
@@ -1507,9 +1507,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult {
+            WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service2::RequestResult::KademliaFindNode(Err(error)),
+                response: service::RequestResult::KademliaFindNode(Err(error)),
             }) => {
                 let chain_id = task
                     .kademlia_find_node_requests
@@ -1526,11 +1526,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // No error is printed if the request fails due to a benign networking error such
                 // as an unresponsive peer.
                 match error {
-                    service2::KademliaFindNodeError::RequestFailed(err)
+                    service::KademliaFindNodeError::RequestFailed(err)
                         if !err.is_protocol_error() => {}
 
-                    service2::KademliaFindNodeError::RequestFailed(
-                        service2::RequestError::Substream(
+                    service::KademliaFindNodeError::RequestFailed(
+                        service::RequestError::Substream(
                             connection::established::RequestError::ProtocolNotAvailable,
                         ),
                     ) => {
@@ -1556,14 +1556,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::RequestResult { .. }) => {
+            WhatHappened::NetworkEvent(service::Event::RequestResult { .. }) => {
                 // We never start any other kind of requests.
                 unreachable!()
             }
-            WhatHappened::NetworkEvent(service2::Event::GossipInDesired {
+            WhatHappened::NetworkEvent(service::Event::GossipInDesired {
                 peer_id,
                 chain_id,
-                kind: service2::GossipKind::ConsensusTransactions,
+                kind: service::GossipKind::ConsensusTransactions,
             }) => {
                 // TODO: reject if too many in slots?
                 log::debug!(
@@ -1577,16 +1577,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.platform.now(),
                         chain_id,
                         &peer_id,
-                        service2::GossipKind::ConsensusTransactions,
+                        service::GossipKind::ConsensusTransactions,
                     )
                     .unwrap();
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::GossipInDesiredCancel { .. }) => {
+            WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
                 unreachable!()
             }
-            WhatHappened::NetworkEvent(service2::Event::IdentifyRequestIn {
+            WhatHappened::NetworkEvent(service::Event::IdentifyRequestIn {
                 peer_id,
                 substream_id,
             }) => {
@@ -1599,12 +1599,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .respond_identify(substream_id, &task.identify_agent_version);
                 continue;
             }
-            WhatHappened::NetworkEvent(service2::Event::BlocksRequestIn { .. }) => unreachable!(),
-            WhatHappened::NetworkEvent(service2::Event::RequestInCancel { .. }) => {
+            WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
+            WhatHappened::NetworkEvent(service::Event::RequestInCancel { .. }) => {
                 // All incoming requests are immediately answered.
                 unreachable!()
             }
-            WhatHappened::NetworkEvent(service2::Event::GrandpaNeighborPacket {
+            WhatHappened::NetworkEvent(service::Event::GrandpaNeighborPacket {
                 chain_id,
                 peer_id,
                 state,
@@ -1624,7 +1624,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     finalized_block_height: state.commit_finalized_height,
                 }
             }
-            WhatHappened::NetworkEvent(service2::Event::GrandpaCommitMessage {
+            WhatHappened::NetworkEvent(service::Event::GrandpaCommitMessage {
                 chain_id,
                 peer_id,
                 message,
@@ -1642,7 +1642,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     message,
                 }
             }
-            WhatHappened::NetworkEvent(service2::Event::ProtocolError { peer_id, error }) => {
+            WhatHappened::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log::warn!(
                     target: "network",
@@ -1701,7 +1701,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let (connection_id, connection_task) =
                             task.network.add_single_stream_connection(
                                 task.platform.now(),
-                                service2::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                                service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                                     is_initiator: true,
                                 },
                                 multiaddr.clone(),
@@ -1744,7 +1744,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let (connection_id, connection_task) =
                             task.network.add_multi_stream_connection(
                                 task.platform.now(),
-                                service2::MultiStreamHandshakeKind::WebRtc {
+                                service::MultiStreamHandshakeKind::WebRtc {
                                     is_initiator: true,
                                     local_tls_certificate_multihash,
                                     remote_tls_certificate_multihash,

@@ -24,17 +24,17 @@ use futures_lite::FutureExt as _;
 use futures_util::{future, stream::FuturesUnordered, StreamExt as _};
 use smoldot::{
     libp2p::{collection::SubstreamFate, Multiaddr},
-    network::service2,
+    network::service,
 };
 
 /// Asynchronous task managing a specific single-stream connection.
 pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     address: Multiaddr,
     platform: TPlat,
-    connection_id: service2::ConnectionId,
-    mut connection_task: service2::SingleStreamConnectionTask<TPlat::Instant>,
+    connection_id: service::ConnectionId,
+    mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     mut coordinator_to_connection: async_channel::Receiver<
-        service2::CoordinatorToConnection<TPlat::Instant>,
+        service::CoordinatorToConnection<TPlat::Instant>,
     >,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
@@ -137,7 +137,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         // Now wait for something interesting to happen before looping again.
 
         enum WhatHappened<TPlat: PlatformRef> {
-            CoordinatorMessage(service2::CoordinatorToConnection<TPlat::Instant>),
+            CoordinatorMessage(service::CoordinatorToConnection<TPlat::Instant>),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
@@ -208,10 +208,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     address: Multiaddr,
     platform: TPlat,
-    connection_id: service2::ConnectionId,
-    mut connection_task: service2::MultiStreamConnectionTask<TPlat::Instant, usize>,
+    connection_id: service::ConnectionId,
+    mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
     mut coordinator_to_connection: async_channel::Receiver<
-        service2::CoordinatorToConnection<TPlat::Instant>,
+        service::CoordinatorToConnection<TPlat::Instant>,
     >,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
@@ -273,7 +273,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // Now wait for something interesting to happen before looping again.
 
         enum WhatHappened<TPlat: PlatformRef> {
-            CoordinatorMessage(service2::CoordinatorToConnection<TPlat::Instant>),
+            CoordinatorMessage(service::CoordinatorToConnection<TPlat::Instant>),
             CoordinatorDead,
             SocketEvent(pin::Pin<Box<TPlat::Stream>>, usize),
             MessageSent,
