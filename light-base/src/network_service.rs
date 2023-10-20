@@ -941,7 +941,32 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     service2::GossipKind::ConsensusTransactions,
                 );
+
+                // TODO: work-around for infinite loop
+                break;
             }
+        }
+
+        // TODO: handle differently
+        // TODO: doc
+        loop {
+            let Some((peer_id, chain_id)) = task
+                .network
+                .connected_unopened_gossip_desired()
+                .next()
+                .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
+            else {
+                break;
+            };
+
+            task.network
+                .gossip_open(
+                    task.platform.now(),
+                    chain_id,
+                    &peer_id,
+                    service2::GossipKind::ConsensusTransactions,
+                )
+                .unwrap();
         }
 
         enum WhatHappened<TPlat: PlatformRef> {
@@ -1257,7 +1282,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
-                for chain_id in task.log_chain_names.keys() {
+                // TODO: restore
+                /*for chain_id in task.log_chain_names.keys() {
                     let substream_id = task
                         .network
                         .start_kademlia_find_node_request(
@@ -1273,7 +1299,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .kademlia_find_node_requests
                         .insert(substream_id, *chain_id);
                     debug_assert!(_prev_value.is_none());
-                }
+                }*/
 
                 continue;
             }

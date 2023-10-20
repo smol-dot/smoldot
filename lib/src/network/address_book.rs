@@ -39,6 +39,22 @@ enum AddressState {
     Disconnected,
 }
 
+/// Identifier of a connection.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionId(usize);
+
+impl ConnectionId {
+    /// Returns the value that compares inferior or equal to any possible [`ConnectionId`̀].
+    pub fn min_value() -> Self {
+        ConnectionId(usize::min_value())
+    }
+
+    /// Returns the value that compares superior or equal to any possible [`ConnectionId`̀].
+    pub fn max_value() -> Self {
+        ConnectionId(usize::max_value())
+    }
+}
+
 impl<TChainId> AddressBook<TChainId>
 where
     TChainId: PartialOrd + Ord + Eq + Hash,
@@ -50,8 +66,22 @@ where
         }
     }
 
+    /*pub fn insert_connection(
+        &mut self,
+        expected_peer_id: Option<PeerId>,
+        address: Vec<u8>,
+    ) -> ConnectionId {
+    }*/
+
+    pub fn remove_connection(&mut self, id: ConnectionId) {}
+
     pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
         self.peers_chains.insert((chain, peer_id), ());
+    }
+
+    pub fn remove_chain_peer(&mut self, peer_id: &PeerId, chain: TChainId) {
+        // TODO: cloning
+        self.peers_chains.remove(&(chain, peer_id.clone()));
     }
 
     pub fn insert_address(&mut self, peer_id: &PeerId, multiaddr: &[u8]) {
@@ -75,6 +105,13 @@ where
     /// Picks an address from the list whose state is "not connected", and switches it to
     /// "pending". Returns `None` if no such address is available.
     pub fn addr_to_pending(&mut self, peer_id: &PeerId) -> Option<&[u8]> {
-        todo!()
+        if let Some(((_, address), state)) =
+            self.addresses.iter_mut().find(|((p, _), _)| p == peer_id)
+        {
+            *state = AddressState::Pending;
+            Some(&address)
+        } else {
+            None
+        }
     }
 }
