@@ -926,7 +926,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
 
                 // TODO: infinite loop right now
-                let peer_id = task.address_book.random_peer(chain_id).map(|p| p.clone()); // TODO: spurious cloning
+                let peer_id = task
+                    .address_book
+                    .assign_out_slot(chain_id)
+                    .map(|p| p.clone()); // TODO: spurious cloning
                 let Some(peer_id) = peer_id else { break };
 
                 log::debug!(
@@ -941,9 +944,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     service2::GossipKind::ConsensusTransactions,
                 );
-
-                // TODO: work-around for infinite loop
-                break;
             }
         }
 

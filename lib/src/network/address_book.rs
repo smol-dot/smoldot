@@ -17,7 +17,7 @@
 
 use alloc::{
     borrow::ToOwned as _,
-    collections::{btree_map, BTreeMap},
+    collections::{btree_map, btree_set, BTreeMap},
     vec::Vec,
 };
 
@@ -29,7 +29,7 @@ pub use crate::libp2p::PeerId;
 pub struct AddressBook<TChainId> {
     addresses: BTreeMap<(PeerId, Vec<u8>), AddressState>,
 
-    peers_chains: BTreeMap<(TChainId, PeerId), ()>, // TODO: value
+    peers_chains: BTreeMap<(TChainId, PeerId), PeerChainState>,
 }
 
 #[derive(Debug)]
@@ -37,6 +37,13 @@ enum AddressState {
     Connected,
     Pending,
     Disconnected,
+}
+
+#[derive(Debug)]
+enum PeerChainState {
+    Belongs,
+    InSlot,
+    OutSlot,
 }
 
 /// Identifier of a connection.
@@ -76,7 +83,9 @@ where
     pub fn remove_connection(&mut self, id: ConnectionId) {}
 
     pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
-        self.peers_chains.insert((chain, peer_id), ());
+        if let btree_map::Entry::Vacant(entry) = self.peers_chains.entry((chain, peer_id)) {
+            entry.insert(PeerChainState::Belongs);
+        }
     }
 
     pub fn remove_chain_peer(&mut self, peer_id: &PeerId, chain: TChainId) {
@@ -93,13 +102,18 @@ where
         }
     }
 
-    pub fn random_peer(&mut self, chain_id: &TChainId) -> Option<&PeerId> {
-        // TODO: should switch peer state
-        self.peers_chains
-            .iter()
-            .filter(|((c, _), _)| c == chain_id)
-            .map(|((_, p), _)| p)
-            .next()
+    pub fn assign_out_slot(&mut self, chain: &TChainId) -> Option<&PeerId> {
+        // TODO: optimize
+        if let Some(((_, peer_id), state)) = self
+            .peers_chains
+            .iter_mut()
+            .find(|((c, _), s)| *c == *chain && !matches!(*s, PeerChainState::OutSlot))
+        {
+            *state = PeerChainState::OutSlot;
+            Some(peer_id)
+        } else {
+            None
+        }
     }
 
     /// Picks an address from the list whose state is "not connected", and switches it to
