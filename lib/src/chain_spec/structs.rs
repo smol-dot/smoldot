@@ -42,11 +42,13 @@ pub(super) struct ClientSpec {
     /// The given runtime code will be used to substitute the on-chain runtime code starting with
     /// the given block number until the `spec_version`
     /// ([`crate::executor::host::CoreVersionRef::spec_version`]) on chain changes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     // TODO: make use of this
     pub(super) code_substitutes: HashMap<u64, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) protocol_id: Option<String>,
     #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) fork_id: Option<String>,
@@ -58,14 +60,17 @@ pub(super) struct ClientSpec {
     #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) block_number_bytes: Option<u8>,
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) bad_blocks: Option<HashSet<HashHexString, FnvBuildHasher>>,
     // Unused but for some reason still part of the chain specs.
     #[serde(default, skip_serializing)]
     #[allow(unused)]
     pub(super) consensus_engine: (),
     pub(super) genesis: Genesis,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) light_sync_state: Option<LightSyncState>,
     // Note that in Substrate/Cumulus this field is only named `relay_chain` and `relayChain` is
     // not accepted (as of 2022-06-09). This seems to be an oversight, as there are only two
