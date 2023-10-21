@@ -243,7 +243,7 @@ struct Inner {
 
     active_connections: HashMap<
         service::ConnectionId,
-        channel::Sender<service::CoordinatorToConnection<Instant>>,
+        channel::Sender<service::CoordinatorToConnection>,
         fnv::FnvBuildHasher,
     >,
 
@@ -1314,9 +1314,7 @@ async fn background_task(mut inner: Inner) {
 
             ToBackground::StartKademliaDiscoveries { when_done } => {
                 for chain_index in 0..inner.databases.len() {
-                    let operation_id = inner
-                        .network
-                        .start_kademlia_discovery_round(Instant::now(), chain_index);
+                    let operation_id = inner.network.start_kademlia_discovery_round(chain_index);
                     let _prev_val = inner
                         .kademlia_discovery_operations
                         .insert(operation_id, chain_index);
@@ -1370,7 +1368,6 @@ async fn background_task(mut inner: Inner) {
                 // The call to `start_blocks_request` below panics if we have no active connection.
                 if inner.network.can_start_requests(&target) {
                     let request_id = inner.network.start_blocks_request(
-                        Instant::now(),
                         &target,
                         chain_index,
                         config,

@@ -900,7 +900,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     active_connections: HashMap<
         service::ConnectionId,
-        async_channel::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
+        async_channel::Sender<service::CoordinatorToConnection>,
         fnv::FnvBuildHasher,
     >,
 
@@ -976,7 +976,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             StartConnect(service::StartConnect<TPlat::Instant>),
             MessageToConnection {
                 connection_id: service::ConnectionId,
-                message: service::CoordinatorToConnection<TPlat::Instant>,
+                message: service::CoordinatorToConnection,
             },
             EventSendersReady,
         }
@@ -1165,13 +1165,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
-                let request_id = task.network.start_blocks_request(
-                    task.platform.now(),
-                    &target,
-                    chain_index,
-                    config,
-                    timeout,
-                );
+                let request_id =
+                    task.network
+                        .start_blocks_request(&target, chain_index, config, timeout);
 
                 task.blocks_requests.insert(request_id, result);
                 continue;
@@ -1196,7 +1192,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 let request_id = task.network.start_grandpa_warp_sync_request(
-                    task.platform.now(),
                     &target,
                     chain_index,
                     begin_hash,
@@ -1229,7 +1224,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 let request_id = match task.network.start_storage_proof_request(
-                    task.platform.now(),
                     &target,
                     chain_index,
                     config,
@@ -1269,7 +1263,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 let request_id = match task.network.start_call_proof_request(
-                    task.platform.now(),
                     &target,
                     chain_index,
                     config,
@@ -1398,9 +1391,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
                 for chain_index in 0..task.log_chain_names.len() {
-                    let operation_id = task
-                        .network
-                        .start_kademlia_discovery_round(task.platform.now(), chain_index);
+                    let operation_id = task.network.start_kademlia_discovery_round(chain_index);
 
                     let _prev_value = task
                         .kademlia_discovery_operations

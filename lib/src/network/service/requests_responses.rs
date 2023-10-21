@@ -361,13 +361,12 @@ where
     // TODO: more docs
     pub fn start_blocks_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
     ) -> OutRequestId {
-        self.start_blocks_request_inner(now, target, chain_index, config, timeout, true)
+        self.start_blocks_request_inner(target, chain_index, config, timeout, true)
     }
 
     /// Sends a blocks request to the given peer.
@@ -377,18 +376,16 @@ where
     // TODO: more docs
     pub fn start_blocks_request_unchecked(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
     ) -> OutRequestId {
-        self.start_blocks_request_inner(now, target, chain_index, config, timeout, false)
+        self.start_blocks_request_inner(target, chain_index, config, timeout, false)
     }
 
     fn start_blocks_request_inner(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
@@ -408,7 +405,7 @@ where
             target,
             self.protocol_index(chain_index, 0),
             request_data,
-            now + timeout,
+            timeout,
         ) {
             Ok(id) => id,
             Err(peers::StartRequestError::RequestTooLarge) => {
@@ -437,7 +434,6 @@ where
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     pub fn start_grandpa_warp_sync_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
@@ -449,7 +445,7 @@ where
             target,
             self.protocol_index(chain_index, 3),
             request_data,
-            now + timeout,
+            timeout,
         ) {
             Ok(id) => id,
             Err(peers::StartRequestError::RequestTooLarge) => {
@@ -483,7 +479,6 @@ where
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     pub fn start_state_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         block_hash: &[u8; 32],
@@ -503,7 +498,7 @@ where
             target,
             self.protocol_index(chain_index, 4),
             request_data,
-            now + timeout,
+            timeout,
         ) {
             Ok(id) => id,
             Err(peers::StartRequestError::RequestTooLarge) => {
@@ -528,7 +523,6 @@ where
     // TODO: more docs
     pub fn start_storage_proof_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
@@ -546,7 +540,7 @@ where
             target,
             self.protocol_index(chain_index, 1),
             request_data,
-            now + timeout,
+            timeout,
         )?;
 
         let _prev_value = self
@@ -572,7 +566,6 @@ where
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     pub fn start_call_proof_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
@@ -590,7 +583,7 @@ where
             target,
             self.protocol_index(chain_index, 1),
             request_data,
-            now + timeout,
+            timeout,
         )?;
 
         let _prev_value = self
@@ -731,11 +724,7 @@ where
     ///
     /// This function might generate a message destined a connection. Use
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
-    pub fn start_kademlia_discovery_round(
-        &'_ mut self,
-        now: TNow,
-        chain_index: usize,
-    ) -> KademliaOperationId {
+    pub fn start_kademlia_discovery_round(&'_ mut self, chain_index: usize) -> KademliaOperationId {
         let random_peer_id = {
             let mut pub_key = [0; 32];
             self.randomness.fill_bytes(&mut pub_key);
@@ -772,7 +761,6 @@ where
 
             self.start_kademlia_find_node_inner(
                 &queried_peer,
-                now,
                 chain_index,
                 random_peer_id.as_bytes(),
                 Some(kademlia_operation_id),
@@ -794,17 +782,15 @@ where
     pub fn start_kademlia_find_node(
         &mut self,
         target: &PeerId,
-        now: TNow,
         chain_index: usize,
         close_to_key: &[u8],
     ) -> OutRequestId {
-        self.start_kademlia_find_node_inner(target, now, chain_index, close_to_key, None)
+        self.start_kademlia_find_node_inner(target, chain_index, close_to_key, None)
     }
 
     fn start_kademlia_find_node_inner(
         &mut self,
         target: &PeerId,
-        now: TNow,
         chain_index: usize,
         close_to_key: &[u8],
         part_of_operation: Option<KademliaOperationId>,
@@ -812,7 +798,7 @@ where
         let request_data = protocol::build_find_node_request(close_to_key);
         // The timeout needs to be long enough to potentially download the maximum
         // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
-        let timeout = now + Duration::from_secs(8);
+        let timeout = Duration::from_secs(8);
 
         let id = match self.inner.start_request(
             target,

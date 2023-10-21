@@ -216,7 +216,7 @@ where
     /// Calling this function might generate data to send to the connection. You should call
     /// [`SingleStreamConnectionTask::read_write`] after this function has returned (unless you
     /// have called [`SingleStreamConnectionTask::reset`] in the past).
-    pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
+    pub fn inject_coordinator_message(&mut self, now: &TNow, message: CoordinatorToConnection) {
         match (message.inner, &mut self.connection) {
             (
                 CoordinatorToConnectionInner::AcceptInbound {
@@ -266,7 +266,7 @@ where
                 let inner_substream_id = established.add_request(
                     protocol_name,
                     request_data,
-                    timeout,
+                    now.clone() + timeout,
                     max_response_size,
                     Some(substream_id),
                 );
@@ -292,7 +292,7 @@ where
                     protocol_name,
                     handshake,
                     max_handshake_size,
-                    handshake_timeout,
+                    now.clone() + handshake_timeout,
                     Some(outer_substream_id),
                 );
 

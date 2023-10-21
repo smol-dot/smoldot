@@ -78,7 +78,7 @@ pub(super) async fn established_connection_task(
     socket: impl AsyncReadWrite,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection<Instant>>,
+    mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: channel::Sender<super::ToBackground>,
 ) {
     // The socket is wrapped around an object containing a read buffer and a write buffer and
@@ -163,7 +163,7 @@ pub(super) async fn established_connection_task(
         // Now wait for something interesting to happen before looping again.
 
         enum WhatHappened {
-            CoordinatorMessage(CoordinatorToConnection<Instant>),
+            CoordinatorMessage(CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
@@ -218,7 +218,7 @@ pub(super) async fn established_connection_task(
 
         match what_happened {
             WhatHappened::CoordinatorMessage(message) => {
-                connection_task.inject_coordinator_message(message);
+                connection_task.inject_coordinator_message(&Instant::now(), message);
             }
             WhatHappened::CoordinatorDead => return,
             WhatHappened::SocketEvent => {}
