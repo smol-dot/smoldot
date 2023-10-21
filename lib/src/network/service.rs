@@ -1206,7 +1206,7 @@ where
                                         .next()
                                         .is_none()
                                     {
-                                        let substream_id = self.inner.open_out_notifications(
+                                        let new_substream_id = self.inner.open_out_notifications(
                                             connection_id,
                                             protocol::encode_protocol_name_string(
                                                 protocol::ProtocolName::Transactions {
@@ -1223,7 +1223,7 @@ where
                                         );
 
                                         self.substreams.insert(
-                                            substream_id,
+                                            new_substream_id,
                                             SubstreamInfo {
                                                 connection_id,
                                                 direction: SubstreamDirection::Out,
@@ -1236,7 +1236,7 @@ where
                                             peer_id.clone(),
                                             SubstreamDirection::Out,
                                             NotificationsSubstreamState::Pending,
-                                            substream_id,
+                                            new_substream_id,
                                         ));
                                     }
 
@@ -1261,7 +1261,7 @@ where
                                         .next()
                                         .is_none()
                                     {
-                                        self.inner.open_out_notifications(
+                                        let new_substream_id = self.inner.open_out_notifications(
                                             connection_id,
                                             protocol::encode_protocol_name_string(
                                                 protocol::ProtocolName::Grandpa {
@@ -1278,7 +1278,7 @@ where
                                         );
 
                                         self.substreams.insert(
-                                            substream_id,
+                                            new_substream_id,
                                             SubstreamInfo {
                                                 connection_id,
                                                 direction: SubstreamDirection::Out,
@@ -1291,7 +1291,7 @@ where
                                             peer_id.clone(),
                                             SubstreamDirection::Out,
                                             NotificationsSubstreamState::Pending,
-                                            substream_id,
+                                            new_substream_id,
                                         ));
                                     }
 
