@@ -184,9 +184,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
-    mut coordinator_to_connection: async_channel::Receiver<
-        service::CoordinatorToConnection<TPlat::Instant>,
-    >,
+    mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     let mut socket = pin::pin!(socket);
@@ -258,14 +256,14 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
         // Now wait for something interesting to happen before looping again.
 
-        enum WhatHappened<TPlat: PlatformRef> {
-            CoordinatorMessage(service::CoordinatorToConnection<TPlat::Instant>),
+        enum WhatHappened {
+            CoordinatorMessage(service::CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
         }
 
-        let what_happened: WhatHappened<TPlat> = {
+        let what_happened: WhatHappened = {
             let coordinator_message = async {
                 match coordinator_to_connection.next().await {
                     Some(msg) => WhatHappened::CoordinatorMessage(msg),
@@ -312,7 +310,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
         match what_happened {
             WhatHappened::CoordinatorMessage(message) => {
-                connection_task.inject_coordinator_message(message);
+                connection_task.inject_coordinator_message(&platform.now(), message);
             }
             WhatHappened::CoordinatorDead => return,
             WhatHappened::SocketEvent => {}
@@ -333,9 +331,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
-    mut coordinator_to_connection: async_channel::Receiver<
-        service::CoordinatorToConnection<TPlat::Instant>,
-    >,
+    mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
@@ -365,7 +361,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         // Now wait for something interesting to happen before looping again.
 
         enum WhatHappened<TPlat: PlatformRef> {
-            CoordinatorMessage(service::CoordinatorToConnection<TPlat::Instant>),
+            CoordinatorMessage(service::CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent(pin::Pin<Box<TPlat::Stream>>, usize),
             MessageSent,
@@ -437,7 +433,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
         match what_happened {
             WhatHappened::CoordinatorMessage(message) => {
-                connection_task.inject_coordinator_message(message);
+                connection_task.inject_coordinator_message(&platform.now(), message);
             }
             WhatHappened::CoordinatorDead => return,
             WhatHappened::SocketEvent(mut socket, substream_id) => {
