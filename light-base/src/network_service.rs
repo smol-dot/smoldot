@@ -52,13 +52,14 @@ use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools as _;
+use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     header,
     informant::{BytesDisplay, HashDisplay},
     libp2p::{
         connection,
         multiaddr::{self, Multiaddr},
-        peer_id::PeerId,
+        peer_id::{self, PeerId},
     },
     network::{basic_peering_strategy, protocol, service},
 };
@@ -227,6 +228,11 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         // Spawn main task that processes the network service.
         let task = Box::pin(
             background_task(BackgroundTask {
+                randomness: rand_chacha::ChaCha20Rng::from_seed({
+                    let mut seed = [0; 32];
+                    config.platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
                 identify_agent_version: config.identify_agent_version,
                 log_chain_names: log_chain_names.clone(),
                 messages_tx: messages_tx.clone(),
@@ -841,6 +847,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// See [`Config::platform`].
     platform: TPlat,
 
+    /// Random number generator.
+    randomness: rand_chacha::ChaCha20Rng,
+
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
 
@@ -1289,24 +1298,46 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
-                // TODO: restore
-                /*for chain_id in task.log_chain_names.keys() {
-                    let substream_id = task
-                        .network
-                        .start_kademlia_find_node_request(
-                            task.platform.now(),
-                            todo!(),
-                            *chain_id,
-                            todo!(),
-                            Duration::from_secs(20),
-                        )
-                        .unwrap(); // TODO: explain the unwrap
+                for chain_id in task.log_chain_names.keys() {
+                    let random_peer_id = {
+                        let mut pub_key = [0; 32];
+                        rand_chacha::rand_core::RngCore::fill_bytes(
+                            &mut task.randomness,
+                            &mut pub_key,
+                        );
+                        PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+                    };
 
-                    let _prev_value = task
-                        .kademlia_find_node_requests
-                        .insert(substream_id, *chain_id);
-                    debug_assert!(_prev_value.is_none());
-                }*/
+                    // TODO: select target closest to the random peer instead
+                    let target = task
+                        .network
+                        .gossip_connected_peers(
+                            *chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .next()
+                        .map(|p| p.clone());
+
+                    if let Some(target) = target {
+                        let substream_id = match task.network.start_kademlia_find_node_request(
+                            task.platform.now(),
+                            &target,
+                            *chain_id,
+                            &random_peer_id,
+                            Duration::from_secs(20),
+                        ) {
+                            Ok(s) => s,
+                            Err(service::StartRequestError::NoConnection) => unreachable!(),
+                        };
+
+                        let _prev_value = task
+                            .kademlia_find_node_requests
+                            .insert(substream_id, *chain_id);
+                        debug_assert!(_prev_value.is_none());
+                    } else {
+                        // TODO: log message
+                    }
+                }
 
                 continue;
             }

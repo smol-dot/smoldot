@@ -213,6 +213,7 @@ struct SubstreamInfo {
     protocol: Protocol,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Protocol {
     Identify,
     Ping,
@@ -253,6 +254,31 @@ enum NotificationsProtocol {
     BlockAnnounces { chain_index: usize },
     Transactions { chain_index: usize },
     Grandpa { chain_index: usize },
+}
+
+impl TryFrom<Protocol> for NotificationsProtocol {
+    type Error = ();
+
+    fn try_from(value: Protocol) -> Result<Self, Self::Error> {
+        match value {
+            Protocol::BlockAnnounces { chain_index } => {
+                Ok(NotificationsProtocol::BlockAnnounces { chain_index })
+            }
+            Protocol::Transactions { chain_index } => {
+                Ok(NotificationsProtocol::Transactions { chain_index })
+            }
+            Protocol::Grandpa { chain_index } => Ok(NotificationsProtocol::Grandpa { chain_index }),
+            Protocol::Identify => Err(()),
+            Protocol::Ping => Err(()),
+            Protocol::Sync { .. } => Err(()),
+            Protocol::LightUnknown { .. } => Err(()),
+            Protocol::LightStorage { .. } => Err(()),
+            Protocol::LightCall { .. } => Err(()),
+            Protocol::Kad { .. } => Err(()),
+            Protocol::SyncWarp { .. } => Err(()),
+            Protocol::State { .. } => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -739,7 +765,45 @@ where
 
                 collection::Event::StartShutdown { id, .. } => {
                     // TODO: IMPORTANT this event should be turned into `NewOutboundSubstreamsForbidden` and the `reason` removed; see <https://github.com/smol-dot/smoldot/pull/391>
-                    todo!()
+
+                    let connection_info = &self.inner[id];
+
+                    // If peer is desired, and we have no connection or only shutting down
+                    // connections, add peer to `unconnected_desired`.
+                    if let Some(peer_id) = &connection_info.peer_id {
+                        if self
+                            .gossip_desired_peers
+                            .range(
+                                (
+                                    peer_id.clone(),
+                                    usize::min_value(),
+                                    GossipKind::ConsensusTransactions,
+                                )
+                                    ..=(
+                                        peer_id.clone(),
+                                        usize::max_value(),
+                                        GossipKind::ConsensusTransactions,
+                                    ),
+                            )
+                            .count()
+                            != 0
+                        {
+                            if !self
+                                .connections_by_peer_id
+                                .range(
+                                    (peer_id.clone(), ConnectionId::min_value())
+                                        ..=(peer_id.clone(), ConnectionId::max_value()),
+                                )
+                                .any(|(_, connection_id)| {
+                                    let state = self.inner.connection_state(*connection_id);
+                                    !state.shutting_down
+                                })
+                            {
+                                self.unconnected_desired.insert(peer_id.clone());
+                                // TODO: update self.connected_unopened_gossip_desired
+                            }
+                        }
+                    }
                 }
                 collection::Event::Shutdown {
                     id,
@@ -756,8 +820,6 @@ where
                         let _was_removed = self.connections_by_peer_id.remove(&(peer_id, id));
                         debug_assert!(_was_removed);
                     }
-
-                    // TODO: update unconnected_desired
 
                     // TODO: IMPORTANT this event should indicate a clean shutdown, a pre-handshake interruption, a protocol error, a reset, etc. and should get a `reason`; see <https://github.com/smol-dot/smoldot/pull/391>
                     todo!()
@@ -1070,27 +1132,7 @@ where
                         .unwrap_or_else(|| unreachable!());
 
                     let _was_in = self.notification_substreams_by_peer_id.remove(&(
-                        match substream_info.protocol {
-                            Protocol::BlockAnnounces { chain_index } => {
-                                NotificationsProtocol::BlockAnnounces { chain_index }
-                            }
-                            Protocol::Transactions { chain_index } => {
-                                NotificationsProtocol::Transactions { chain_index }
-                            }
-                            Protocol::Grandpa { chain_index } => {
-                                NotificationsProtocol::Grandpa { chain_index }
-                            }
-                            // Other protocols aren't notification protocols.
-                            Protocol::Identify
-                            | Protocol::Ping
-                            | Protocol::Sync { .. }
-                            | Protocol::LightUnknown { .. }
-                            | Protocol::LightStorage { .. }
-                            | Protocol::LightCall { .. }
-                            | Protocol::Kad { .. }
-                            | Protocol::SyncWarp { .. }
-                            | Protocol::State { .. } => unreachable!(),
-                        },
+                        substream_info.protocol.try_into().unwrap(),
                         peer_id.clone(),
                         SubstreamDirection::Out,
                         NotificationsSubstreamState::Pending,
@@ -1300,6 +1342,19 @@ where
                 collection::Event::NotificationsInOpen { substream_id, .. } => {
                     // Remote would like to open a notifications substream with us.
 
+                    // There exists three possible ways to handle this event:
+                    //
+                    // - Accept the demand immediately. This happens if the API user has opened
+                    //   a gossip substream in the past or is currently trying to open a gossip
+                    //   substream with this peer.
+                    // - Refuse the demand immediately. This happens if there already exists a
+                    //   pending inbound notifications substream. Opening multiple notification
+                    //   substreams of the same protocol is a protocol violation. This also happens
+                    //   for transactions and grandpa substreams if no block announce substream is
+                    //   open.
+                    // - Generate an event to ask the API user whether to accept the demand. This
+                    //   happens specifically for block announce substreams.
+
                     let substream_info = self
                         .substreams
                         .get(&substream_id)
@@ -1312,49 +1367,124 @@ where
                         .as_ref()
                         .unwrap_or_else(|| unreachable!());
 
-                    // We generate an event for the API user only if no other substream opening
-                    // attempt has been made yet.
-                    let generate_event = todo!();
+                    // Check whether a substream with the same protocol already exists with that
+                    // peer, and if so deny the request.
+                    if self
+                        .notification_substreams_by_peer_id
+                        .range(
+                            (
+                                substream_info.protocol.try_into().unwrap(),
+                                peer_id.clone(),
+                                SubstreamDirection::In,
+                                NotificationsSubstreamState::min_value(),
+                                SubstreamId::min_value(),
+                            )
+                                ..=(
+                                    substream_info.protocol.try_into().unwrap(),
+                                    peer_id.clone(),
+                                    SubstreamDirection::In,
+                                    NotificationsSubstreamState::max_value(),
+                                    SubstreamId::max_value(),
+                                ),
+                        )
+                        .next()
+                        .is_some()
+                    {
+                        self.inner.reject_in_notifications(substream_id);
+                        self.substreams.remove(&substream_id);
+                        continue;
+                    }
 
-                    // Update local state.
-                    let _was_inserted = self.notification_substreams_by_peer_id.insert((
-                        match substream_info.protocol {
-                            Protocol::BlockAnnounces { chain_index } => {
-                                NotificationsProtocol::BlockAnnounces { chain_index }
+                    // Find the `chain_index`.
+                    let (Protocol::BlockAnnounces { chain_index }
+                    | Protocol::Transactions { chain_index }
+                    | Protocol::Grandpa { chain_index }) = substream_info.protocol
+                    else {
+                        // Any other protocol isn't a notifications protocol.
+                        unreachable!()
+                    };
+
+                    // If an outgoing notifications protocol (either pending or fully open) exists,
+                    // accept the substream immediately.
+                    if self
+                        .notification_substreams_by_peer_id
+                        .range(
+                            (
+                                NotificationsProtocol::BlockAnnounces { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::min_value(),
+                                SubstreamId::min_value(),
+                            )
+                                ..=(
+                                    NotificationsProtocol::BlockAnnounces { chain_index },
+                                    peer_id.clone(),
+                                    SubstreamDirection::Out,
+                                    NotificationsSubstreamState::max_value(),
+                                    SubstreamId::max_value(),
+                                ),
+                        )
+                        .next()
+                        .is_some()
+                    {
+                        self.notification_substreams_by_peer_id.insert((
+                            substream_info.protocol.try_into().unwrap(),
+                            peer_id.clone(),
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Open,
+                            substream_id,
+                        ));
+                        let handshake = match substream_info.protocol {
+                            Protocol::BlockAnnounces { .. } => {
+                                protocol::encode_block_announces_handshake(
+                                    protocol::BlockAnnouncesHandshakeRef {
+                                        best_hash: &self.chains[chain_index].best_hash,
+                                        best_number: self.chains[chain_index].best_number,
+                                        role: self.chains[chain_index].role,
+                                        genesis_hash: &self.chains[chain_index].genesis_hash,
+                                    },
+                                    self.chains[chain_index].block_number_bytes,
+                                )
+                                .fold(Vec::new(), |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                })
                             }
-                            Protocol::Transactions { chain_index } => {
-                                NotificationsProtocol::Transactions { chain_index }
+                            Protocol::Grandpa { .. } => {
+                                self.chains[chain_index].role.scale_encoding().to_vec()
                             }
-                            Protocol::Grandpa { chain_index } => {
-                                NotificationsProtocol::Grandpa { chain_index }
-                            }
-                            // Other protocols aren't notification protocols.
-                            Protocol::Identify
-                            | Protocol::Ping
-                            | Protocol::Sync { .. }
-                            | Protocol::LightUnknown { .. }
-                            | Protocol::LightStorage { .. }
-                            | Protocol::LightCall { .. }
-                            | Protocol::Kad { .. }
-                            | Protocol::SyncWarp { .. }
-                            | Protocol::State { .. } => unreachable!(),
-                        },
-                        peer_id.clone(), // TODO: cloning overhead :-/
+                            Protocol::Transactions { .. } => Vec::new(),
+                            _ => unreachable!(),
+                        };
+                        self.inner.accept_in_notifications(
+                            substream_id,
+                            handshake,
+                            1024 * 1024, // TODO: ?!
+                        );
+                        continue;
+                    }
+
+                    // It is forbidden to cold-open a substream other than the block announces
+                    // substream.
+                    if !matches!(substream_info.protocol, Protocol::BlockAnnounces { .. }) {
+                        self.inner.reject_in_notifications(substream_id);
+                        self.substreams.remove(&substream_id);
+                        continue;
+                    }
+
+                    // Update the local state and return the event.
+                    self.notification_substreams_by_peer_id.insert((
+                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        peer_id.clone(),
                         SubstreamDirection::In,
                         NotificationsSubstreamState::Pending,
                         substream_id,
                     ));
-                    debug_assert!(_was_inserted);
-
-                    // TODO: must accept the substream if we already have an out substream with peer
-
-                    if generate_event {
-                        return Some(Event::GossipInDesired {
-                            peer_id: peer_id.clone(),
-                            chain_id: todo!(),
-                            kind: GossipKind::ConsensusTransactions,
-                        });
-                    }
+                    return Some(Event::GossipInDesired {
+                        peer_id: peer_id.clone(),
+                        chain_id: ChainId(chain_index),
+                        kind: GossipKind::ConsensusTransactions,
+                    });
                 }
 
                 collection::Event::NotificationsInOpenCancel { substream_id } => {
