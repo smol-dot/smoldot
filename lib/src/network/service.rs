@@ -1123,7 +1123,8 @@ where
                         .substreams
                         .get(&substream_id)
                         .unwrap_or_else(|| unreachable!());
-                    let connection_info = &self.inner[substream_info.connection_id];
+                    let connection_id = substream_info.connection_id;
+                    let connection_info = &self.inner[connection_id];
                     // Notification substreams can only happen on connections after their
                     // handshake phase is finished, therefore their `PeerId` is known.
                     let peer_id = connection_info
@@ -1170,6 +1171,8 @@ where
 
                             match result {
                                 Ok(decoded_handshake) => {
+                                    let peer_id = peer_id.clone();
+
                                     let _was_inserted =
                                         self.notification_substreams_by_peer_id.insert((
                                             NotificationsProtocol::BlockAnnounces { chain_index },
@@ -1203,8 +1206,8 @@ where
                                         .next()
                                         .is_none()
                                     {
-                                        self.inner.open_out_notifications(
-                                            substream_info.connection_id,
+                                        let substream_id = self.inner.open_out_notifications(
+                                            connection_id,
                                             protocol::encode_protocol_name_string(
                                                 protocol::ProtocolName::Transactions {
                                                     genesis_hash: self.chains[chain_index]
@@ -1214,10 +1217,27 @@ where
                                                         .as_deref(),
                                                 },
                                             ),
-                                            todo!(), // TODO: how to determine now?!
+                                            Duration::from_secs(10), // TODO: arbitrary
                                             Vec::new(),
                                             128, // TODO: arbitrary
                                         );
+
+                                        self.substreams.insert(
+                                            substream_id,
+                                            SubstreamInfo {
+                                                connection_id,
+                                                direction: SubstreamDirection::Out,
+                                                protocol: Protocol::Transactions { chain_index },
+                                            },
+                                        );
+
+                                        self.notification_substreams_by_peer_id.insert((
+                                            NotificationsProtocol::Transactions { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Pending,
+                                            substream_id,
+                                        ));
                                     }
 
                                     if self
@@ -1242,7 +1262,7 @@ where
                                         .is_none()
                                     {
                                         self.inner.open_out_notifications(
-                                            substream_info.connection_id,
+                                            connection_id,
                                             protocol::encode_protocol_name_string(
                                                 protocol::ProtocolName::Grandpa {
                                                     genesis_hash: self.chains[chain_index]
@@ -1252,14 +1272,31 @@ where
                                                         .as_deref(),
                                                 },
                                             ),
-                                            todo!(), // TODO: how to determine now?!
+                                            Duration::from_secs(10), // TODO: arbitrary
                                             self.chains[chain_index].role.scale_encoding().to_vec(),
                                             1024 * 1024, // TODO: arbitrary
                                         );
+
+                                        self.substreams.insert(
+                                            substream_id,
+                                            SubstreamInfo {
+                                                connection_id,
+                                                direction: SubstreamDirection::Out,
+                                                protocol: Protocol::Grandpa { chain_index },
+                                            },
+                                        );
+
+                                        self.notification_substreams_by_peer_id.insert((
+                                            NotificationsProtocol::Grandpa { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Pending,
+                                            substream_id,
+                                        ));
                                     }
 
                                     return Some(Event::GossipConnected {
-                                        peer_id: peer_id.clone(),
+                                        peer_id,
                                         chain_id: ChainId(chain_index),
                                         kind: GossipKind::ConsensusTransactions,
                                         role: decoded_handshake.role,
