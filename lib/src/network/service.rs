@@ -1180,6 +1180,84 @@ where
                                         ));
                                     debug_assert!(_was_inserted);
 
+                                    if self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Transactions { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Transactions {
+                                                        chain_index,
+                                                    },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .next()
+                                        .is_none()
+                                    {
+                                        self.inner.open_out_notifications(
+                                            substream_info.connection_id,
+                                            protocol::encode_protocol_name_string(
+                                                protocol::ProtocolName::Transactions {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                },
+                                            ),
+                                            todo!(), // TODO: how to determine now?!
+                                            Vec::new(),
+                                            128, // TODO: arbitrary
+                                        );
+                                    }
+
+                                    if self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Grandpa { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .next()
+                                        .is_none()
+                                    {
+                                        self.inner.open_out_notifications(
+                                            substream_info.connection_id,
+                                            protocol::encode_protocol_name_string(
+                                                protocol::ProtocolName::Grandpa {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                },
+                                            ),
+                                            todo!(), // TODO: how to determine now?!
+                                            self.chains[chain_index].role.scale_encoding().to_vec(),
+                                            1024 * 1024, // TODO: arbitrary
+                                        );
+                                    }
+
                                     return Some(Event::GossipConnected {
                                         peer_id: peer_id.clone(),
                                         chain_id: ChainId(chain_index),
@@ -1190,6 +1268,8 @@ where
                                     });
                                 }
                                 Err(error) => {
+                                    let peer_id = peer_id.clone();
+
                                     // TODO: lots of unnecessary cloning below
                                     if self
                                         .connections_by_peer_id
@@ -1215,8 +1295,62 @@ where
                                         }
                                     }
 
-                                    let peer_id = peer_id.clone();
-                                    self.inner.close_out_notifications(substream_id);
+                                    if let GossipConnectError::HandshakeDecode(_) = error {
+                                        self.inner.close_out_notifications(substream_id);
+                                    }
+
+                                    for substream_id in self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Transactions { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Transactions {
+                                                        chain_index,
+                                                    },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .map(|(_, _, _, _, s)| *s)
+                                        .collect::<Vec<_>>()
+                                    {
+                                        self.inner.close_out_notifications(substream_id);
+                                    }
+
+                                    for substream_id in self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Grandpa { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .map(|(_, _, _, _, s)| *s)
+                                        .collect::<Vec<_>>()
+                                    {
+                                        self.inner.close_out_notifications(substream_id);
+                                    }
+
+                                    // TODO: also close the ingoing ba+tx+gp substreams
+
                                     return Some(Event::GossipOpenFailed {
                                         peer_id,
                                         chain_id: ChainId(chain_index),
