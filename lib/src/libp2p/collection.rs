@@ -58,6 +58,7 @@ use alloc::{
 };
 use core::{
     hash::Hash,
+    marker::PhantomData,
     ops::{self, Add, Sub},
     time::Duration,
 };
@@ -173,7 +174,7 @@ impl SubstreamId {
 /// state. See also [the module-level documentation](..).
 pub struct Network<TConn, TNow> {
     /// Messages waiting to be sent to connection tasks.
-    messages_to_connections: VecDeque<(ConnectionId, CoordinatorToConnectionInner<TNow>)>,
+    messages_to_connections: VecDeque<(ConnectionId, CoordinatorToConnectionInner)>,
 
     /// Messages received from connection tasks. Processed in [`Network::next_event`].
     pending_incoming_messages: VecDeque<(ConnectionId, ConnectionToCoordinatorInner)>,
@@ -263,6 +264,10 @@ pub struct Network<TConn, TNow> {
 
     /// See [`Config::ping_protocol`].
     ping_protocol: Arc<str>,
+
+    // Phantom data to keep the `TNow` type pinned.
+    // TODO: considering removing
+    now_pin: PhantomData<fn() -> TNow>,
 }
 
 struct Connection<TConn> {
@@ -344,6 +349,7 @@ where
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
             ping_protocol: config.ping_protocol.into(),
+            now_pin: PhantomData,
         }
     }
 
@@ -659,8 +665,9 @@ where
     /// limits, or if the remote takes too much time to answer.
     ///
     /// The timeout is the time between the moment the substream is opened and the moment the
-    /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
-    /// answer during this time window, the request is considered failed.
+    /// response is sent back. It starts ticking only after the request starts being sent. If the
+    /// emitter doesn't send the request or if the receiver doesn't answer during this time
+    /// window, the request is considered failed.
     ///
     /// # Panic
     ///
@@ -673,7 +680,7 @@ where
         target: ConnectionId,
         protocol_name: String,
         request_data: Option<Vec<u8>>,
-        timeout: TNow,
+        timeout: Duration,
         max_response_size: usize,
     ) -> SubstreamId {
         let connection = match self.connections.get(&target) {
@@ -726,7 +733,7 @@ where
         &mut self,
         connection_id: ConnectionId,
         protocol_name: String,
-        handshake_timeout: TNow,
+        handshake_timeout: Duration,
         handshake: impl Into<Vec<u8>>,
         max_handshake_size: usize,
     ) -> SubstreamId {
@@ -980,7 +987,7 @@ where
     /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
     pub fn pull_message_to_connection(
         &mut self,
-    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+    ) -> Option<(ConnectionId, CoordinatorToConnection)> {
         self.messages_to_connections
             .pop_front()
             .map(|(id, inner)| (id, CoordinatorToConnection { inner }))
@@ -1768,11 +1775,11 @@ enum ConnectionToCoordinatorInner {
 }
 
 /// Message from the coordinator destined to a connection task.
-pub struct CoordinatorToConnection<TNow> {
-    inner: CoordinatorToConnectionInner<TNow>,
+pub struct CoordinatorToConnection {
+    inner: CoordinatorToConnectionInner,
 }
 
-enum CoordinatorToConnectionInner<TNow> {
+enum CoordinatorToConnectionInner {
     /// Connection task must terminate. This is always sent back after a
     /// [`ConnectionToCoordinatorInner::ShutdownFinished`].
     ///
@@ -1797,7 +1804,7 @@ enum CoordinatorToConnectionInner<TNow> {
     StartRequest {
         protocol_name: String,
         request_data: Option<Vec<u8>>,
-        timeout: TNow,
+        timeout: Duration,
         max_response_size: usize,
         /// Id of the substream assigned by the coordinator.
         /// This is **not** the same as the actual substream used in the connection.
@@ -1809,7 +1816,7 @@ enum CoordinatorToConnectionInner<TNow> {
         substream_id: SubstreamId,
         protocol_name: String,
         max_handshake_size: usize,
-        handshake_timeout: TNow,
+        handshake_timeout: Duration,
         handshake: Vec<u8>,
     },
     CloseOutNotifications {

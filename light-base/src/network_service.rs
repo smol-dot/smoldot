@@ -884,7 +884,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     active_connections: HashMap<
         service::ConnectionId,
-        async_channel::Sender<service::CoordinatorToConnection<TPlat::Instant>>,
+        async_channel::Sender<service::CoordinatorToConnection>,
         fnv::FnvBuildHasher,
     >,
 
@@ -969,7 +969,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
             task.network
                 .gossip_open(
-                    task.platform.now(),
                     chain_id,
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
@@ -990,7 +989,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             StartConnect(PeerId),
             MessageToConnection {
                 connection_id: service::ConnectionId,
-                message: service::CoordinatorToConnection<TPlat::Instant>,
+                message: service::CoordinatorToConnection,
             },
             EventSendersReady,
         }
@@ -1057,13 +1056,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 timeout,
                 result,
             }) => {
-                match task.network.start_blocks_request(
-                    task.platform.now(),
-                    &target,
-                    chain_id,
-                    config.clone(),
-                    timeout,
-                ) {
+                match task
+                    .network
+                    .start_blocks_request(&target, chain_id, config.clone(), timeout)
+                {
                     Ok(substream_id) => {
                         match &config.start {
                             protocol::BlocksRequestConfigStart::Hash(hash) => {
@@ -1104,13 +1100,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 timeout,
                 result,
             }) => {
-                match task.network.start_grandpa_warp_sync_request(
-                    task.platform.now(),
-                    &target,
-                    chain_id,
-                    begin_hash,
-                    timeout,
-                ) {
+                match task
+                    .network
+                    .start_grandpa_warp_sync_request(&target, chain_id, begin_hash, timeout)
+                {
                     Ok(substream_id) => {
                         log::debug!(
                             target: "network", "Connections({}) <= WarpSyncRequest(chain={}, start={})",
@@ -1134,7 +1127,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 result,
             }) => {
                 match task.network.start_storage_proof_request(
-                    task.platform.now(),
                     &target,
                     chain_id,
                     config.clone(),
@@ -1170,7 +1162,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 result,
             }) => {
                 match task.network.start_call_proof_request(
-                    task.platform.now(),
                     &target,
                     chain_id,
                     config.clone(),
@@ -1320,7 +1311,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     if let Some(target) = target {
                         let substream_id = match task.network.start_kademlia_find_node_request(
-                            task.platform.now(),
                             &target,
                             *chain_id,
                             &random_peer_id,
@@ -1605,7 +1595,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 task.network
                     .gossip_open(
-                        task.platform.now(),
                         chain_id,
                         &peer_id,
                         service::GossipKind::ConsensusTransactions,

@@ -657,7 +657,7 @@ where
     /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
     pub fn pull_message_to_connection(
         &mut self,
-    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+    ) -> Option<(ConnectionId, CoordinatorToConnection)> {
         self.inner.pull_message_to_connection()
     }
 
@@ -1838,7 +1838,6 @@ where
     // TODO: more docs
     pub fn start_blocks_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_id: ChainId,
         config: protocol::BlocksRequestConfig,
@@ -1852,7 +1851,6 @@ where
                 });
 
         self.start_request(
-            now,
             target,
             request_data,
             Protocol::SyncWarp {
@@ -1870,7 +1868,6 @@ where
     // TODO: docs
     pub fn start_grandpa_warp_sync_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_id: ChainId,
         begin_hash: [u8; 32],
@@ -1879,7 +1876,6 @@ where
         let request_data = begin_hash.to_vec();
 
         self.start_request(
-            now,
             target,
             request_data,
             Protocol::SyncWarp {
@@ -1910,7 +1906,6 @@ where
     ///
     pub fn start_state_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_id: ChainId,
         block_hash: &[u8; 32],
@@ -1927,7 +1922,6 @@ where
         });
 
         self.start_request(
-            now,
             target,
             request_data,
             Protocol::SyncWarp {
@@ -1949,7 +1943,6 @@ where
     // TODO: more docs
     pub fn start_storage_proof_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_id: ChainId,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
@@ -1966,7 +1959,6 @@ where
         // TODO: check limit
 
         Ok(self.start_request(
-            now,
             target,
             request_data,
             Protocol::SyncWarp {
@@ -1996,7 +1988,6 @@ where
     ///
     pub fn start_call_proof_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_id: ChainId,
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
@@ -2013,7 +2004,6 @@ where
         // TODO: check limit
 
         Ok(self.start_request(
-            now,
             target,
             request_data,
             Protocol::SyncWarp {
@@ -2034,7 +2024,6 @@ where
     ///
     pub fn start_kademlia_find_node_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         chain_id: ChainId,
         peer_id_to_find: &PeerId,
@@ -2047,7 +2036,6 @@ where
         // TODO: check limit
 
         Ok(self.start_request(
-            now,
             target,
             request_data,
             Protocol::Kad {
@@ -2060,7 +2048,6 @@ where
     /// Underlying implementation of all the functions that start requests.
     fn start_request(
         &mut self,
-        now: TNow,
         target: &PeerId,
         request_data: Vec<u8>,
         protocol: Protocol,
@@ -2164,7 +2151,7 @@ where
             connection_id,
             protocol_name,
             Some(request_data),
-            now + timeout,
+            timeout,
             16 * 1024 * 1024,
         );
 
@@ -2301,7 +2288,6 @@ where
     // TODO: proper error
     pub fn gossip_open(
         &mut self,
-        now: TNow,
         chain_id: ChainId,
         target: &PeerId,
         kind: GossipKind,
@@ -2350,7 +2336,7 @@ where
         let substream_id = self.inner.open_out_notifications(
             connection_id,
             protocol_name,
-            now + Duration::from_secs(10), // TODO: arbitrary
+            Duration::from_secs(10), // TODO: arbitrary
             handshake,
             1024 * 1024, // TODO: arbitrary
         );
