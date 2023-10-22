@@ -204,44 +204,14 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 /// >           buffer to not go over the frame size limit of WebRTC. It can easily be made more
 /// >           general-purpose.
 pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
-    address: Multiaddr,
+    mut connection: TPlat::MultiStream,
+    address_string: String,
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
     mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
 ) {
-    let address_string = address.to_string();
-    let Ok(address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(address)) =
-        address_parse::multiaddr_to_address(&address)
-    else {
-        unreachable!()
-    };
-
-    let mut connection = match platform.connect_multistream(address).await {
-        Ok(s) => s,
-        Err(err) => {
-            log::trace!(target: "connections", "Connection({address_string}) => Reset({:?})", err.message);
-            connection_task.reset();
-            loop {
-                let (task_update, message) = connection_task.pull_message_to_coordinator();
-                if let Some(message) = message {
-                    let _ = connection_to_coordinator
-                        .send(super::ToBackground::ConnectionMessage {
-                            connection_id,
-                            message,
-                        })
-                        .await;
-                }
-                if let Some(task_update) = task_update {
-                    connection_task = task_update;
-                } else {
-                    return;
-                }
-            }
-        }
-    };
-
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
     let mut message_sending = None;
@@ -262,7 +232,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             .desired_outbound_substreams()
             .saturating_sub(pending_opening_out_substreams)
         {
-            platform.open_out_substream(&mut connection.connection);
+            platform.open_out_substream(&mut connection);
             pending_opening_out_substreams += 1;
         }
 
@@ -325,7 +295,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 if connection_task.is_reset_called() {
                     future::pending().await
                 } else {
-                    match platform.next_substream(&mut connection.connection).await {
+                    match platform.next_substream(&mut connection).await {
                         Some((stream, direction)) => WhatHappened::NewSubstream(stream, direction),
                         None => WhatHappened::ConnectionReset,
                     }

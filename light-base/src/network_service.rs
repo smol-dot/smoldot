@@ -1749,13 +1749,32 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             remote_certificate_sha256,
                         },
                     ) => {
-                        let local_tls_certificate_sha256: [u8; 32] = todo!(); // TODO: we'll probably have to add a hack here to determine this
+                        // TODO: we unfortunately need to know the local TLS certificate in order to
+                        // insert the connection, and this local TLS certificate can only be given
+                        // us by the platform implementation, leading to this `await` here which
+                        // really shouldn't exist. For the moment it's fine because the only implementations
+                        // of multistream connections returns very quickly, but in theory this `await`
+                        // could block for a long time.
+                        let connection = task
+                            .platform
+                            .connect_multistream(platform::MultiStreamAddress::WebRtc {
+                                ip,
+                                port,
+                                remote_certificate_sha256,
+                            })
+                            .await
+                            .unwrap_or_else(|_| unreachable!()); // TODO: don't unwrap, again we know that the only implementation that exists never unwraps here, but in theory it's possible
 
                         // Convert the SHA256 hashes into multihashes.
                         let local_tls_certificate_multihash = [12u8, 32]
                             .into_iter()
-                            .chain(local_tls_certificate_sha256.into_iter())
+                            .chain(connection.local_tls_certificate_sha256.into_iter())
                             .collect();
+                        debug_assert_eq!(
+                            // TODO: a bit stupid
+                            remote_certificate_sha256,
+                            connection.remote_tls_certificate_sha256
+                        );
                         let remote_tls_certificate_multihash = [12u8, 32]
                             .into_iter()
                             .chain(remote_certificate_sha256.into_iter())
@@ -1769,14 +1788,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     local_tls_certificate_multihash,
                                     remote_tls_certificate_multihash,
                                 },
-                                multiaddr,
+                                multiaddr.clone(),
                                 Some(peer_id.clone()),
                             );
 
                         task.platform.spawn_task(
                             task_name.into(),
                             tasks::webrtc_multi_stream_connection_task::<TPlat>(
-                                multiaddr,
+                                connection.connection,
+                                multiaddr.to_string(),
                                 task.platform.clone(),
                                 connection_id,
                                 connection_task,
