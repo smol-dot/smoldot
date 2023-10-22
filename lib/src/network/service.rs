@@ -204,6 +204,7 @@ struct ConnectionInfo {
 }
 
 /// See [`ChainNetwork::substreams`].
+#[derive(Debug, Clone)]
 struct SubstreamInfo {
     // TODO: substream <-> connection mapping should be provided by collection.rs instead
     connection_id: collection::ConnectionId,
@@ -1122,7 +1123,8 @@ where
                     let substream_info = self
                         .substreams
                         .get(&substream_id)
-                        .unwrap_or_else(|| unreachable!());
+                        .unwrap_or_else(|| unreachable!())
+                        .clone();
                     let connection_id = substream_info.connection_id;
                     let connection_info = &self.inner[connection_id];
                     // Notification substreams can only happen on connections after their
@@ -1130,7 +1132,8 @@ where
                     let peer_id = connection_info
                         .peer_id
                         .as_ref()
-                        .unwrap_or_else(|| unreachable!());
+                        .unwrap_or_else(|| unreachable!())
+                        .clone();
 
                     let _was_in = self.notification_substreams_by_peer_id.remove(&(
                         substream_info.protocol.try_into().unwrap(),
@@ -1140,6 +1143,11 @@ where
                         substream_id,
                     ));
                     debug_assert!(_was_in);
+
+                    if result.is_err() {
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
 
                     // The behaviour is very specific to the protocol.
                     match substream_info.protocol {
@@ -1171,8 +1179,6 @@ where
 
                             match result {
                                 Ok(decoded_handshake) => {
-                                    let peer_id = peer_id.clone();
-
                                     let _was_inserted =
                                         self.notification_substreams_by_peer_id.insert((
                                             NotificationsProtocol::BlockAnnounces { chain_index },
@@ -1305,8 +1311,6 @@ where
                                     });
                                 }
                                 Err(error) => {
-                                    let peer_id = peer_id.clone();
-
                                     // TODO: lots of unnecessary cloning below
                                     if self
                                         .connections_by_peer_id
@@ -1405,14 +1409,106 @@ where
                             // been cancelled.
                             // TODO: debug_assert!(self.notification_substreams_by_peer_id.contains(&(NotificationsProtocol::BlockAnnounces { chain_index }, peer_id.clone(), NotificationsSubstreamDirection::Out, )));
 
-                            // If the substream opened successfully, nothing to do. If the
-                            // substream failed to open, we simply try again.
+                            // If the substream failed to open, we simply try again.
                             // Trying agains means that we might be hammering the remote with
                             // substream requests, however as of the writing of this text this is
                             // necessary in order to bypass an issue in Substrate.
-
                             if result.is_err() {
-                                // TODO: self.inner.open_out_notifications(connection_id, protocol_name, handshake_timeout, handshake, max_handshake_size)
+                                let new_substream_id = self.inner.open_out_notifications(
+                                    connection_id,
+                                    protocol::encode_protocol_name_string(
+                                        match substream_info.protocol {
+                                            Protocol::Transactions { .. } => {
+                                                protocol::ProtocolName::Transactions {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                }
+                                            }
+                                            Protocol::Grandpa { .. } => {
+                                                protocol::ProtocolName::Grandpa {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                }
+                                            }
+                                            _ => unreachable!(),
+                                        },
+                                    ),
+                                    Duration::from_secs(10), // TODO: arbitrary
+                                    match substream_info.protocol {
+                                        Protocol::Transactions { .. } => Vec::new(),
+                                        Protocol::Grandpa { .. } => {
+                                            self.chains[chain_index].role.scale_encoding().to_vec()
+                                        }
+                                        _ => unreachable!(),
+                                    },
+                                    1024 * 1024, // TODO: arbitrary
+                                );
+
+                                let _was_inserted =
+                                    self.notification_substreams_by_peer_id.insert((
+                                        NotificationsProtocol::try_from(substream_info.protocol)
+                                            .unwrap(),
+                                        peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        NotificationsSubstreamState::Pending,
+                                        new_substream_id,
+                                    ));
+                                debug_assert!(_was_inserted);
+
+                                let _prev_value = self.substreams.insert(
+                                    new_substream_id,
+                                    SubstreamInfo {
+                                        connection_id,
+                                        direction: SubstreamDirection::Out,
+                                        protocol: substream_info.protocol.clone(),
+                                    },
+                                );
+                                debug_assert!(_prev_value.is_none());
+
+                                continue;
+                            }
+
+                            let _was_inserted = self.notification_substreams_by_peer_id.insert((
+                                NotificationsProtocol::try_from(substream_info.protocol).unwrap(),
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Open,
+                                substream_id,
+                            ));
+                            debug_assert!(_was_inserted);
+
+                            // In case of Grandpa, we immediately send a neighbor packet with
+                            // the current local state.
+                            if matches!(substream_info.protocol, Protocol::Grandpa { .. }) {
+                                let grandpa_state = &self.chains[chain_index]
+                                    .grandpa_protocol_config
+                                    .as_ref()
+                                    .unwrap();
+                                let packet = protocol::GrandpaNotificationRef::Neighbor(
+                                    protocol::NeighborPacket {
+                                        round_number: grandpa_state.round_number,
+                                        set_id: grandpa_state.set_id,
+                                        commit_finalized_height: grandpa_state
+                                            .commit_finalized_height,
+                                    },
+                                )
+                                .scale_encoding(self.chains[chain_index].block_number_bytes)
+                                .fold(Vec::new(), |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                });
+                                match self.inner.queue_notification(substream_id, packet) {
+                                    Ok(()) => {}
+                                    Err(collection::QueueNotificationError::QueueFull) => {
+                                        unreachable!()
+                                    }
+                                }
                             }
                         }
 
@@ -1486,14 +1582,14 @@ where
                     // Some substreams are tied to the state of the block announces substream.
                     match substream_info.protocol {
                         Protocol::BlockAnnounces { chain_index } => {
-                            todo!()
+                            //todo!()
                         }
                         Protocol::Transactions { chain_index }
                         | Protocol::Grandpa { chain_index } => {
                             // These protocols are tied to the block announces substream. If
                             // there is a block announce substream with the peer, we try to reopen
                             // these two substreams.
-                            todo!()
+                            //todo!()
                         }
                         _ => {}
                     }
