@@ -154,7 +154,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
-            peers_capacity: 8,
             noise_key: config.noise_key,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: {
