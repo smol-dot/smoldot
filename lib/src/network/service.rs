@@ -458,7 +458,7 @@ where
 
     pub fn pull_message_to_connection(
         &mut self,
-    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+    ) -> Option<(ConnectionId, CoordinatorToConnection)> {
         self.inner.pull_message_to_connection()
     }
 
@@ -989,12 +989,8 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(
-                &peer_id,
-                notifications_protocol_index,
-                now.clone(),
-                handshake,
-            );
+            self.inner
+                .open_out_notification(&peer_id, notifications_protocol_index, handshake);
         }
 
         event_to_return

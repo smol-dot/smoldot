@@ -369,7 +369,7 @@ where
     /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
     pub fn pull_message_to_connection(
         &mut self,
-    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+    ) -> Option<(ConnectionId, CoordinatorToConnection)> {
         self.inner.pull_message_to_connection()
     }
 
@@ -1706,7 +1706,6 @@ where
         &mut self,
         peer_id: &PeerId,
         notifications_protocol_index: usize,
-        now: TNow,
         handshake: Vec<u8>,
     ) {
         let peer_index = self.peer_index_or_insert(peer_id);
@@ -1737,7 +1736,7 @@ where
         let substream_id = self.inner.open_out_notifications(
             connection_id,
             protocol_name,
-            now + Duration::from_secs(20), // TODO: make configurable
+            Duration::from_secs(20), // TODO: make configurable
             handshake,
             max_handshake_size,
         );
@@ -2016,8 +2015,9 @@ where
     /// limits (see [`ConfigRequestResponse`]), or if the remote takes too much time to answer.
     ///
     /// The timeout is the time between the moment the substream is opened and the moment the
-    /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
-    /// answer during this time window, the request is considered failed.
+    /// response is sent back. It starts ticking only after the request starts being sent. If the
+    /// emitter doesn't send the request or if the receiver doesn't answer during this time
+    /// window, the request is considered failed.
     ///
     /// # Panic
     ///
@@ -2031,7 +2031,7 @@ where
         target: &PeerId,
         protocol_index: usize,
         request_data: Vec<u8>,
-        timeout: TNow,
+        timeout: Duration,
     ) -> Result<OutRequestId, StartRequestError> {
         let target_connection_id = match self.connection_id_for_peer(target) {
             Some(id) => id,
