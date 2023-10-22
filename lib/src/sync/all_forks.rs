@@ -2189,7 +2189,6 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
             }
 
             FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
-                let block_number_bytes = self.parent.chain.block_number_bytes();
                 match self.parent.chain.verify_justification(
                     consensus_engine_id,
                     &scale_encoded_justification,
