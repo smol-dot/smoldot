@@ -1982,7 +1982,7 @@ where
         self.start_request(
             target,
             request_data,
-            Protocol::SyncWarp {
+            Protocol::Sync {
                 chain_index: chain_id.0,
             },
             timeout,
@@ -2053,7 +2053,7 @@ where
         self.start_request(
             target,
             request_data,
-            Protocol::SyncWarp {
+            Protocol::State {
                 chain_index: chain_id.0,
             },
             timeout,
@@ -2090,7 +2090,7 @@ where
         Ok(self.start_request(
             target,
             request_data,
-            Protocol::SyncWarp {
+            Protocol::LightStorage {
                 chain_index: chain_id.0,
             },
             timeout,
@@ -2135,7 +2135,7 @@ where
         Ok(self.start_request(
             target,
             request_data,
-            Protocol::SyncWarp {
+            Protocol::LightCall {
                 chain_index: chain_id.0,
             },
             timeout,
