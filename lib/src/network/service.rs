@@ -895,6 +895,8 @@ where
                                 }
                             };
 
+                            self.inner.accept_inbound(substream_id, inbound_type);
+
                             let _prev_value = self.substreams.insert(
                                 substream_id,
                                 SubstreamInfo {
@@ -907,13 +909,12 @@ where
                         }
                         Err(()) => {
                             self.inner.reject_inbound(substream_id);
-                            continue;
                         }
                     }
                     continue;
                 }
 
-                collection::Event::InboundNegotiatedCancel { substream_id } => {
+                collection::Event::InboundNegotiatedCancel { .. } => {
                     // Because we immediately accept or reject substreams, this event can never
                     // happen.
                     unreachable!()
@@ -932,17 +933,10 @@ where
                     substream_id,
                     response,
                 } => {
-                    // Received a response on a connection.
+                    // Received a response to a request in a request-response protocol.
                     let substream_info = self
                         .substreams
                         .remove(&substream_id)
-                        .unwrap_or_else(|| unreachable!());
-                    let connection_info = &self.inner[substream_info.connection_id];
-                    // Requests can only happen on connections after their handshake phase is
-                    // finished, therefore their `PeerId` is known.
-                    let peer_id = connection_info
-                        .peer_id
-                        .as_ref()
                         .unwrap_or_else(|| unreachable!());
 
                     // Decode/verify the response.
@@ -1413,7 +1407,9 @@ where
                             // Trying agains means that we might be hammering the remote with
                             // substream requests, however as of the writing of this text this is
                             // necessary in order to bypass an issue in Substrate.
-                            if result.is_err() {
+                            if result.is_err()
+                                && !self.inner.connection_state(connection_id).shutting_down
+                            {
                                 let new_substream_id = self.inner.open_out_notifications(
                                     connection_id,
                                     protocol::encode_protocol_name_string(
@@ -2429,7 +2425,35 @@ where
 
         let chain_info = &self.chains[chain_id.0];
 
-        // TODO: check with a call to `range()` whether there's already an opening in progress
+        // It is forbidden to open more than one gossip notifications substream with any given
+        // peer.
+        if self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    target.clone(),
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::min_value(),
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        target.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::max_value(),
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .is_some()
+        {
+            return Err(());
+        }
 
         let protocol_name =
             protocol::encode_protocol_name_string(protocol::ProtocolName::BlockAnnounces {
