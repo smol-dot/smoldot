@@ -298,7 +298,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let (tx, rx) = oneshot::channel();
 
-        todo!(); // TODO: the block requests results are now unverified, fix the upper layers
+        // TODO: the block requests results are now unverified, fix the upper layers
 
         self.messages_tx
             .send(ToBackground::StartBlocksRequest {
