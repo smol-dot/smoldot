@@ -779,7 +779,12 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { id, .. } => {
+                collection::Event::PingOutFailed { id }
+                | collection::Event::StartShutdown { id, .. } => {
+                    if let collection::Event::PingOutFailed { .. } = inner_event {
+                        self.inner.start_shutdown(id);
+                    }
+
                     // TODO: IMPORTANT this event should be turned into `NewOutboundSubstreamsForbidden` and the `reason` removed; see <https://github.com/smol-dot/smoldot/pull/391>
 
                     let connection_info = &self.inner[id];
@@ -1551,13 +1556,15 @@ where
                         .substreams
                         .remove(&substream_id)
                         .unwrap_or_else(|| unreachable!());
-                    let connection_info = &self.inner[substream_info.connection_id];
+                    let connection_id = substream_info.connection_id;
+                    let connection_info = &self.inner[connection_id];
                     // Notification substreams can only happen on connections after their
                     // handshake phase is finished, therefore their `PeerId` is known.
                     let peer_id = connection_info
                         .peer_id
                         .as_ref()
-                        .unwrap_or_else(|| unreachable!());
+                        .unwrap_or_else(|| unreachable!())
+                        .clone();
 
                     // Clean up the local state.
                     let _was_in = self.notification_substreams_by_peer_id.remove(&(
@@ -1574,12 +1581,64 @@ where
                         Protocol::BlockAnnounces { chain_index } => {
                             //todo!()
                         }
-                        Protocol::Transactions { chain_index }
-                        | Protocol::Grandpa { chain_index } => {
-                            // These protocols are tied to the block announces substream. If
-                            // there is a block announce substream with the peer, we try to reopen
-                            // these two substreams.
-                            //todo!()
+                        // The transactions and Grandpa protocols are tied to the block announces
+                        // substream. If there is a block announce substream with the peer, we try
+                        // to reopen these two substreams.
+                        Protocol::Transactions { chain_index } => {
+                            let new_substream_id = self.inner.open_out_notifications(
+                                connection_id,
+                                protocol::encode_protocol_name_string(
+                                    protocol::ProtocolName::Transactions {
+                                        genesis_hash: self.chains[chain_index].genesis_hash,
+                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                    },
+                                ),
+                                Duration::from_secs(10), // TODO: arbitrary
+                                Vec::new(),
+                                1024 * 1024, // TODO: arbitrary
+                            );
+                            self.substreams.insert(
+                                new_substream_id,
+                                SubstreamInfo {
+                                    connection_id,
+                                    protocol: Protocol::Transactions { chain_index },
+                                },
+                            );
+                            self.notification_substreams_by_peer_id.insert((
+                                NotificationsProtocol::Transactions { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Pending,
+                                new_substream_id,
+                            ));
+                        }
+                        Protocol::Grandpa { chain_index } => {
+                            let new_substream_id = self.inner.open_out_notifications(
+                                connection_id,
+                                protocol::encode_protocol_name_string(
+                                    protocol::ProtocolName::Grandpa {
+                                        genesis_hash: self.chains[chain_index].genesis_hash,
+                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                    },
+                                ),
+                                Duration::from_secs(10), // TODO: arbitrary
+                                self.chains[chain_index].role.scale_encoding().to_vec(),
+                                1024 * 1024, // TODO: arbitrary
+                            );
+                            self.substreams.insert(
+                                new_substream_id,
+                                SubstreamInfo {
+                                    connection_id,
+                                    protocol: Protocol::Grandpa { chain_index },
+                                },
+                            );
+                            self.notification_substreams_by_peer_id.insert((
+                                NotificationsProtocol::Grandpa { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Pending,
+                                new_substream_id,
+                            ));
                         }
                         _ => {}
                     }
@@ -1936,10 +1995,6 @@ where
                 collection::Event::PingOutSuccess { .. } => {
                     // We ignore ping events.
                     // TODO: report to end user or something
-                }
-                collection::Event::PingOutFailed { id } => {
-                    // TODO: handle the same way as a shutdown event
-                    todo!()
                 }
             }
         }
