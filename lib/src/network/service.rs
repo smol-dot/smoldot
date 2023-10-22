@@ -2566,12 +2566,14 @@ where
             a
         });
 
-        //todo!();
-        /*// Now sending out.
-        self.queue_notification(
-            target,
-            NotificationsProtocol::Grandpa {
-                chain_index: chain_id.0,
+        // Now sending out to all the grandpa substreams that exist.
+        // TODO: O(n)
+        for (_, _, _, _, substream_id) in
+            self.notification_substreams_by_peer_id
+                .iter()
+                .filter(|(p, _, d, s, _)| {
+                    *p == NotificationsProtocol::Grandpa {
+                        chain_index: chain_id.0,
             },
             packet,
         );
