@@ -790,7 +790,8 @@ where
                     let connection_info = &self.inner[id];
 
                     // If peer is desired, and we have no connection or only shutting down
-                    // connections, add peer to `unconnected_desired`.
+                    // connections, add peer to `unconnected_desired` and remove it from
+                    // `connected_unopened_gossip_desired`.
                     if let Some(peer_id) = &connection_info.peer_id {
                         if self
                             .gossip_desired_peers
@@ -821,11 +822,29 @@ where
                                 })
                             {
                                 self.unconnected_desired.insert(peer_id.clone());
-                                // TODO: update self.connected_unopened_gossip_desired
+                                for (_, _, chain_index) in self.gossip_desired_peers.range(
+                                    (
+                                        peer_id.clone(),
+                                        GossipKind::ConsensusTransactions,
+                                        usize::min_value(),
+                                    )
+                                        ..=(
+                                            peer_id.clone(),
+                                            GossipKind::ConsensusTransactions,
+                                            usize::max_value(),
+                                        ),
+                                ) {
+                                    self.connected_unopened_gossip_desired.remove(&(
+                                        peer_id.clone(),
+                                        ChainId(*chain_index),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+                                }
                             }
                         }
                     }
                 }
+
                 collection::Event::Shutdown {
                     id,
                     was_established,
@@ -843,8 +862,8 @@ where
                     }
 
                     // TODO: IMPORTANT this event should indicate a clean shutdown, a pre-handshake interruption, a protocol error, a reset, etc. and should get a `reason`; see <https://github.com/smol-dot/smoldot/pull/391>
-                    todo!()
                 }
+
                 collection::Event::InboundError { id, error } => {
                     // TODO: report event to API user for diagnostics
                     continue;
