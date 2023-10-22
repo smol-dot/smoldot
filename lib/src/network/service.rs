@@ -46,10 +46,6 @@ pub struct Config {
     /// Capacity to initially reserve to the list of connections.
     pub connections_capacity: usize,
 
-    /// Capacity to initially reserve to the list of peers.
-    // TODO: remove?
-    pub peers_capacity: usize,
-
     /// Capacity to reserve for the list of chains.
     pub chains_capacity: usize,
 
@@ -114,8 +110,13 @@ pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
     inner: collection::Network<ConnectionInfo, TNow>,
 
+    /// List of all chains that have been added.
+    // TODO: shrink to fit from time to time
+    chains: slab::Slab<Chain>,
+
     /// All the substreams of [`ChainNetwork::inner`], with info attached to them.
     // TODO: add a substream user data to `collection::Network` instead
+    // TODO: shrink to fit from time to time
     substreams: hashbrown::HashMap<SubstreamId, SubstreamInfo, fnv::FnvBuildHasher>,
 
     /// Connections indexed by the value in [`ConnectionInfo::peer_id`].
@@ -135,13 +136,11 @@ pub struct ChainNetwork<TNow> {
     // TODO: make rotatable, see <https://github.com/smol-dot/smoldot/issues/44>
     noise_key: NoiseKey,
 
-    /// List of all chains that have been added.
-    chains: slab::Slab<Chain>,
-
     /// Chains indexed by genesis hash and fork ID.
     ///
     /// Contains the same number of entries as [`ChainNetwork::chains`]. The values are `usize`s
     /// that are indices into [`ChainNetwork::chains`].
+    // TODO: shrink to fit from time to time
     chains_by_protocol_info:
         hashbrown::HashMap<([u8; 32], Option<String>), usize, fnv::FnvBuildHasher>,
 
@@ -154,9 +153,12 @@ pub struct ChainNetwork<TNow> {
 
     /// Subset of peers in [`ChainNetwork::gossip_out_peers_by_chain`] for which no healthy
     /// connection exists.
+    // TODO: shrink to fit from time to time
     unconnected_desired: hashbrown::HashSet<PeerId, util::SipHasherBuild>,
 
-    // TODO: doc
+    /// List of [`PeerId`]s that are marked as desired, and for which a healthy connection exists,
+    /// but for which no substream connection (attempt or established) exists.
+    // TODO: shrink to fit from time to time
     connected_unopened_gossip_desired:
         hashbrown::HashSet<(PeerId, ChainId, GossipKind), util::SipHasherBuild>,
 }
@@ -303,7 +305,7 @@ where
             gossip_desired_peers_by_chain: BTreeSet::new(),
             gossip_desired_peers: BTreeSet::new(),
             unconnected_desired: hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity,
+                config.connections_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
@@ -311,7 +313,7 @@ where
                 }),
             ),
             connected_unopened_gossip_desired: hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity,
+                config.connections_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
@@ -506,7 +508,17 @@ where
         self.connected_unopened_gossip_desired
             .remove(&(peer_id.clone(), chain_id, kind)); // TODO: cloning
 
-        // TODO: update unconnected_desired; consider changing the fields order in the set
+        if self
+            .gossip_desired_peers
+            .range(
+                (peer_id.clone(), kind, usize::min_value())
+                    ..=(peer_id.clone(), kind, usize::max_value()),
+            )
+            .next()
+            .is_none()
+        {
+            self.unconnected_desired.remove(peer_id);
+        }
     }
 
     /// Returns the number of gossip-desired peers for the given chain.
@@ -1241,26 +1253,29 @@ where
                                         ));
                                     }
 
-                                    if self
-                                        .notification_substreams_by_peer_id
-                                        .range(
-                                            (
-                                                NotificationsProtocol::Grandpa { chain_index },
-                                                peer_id.clone(),
-                                                SubstreamDirection::Out,
-                                                NotificationsSubstreamState::min_value(),
-                                                SubstreamId::min_value(),
-                                            )
-                                                ..=(
+                                    if self.chains[chain_index].grandpa_protocol_config.is_some()
+                                        && self
+                                            .notification_substreams_by_peer_id
+                                            .range(
+                                                (
                                                     NotificationsProtocol::Grandpa { chain_index },
                                                     peer_id.clone(),
                                                     SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::max_value(),
-                                                    SubstreamId::max_value(),
-                                                ),
-                                        )
-                                        .next()
-                                        .is_none()
+                                                    NotificationsSubstreamState::min_value(),
+                                                    SubstreamId::min_value(),
+                                                )
+                                                    ..=(
+                                                        NotificationsProtocol::Grandpa {
+                                                            chain_index,
+                                                        },
+                                                        peer_id.clone(),
+                                                        SubstreamDirection::Out,
+                                                        NotificationsSubstreamState::max_value(),
+                                                        SubstreamId::max_value(),
+                                                    ),
+                                            )
+                                            .next()
+                                            .is_none()
                                     {
                                         let new_substream_id = self.inner.open_out_notifications(
                                             connection_id,
@@ -1546,27 +1561,7 @@ where
 
                     // Clean up the local state.
                     let _was_in = self.notification_substreams_by_peer_id.remove(&(
-                        match substream_info.protocol {
-                            Protocol::BlockAnnounces { chain_index } => {
-                                NotificationsProtocol::BlockAnnounces { chain_index }
-                            }
-                            Protocol::Transactions { chain_index } => {
-                                NotificationsProtocol::Transactions { chain_index }
-                            }
-                            Protocol::Grandpa { chain_index } => {
-                                NotificationsProtocol::Grandpa { chain_index }
-                            }
-                            // Other protocols aren't notification protocols.
-                            Protocol::Identify
-                            | Protocol::Ping
-                            | Protocol::Sync { .. }
-                            | Protocol::LightUnknown { .. }
-                            | Protocol::LightStorage { .. }
-                            | Protocol::LightCall { .. }
-                            | Protocol::Kad { .. }
-                            | Protocol::SyncWarp { .. }
-                            | Protocol::State { .. } => unreachable!(),
-                        },
+                        NotificationsProtocol::try_from(substream_info.protocol).unwrap(),
                         peer_id.clone(), // TODO: cloning overhead :-/
                         SubstreamDirection::Out,
                         NotificationsSubstreamState::Open,
