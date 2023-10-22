@@ -150,7 +150,7 @@ pub struct ChainNetwork<TNow> {
     gossip_desired_peers_by_chain: BTreeSet<(usize, GossipKind, PeerId)>,
 
     /// Same entries as [`ChainNetwork::gossip_desired_peers_by_chain`] but indexed differently.
-    gossip_desired_peers: BTreeSet<(PeerId, usize, GossipKind)>,
+    gossip_desired_peers: BTreeSet<(PeerId, GossipKind, usize)>,
 
     /// Subset of peers in [`ChainNetwork::gossip_out_peers_by_chain`] for which no healthy
     /// connection exists.
@@ -424,7 +424,7 @@ where
         }
 
         self.gossip_desired_peers
-            .insert((peer_id.clone(), chain_id.0, kind));
+            .insert((peer_id.clone(), kind, chain_id.0));
 
         // If we have no connection or only shutting down connections, add to
         // `unconnected_desired`.
@@ -464,7 +464,7 @@ where
         }
 
         self.gossip_desired_peers
-            .remove(&(peer_id.clone(), chain_id.0, kind));
+            .remove(&(peer_id.clone(), kind, chain_id.0));
 
         self.connected_unopened_gossip_desired
             .remove(&(peer_id.clone(), chain_id, kind)); // TODO: cloning
@@ -678,16 +678,16 @@ where
 
                     // TODO: limit the number of connections per peer?
 
-                    for (_, chain_id, _) in self.gossip_desired_peers.range(
+                    for (_, _, chain_id) in self.gossip_desired_peers.range(
                         (
                             actual_peer_id.clone(),
-                            usize::min_value(),
                             GossipKind::ConsensusTransactions,
+                            usize::min_value(),
                         )
                             ..=(
                                 actual_peer_id.clone(),
-                                usize::max_value(),
                                 GossipKind::ConsensusTransactions,
+                                usize::max_value(),
                             ),
                     ) {
                         if self
@@ -743,13 +743,13 @@ where
                             .range(
                                 (
                                     peer_id.clone(),
-                                    usize::min_value(),
                                     GossipKind::ConsensusTransactions,
+                                    usize::min_value(),
                                 )
                                     ..=(
                                         peer_id.clone(),
-                                        usize::max_value(),
                                         GossipKind::ConsensusTransactions,
+                                        usize::max_value(),
                                     ),
                             )
                             .count()
