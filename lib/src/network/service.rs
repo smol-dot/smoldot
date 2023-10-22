@@ -423,12 +423,14 @@ where
             return;
         }
 
-        self.gossip_desired_peers
+        let _was_inserted = self
+            .gossip_desired_peers
             .insert((peer_id.clone(), kind, chain_id.0));
+        debug_assert!(_was_inserted);
 
-        // If we have no connection or only shutting down connections, add to
-        // `unconnected_desired`.
-        if !self
+        //  Add either to `unconnected_desired` or to `connected_unopened_gossip_desired`,
+        // depending on the situation.
+        if self
             .connections_by_peer_id
             .range(
                 (peer_id.clone(), ConnectionId::min_value())
@@ -439,6 +441,41 @@ where
                 !state.shutting_down
             })
         {
+            if self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::min_value(),
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            NotificationsProtocol::BlockAnnounces {
+                                chain_index: chain_id.0,
+                            },
+                            peer_id.clone(),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::max_value(),
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .next()
+                .is_none()
+            {
+                let _was_inserted = self.connected_unopened_gossip_desired.insert((
+                    peer_id.clone(),
+                    chain_id,
+                    kind,
+                ));
+                debug_assert!(_was_inserted);
+            }
+        } else {
+            // Note that that `PeerId` might already be desired towards a different chain, in
+            // which case it is already present in `unconnected_desired`.
             self.unconnected_desired.insert(peer_id);
         }
     }
