@@ -19,18 +19,11 @@ use crate::libp2p::collection;
 use crate::network::protocol;
 use crate::util::{self, SipHasherBuild};
 
-use alloc::{
-    borrow::ToOwned as _,
-    collections::{BTreeSet, VecDeque},
-    format,
-    string::String,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, collections::BTreeSet, string::String, vec::Vec};
 use core::{
     fmt,
     hash::Hash,
     iter,
-    num::NonZeroUsize,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -208,9 +201,6 @@ struct ConnectionInfo {
 struct SubstreamInfo {
     // TODO: substream <-> connection mapping should be provided by collection.rs instead
     connection_id: collection::ConnectionId,
-    /// `true` if we have opened the substream. `false` if the remote has opened the substream.
-    // TODO: this information should be provided by collection.rs instead
-    direction: SubstreamDirection,
     protocol: Protocol,
 }
 
@@ -228,26 +218,6 @@ enum Protocol {
     Kad { chain_index: usize },
     SyncWarp { chain_index: usize },
     State { chain_index: usize },
-}
-
-impl Protocol {
-    // TODO useless?
-    fn chain_index(&self) -> Option<usize> {
-        match *self {
-            Protocol::Identify => None,
-            Protocol::Ping => None,
-            Protocol::BlockAnnounces { chain_index } => Some(chain_index),
-            Protocol::Transactions { chain_index } => Some(chain_index),
-            Protocol::Grandpa { chain_index } => Some(chain_index),
-            Protocol::Sync { chain_index } => Some(chain_index),
-            Protocol::LightUnknown { chain_index } => Some(chain_index),
-            Protocol::LightStorage { chain_index } => Some(chain_index),
-            Protocol::LightCall { chain_index } => Some(chain_index),
-            Protocol::Kad { chain_index } => Some(chain_index),
-            Protocol::SyncWarp { chain_index } => Some(chain_index),
-            Protocol::State { chain_index } => Some(chain_index),
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -378,10 +348,6 @@ where
         } else {
             return Err(AddChainError::Duplicate);
         }
-
-        let local_peer_id = PeerId::from_public_key(&peer_id::PublicKey::Ed25519(
-            *self.noise_key.libp2p_public_ed25519_key(),
-        ));
 
         chain_entry.insert(Chain {
             block_number_bytes: config.block_number_bytes,
@@ -901,7 +867,6 @@ where
                                 substream_id,
                                 SubstreamInfo {
                                     connection_id: id,
-                                    direction: SubstreamDirection::In,
                                     protocol,
                                 },
                             );
@@ -1226,7 +1191,6 @@ where
                                             new_substream_id,
                                             SubstreamInfo {
                                                 connection_id,
-                                                direction: SubstreamDirection::Out,
                                                 protocol: Protocol::Transactions { chain_index },
                                             },
                                         );
@@ -1281,7 +1245,6 @@ where
                                             new_substream_id,
                                             SubstreamInfo {
                                                 connection_id,
-                                                direction: SubstreamDirection::Out,
                                                 protocol: Protocol::Grandpa { chain_index },
                                             },
                                         );
@@ -1461,7 +1424,6 @@ where
                                     new_substream_id,
                                     SubstreamInfo {
                                         connection_id,
-                                        direction: SubstreamDirection::Out,
                                         protocol: substream_info.protocol.clone(),
                                     },
                                 );
@@ -2288,7 +2250,6 @@ where
             substream_id,
             SubstreamInfo {
                 connection_id,
-                direction: SubstreamDirection::Out,
                 protocol,
             },
         );
@@ -2502,7 +2463,6 @@ where
             substream_id,
             SubstreamInfo {
                 connection_id,
-                direction: SubstreamDirection::Out,
                 protocol: Protocol::BlockAnnounces {
                     chain_index: chain_id.0,
                 },
@@ -2574,11 +2534,15 @@ where
                 .filter(|(p, _, d, s, _)| {
                     *p == NotificationsProtocol::Grandpa {
                         chain_index: chain_id.0,
-            },
-            packet,
-        );
-        self.inner
-            .broadcast_notification(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2, packet);*/
+                    } && *d == SubstreamDirection::Out
+                        && *s == NotificationsSubstreamState::Open
+                })
+        {
+            match self.inner.queue_notification(*substream_id, packet.clone()) {
+                Ok(()) => {}
+                Err(collection::QueueNotificationError::QueueFull) => {}
+            }
+        }
 
         // Update the locally-stored state.
         *self.chains[chain_id.0]
