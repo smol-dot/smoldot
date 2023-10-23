@@ -23,7 +23,7 @@ use alloc::{borrow::ToOwned as _, collections::BTreeSet, string::String, vec::Ve
 use core::{
     fmt,
     hash::Hash,
-    iter,
+    iter, mem,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -31,8 +31,9 @@ use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::{
-        ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, MultiStreamConnectionTask,
-        NotificationsOutErr, ReadWrite, RequestError, SingleStreamConnectionTask, SubstreamId,
+        ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InboundError,
+        MultiStreamConnectionTask, NotificationsOutErr, ReadWrite, RequestError,
+        SingleStreamConnectionTask, SubstreamId,
     },
     connection::noise::{self, NoiseKey},
     multiaddr::{self, Multiaddr},
@@ -702,28 +703,64 @@ where
                     let expected_peer_id = connection_info.peer_id.clone();
                     match &mut connection_info.peer_id {
                         Some(expected_peer_id) if *expected_peer_id == actual_peer_id => {}
-                        Some(expected_peer_id) => {
-                            // TODO: cloning of `expected_peer_id` overhead
+                        peer_id_refmut @ None => {
+                            self.unconnected_desired.remove(&actual_peer_id);
+                            *peer_id_refmut = Some(actual_peer_id.clone());
+                        }
+                        Some(peer_id_refmut) => {
+                            // The actual PeerId doesn't match the expected PeerId.
+                            let expected_peer_id =
+                                mem::replace(peer_id_refmut, actual_peer_id.clone());
+
                             let _was_removed = self
                                 .connections_by_peer_id
                                 .remove(&(expected_peer_id.clone(), id));
                             debug_assert!(_was_removed);
+                            if self
+                                .gossip_desired_peers
+                                .range(
+                                    (
+                                        expected_peer_id.clone(),
+                                        GossipKind::ConsensusTransactions,
+                                        usize::min_value(),
+                                    )
+                                        ..=(
+                                            expected_peer_id.clone(),
+                                            GossipKind::ConsensusTransactions,
+                                            usize::max_value(),
+                                        ),
+                                )
+                                .next()
+                                .is_some()
+                            {
+                                if !self
+                                    .connections_by_peer_id
+                                    .range(
+                                        (expected_peer_id.clone(), ConnectionId::min_value())
+                                            ..=(
+                                                expected_peer_id.clone(),
+                                                ConnectionId::max_value(),
+                                            ),
+                                    )
+                                    .any(|(_, connection_id)| {
+                                        let state = self.inner.connection_state(*connection_id);
+                                        !state.shutting_down
+                                    })
+                                {
+                                    let _was_inserted =
+                                        self.unconnected_desired.insert(expected_peer_id.clone());
+                                    debug_assert!(_was_inserted);
+                                }
+                            }
                             let _was_inserted = self
                                 .connections_by_peer_id
                                 .insert((actual_peer_id.clone(), id));
                             debug_assert!(_was_inserted);
                             self.unconnected_desired.remove(&actual_peer_id);
-                            *expected_peer_id = actual_peer_id.clone();
-                        }
-                        peer_id @ None => {
-                            self.unconnected_desired.remove(&actual_peer_id);
-                            *peer_id = Some(actual_peer_id.clone());
                         }
                     }
 
                     debug_assert!(!self.unconnected_desired.contains(&actual_peer_id));
-
-                    // TODO: update the unopened desired set in case of peer id mismatch
 
                     // TODO: limit the number of connections per peer?
 
@@ -864,8 +901,8 @@ where
                     // TODO: IMPORTANT this event should indicate a clean shutdown, a pre-handshake interruption, a protocol error, a reset, etc. and should get a `reason`; see <https://github.com/smol-dot/smoldot/pull/391>
                 }
 
-                collection::Event::InboundError { id, error } => {
-                    // TODO: report event to API user for diagnostics
+                collection::Event::InboundError { .. } => {
+                    // TODO: report the error for diagnostic purposes, but revisit the concept of "InboundError"
                     continue;
                 }
 
@@ -1152,11 +1189,15 @@ where
                     result,
                 } => {
                     // Outgoing notifications substream has finished opening.
-                    let substream_info = self
-                        .substreams
-                        .get(&substream_id)
-                        .unwrap_or_else(|| unreachable!())
-                        .clone();
+                    let substream_info = if result.is_ok() {
+                        self.substreams
+                            .get(&substream_id)
+                            .unwrap_or_else(|| unreachable!())
+                            .clone()
+                    } else {
+                        self.substreams.remove(&substream_id).unwrap()
+                    };
+
                     let connection_id = substream_info.connection_id;
                     let connection_info = &self.inner[connection_id];
                     // Notification substreams can only happen on connections after their
@@ -1175,11 +1216,6 @@ where
                         substream_id,
                     ));
                     debug_assert!(_was_in);
-
-                    if result.is_err() {
-                        let _was_in = self.substreams.remove(&substream_id);
-                        debug_assert!(_was_in.is_some());
-                    }
 
                     // The behaviour is very specific to the protocol.
                     match substream_info.protocol {
@@ -1355,22 +1391,49 @@ where
                                             let state = self.inner.connection_state(*c);
                                             state.established && !state.shutting_down
                                         })
-                                    {
-                                        if self.gossip_desired_peers_by_chain.contains(&(
+                                        && self.gossip_desired_peers_by_chain.contains(&(
                                             chain_index,
                                             GossipKind::ConsensusTransactions,
                                             peer_id.clone(),
-                                        )) {
-                                            self.connected_unopened_gossip_desired.insert((
-                                                peer_id.clone(),
-                                                ChainId(chain_index),
-                                                GossipKind::ConsensusTransactions,
-                                            ));
-                                        }
+                                        ))
+                                    {
+                                        debug_assert!(self
+                                            .notification_substreams_by_peer_id
+                                            .range(
+                                                (
+                                                    NotificationsProtocol::BlockAnnounces {
+                                                        chain_index
+                                                    },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::Open,
+                                                    SubstreamId::min_value(),
+                                                )
+                                                    ..=(
+                                                        NotificationsProtocol::BlockAnnounces {
+                                                            chain_index
+                                                        },
+                                                        peer_id.clone(),
+                                                        SubstreamDirection::Out,
+                                                        NotificationsSubstreamState::Open,
+                                                        SubstreamId::max_value(),
+                                                    ),
+                                            )
+                                            .next()
+                                            .is_none());
+
+                                        self.connected_unopened_gossip_desired.insert((
+                                            peer_id.clone(),
+                                            ChainId(chain_index),
+                                            GossipKind::ConsensusTransactions,
+                                        ));
                                     }
 
-                                    if let GossipConnectError::HandshakeDecode(_) = error {
+                                    if let GossipConnectError::HandshakeDecode(_)
+                                    | GossipConnectError::GenesisMismatch { .. } = error
+                                    {
                                         self.inner.close_out_notifications(substream_id);
+                                        self.substreams.remove(&substream_id).unwrap();
                                     }
 
                                     for substream_id in self
@@ -1440,7 +1503,26 @@ where
                             // This can only happen if we have a block announces substream with
                             // that peer, otherwise the substream opening attempt should have
                             // been cancelled.
-                            // TODO: debug_assert!(self.notification_substreams_by_peer_id.contains(&(NotificationsProtocol::BlockAnnounces { chain_index }, peer_id.clone(), NotificationsSubstreamDirection::Out, )));
+                            debug_assert!(self
+                                .notification_substreams_by_peer_id
+                                .range(
+                                    (
+                                        NotificationsProtocol::BlockAnnounces { chain_index },
+                                        peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        NotificationsSubstreamState::Open,
+                                        SubstreamId::min_value()
+                                    )
+                                        ..=(
+                                            NotificationsProtocol::BlockAnnounces { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Open,
+                                            SubstreamId::max_value()
+                                        )
+                                )
+                                .next()
+                                .is_some());
 
                             // If the substream failed to open, we simply try again.
                             // Trying agains means that we might be hammering the remote with
@@ -1598,7 +1680,62 @@ where
                     // Some substreams are tied to the state of the block announces substream.
                     match substream_info.protocol {
                         Protocol::BlockAnnounces { chain_index } => {
+                            // Insert back in `connected_unopened_gossip_desired` if relevant.
+                            if self.gossip_desired_peers_by_chain.contains(&(
+                                chain_index,
+                                GossipKind::ConsensusTransactions,
+                                peer_id.clone(),
+                            )) && !self
+                                .connections_by_peer_id
+                                .range(
+                                    (peer_id.clone(), ConnectionId::min_value())
+                                        ..=(peer_id.clone(), ConnectionId::max_value()),
+                                )
+                                .any(|(_, connection_id)| {
+                                    let state = self.inner.connection_state(*connection_id);
+                                    !state.shutting_down
+                                })
+                            {
+                                debug_assert!(self
+                                    .notification_substreams_by_peer_id
+                                    .range(
+                                        (
+                                            NotificationsProtocol::BlockAnnounces { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Open,
+                                            SubstreamId::min_value(),
+                                        )
+                                            ..=(
+                                                NotificationsProtocol::BlockAnnounces {
+                                                    chain_index
+                                                },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::Open,
+                                                SubstreamId::max_value(),
+                                            ),
+                                    )
+                                    .next()
+                                    .is_none());
+
+                                let _was_inserted =
+                                    self.connected_unopened_gossip_desired.insert((
+                                        peer_id.clone(),
+                                        ChainId(chain_index),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+                                debug_assert!(_was_inserted);
+                            }
+
+                            // TODO: close grandpa/tx
                             //todo!()
+
+                            return Some(Event::GossipDisconnected {
+                                peer_id: peer_id.clone(),
+                                chain_id: ChainId(chain_index),
+                                kind: GossipKind::ConsensusTransactions,
+                            });
                         }
                         // The transactions and Grandpa protocols are tied to the block announces
                         // substream. If there is a block announce substream with the peer, we try
@@ -1659,18 +1796,7 @@ where
                                 new_substream_id,
                             ));
                         }
-                        _ => {}
-                    }
-
-                    // TODO: update connected_unopened_desired
-
-                    // Generate an event if relevant.
-                    if let Protocol::BlockAnnounces { chain_index } = substream_info.protocol {
-                        return Some(Event::GossipDisconnected {
-                            peer_id: peer_id.clone(),
-                            chain_id: ChainId(chain_index),
-                            kind: GossipKind::ConsensusTransactions,
-                        });
+                        _ => unreachable!(),
                     }
                 }
 
@@ -1739,8 +1865,8 @@ where
                         unreachable!()
                     };
 
-                    // If an outgoing notifications protocol (either pending or fully open) exists,
-                    // accept the substream immediately.
+                    // If an outgoing block announces notifications protocol (either pending or
+                    // fully open) exists, accept the substream immediately.
                     if self
                         .notification_substreams_by_peer_id
                         .range(
@@ -3098,7 +3224,7 @@ pub enum Event {
 pub enum ProtocolError {
     /// Error in an incoming substream.
     #[display(fmt = "Error in an incoming substream: {_0}")]
-    InboundError(collection::InboundError),
+    InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
     #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
     BadBlockAnnouncesHandshake(BlockAnnouncesHandshakeDecodeError),
