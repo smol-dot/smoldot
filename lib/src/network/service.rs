@@ -3276,6 +3276,7 @@ pub enum Event {
     /// Error in the protocol in a connection, such as failure to decode a message. This event
     /// doesn't have any consequence on the health of the connection, and is purely for diagnostic
     /// purposes.
+    // TODO: review the concept of protocol error
     ProtocolError {
         /// Peer that has caused the protocol error.
         peer_id: PeerId,

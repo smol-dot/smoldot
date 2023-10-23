@@ -661,10 +661,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
-    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
+    pub async fn peers_list(&self, chain_id: ChainId) -> impl Iterator<Item = PeerId> {
         let (tx, rx) = oneshot::channel();
         self.messages_tx
-            .send(ToBackground::PeersList { result: tx })
+            .send(ToBackground::PeersList {
+                chain_id,
+                result: tx,
+            })
             .await
             .unwrap();
         rx.await.unwrap().into_iter()
@@ -835,6 +838,7 @@ enum ToBackground<TPlat: PlatformRef> {
         result: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
     },
     PeersList {
+        chain_id: ChainId,
         result: oneshot::Sender<Vec<PeerId>>,
     },
     StartDiscovery,
@@ -930,7 +934,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                // TODO: infinite loop right now
                 let peer_id = task
                     .peering_strategy
                     .assign_out_slot(chain_id)
@@ -1144,7 +1147,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(StorageProofRequestError::NoConnection));
                     }
                     Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
-                        // TODO: consider dealing with the problem of requests too large internally by sending multiple requests
                         let _ = result.send(Err(StorageProofRequestError::RequestTooLarge));
                     }
                 };
@@ -1281,8 +1283,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let _ = result.send(todo!());
                 continue;
             }
-            WhatHappened::Message(ToBackground::PeersList { result }) => {
-                let _ = result.send(todo!());
+            WhatHappened::Message(ToBackground::PeersList { chain_id, result }) => {
+                let _ = result.send(
+                    task.network
+                        .gossip_connected_peers(
+                            chain_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .cloned()
+                        .collect(),
+                );
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {

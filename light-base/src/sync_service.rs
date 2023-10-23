@@ -388,7 +388,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         // TODO: better peers selection ; don't just take the first
         for target in self
             .network_service
-            .peers_list()
+            .peers_list(self.network_chain_id)
             .await
             .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
         {
