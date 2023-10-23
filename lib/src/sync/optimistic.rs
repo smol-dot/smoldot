@@ -602,6 +602,8 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             return (user_data, FinishRequestOutcome::Obsolete);
         }
 
+        // TODO: important /!\ should check whether the block bodies match the extrinsics root in the headers, in order to differentiate invalid blocks from malicious peers
+
         let ((_, user_data), source_id) = self
             .inner
             .verification_queue

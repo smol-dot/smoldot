@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `chain_getBlock` JSON-RPC function now always returns an empty list of justifications, because there is no (reasonable) way for smoldot to verify whether the justifications sent by full nodes are valid.
+
 ## 2.0.6 - 2023-10-13
 
 ### Fixed
