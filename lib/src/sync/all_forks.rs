@@ -2130,47 +2130,25 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
         AllForksSync<TBl, TRq, TSrc>,
         FinalityProofVerifyOutcome<TBl>,
     ) {
-        let outcome = match self.finality_proof_to_verify {
+        let block_number_bytes = self.parent.chain.block_number_bytes();
+
+        let finality_apply = match self.finality_proof_to_verify {
             FinalityProof::GrandpaCommit(scale_encoded_commit) => {
-                let block_number_bytes = self.parent.chain.block_number_bytes();
                 match self
                     .parent
                     .chain
                     .verify_grandpa_commit_message(&scale_encoded_commit, randomness_seed)
                 {
-                    Ok(success) => {
-                        // TODO: DRY
-                        let finalized_blocks_iter = success.apply();
-                        let updates_best_block = finalized_blocks_iter.updates_best_block();
-                        let mut finalized_blocks = Vec::new();
-                        let mut pruned_blocks = Vec::new();
-                        for block in finalized_blocks_iter {
-                            let header = header::Header::from(
-                                header::decode(&block.scale_encoded_header, block_number_bytes)
-                                    .unwrap(),
-                            );
-                            if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
-                                finalized_blocks.push((header, block.user_data));
-                            } else {
-                                pruned_blocks.push((header, block.user_data));
-                            }
-                        }
-                        let _finalized_blocks =
-                            self.parent.inner.blocks.set_finalized_block_height(
-                                finalized_blocks.last().unwrap().0.number,
-                            );
-                        FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks_newest_to_oldest: finalized_blocks,
-                            pruned_blocks,
-                            updates_best_block,
-                        }
-                    }
+                    Ok(finality_apply) => finality_apply,
+
                     // In case where the commit message concerns a block older or equal to the
                     // finalized block, the operation is silently considered successful.
                     Err(blocks_tree::CommitVerifyError::FinalityVerify(
                         blocks_tree::FinalityVerifyError::EqualToFinalized
                         | blocks_tree::FinalityVerifyError::BelowFinalized,
-                    )) => FinalityProofVerifyOutcome::AlreadyFinalized,
+                    )) => return (self.parent, FinalityProofVerifyOutcome::AlreadyFinalized),
+
+                    // The commit can't be verified yet.
                     Err(
                         blocks_tree::CommitVerifyError::FinalityVerify(
                             blocks_tree::FinalityVerifyError::UnknownTargetBlock {
@@ -2194,59 +2172,80 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                                 block_number,
                                 FinalityProofs::GrandpaCommit(scale_encoded_commit),
                             );
-                        FinalityProofVerifyOutcome::GrandpaCommitPending
+                        return (
+                            self.parent,
+                            FinalityProofVerifyOutcome::GrandpaCommitPending,
+                        );
                     }
-                    Err(err) => FinalityProofVerifyOutcome::GrandpaCommitError(err),
+
+                    // Any other error means that the commit is invalid.
+                    Err(err) => {
+                        return (
+                            self.parent,
+                            FinalityProofVerifyOutcome::GrandpaCommitError(err),
+                        )
+                    }
                 }
             }
+
             FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
-                let block_number_bytes = self.parent.chain.block_number_bytes();
                 match self.parent.chain.verify_justification(
                     consensus_engine_id,
                     &scale_encoded_justification,
                     randomness_seed,
                 ) {
-                    Ok(success) => {
-                        let finalized_blocks_iter = success.apply();
-                        let updates_best_block = finalized_blocks_iter.updates_best_block();
-                        let mut finalized_blocks = Vec::new();
-                        let mut pruned_blocks = Vec::new();
-                        for block in finalized_blocks_iter {
-                            let header = header::Header::from(
-                                header::decode(&block.scale_encoded_header, block_number_bytes)
-                                    .unwrap(),
-                            );
-                            if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
-                                finalized_blocks.push((header, block.user_data));
-                            } else {
-                                pruned_blocks.push((header, block.user_data));
-                            }
-                        }
-                        let _finalized_blocks =
-                            self.parent.inner.blocks.set_finalized_block_height(
-                                finalized_blocks.last().unwrap().0.number,
-                            );
-                        FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks_newest_to_oldest: finalized_blocks,
-                            pruned_blocks,
-                            updates_best_block,
-                        }
-                    }
+                    Ok(finality_apply) => finality_apply,
+
                     // In case where the commit message concerns a block older or equal to the
                     // finalized block, the operation is silently considered successful.
                     Err(blocks_tree::JustificationVerifyError::FinalityVerify(
                         blocks_tree::FinalityVerifyError::EqualToFinalized
                         | blocks_tree::FinalityVerifyError::BelowFinalized,
-                    )) => FinalityProofVerifyOutcome::AlreadyFinalized,
+                    )) => return (self.parent, FinalityProofVerifyOutcome::AlreadyFinalized),
 
                     // Note that, contrary to commits, there's no such thing as a justification
                     // that can't be verified yet.
-                    Err(err) => FinalityProofVerifyOutcome::JustificationError(err),
+                    Err(err) => {
+                        return (
+                            self.parent,
+                            FinalityProofVerifyOutcome::JustificationError(err),
+                        )
+                    }
                 }
             }
         };
 
-        (self.parent, outcome)
+        // Commit or justification successfully verified.
+        // Update the local state with the newly-finalized block.
+
+        let finalized_blocks_iter = finality_apply.apply();
+        let updates_best_block = finalized_blocks_iter.updates_best_block();
+        let mut finalized_blocks = Vec::new();
+        let mut pruned_blocks = Vec::new();
+        for block in finalized_blocks_iter {
+            let header = header::Header::from(
+                header::decode(&block.scale_encoded_header, block_number_bytes).unwrap(),
+            );
+            if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
+                finalized_blocks.push((header, block.user_data));
+            } else {
+                pruned_blocks.push((header, block.user_data));
+            }
+        }
+        let _finalized_blocks = self
+            .parent
+            .inner
+            .blocks
+            .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+
+        (
+            self.parent,
+            FinalityProofVerifyOutcome::NewFinalized {
+                finalized_blocks_newest_to_oldest: finalized_blocks,
+                pruned_blocks,
+                updates_best_block,
+            },
+        )
     }
 
     /// Do not actually proceed with the verification.
