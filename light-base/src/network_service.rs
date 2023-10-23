@@ -1343,7 +1343,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 expected_peer_id,
                 id,
             }) => {
-                let remote_addr = task.network.connection_remote_addr(id);
+                let remote_addr =
+                    Multiaddr::try_from(task.network.connection_remote_addr(id).to_owned())
+                        .unwrap(); // TODO: review this unwrap
                 if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
                 {
                     log::debug!(target: "network", "Connections({}, {}) <= HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
@@ -1731,7 +1733,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                                     is_initiator: true,
                                 },
-                                multiaddr.clone(),
+                                multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
                             );
 
@@ -1795,7 +1797,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     local_tls_certificate_multihash,
                                     remote_tls_certificate_multihash,
                                 },
-                                multiaddr.clone(),
+                                multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
                             );
 

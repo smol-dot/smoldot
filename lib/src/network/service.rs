@@ -251,7 +251,7 @@ struct Chain {
 
 /// See [`ChainNetwork::inner`].
 struct ConnectionInfo {
-    address: Multiaddr,
+    address: Vec<u8>,
 
     /// Identity of the remote. Can be either the expected or the actual identity.
     ///
@@ -633,14 +633,15 @@ where
     /// Must be passed the moment (as a `TNow`) when the connection has first been opened, in
     /// order to determine when the handshake timeout expires.
     ///
-    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// The `remote_addr` is the multiaddress used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
-    /// libp2p protocol, its own address, in which case we send it.
+    /// libp2p protocol, its own address, in which case we send it. Because the multiaddress
+    /// specification is flexible, this module doesn't attempt to parse the address.
     pub fn add_single_stream_connection(
         &mut self,
         when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
-        remote_addr: Multiaddr,
+        remote_addr: Vec<u8>,
         expected_peer_id: Option<PeerId>,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
@@ -682,14 +683,15 @@ where
     /// Must be passed the moment (as a `TNow`) when the connection has first been opened, in
     /// order to determine when the handshake timeout expires.
     ///
-    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// The `remote_addr` is the multiaddress used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
-    /// libp2p protocol, its own address, in which case we send it.
+    /// libp2p protocol, its own address, in which case we send it. Because the multiaddress
+    /// specification is flexible, this module doesn't attempt to parse the address.
     pub fn add_multi_stream_connection<TSubId>(
         &mut self,
         when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
-        remote_addr: Multiaddr,
+        remote_addr: Vec<u8>,
         expected_peer_id: Option<PeerId>,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -726,7 +728,17 @@ where
         (id, task)
     }
 
-    pub fn connection_remote_addr(&self, id: ConnectionId) -> &Multiaddr {
+    /// Returns the remote address that was passed to [`ChainNetwork::add_single_stream_connection`]
+    /// or [`ChainNetwork::add_multi_stream_connection`] for the given connection.
+    ///
+    /// > **Note**: This module does in no way attempt to parse the address. This function simply
+    /// >           returns the value that was provided by the API user, whatever it is.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ConnectionId`] is invalid.
+    ///
+    pub fn connection_remote_addr(&self, id: ConnectionId) -> &[u8] {
         &self.inner[id].address
     }
 
@@ -2625,7 +2637,7 @@ where
                 agent_version,
                 ed25519_public_key: *self.noise_key.libp2p_public_ed25519_key(),
                 listen_addrs: iter::empty(), // TODO:
-                observed_addr: observed_addr.as_ref(),
+                observed_addr,
                 protocols: supported_protocols_names.iter().map(|p| &p[..]),
             })
             .fold(Vec::new(), |mut a, b| {
