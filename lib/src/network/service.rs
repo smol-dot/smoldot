@@ -15,6 +15,67 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! State machine of all networking connections.
+//!
+//! The [`ChainNetwork`] struct is a state machine containing multiple collections that are
+//! controlled by the API user:
+//!
+//! - A list of networking connections, identified by a [`ConnectionId`]. Each connection is
+//! either in the handshake phase, healthy, or shutting down. Each connection in the handshake
+//! phase has an optional expected [`PeerId`] representing the identity of the node that is
+//! expected to be reached once the handshake is finished. Each connection that is healthy or
+//! shutting down has an (actual) [`PeerId`] associated to it.
+//! - A list of chains, identified by a [`ChainId`].
+//! - A set of "desired" `(ChainId, PeerId, GossipKind)` tuples representing, for each chain, the
+//! identities of the nodes that the API user wants to establish a gossip link with.
+//!
+//! In addition to this, the [`ChainNetwork`] also exposes:
+//!
+//! - A set of `(ChainId, PeerId, GossipKind)` tuples representing the gossip links that have been
+//! established.
+//! - A list of outgoing requests, identified by a [`SubstreamId`], that have been sent to a peer
+//! and that are awaiting a response.
+//! - A list of ingoing requests, identified by a [`SubstreamId`], that have been received from a
+//! peer and that must be answered by the API user.
+//! - A list of outgoing gossip link connection attempts, identified by a [`SubstreamId`], that
+//! must be answered by the peer.
+//! - A set of `(ChainId, PeerId, GossipKind)` tuples representing the peers that would like to
+//! establish a gossip link with the local node, and that are awaiting a response by the API user.
+//!
+//! # Usage
+//!
+//! At initialization, create a new [`ChainNetwork`] with [`ChainNetwork::new`], and add chains
+//! using [`ChainNetwork::add_chain`].
+//!
+//! The [`ChainNetwork`] doesn't automatically open connections to peers. This must be done
+//! manually using [`ChainNetwork::add_single_stream_connection`] or
+//! [`ChainNetwork::add_multi_stream_connection`]. Choosing which peer to connect to and through
+//! which address is outside of the scope of this module.
+//!
+//! Adding a connection using [`ChainNetwork::add_single_stream_connection`] or
+//! [`ChainNetwork::add_multi_stream_connection`] returns a "connection task". This connection task
+//! must be processed. TODO: expand explanation here
+//!
+//! After a message has been injected using [`ChainNetwork::inject_connection_message`], repeatedly
+//! [`ChainNetwork::next_event`] until it returns `None` in order to determine what has happened.
+//!
+//! Once a connection has been established (which is indicated by a [`Event::HandshakeFinished`]
+//! event), one can open a gossip link to this peer using [`ChainNetwork::gossip_open`].
+//!
+//! In order to faciliate this process, the [`ChainNetwork`] provides a "desired gossip links"
+//! system. Use [`ChainNetwork::gossip_insert_desired`] and [`ChainNetwork::gossip_remove_desired`]
+//! to insert or remove `(ChainId, PeerId, GossipKind)` tuples into the state machine. You can
+//! then use [`ChainNetwork::unconnected_desired`] to obtain a list of [`PeerId`]s that are marked
+//! as desired and for which a connection should be opened, and
+//! [`ChainNetwork::connected_unopened_gossip_desired`] to obtain a list of [`PeerId`]s that are
+//! marked as desired and that have a healthy connection and for which a gossip link should be
+//! opened. Marking peers as desired only influences the return values of
+//! [`ChainNetwork::unconnected_desired`] and [`ChainNetwork::connected_unopened_gossip_desired`]
+//! and has no other effect.
+//!
+
+// TODO: expand explanations once the API is finalized
+
 use crate::libp2p::collection;
 use crate::network::protocol;
 use crate::util::{self, SipHasherBuild};
@@ -63,7 +124,7 @@ pub struct Config {
     /// Signed using the actual libp2p key.
     pub noise_key: NoiseKey,
 
-    /// Amount of time after which a connection handshake is considered to have taken too long
+    /// Amount of time after which a connection hathat ndshake is considered to have taken too long
     /// and must be aborted.
     pub handshake_timeout: Duration,
 }
