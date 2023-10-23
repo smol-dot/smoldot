@@ -601,7 +601,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         block_hash,
                         protocol::BlocksRequestFields {
                             body: true,
-                            header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
+                            header: true, // TODO: must be true in order to avoid an error being generated, fix this in sync service
                             justifications: false,
                         },
                         3,
@@ -609,9 +609,12 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         NonZeroU32::new(3).unwrap(),
                     );
 
-                    Box::pin(
-                        async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) },
-                    )
+                    Box::pin(async move {
+                        (
+                            block_hash,
+                            download_future.await.and_then(|b| b.body.ok_or(())),
+                        )
+                    })
                 });
 
                 worker
@@ -701,7 +704,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
                 download = worker.block_downloads.select_next_some() => {
                     // A block body download has finished, successfully or not.
-                    let (block_hash, block_body) = download;
+                    let (block_hash, mut block_body) = download;
 
                     let block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
@@ -714,8 +717,14 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
                     debug_assert!(block.downloading);
                     block.downloading = false;
-                    if block_body.is_err() {
-                        block.failed_downloads = block.failed_downloads.saturating_add(1);
+
+                    // Make sure that the downloaded body is the one of this block, otherwise
+                    // we consider the download as failed.
+                    if let Ok(body) = &block_body {
+                        // TODO: unwrap the decoding?! is that correct?
+                        if header::extrinsics_root(body) != *header::decode(&block.scale_encoded_header, worker.sync_service.block_number_bytes()).unwrap().extrinsics_root {
+                            block_body = Err(());
+                        }
                     }
 
                     if let Ok(block_body) = block_body {
@@ -743,6 +752,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         }
 
                     } else {
+                        block.failed_downloads = block.failed_downloads.saturating_add(1);
                         log::debug!(
                             target: &config.log_target,
                             "BlockDownloads => Failed(block={})",
