@@ -877,12 +877,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             unreachable!()
         };
 
-        // Determine whether the requested block hash is valid, and if yes its number.
-        let block_number = {
+        // Determine whether the requested block hash is valid, and if yes its number and
+        // extrinsics trie root. The extrinsics trie root is used to verify whether the body we
+        // download is correct.
+        let (block_number, extrinsics_root) = {
             if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                 let decoded =
                     header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
-                decoded.number
+                (decoded.number, *decoded.extrinsics_root)
             } else {
                 // Block isn't pinned. Request is invalid.
                 request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
@@ -949,20 +951,33 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                     };
 
-                    match outcome {
-                        Ok(block_data) => {
+                    // We must check whether the body is present in the response and valid.
+                    // TODO: should try the request again with a different peer instead of failing immediately
+                    let body = match outcome {
+                        Ok(outcome) => {
+                            if let Some(body) = outcome.body {
+                                if header::extrinsics_root(&body) == extrinsics_root {
+                                    Ok(body)
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        Err(err) => Err(err),
+                    };
+
+                    // Send back the response.
+                    match body {
+                        Ok(body) => {
                             let _ = to_main_task
                                 .send(OperationEvent {
                                     operation_id: operation_id.clone(),
                                     is_done: true,
                                     notification: methods::FollowEvent::OperationBodyDone {
                                         operation_id: operation_id.clone().into(),
-                                        value: block_data
-                                            .body
-                                            .unwrap()
-                                            .into_iter()
-                                            .map(methods::HexString)
-                                            .collect(),
+                                        value: body.into_iter().map(methods::HexString).collect(),
                                     },
                                 })
                                 .await;
