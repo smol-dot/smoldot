@@ -1728,8 +1728,44 @@ where
                                 debug_assert!(_was_inserted);
                             }
 
-                            // TODO: close grandpa/tx
-                            //todo!()
+                            for proto in [
+                                NotificationsProtocol::Transactions { chain_index },
+                                NotificationsProtocol::Grandpa { chain_index },
+                            ] {
+                                for (substream_state, substream_id) in self
+                                    .notification_substreams_by_peer_id
+                                    .range(
+                                        (
+                                            proto,
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::min_value(),
+                                            SubstreamId::min_value(),
+                                        )
+                                            ..=(
+                                                proto,
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::max_value(),
+                                                SubstreamId::max_value(),
+                                            ),
+                                    )
+                                    .map(|(_, _, _, state, substream_id)| (*state, *substream_id))
+                                    .collect::<Vec<_>>()
+                                {
+                                    self.inner.close_out_notifications(substream_id);
+                                    self.substreams.remove(&substream_id);
+                                    self.notification_substreams_by_peer_id.remove(&(
+                                        proto,
+                                        peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        substream_state,
+                                        substream_id,
+                                    ));
+                                }
+                            }
+
+                            // TODO: also close inbound substreams?
 
                             return Some(Event::GossipDisconnected {
                                 peer_id: peer_id.clone(),
@@ -2837,6 +2873,7 @@ where
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
+    // TODO: function is awkward due to tx substream not being necessarily always open
     pub fn gossip_send_transaction(
         &mut self,
         target: &PeerId,
