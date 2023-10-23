@@ -588,6 +588,38 @@ where
         }
     }
 
+    /// Removes the given peer from the list of desired chain-peers of all the chains that exist.
+    ///
+    /// Has no effect if it was not marked as desired.
+    pub fn gossip_remove_desired_all(&mut self, peer_id: &PeerId, kind: GossipKind) {
+        let chains = self
+            .gossip_desired_peers
+            .range(
+                (peer_id.clone(), kind, usize::min_value())
+                    ..=(peer_id.clone(), kind, usize::max_value()),
+            )
+            .map(|(_, _, chain_index)| *chain_index)
+            .collect::<Vec<_>>();
+
+        for chain_index in chains {
+            let _was_in =
+                self.gossip_desired_peers_by_chain
+                    .remove(&(chain_index, kind, peer_id.clone()));
+            debug_assert!(_was_in);
+            let _was_in = self
+                .gossip_desired_peers
+                .remove(&(peer_id.clone(), kind, chain_index));
+            debug_assert!(_was_in);
+            self.connected_unopened_gossip_desired.remove(&(
+                peer_id.clone(),
+                ChainId(chain_index),
+                kind,
+            ));
+        }
+
+        self.unconnected_desired.remove(peer_id);
+    }
+
     /// Returns the number of gossip-desired peers for the given chain.
     ///
     /// # Panic
@@ -971,12 +1003,27 @@ where
 
                     debug_assert!(connection_info.peer_id.is_some() || !was_established);
 
-                    if let Some(peer_id) = connection_info.peer_id {
-                        let _was_removed = self.connections_by_peer_id.remove(&(peer_id, id));
+                    if let Some(peer_id) = &connection_info.peer_id {
+                        let _was_removed =
+                            self.connections_by_peer_id.remove(&(peer_id.clone(), id));
                         debug_assert!(_was_removed);
                     }
 
                     // TODO: IMPORTANT this event should indicate a clean shutdown, a pre-handshake interruption, a protocol error, a reset, etc. and should get a `reason`; see <https://github.com/smol-dot/smoldot/pull/391>
+
+                    if was_established {
+                        return Some(Event::Disconnected {
+                            id,
+                            address: connection_info.address,
+                            peer_id: connection_info.peer_id.unwrap(),
+                        });
+                    } else {
+                        return Some(Event::PreHandshakeDisconnected {
+                            id,
+                            address: connection_info.address,
+                            expected_peer_id: connection_info.peer_id,
+                        });
+                    }
                 }
 
                 collection::Event::InboundError { .. } => {
@@ -3171,6 +3218,29 @@ pub enum Event {
         /// [`ChainNetwork::add_multi_stream_connection`].
         expected_peer_id: Option<PeerId>,
         /// Actual [`PeerId`] of the connection.
+        peer_id: PeerId,
+    },
+
+    /// A connection has shut down before finishing its handshake.
+    PreHandshakeDisconnected {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        address: Vec<u8>,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        expected_peer_id: Option<PeerId>,
+    },
+
+    /// A connection has shut down after finishing its handshake.
+    Disconnected {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        address: Vec<u8>,
+        /// Peer that was connected.
         peer_id: PeerId,
     },
 

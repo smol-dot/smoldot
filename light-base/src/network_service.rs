@@ -1271,7 +1271,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     for addr in addrs {
                         task.peering_strategy
-                            .insert_address(&peer_id, addr.as_ref());
+                            .insert_address(&peer_id, addr.into_vec());
                     }
 
                     task.peering_strategy.insert_chain_peer(peer_id, chain_id);
@@ -1349,12 +1349,41 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
                 {
                     log::debug!(target: "network", "Connections({}, {}) <= HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
+
+                    task.peering_strategy
+                        .remove_address(expected_peer_id, remote_addr.as_ref());
+                    task.peering_strategy
+                        .insert_connected_address(&peer_id, remote_addr.clone().into_vec());
                 } else {
                     log::debug!(target: "network", "Connections({}, {}) <= HandshakeFinished", peer_id, remote_addr);
                 }
 
                 // TODO: handle peer id mismatch
 
+                continue;
+            }
+            WhatHappened::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                address,
+                expected_peer_id,
+                ..
+            }) => {
+                if let Some(expected_peer_id) = expected_peer_id {
+                    task.peering_strategy
+                        .disconnect_addr(&expected_peer_id, &address)
+                        .unwrap();
+                    let address = Multiaddr::try_from(address).unwrap();
+                    log::debug!(target: "network", "Connections({}, {}) <= Shutdown(handshake_finished=false)", expected_peer_id, address);
+                }
+                continue;
+            }
+            WhatHappened::NetworkEvent(service::Event::Disconnected {
+                address, peer_id, ..
+            }) => {
+                task.peering_strategy
+                    .disconnect_addr(&peer_id, &address)
+                    .unwrap();
+                let address = Multiaddr::try_from(address).unwrap();
+                log::debug!(target: "network", "Connections({}, {}) <= Shutdown(handshake_finished=true)", peer_id, address);
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
@@ -1418,7 +1447,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &task.log_chain_names[&chain_id],
                     peer_id
                 );
-                // TODO: also ban peer
+                task.peering_strategy
+                    .unassign_out_slot_and_ban(&chain_id, &peer_id);
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -1439,11 +1469,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 log::debug!(
                     target: "connections",
-                    "{}Slots ∌ {}",
+                    "{}Slots ∌ {}", // TODO:
                     &task.log_chain_names[&chain_id],
                     peer_id
                 );
-                // TODO: also ban peer
+                task.peering_strategy
+                    .unassign_out_slot_and_ban(&chain_id, &peer_id);
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -1526,13 +1557,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         }
                     }
 
-                    for addr in valid_addrs {
+                    if !valid_addrs.is_empty() {
                         task.peering_strategy
-                            .insert_address(&peer_id, addr.as_ref());
+                            .insert_chain_peer(peer_id.clone(), chain_id);
                     }
 
-                    // TODO: only if valid addresses?
-                    task.peering_strategy.insert_chain_peer(peer_id, chain_id);
+                    for addr in valid_addrs {
+                        task.peering_strategy
+                            .insert_address(&peer_id, addr.into_vec());
+                    }
                 }
 
                 continue;
@@ -1685,16 +1718,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WhatHappened::StartConnect(peer_id) => {
                 // TODO: restore rate limiting
-                let is_important = task.important_nodes.contains(&peer_id);
 
-                // TODO: unwrap()? is that correct?
-                let multiaddr = task
-                    .peering_strategy
-                    .addr_to_pending(&peer_id)
-                    .unwrap()
-                    .to_owned(); // TODO: to_owned overhead
-                let Ok(multiaddr) = multiaddr::Multiaddr::try_from(multiaddr) else {
-                    todo!() // TODO:
+                let Some(multiaddr) = task.peering_strategy.addr_to_connected(&peer_id) else {
+                    // There is no address for that peer in the address book.
+                    task.network.gossip_remove_desired_all(
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    task.peering_strategy.unassign_out_slots_and_ban(&peer_id);
+                    continue;
+                };
+
+                let multiaddr = match multiaddr::Multiaddr::try_from(multiaddr.to_owned()) {
+                    Ok(a) => a,
+                    Err(multiaddr::FromVecError { addr }) => {
+                        // Address is in an invalid format.
+                        let _was_in = task.peering_strategy.remove_address(&peer_id, &addr);
+                        debug_assert!(_was_in);
+                        continue;
+                    }
                 };
 
                 let address = address_parse::multiaddr_to_address(&multiaddr)
@@ -1711,8 +1753,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     });
 
                 let Some(address) = address else {
-                    todo!();
-                }; // TODO:
+                    // Address is in an invalid format or isn't supported by the platform.
+                    let _was_in = task
+                        .peering_strategy
+                        .remove_address(&peer_id, multiaddr.as_ref());
+                    debug_assert!(_was_in);
+                    continue;
+                };
 
                 log::debug!(
                     target: "connections",
@@ -1760,7 +1807,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ) => {
                         // TODO: we unfortunately need to know the local TLS certificate in order to
                         // insert the connection, and this local TLS certificate can only be given
-                        // us by the platform implementation, leading to this `await` here which
+                        // to us by the platform implementation, leading to this `await` here which
                         // really shouldn't exist. For the moment it's fine because the only implementations
                         // of multistream connections returns very quickly, but in theory this `await`
                         // could block for a long time.
@@ -1780,7 +1827,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .chain(connection.local_tls_certificate_sha256.into_iter())
                             .collect();
                         debug_assert_eq!(
-                            // TODO: a bit stupid
+                            // TODO: check is a bit stupid given that the remote certificate is just passed through
                             remote_certificate_sha256,
                             connection.remote_tls_certificate_sha256
                         );
