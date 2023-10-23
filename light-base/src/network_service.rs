@@ -977,7 +977,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
             log::debug!(
                 target: "network",
-                "Connection({}, {}) <= OpenGossip",
+                "Gossip({}, {}) <= Open",
                 peer_id,
                 &task.log_chain_names[&chain_id],
             );
@@ -1348,18 +1348,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .unwrap(); // TODO: review this unwrap
                 if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
                 {
-                    log::debug!(target: "network", "Connections({}, {}) <= HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
+                    log::debug!(target: "network", "Connections({}, {}) => HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
 
                     task.peering_strategy
                         .remove_address(expected_peer_id, remote_addr.as_ref());
                     task.peering_strategy
                         .insert_connected_address(&peer_id, remote_addr.clone().into_vec());
                 } else {
-                    log::debug!(target: "network", "Connections({}, {}) <= HandshakeFinished", peer_id, remote_addr);
+                    log::debug!(target: "network", "Connections({}, {}) => HandshakeFinished", peer_id, remote_addr);
                 }
-
-                // TODO: handle peer id mismatch
-
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::PreHandshakeDisconnected {
@@ -1372,7 +1369,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .disconnect_addr(&expected_peer_id, &address)
                         .unwrap();
                     let address = Multiaddr::try_from(address).unwrap();
-                    log::debug!(target: "network", "Connections({}, {}) <= Shutdown(handshake_finished=false)", expected_peer_id, address);
+                    log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
                 }
                 continue;
             }
@@ -1383,7 +1380,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .disconnect_addr(&peer_id, &address)
                     .unwrap();
                 let address = Multiaddr::try_from(address).unwrap();
-                log::debug!(target: "network", "Connections({}, {}) <= Shutdown(handshake_finished=true)", peer_id, address);
+                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
@@ -1415,7 +1412,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => ChainConnected(best_height={}, best_hash={})",
+                    "Gossip({}, {}) => Opened(best_height={}, best_hash={})",
                     peer_id,
                     &task.log_chain_names[&chain_id],
                     best_number,
@@ -1437,18 +1434,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => GossipOpenFailed(error={:?})",
+                    "Gossip({}, {}) => OpenFailed(error={:?})",
                     &task.log_chain_names[&chain_id],
                     peer_id, error,
                 );
                 log::debug!(
                     target: "connections",
-                    "{}Slots ∌ {}",
+                    "{}Slots ∌ {}", // TODO:
                     &task.log_chain_names[&chain_id],
                     peer_id
                 );
+                // Note that peer doesn't necessarily have an out slot, as this event might happen
+                // as a result of an inbound gossip connection.
                 task.peering_strategy
-                    .unassign_out_slot_and_ban(&chain_id, &peer_id);
+                    .unassign_slot_and_ban(&chain_id, &peer_id);
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -1473,8 +1472,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &task.log_chain_names[&chain_id],
                     peer_id
                 );
+                // Note that peer doesn't necessarily have an out slot, as this event might happen
+                // as a result of an inbound gossip connection.
                 task.peering_strategy
-                    .unassign_out_slot_and_ban(&chain_id, &peer_id);
+                    .unassign_slot_and_ban(&chain_id, &peer_id);
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -1628,20 +1629,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 kind: service::GossipKind::ConsensusTransactions,
             }) => {
-                // TODO: reject if too many in slots?
-                log::debug!(
-                    target: "connections",
-                    "InSlots({}) ∋ {}",
-                    &task.log_chain_names[&chain_id],
-                    peer_id
-                );
-                task.network
-                    .gossip_open(
-                        chain_id,
-                        &peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    )
-                    .unwrap();
+                match task.peering_strategy.assign_in_slot(chain_id, &peer_id) {
+                    Ok(()) => {
+                        log::debug!(
+                            target: "connections",
+                            "InSlots({}) ∋ {}",
+                            &task.log_chain_names[&chain_id],
+                            peer_id
+                        );
+                        task.network
+                            .gossip_open(
+                                chain_id,
+                                &peer_id,
+                                service::GossipKind::ConsensusTransactions,
+                            )
+                            .unwrap();
+                    }
+                    Err(basic_peering_strategy::AssignInSlotError::MaximumInSlotsReached) => {
+                        // TODO: reject
+                        log::debug!(
+                            target: "connections",
+                            "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
+                            peer_id,
+                            &task.log_chain_names[&chain_id],
+                        );
+                    }
+                    Err(basic_peering_strategy::AssignInSlotError::PeerHasOutSlot) => {
+                        // The networking state machine guarantees that `GossipInDesired`
+                        // can't happen if we are already opening an out slot, which we do
+                        // immediately.
+                        // TODO: re-review this sentence ^ after this code is mature, as we still need to instantaneously call gossip_open after assigning the slot for this to be true
+                        unreachable!()
+                    }
+                }
+
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
@@ -1673,7 +1694,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
+                    "Gossip({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
                     peer_id,
                     &task.log_chain_names[&chain_id],
                     state.round_number,
@@ -1693,7 +1714,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => GrandpaCommitMessage(target_block_hash={})",
+                    "Gossip({}, {}) => GrandpaCommitMessage(target_block_hash={})",
                     peer_id,
                     &task.log_chain_names[&chain_id],
                     HashDisplay(message.decode().message.target_hash),
@@ -1725,7 +1746,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         &peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
-                    task.peering_strategy.unassign_out_slots_and_ban(&peer_id);
+                    task.peering_strategy.unassign_slots_and_ban(&peer_id);
                     continue;
                 };
 

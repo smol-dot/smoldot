@@ -146,42 +146,44 @@ where
         }
     }
 
-    /// Unassign the out slot that has been assigned to the given peer and bans the peer,
-    /// preventing it from being assigned an out slot on this chain for a certain amount of time.
-    pub fn unassign_out_slot_and_ban(&mut self, chain: &TChainId, peer_id: &PeerId) {
+    /// Unassign the slot (either in or out) that has been assigned to the given peer and bans
+    /// the peer, preventing it from being assigned an out slot on this chain for a certain amount
+    /// of time.
+    pub fn unassign_slot_and_ban(&mut self, chain: &TChainId, peer_id: &PeerId) {
         // TODO: optimize
         for (_, state) in self.peers_chains.iter_mut().filter(|((c, p), s)| {
-            c == chain && p == peer_id && matches!(*s, PeerChainState::OutSlot)
+            c == chain
+                && p == peer_id
+                && matches!(*s, PeerChainState::OutSlot | PeerChainState::InSlot)
         }) {
-            // TODO:  what about in slots?
             *state = PeerChainState::Belongs;
         }
 
         // TODO: implement the ban
     }
 
-    /// Unassigns all the out slots that have been assigned to the given peer and bans the peer,
-    /// preventing it from being assigned an out slot for all of the chains it had a slot on for
-    /// a certain amount of time.
+    /// Unassigns all the slots (either in or out) that have been assigned to the given peer and
+    /// bans the peer, preventing it from being assigned an out slot for all of the chains it had
+    /// a slot on for a certain amount of time.
     ///
     /// > **Note**: This function is a shortcut for calling
     /// >           [`BasicPeeringStrategy::unassign_out_slot_and_ban`] for all existing chains.
-    pub fn unassign_out_slots_and_ban(&mut self, peer_id: &PeerId) {
+    pub fn unassign_slots_and_ban(&mut self, peer_id: &PeerId) {
         // TODO: optimize
-        for (_, state) in self
-            .peers_chains
-            .iter_mut()
-            .filter(|((_, p), s)| p == peer_id && matches!(*s, PeerChainState::OutSlot))
-        {
-            // TODO:  what about in slots?
+        for (_, state) in self.peers_chains.iter_mut().filter(|((_, p), s)| {
+            p == peer_id && matches!(*s, PeerChainState::OutSlot | PeerChainState::InSlot)
+        }) {
             *state = PeerChainState::Belongs;
         }
 
         // TODO: implement the ban
     }
 
-    // TODO: unused at the moment
-    pub fn assign_in_slot(&mut self, chain: TChainId, peer_id: &PeerId) -> Result<(), ()> {
+    pub fn assign_in_slot(
+        &mut self,
+        chain: TChainId,
+        peer_id: &PeerId,
+    ) -> Result<(), AssignInSlotError> {
         // TODO: check against maximum
         match self.peers_chains.entry((chain, peer_id.clone())) {
             btree_map::Entry::Vacant(entry) => {
@@ -192,7 +194,7 @@ where
                 match entry.get() {
                     PeerChainState::Belongs => {}
                     PeerChainState::InSlot => {}
-                    PeerChainState::OutSlot => return Err(()),
+                    PeerChainState::OutSlot => return Err(AssignInSlotError::PeerHasOutSlot),
                 };
 
                 entry.insert(PeerChainState::InSlot);
@@ -238,6 +240,12 @@ where
 
         Ok(())
     }
+}
+
+#[derive(Debug, derive_more::Display)]
+pub enum AssignInSlotError {
+    MaximumInSlotsReached, // TODO: unused at the moment
+    PeerHasOutSlot,
 }
 
 #[derive(Debug, derive_more::Display)]
