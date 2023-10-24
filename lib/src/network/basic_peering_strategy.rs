@@ -82,6 +82,12 @@ where
         self.peers_chains.remove(&(chain.clone(), peer_id.clone()));
     }
 
+    /// Returns the list of all peers that are known to belong to the given chain.
+    pub fn chain_peers(&'_ self, chain: &TChainId) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        // TODO:
+        core::iter::empty()
+    }
+
     /// Inserts a new address for the given peer.
     ///
     /// Returns `true` if an address was inserted, or `false` if the address was already known.
@@ -115,6 +121,12 @@ where
         self.addresses
             .remove(&(peer_id.clone(), address.to_owned()))
             .is_some()
+    }
+
+    /// Returns the list of all addresses that have been inserted for the given peer.
+    pub fn peer_addresses(&'_ self, peer_id: &PeerId) -> impl Iterator<Item = &'_ [u8]> + '_ {
+        // TODO:
+        core::iter::empty()
     }
 
     /// Choose a [`PeerId`] known to belong to the given chain, that is not banned and doesn't

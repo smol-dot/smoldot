@@ -1282,7 +1282,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
-                let _ = result.send(todo!());
+                // TODO: consider returning Vec<u8>s for the addresses?
+                let _ = result.send(
+                    task.peering_strategy
+                        .chain_peers(&chain_id)
+                        .map(|peer_id| {
+                            let addrs = task
+                                .peering_strategy
+                                .peer_addresses(peer_id)
+                                .map(|a| Multiaddr::try_from(a.to_owned()).unwrap())
+                                .collect::<Vec<_>>();
+                            (peer_id.clone(), addrs)
+                        })
+                        .collect::<Vec<_>>(),
+                );
                 continue;
             }
             WhatHappened::Message(ToBackground::PeersList { chain_id, result }) => {
