@@ -25,7 +25,7 @@
 // TODO: expand docs
 
 use alloc::{borrow::Cow, string::String};
-use core::iter;
+use core::{fmt, iter};
 
 // Implementation note: each protocol goes into a different sub-module whose content is
 // re-exported here.
@@ -48,6 +48,8 @@ pub use self::kademlia::*;
 pub use self::state_request::*;
 pub use self::storage_call_proof::*;
 
+/// Name of a protocol that is part of the Substrate/Polkadot networking.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ProtocolName<'a> {
     Identify,
     Ping,
@@ -85,6 +87,23 @@ pub enum ProtocolName<'a> {
     },
 }
 
+impl<'a> fmt::Debug for ProtocolName<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl<'a> fmt::Display for ProtocolName<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in encode_protocol_name(*self) {
+            f.write_str(chunk.as_ref())?;
+        }
+        Ok(())
+    }
+}
+
+/// Turns a [`ProtocolName`] into its string version. Returns a list of objects that, when
+/// concatenated together, forms the string version of the [`ProtocolName`].
 pub fn encode_protocol_name(
     protocol: ProtocolName<'_>,
 ) -> impl Iterator<Item = impl AsRef<str> + '_> + '_ {
@@ -152,6 +171,7 @@ pub fn encode_protocol_name(
     }
 }
 
+/// Turns a [`ProtocolName`] into a string.
 pub fn encode_protocol_name_string(protocol: ProtocolName<'_>) -> String {
     encode_protocol_name(protocol).fold(String::with_capacity(128), |mut a, b| {
         a.push_str(b.as_ref());
