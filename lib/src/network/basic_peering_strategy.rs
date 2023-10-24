@@ -25,7 +25,7 @@
 
 use alloc::{
     borrow::ToOwned as _,
-    collections::{btree_map, btree_set, BTreeMap},
+    collections::{btree_map, btree_set, BTreeMap, BTreeSet},
     vec::Vec,
 };
 
@@ -34,10 +34,12 @@ use core::hash::Hash;
 pub use crate::libp2p::PeerId;
 
 #[derive(Debug)]
-pub struct BasicPeeringStrategy<TChainId> {
+pub struct BasicPeeringStrategy<TChainId, TInstant> {
     addresses: BTreeMap<(PeerId, Vec<u8>), AddressState>,
 
     peers_chains: BTreeMap<(TChainId, PeerId), PeerChainState>,
+
+    foo: core::marker::PhantomData<fn() -> TInstant>,
 }
 
 #[derive(Debug)]
@@ -53,47 +55,38 @@ enum PeerChainState {
     OutSlot,
 }
 
-/// Identifier of a connection.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ConnectionId(usize);
-
-impl ConnectionId {
-    /// Returns the value that compares inferior or equal to any possible [`ConnectionId`̀].
-    pub fn min_value() -> Self {
-        ConnectionId(usize::min_value())
-    }
-
-    /// Returns the value that compares superior or equal to any possible [`ConnectionId`̀].
-    pub fn max_value() -> Self {
-        ConnectionId(usize::max_value())
-    }
-}
-
-impl<TChainId> BasicPeeringStrategy<TChainId>
+impl<TChainId, TInstant> BasicPeeringStrategy<TChainId, TInstant>
 where
     TChainId: PartialOrd + Ord + Eq + Hash,
+    TInstant: PartialOrd + Ord + Eq,
 {
+    /// Creates a new empty [`BasicPeeringStrategy`].
     pub fn new() -> Self {
         BasicPeeringStrategy {
             addresses: BTreeMap::new(),
             peers_chains: BTreeMap::new(),
+            foo: core::marker::PhantomData,
         }
     }
 
-    pub fn insert_chain_peer(&mut self, peer_id: PeerId, chain: TChainId) {
+    pub fn insert_chain_peer(&mut self, chain: TChainId, peer_id: PeerId) {
         if let btree_map::Entry::Vacant(entry) = self.peers_chains.entry((chain, peer_id)) {
             entry.insert(PeerChainState::Belongs);
         }
     }
 
-    pub fn remove_chain_peer(&mut self, peer_id: &PeerId, chain: TChainId) {
-        // TODO: cloning
-        self.peers_chains.remove(&(chain, peer_id.clone()));
+    pub fn remove_chain_peer(&mut self, chain: &TChainId, peer_id: &PeerId)
+    where
+        TChainId: Clone, // TODO: remove the `TChainId: Clone` bound
+    {
+        self.peers_chains.remove(&(chain.clone(), peer_id.clone()));
     }
 
     /// Inserts a new address for the given peer.
     ///
     /// Returns `true` if an address was inserted, or `false` if the address was already known.
+    ///
+    /// If an address is inserted, it is in the "not connected" state.
     pub fn insert_address(&mut self, peer_id: &PeerId, address: Vec<u8>) -> bool {
         if let btree_map::Entry::Vacant(entry) =
             self.addresses.entry((peer_id.clone(), address.to_owned()))
@@ -124,14 +117,17 @@ where
             .is_some()
     }
 
-    /// Choose a [`PeerId`] known to belong to the given chain, that is not banned, and assigns
-    /// an "out slot" to it. Returns the [`PeerId`] that was chosen, or `None` if no [`PeerId`]
-    /// matches these criteria.
+    /// Choose a [`PeerId`] known to belong to the given chain, that is not banned and doesn't
+    /// have a slot assigned to it, and assigns an "out slot" to it. Returns the [`PeerId`] that
+    /// was chosen, or `None` if no [`PeerId`] matches this criteria.
+    ///
+    /// This function might assign an "out slot" to a peer that already has an "in slot", in which
+    /// case the peer loses its "in slot".
     ///
     /// Note that this function might assign a slot to a peer for which no address is present.
     /// While this is often not desirable, it is preferable to keep the API simple and
     /// straight-forward rather than try to be smart about function behaviours.
-    pub fn assign_out_slot(&mut self, chain: &TChainId) -> Option<&PeerId> {
+    pub fn assign_out_slot(&'_ mut self, chain: &TChainId) -> AssignOutSlotOutcome<'_, TInstant> {
         // TODO: choose randomly which peer to assign
         // TODO: optimize
         if let Some(((_, peer_id), state)) = self
@@ -140,16 +136,21 @@ where
             .find(|((c, _), s)| *c == *chain && !matches!(*s, PeerChainState::OutSlot))
         {
             *state = PeerChainState::OutSlot;
-            Some(peer_id)
+            AssignOutSlotOutcome::Assigned(peer_id)
         } else {
-            None
+            AssignOutSlotOutcome::NoPeer
         }
     }
 
     /// Unassign the slot (either in or out) that has been assigned to the given peer and bans
     /// the peer, preventing it from being assigned an out slot on this chain for a certain amount
     /// of time.
-    pub fn unassign_slot_and_ban(&mut self, chain: &TChainId, peer_id: &PeerId) {
+    pub fn unassign_slot_and_ban(
+        &mut self,
+        chain: &TChainId,
+        peer_id: &PeerId,
+        when_unban: TInstant,
+    ) {
         // TODO: optimize
         for (_, state) in self.peers_chains.iter_mut().filter(|((c, p), s)| {
             c == chain
@@ -168,7 +169,7 @@ where
     ///
     /// > **Note**: This function is a shortcut for calling
     /// >           [`BasicPeeringStrategy::unassign_out_slot_and_ban`] for all existing chains.
-    pub fn unassign_slots_and_ban(&mut self, peer_id: &PeerId) {
+    pub fn unassign_slots_and_ban(&mut self, peer_id: &PeerId, when_unban: TInstant) {
         // TODO: optimize
         for (_, state) in self.peers_chains.iter_mut().filter(|((_, p), s)| {
             p == peer_id && matches!(*s, PeerChainState::OutSlot | PeerChainState::InSlot)
@@ -179,9 +180,19 @@ where
         // TODO: implement the ban
     }
 
-    pub fn assign_in_slot(
+    /// Try to assign an "in slot" to the given peer on the given chain.
+    ///
+    /// A [`AssignInSlotError::PeerHasOutSlot`] error is returned if the peer has an "out slot"
+    /// assigned to it.
+    ///
+    /// The maximum number of allowed slots must be passed as parameter. Since the
+    /// [`BasicPeeringStrategy`] doesn't hold any chain-specific configuration, it compares the
+    /// number of currently-allocated "in" slots with the value passed as parameter. A
+    /// [`AssignInSlotError::MaximumInSlotsReached`] error is returned if the maximum is exceeded.
+    pub fn try_assign_in_slot(
         &mut self,
         chain: TChainId,
+        chain_max_in_slots: u32,
         peer_id: &PeerId,
     ) -> Result<(), AssignInSlotError> {
         // TODO: check against maximum
@@ -252,4 +263,10 @@ pub enum AssignInSlotError {
 pub enum DisconnectAddrError {
     UnknownAddress,
     NotConnected,
+}
+
+pub enum AssignOutSlotOutcome<'a, TInstant> {
+    Assigned(&'a PeerId),
+    AllPeersBanned { next_unban: &'a TInstant },
+    NoPeer,
 }

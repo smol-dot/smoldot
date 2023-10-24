@@ -866,7 +866,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     network: service::ChainNetwork<TPlat::Instant>,
 
     /// All known peers and their addresses.
-    peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId>,
+    peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, TPlat::Instant>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -934,11 +934,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id = task
-                    .peering_strategy
-                    .assign_out_slot(chain_id)
-                    .map(|p| p.clone()); // TODO: spurious cloning
-                let Some(peer_id) = peer_id else { break };
+                let peer_id = match task.peering_strategy.assign_out_slot(chain_id) {
+                    basic_peering_strategy::AssignOutSlotOutcome::Assigned(peer_id) => {
+                        peer_id.clone()
+                    }
+                    basic_peering_strategy::AssignOutSlotOutcome::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
+                    | basic_peering_strategy::AssignOutSlotOutcome::NoPeer => break,
+                };
 
                 log::debug!(
                     target: "connections",
@@ -1274,7 +1276,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .insert_address(&peer_id, addr.into_vec());
                     }
 
-                    task.peering_strategy.insert_chain_peer(peer_id, chain_id);
+                    task.peering_strategy.insert_chain_peer(chain_id, peer_id);
                 }
 
                 continue;
@@ -1446,13 +1448,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
-                task.peering_strategy
-                    .unassign_slot_and_ban(&chain_id, &peer_id);
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
+                if let service::GossipConnectError::GenesisMismatch { .. } = error {
+                    task.peering_strategy.remove_chain_peer(&chain_id, &peer_id);
+                } else {
+                    task.peering_strategy.unassign_slot_and_ban(
+                        &chain_id,
+                        &peer_id,
+                        task.platform.now() + Duration::from_secs(15),
+                    );
+                }
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::GossipDisconnected {
@@ -1474,8 +1483,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
-                task.peering_strategy
-                    .unassign_slot_and_ban(&chain_id, &peer_id);
+                task.peering_strategy.unassign_slot_and_ban(
+                    &chain_id,
+                    &peer_id,
+                    task.platform.now() + Duration::from_secs(10),
+                );
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -1560,7 +1572,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     if !valid_addrs.is_empty() {
                         task.peering_strategy
-                            .insert_chain_peer(peer_id.clone(), chain_id);
+                            .insert_chain_peer(chain_id, peer_id.clone());
                     }
 
                     for addr in valid_addrs {
@@ -1629,7 +1641,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 kind: service::GossipKind::ConsensusTransactions,
             }) => {
-                match task.peering_strategy.assign_in_slot(chain_id, &peer_id) {
+                // TODO: arbitrary constant
+                match task
+                    .peering_strategy
+                    .try_assign_in_slot(chain_id, 4, &peer_id)
+                {
                     Ok(()) => {
                         log::debug!(
                             target: "connections",
@@ -1746,7 +1762,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         &peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
-                    task.peering_strategy.unassign_slots_and_ban(&peer_id);
+                    task.peering_strategy.unassign_slots_and_ban(
+                        &peer_id,
+                        task.platform.now() + Duration::from_secs(10),
+                    );
                     continue;
                 };
 
