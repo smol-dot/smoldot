@@ -935,7 +935,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id = match task.peering_strategy.assign_out_slot(chain_id) {
+                let peer_id = match task.peering_strategy.assign_out_slot(chain_id, &task.platform.now()) {
                     basic_peering_strategy::AssignOutSlotOutcome::Assigned(peer_id) => {
                         peer_id.clone()
                     }
@@ -1285,7 +1285,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: consider returning Vec<u8>s for the addresses?
                 let _ = result.send(
                     task.peering_strategy
-                        .chain_peers(&chain_id)
+                        .chain_peers_unordered(&chain_id)
                         .map(|peer_id| {
                             let addrs = task
                                 .peering_strategy
