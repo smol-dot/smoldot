@@ -124,10 +124,13 @@ pub struct NetworkService<TPlat: PlatformRef> {
     log_chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
 
     /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+    messages_tx: async_channel::Sender<ToBackground>,
 
     /// Event notified when the [`NetworkService`] is destroyed.
     on_service_killed: event_listener::Event,
+
+    /// Dummy to hold the `TPlat` type.
+    marker: core::marker::PhantomData<TPlat>,
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
@@ -268,6 +271,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             log_chain_names,
             messages_tx,
             on_service_killed,
+            marker: core::marker::PhantomData,
         });
 
         // Adjust the event receivers to keep the `final_network_service` alive.
@@ -610,14 +614,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// and should have additional logging.
     pub async fn discover(
         &self,
-        now: &TPlat::Instant,
         chain_id: ChainId,
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
         important_nodes: bool,
     ) {
         self.messages_tx
             .send(ToBackground::Discover {
-                now: now.clone(), // TODO: overhead
                 chain_id,
                 // TODO: overhead
                 list: list
@@ -768,7 +770,7 @@ impl CallProofRequestError {
     }
 }
 
-enum ToBackground<TPlat: PlatformRef> {
+enum ToBackground {
     ConnectionMessage {
         connection_id: service::ConnectionId,
         message: service::ConnectionToCoordinator,
@@ -828,7 +830,6 @@ enum ToBackground<TPlat: PlatformRef> {
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
     Discover {
-        now: TPlat::Instant,
         chain_id: ChainId,
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
         important_nodes: bool,
@@ -860,7 +861,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     log_chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
 
     /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+    messages_tx: async_channel::Sender<ToBackground>,
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<TPlat::Instant>,
@@ -881,7 +882,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
         Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
     >,
 
-    messages_rx: async_channel::Receiver<ToBackground<TPlat>>,
+    messages_rx: async_channel::Receiver<ToBackground>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -985,8 +986,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             );
         }
 
-        enum WhatHappened<TPlat: PlatformRef> {
-            Message(ToBackground<TPlat>),
+        enum WhatHappened {
+            Message(ToBackground),
             NetworkEvent(service::Event),
             StartConnect(PeerId),
             MessageToConnection {
@@ -1261,7 +1262,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::Discover {
-                now,
                 chain_id,
                 list,
                 important_nodes,

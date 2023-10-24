@@ -923,17 +923,11 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         .unwrap();
                     running_chain
                         .network_service
-                        .discover(
-                            &platform.now(),
-                            running_chain.network_service_chain_id,
-                            known_nodes,
-                            false,
-                        )
+                        .discover(running_chain.network_service_chain_id, known_nodes, false)
                         .await;
                     running_chain
                         .network_service
                         .discover(
-                            &platform.now(),
                             running_chain.network_service_chain_id,
                             bootstrap_nodes,
                             true,

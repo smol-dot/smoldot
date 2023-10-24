@@ -37,7 +37,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
-    connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
+    connection_to_coordinator: async_channel::Sender<ToBackground>,
 ) {
     let address_string = address.to_string();
     let Ok(address_parse::AddressOrMultiStreamAddress::Address(address)) =
@@ -213,7 +213,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
     mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
-    connection_to_coordinator: async_channel::Sender<ToBackground<TPlat>>,
+    connection_to_coordinator: async_channel::Sender<ToBackground>,
 ) {
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
