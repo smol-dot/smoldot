@@ -913,8 +913,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     future::MaybeDone::Gone => unreachable!(),
                 };
 
-                let platform = self.platform.clone();
-
                 async move {
                     // Wait for the chain to finish initializing to proceed.
                     (&mut running_chain_init).await;
