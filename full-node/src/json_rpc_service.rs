@@ -56,7 +56,10 @@ pub struct Config {
 
     /// Access to the network, and identifier of the chain from the point of view of the network
     /// service.
-    pub network_service: (Arc<network_service::NetworkService>, network_service::ChainId),
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Where to bind the WebSocket server. If `None`, no TCP server is started.
     pub bind_address: Option<SocketAddr>,

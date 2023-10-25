@@ -114,7 +114,10 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the network, and identifier of the chain to use to gossip transactions from the
     /// point of view of the network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, network_service::ChainId),
+    pub network_service: (
+        Arc<network_service::NetworkService<TPlat>>,
+        network_service::ChainId,
+    ),
 
     /// Maximum number of pending transactions allowed in the service.
     ///
