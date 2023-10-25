@@ -131,7 +131,7 @@ pub struct Config {
 
 /// Configuration for a specific overlay network.
 ///
-/// See [`Config::add_chain`].
+/// See [`ChainNetwork::add_chain`].
 pub struct ChainConfig {
     /// Hash of the genesis block (i.e. block number 0) according to the local node.
     pub genesis_hash: [u8; 32],
