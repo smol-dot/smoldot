@@ -1072,7 +1072,14 @@ async fn background_task(mut inner: Inner) {
                             Err(
                                 basic_peering_strategy::AssignInSlotError::MaximumInSlotsReached,
                             ) => {
-                                // TODO: reject
+                                inner
+                                    .network
+                                    .gossip_reject(
+                                        chain_id,
+                                        &peer_id,
+                                        service::GossipKind::ConsensusTransactions,
+                                    )
+                                    .unwrap();
                             }
                             Err(basic_peering_strategy::AssignInSlotError::PeerHasOutSlot) => {
                                 // The networking state machine guarantees that `GossipInDesired`
@@ -1086,7 +1093,6 @@ async fn background_task(mut inner: Inner) {
                     service::Event::GossipInDesiredCancel { .. } => {
                         // All `GossipInDesired` are immediately accepted or rejected, meaning
                         // that this event can't happen.
-                        // TODO: not true because we don't reject right now /!\
                         unreachable!()
                     }
                     service::Event::RequestResult {

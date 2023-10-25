@@ -1675,13 +1675,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .unwrap();
                     }
                     Err(basic_peering_strategy::AssignInSlotError::MaximumInSlotsReached) => {
-                        // TODO: reject
                         log::debug!(
                             target: "connections",
                             "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
                             peer_id,
                             &task.log_chain_names[&chain_id],
                         );
+                        task.network
+                            .gossip_reject(
+                                chain_id,
+                                &peer_id,
+                                service::GossipKind::ConsensusTransactions,
+                            )
+                            .unwrap();
                     }
                     Err(basic_peering_strategy::AssignInSlotError::PeerHasOutSlot) => {
                         // The networking state machine guarantees that `GossipInDesired`
@@ -1696,7 +1702,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
-                // TODO: not true because we don't reject right now /!\
                 unreachable!()
             }
             WhatHappened::NetworkEvent(service::Event::IdentifyRequestIn {

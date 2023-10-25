@@ -2885,6 +2885,75 @@ where
         Ok(())
     }
 
+    /// Respond to a [`Event::GossipInDesired`] by rejecting the request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`ChainId`] is invalid.
+    ///
+    pub fn gossip_reject(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: &PeerId,
+        kind: GossipKind,
+    ) -> Result<(), GossipRejectError> {
+        let GossipKind::ConsensusTransactions = kind;
+
+        // An `assert!` is necessary because we don't actually access the chain information
+        // anywhere, but still want to panic if the chain is invalid.
+        assert!(self.chains.contains(chain_id.0));
+
+        // It is forbidden to open more than one gossip notifications substream with any given
+        // peer.
+        let Some(substream_id) = self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    peer_id.clone(),
+                    SubstreamDirection::In,
+                    NotificationsSubstreamState::Pending,
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Pending,
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .map(|(_, _, _, _, substream_id)| *substream_id)
+        else {
+            return Err(GossipRejectError::NoInGossipRequest);
+        };
+
+        // TODO: debug_assert that there's no inbound tx/gp substream?
+
+        self.inner.reject_in_notifications(substream_id);
+
+        let _was_in = self.notification_substreams_by_peer_id.remove(&(
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            peer_id.clone(),
+            SubstreamDirection::In,
+            NotificationsSubstreamState::Pending,
+            substream_id,
+        ));
+        debug_assert!(_was_in);
+
+        let _was_in = self.substreams.remove(&substream_id);
+        debug_assert!(_was_in.is_some());
+
+        Ok(())
+    }
+
     /// Update the state of the local node with regards to GrandPa rounds.
     ///
     /// Calling this method does two things:
@@ -3411,6 +3480,13 @@ pub enum Event {
         peer_id: PeerId,
         transactions: EncodedTransactions,
     }*/
+}
+
+/// See [`ChainNetwork::gossip_reject`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum GossipRejectError {
+    /// No request in progress.
+    NoInGossipRequest,
 }
 
 /// See [`Event::ProtocolError`].
