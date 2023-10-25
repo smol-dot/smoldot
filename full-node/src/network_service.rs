@@ -1312,7 +1312,7 @@ async fn background_task(mut inner: Inner) {
             // TODO: doc
             for chain_id in inner.chains.keys() {
                 loop {
-                    // TODO :4 is an arbitrary constant, make configurable
+                    // TODO: 4 is an arbitrary constant, make configurable
                     if inner
                         .network
                         .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)

@@ -927,7 +927,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         // TODO: doc
         for chain_id in task.log_chain_names.keys() {
             loop {
-                // TODO :4 is an arbitrary constant, make configurable
+                // TODO: 4 is an arbitrary constant, make configurable
                 if task
                     .network
                     .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
