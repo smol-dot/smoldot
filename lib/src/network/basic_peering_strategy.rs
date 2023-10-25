@@ -231,7 +231,7 @@ where
     /// a slot on for a certain amount of time.
     ///
     /// > **Note**: This function is a shortcut for calling
-    /// >           [`BasicPeeringStrategy::unassign_out_slot_and_ban`] for all existing chains.
+    /// >           [`BasicPeeringStrategy::unassign_slot_and_ban`] for all existing chains.
     pub fn unassign_slots_and_ban(&mut self, peer_id: &PeerId, when_unban: TInstant) {
         // TODO: optimize
         for ((_, chain), state) in self.peers_chains.iter_mut().filter(|((p, _), s)| {

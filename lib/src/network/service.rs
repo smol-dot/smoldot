@@ -131,7 +131,7 @@ pub struct Config {
 
 /// Configuration for a specific overlay network.
 ///
-/// See [`Config::chains`].
+/// See [`Config::add_chain`].
 pub struct ChainConfig {
     /// Hash of the genesis block (i.e. block number 0) according to the local node.
     pub genesis_hash: [u8; 32],
@@ -213,7 +213,7 @@ pub struct ChainNetwork<TNow> {
     /// Same entries as [`ChainNetwork::gossip_desired_peers_by_chain`] but indexed differently.
     gossip_desired_peers: BTreeSet<(PeerId, GossipKind, usize)>,
 
-    /// Subset of peers in [`ChainNetwork::gossip_out_peers_by_chain`] for which no healthy
+    /// Subset of peers in [`ChainNetwork::gossip_desired_peers`] for which no healthy
     /// connection exists.
     // TODO: shrink to fit from time to time
     unconnected_desired: hashbrown::HashSet<PeerId, util::SipHasherBuild>,
@@ -441,7 +441,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`Chainid`] is out of range.
+    /// Panics if the [`ChainId`] is out of range.
     ///
     pub fn set_chain_local_best_block(
         &mut self,
