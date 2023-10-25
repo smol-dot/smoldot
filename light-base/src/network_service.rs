@@ -584,7 +584,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// See [`service::ChainNetwork::send_block_announce`].
+    /// See [`service::ChainNetwork::gossip_send_block_announce`].
     pub async fn send_block_announce(
         self: Arc<Self>,
         target: &PeerId,
@@ -608,7 +608,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         rx.await.unwrap()
     }
 
-    /// See [`service::ChainNetwork::discover`].
+    /// Marks the given peers as belonging to the given chain, and adds some addresses to these
+    /// peers to the address book.
     ///
     /// The `important_nodes` parameter indicates whether these nodes are considered note-worthy
     /// and should have additional logging.
