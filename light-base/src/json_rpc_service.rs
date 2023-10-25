@@ -204,8 +204,8 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
     pub network_service: (Arc<network_service::NetworkService<TPlat>>, network_service::ChainId),
 
     /// Service responsible for synchronizing the chain.

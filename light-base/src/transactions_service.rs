@@ -112,8 +112,8 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service responsible for synchronizing the chain.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Access to the network, and index of the chain to use to gossip transactions from the point
-    /// of view of the network service.
+    /// Access to the network, and identifier of the chain to use to gossip transactions from the
+    /// point of view of the network service.
     pub network_service: (Arc<network_service::NetworkService<TPlat>>, network_service::ChainId),
 
     /// Maximum number of pending transactions allowed in the service.

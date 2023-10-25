@@ -42,45 +42,40 @@ use std::{
 pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 
-/// Asynchronous task managing a specific connection, including the dialing process.
-pub(super) async fn opening_connection_task(
-    start_connect: service::StartConnect<Instant>,
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
-) -> Result<impl AsyncReadWrite, ()> {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-        Ok(socket) => socket,
-        Err(_) => {
-            log_callback.log(
-                LogLevel::Debug,
-                format!("not-tcp; address={}", start_connect.multiaddr),
-            );
-            return Err(());
-        }
-    };
-
-    // Finishing ongoing connection process.
-    let socket = async move { socket.await.map_err(|_| ()) }
-        .or(async move {
-            smol::Timer::at(start_connect.timeout).await;
-            Err(())
-        })
-        .await?;
-
-    Ok(socket)
-}
-
 /// Asynchronous task managing a specific connection.
-pub(super) async fn established_connection_task(
+pub(super) async fn connection_task(
     log_callback: Arc<dyn LogCallback + Send + Sync>,
     address: String,
-    socket: impl AsyncReadWrite,
+    socket: impl Future<Output = Result<impl AsyncReadWrite, io::Error>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
     mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: channel::Sender<super::ToBackground>,
 ) {
+    // Finishing ongoing connection process.
+    let socket = match socket.await.map_err(|_| ()) {
+        Ok(s) => s,
+        Err(_err) => {
+            // TODO: log
+            connection_task.reset();
+            loop {
+                let (task_update, opaque_message) = connection_task.pull_message_to_coordinator();
+                let _ = connection_to_coordinator
+                    .send(super::ToBackground::FromConnectionTask {
+                        connection_id,
+                        opaque_message,
+                        connection_now_dead: true,
+                    })
+                    .await;
+                if let Some(task_update) = task_update {
+                    connection_task = task_update;
+                } else {
+                    return;
+                }
+            }
+        }
+    };
+
     // The socket is wrapped around an object containing a read buffer and a write buffer and
     // allowing easier usage.
     let mut socket = pin::pin!(with_buffers::WithBuffers::new(socket));
@@ -229,7 +224,7 @@ pub(super) async fn established_connection_task(
 
 /// Builds a future that connects to the given multiaddress. Returns an error if the multiaddress
 /// protocols aren't supported.
-fn multiaddr_to_socket(
+pub(super) fn multiaddr_to_socket(
     addr: &Multiaddr,
 ) -> Result<impl Future<Output = Result<impl AsyncReadWrite, io::Error>>, ()> {
     let mut iter = addr.iter().fuse();

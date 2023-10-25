@@ -1696,6 +1696,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
+                // TODO: not true because we don't reject right now /!\
                 unreachable!()
             }
             WhatHappened::NetworkEvent(service::Event::IdentifyRequestIn {

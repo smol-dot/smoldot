@@ -760,6 +760,11 @@ where
         (id, task)
     }
 
+    /// Returns the number of connections, both handshaking or established.
+    pub fn num_connections(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Returns the remote address that was passed to [`ChainNetwork::add_single_stream_connection`]
     /// or [`ChainNetwork::add_multi_stream_connection`] for the given connection.
     ///
