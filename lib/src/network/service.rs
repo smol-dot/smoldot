@@ -223,6 +223,12 @@ pub struct ChainNetwork<TNow> {
     // TODO: shrink to fit from time to time
     connected_unopened_gossip_desired:
         hashbrown::HashSet<(PeerId, ChainId, GossipKind), util::SipHasherBuild>,
+
+    /// List of [`PeerId`]s for which a substream connection (attempt or established) exists, but
+    /// that are not marked as desired.
+    // TODO: shrink to fit from time to time
+    opened_gossip_undesired:
+        hashbrown::HashSet<(PeerId, ChainId, GossipKind), util::SipHasherBuild>,
 }
 
 struct Chain {
@@ -382,6 +388,14 @@ where
                     seed
                 }),
             ),
+            opened_gossip_undesired: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
+                SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
+            ),
             chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
                 config.chains_capacity,
@@ -497,6 +511,9 @@ where
             .insert((peer_id.clone(), kind, chain_id.0));
         debug_assert!(_was_inserted);
 
+        self.opened_gossip_undesired
+            .remove(&(peer_id.clone(), chain_id, kind));
+
         //  Add either to `unconnected_desired` or to `connected_unopened_gossip_desired`,
         // depending on the situation.
         if self
@@ -586,6 +603,37 @@ where
         {
             self.unconnected_desired.remove(peer_id);
         }
+
+        if self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    peer_id.clone(),
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::min_value(),
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::max_value(),
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .is_some()
+        {
+            let _was_inserted =
+                self.opened_gossip_undesired
+                    .insert((peer_id.clone(), chain_id, kind));
+            debug_assert!(_was_inserted);
+        }
     }
 
     /// Removes the given peer from the list of desired chain-peers of all the chains that exist.
@@ -649,6 +697,16 @@ where
         &'_ self,
     ) -> impl Iterator<Item = (&'_ PeerId, ChainId, GossipKind)> + '_ {
         self.connected_unopened_gossip_desired
+            .iter()
+            .map(move |(peer_id, chain_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
+    }
+
+    /// Returns the list of [`PeerId`]s for which a substream connection or connection attempt
+    /// exists but that are not marked as desired.
+    pub fn opened_gossip_undesired(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ PeerId, ChainId, GossipKind)> + '_ {
+        self.opened_gossip_undesired
             .iter()
             .map(move |(peer_id, chain_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
     }
@@ -1559,6 +1617,12 @@ where
                                         ));
                                     }
 
+                                    self.opened_gossip_undesired.remove(&(
+                                        peer_id.clone(),
+                                        ChainId(chain_index),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+
                                     if let GossipConnectError::HandshakeDecode(_)
                                     | GossipConnectError::GenesisMismatch { .. } = error
                                     {
@@ -1810,6 +1874,12 @@ where
                     // Some substreams are tied to the state of the block announces substream.
                     match substream_info.protocol {
                         Protocol::BlockAnnounces { chain_index } => {
+                            self.opened_gossip_undesired.remove(&(
+                                peer_id.clone(),
+                                ChainId(chain_index),
+                                GossipKind::ConsensusTransactions,
+                            ));
+
                             // Insert back in `connected_unopened_gossip_desired` if relevant.
                             if self.gossip_desired_peers_by_chain.contains(&(
                                 chain_index,
@@ -2879,6 +2949,18 @@ where
         ));
         debug_assert!(_was_inserted);
 
+        if !self
+            .gossip_desired_peers
+            .contains(&(target.clone(), kind, chain_id.0))
+        {
+            let _was_inserted = self.opened_gossip_undesired.insert((
+                target.clone(),
+                chain_id,
+                GossipKind::ConsensusTransactions,
+            ));
+            debug_assert!(_was_inserted);
+        }
+
         self.connected_unopened_gossip_desired
             .remove(&(target.clone(), chain_id, kind)); // TODO: clone
 
@@ -2953,6 +3035,12 @@ where
 
             let _was_in = self.substreams.remove(&substream_id);
             debug_assert!(_was_in.is_some());
+
+            self.opened_gossip_undesired.remove(&(
+                peer_id.clone(),
+                chain_id,
+                GossipKind::ConsensusTransactions,
+            ));
 
             // TODO: debug_assert that there's no inbound tx/gp substream?
         }
