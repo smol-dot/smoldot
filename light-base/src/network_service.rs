@@ -1468,7 +1468,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service::GossipKind::ConsensusTransactions,
                 );
                 if let service::GossipConnectError::GenesisMismatch { .. } = error {
-                    task.peering_strategy.remove_chain_peer(&chain_id, &peer_id);
+                    task.peering_strategy.unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
                 } else {
                     task.peering_strategy.unassign_slot_and_ban(
                         &chain_id,

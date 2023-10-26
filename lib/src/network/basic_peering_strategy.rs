@@ -83,7 +83,7 @@ where
         }
     }
 
-    pub fn remove_chain_peer(&mut self, chain: &TChainId, peer_id: &PeerId) {
+    pub fn unassign_slot_and_remove_chain_peer(&mut self, chain: &TChainId, peer_id: &PeerId) {
         if let Some(state) = self.peers_chains.remove(&(peer_id.clone(), chain.clone())) {
             let _was_removed =
                 self.peers_chains_by_state

@@ -1042,7 +1042,7 @@ async fn background_task(mut inner: Inner) {
                         if let service::GossipConnectError::GenesisMismatch { .. } = error {
                             inner
                                 .peering_strategy
-                                .remove_chain_peer(&chain_id, &peer_id);
+                                .unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
                         } else {
                             inner.peering_strategy.unassign_slot_and_ban(
                                 &chain_id,
