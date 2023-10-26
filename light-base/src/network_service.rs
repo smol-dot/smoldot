@@ -936,12 +936,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     break;
                 }
 
-                let peer_id = match task.peering_strategy.assign_out_slot(chain_id, &task.platform.now()) {
-                    basic_peering_strategy::AssignOutSlotOutcome::Assigned(peer_id) => {
+                let peer_id = match task.peering_strategy.assign_slot(chain_id, &task.platform.now()) {
+                    basic_peering_strategy::AssignSlotOutcome::Assigned(peer_id) => {
                         peer_id.clone()
                     }
-                    basic_peering_strategy::AssignOutSlotOutcome::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                    | basic_peering_strategy::AssignOutSlotOutcome::NoPeer => break,
+                    basic_peering_strategy::AssignSlotOutcome::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
+                    | basic_peering_strategy::AssignSlotOutcome::NoPeer => break,
                 };
 
                 log::debug!(

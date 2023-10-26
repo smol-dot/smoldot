@@ -52,8 +52,7 @@ enum AddressState {
 enum PeerChainState<TInstant> {
     Assignable,
     Banned { expires: TInstant },
-    InSlot,
-    OutSlot,
+    Slot,
 }
 
 impl<TChainId, TInstant> BasicPeeringStrategy<TChainId, TInstant>
@@ -153,27 +152,24 @@ where
     }
 
     /// Choose a [`PeerId`] known to belong to the given chain, that is not banned and doesn't
-    /// have a slot assigned to it, and assigns an "out slot" to it. Returns the [`PeerId`] that
-    /// was chosen, or `None` if no [`PeerId`] matches this criteria.
+    /// have a slot assigned to it, and assigns a slot to it. Returns the [`PeerId`] that was
+    /// chosen, or `None` if no [`PeerId`] matches this criteria.
     ///
     /// A `TInstant` must be provided in order to determine whether past bans have expired.
-    ///
-    /// This function might assign an "out slot" to a peer that already has an "in slot", in which
-    /// case the peer loses its "in slot".
     ///
     /// Note that this function might assign a slot to a peer for which no address is present.
     /// While this is often not desirable, it is preferable to keep the API simple and
     /// straight-forward rather than try to be smart about function behaviours.
-    pub fn assign_out_slot(
+    pub fn assign_slot(
         &'_ mut self,
         chain: &TChainId,
         now: &TInstant,
-    ) -> AssignOutSlotOutcome<'_, TInstant> {
+    ) -> AssignSlotOutcome<'_, TInstant> {
         // TODO: choose randomly which peer to assign
         // TODO: optimize
         if let Some(((peer_id, _), state)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
             *c == *chain
-                && (matches!(*s, PeerChainState::Assignable | PeerChainState::InSlot)
+                && (matches!(*s, PeerChainState::Assignable)
                     || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
         }) {
             let _was_in =
@@ -181,23 +177,22 @@ where
                     .remove(&(chain.clone(), state.clone(), peer_id.clone()));
             debug_assert!(_was_in);
 
-            *state = PeerChainState::OutSlot;
+            *state = PeerChainState::Slot;
 
             let _was_inserted =
                 self.peers_chains_by_state
                     .insert((chain.clone(), state.clone(), peer_id.clone()));
             debug_assert!(_was_inserted);
 
-            AssignOutSlotOutcome::Assigned(peer_id)
+            AssignSlotOutcome::Assigned(peer_id)
         } else {
             // TODO: never returns `AllBanned`
-            AssignOutSlotOutcome::NoPeer
+            AssignSlotOutcome::NoPeer
         }
     }
 
-    /// Unassign the slot (either in or out) that has been assigned to the given peer and bans
-    /// the peer, preventing it from being assigned an out slot on this chain for a certain amount
-    /// of time.
+    /// Unassign the slot that has been assigned to the given peer and bans the peer, preventing
+    /// it from being assigned a slot on this chain for a certain amount of time.
     pub fn unassign_slot_and_ban(
         &mut self,
         chain: &TChainId,
@@ -205,11 +200,11 @@ where
         when_unban: TInstant,
     ) {
         // TODO: optimize
-        for (_, state) in self.peers_chains.iter_mut().filter(|((p, c), s)| {
-            c == chain
-                && p == peer_id
-                && matches!(*s, PeerChainState::OutSlot | PeerChainState::InSlot)
-        }) {
+        for (_, state) in self
+            .peers_chains
+            .iter_mut()
+            .filter(|((p, c), s)| c == chain && p == peer_id && matches!(*s, PeerChainState::Slot))
+        {
             let _was_in =
                 self.peers_chains_by_state
                     .remove(&(chain.clone(), state.clone(), peer_id.clone()));
@@ -226,17 +221,19 @@ where
         }
     }
 
-    /// Unassigns all the slots (either in or out) that have been assigned to the given peer and
-    /// bans the peer, preventing it from being assigned an out slot for all of the chains it had
-    /// a slot on for a certain amount of time.
+    /// Unassigns all the slots that have been assigned to the given peer and bans the peer,
+    /// preventing it from being assigned a slot for all of the chains it had a slot on for a
+    /// certain amount of time.
     ///
     /// > **Note**: This function is a shortcut for calling
     /// >           [`BasicPeeringStrategy::unassign_slot_and_ban`] for all existing chains.
     pub fn unassign_slots_and_ban(&mut self, peer_id: &PeerId, when_unban: TInstant) {
         // TODO: optimize
-        for ((_, chain), state) in self.peers_chains.iter_mut().filter(|((p, _), s)| {
-            p == peer_id && matches!(*s, PeerChainState::OutSlot | PeerChainState::InSlot)
-        }) {
+        for ((_, chain), state) in self
+            .peers_chains
+            .iter_mut()
+            .filter(|((p, _), s)| p == peer_id && matches!(*s, PeerChainState::Slot))
+        {
             let _was_in =
                 self.peers_chains_by_state
                     .remove(&(chain.clone(), state.clone(), peer_id.clone()));
@@ -250,53 +247,6 @@ where
                 self.peers_chains_by_state
                     .insert((chain.clone(), state.clone(), peer_id.clone()));
             debug_assert!(_was_inserted);
-        }
-    }
-
-    /// Try to assign an "in slot" to the given peer on the given chain.
-    ///
-    /// Banned peers are allowed to be assigned "in slot"s.
-    ///
-    /// A [`AssignInSlotError::PeerHasOutSlot`] error is returned if the peer has an "out slot"
-    /// assigned to it.
-    ///
-    /// The maximum number of allowed slots must be passed as parameter. Since the
-    /// [`BasicPeeringStrategy`] doesn't hold any chain-specific configuration, it compares the
-    /// number of currently-allocated "in" slots with the value passed as parameter. A
-    /// [`AssignInSlotError::MaximumInSlotsReached`] error is returned if the maximum is exceeded.
-    pub fn try_assign_in_slot(
-        &mut self,
-        chain: TChainId,
-        chain_max_in_slots: u32,
-        peer_id: &PeerId,
-    ) -> Result<(), AssignInSlotError> {
-        // TODO: optimize
-        if self
-            .peers_chains_by_state
-            .iter()
-            .filter(|(c, s, _)| *c == chain && matches!(s, PeerChainState::InSlot))
-            .count()
-            >= usize::try_from(chain_max_in_slots).unwrap_or(usize::max_value())
-        {
-            return Err(AssignInSlotError::MaximumInSlotsReached);
-        }
-
-        match self.peers_chains.entry((peer_id.clone(), chain)) {
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert(PeerChainState::InSlot);
-                Ok(())
-            }
-            btree_map::Entry::Occupied(mut entry) => {
-                match entry.get() {
-                    PeerChainState::Assignable => {}
-                    PeerChainState::Banned { .. } => {}
-                    PeerChainState::InSlot => {}
-                    PeerChainState::OutSlot => return Err(AssignInSlotError::PeerHasOutSlot),
-                };
-
-                entry.insert(PeerChainState::InSlot);
-                Ok(())
-            }
         }
     }
 
@@ -340,18 +290,12 @@ where
 }
 
 #[derive(Debug, derive_more::Display)]
-pub enum AssignInSlotError {
-    MaximumInSlotsReached,
-    PeerHasOutSlot,
-}
-
-#[derive(Debug, derive_more::Display)]
 pub enum DisconnectAddrError {
     UnknownAddress,
     NotConnected,
 }
 
-pub enum AssignOutSlotOutcome<'a, TInstant> {
+pub enum AssignSlotOutcome<'a, TInstant> {
     Assigned(&'a PeerId),
     AllPeersBanned { next_unban: &'a TInstant },
     NoPeer,
