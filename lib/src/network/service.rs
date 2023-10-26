@@ -228,7 +228,7 @@ pub struct ChainNetwork<TNow> {
     /// that are not marked as desired.
     // TODO: shrink to fit from time to time
     opened_gossip_undesired:
-        hashbrown::HashSet<(PeerId, ChainId, GossipKind), util::SipHasherBuild>,
+        hashbrown::HashSet<(ChainId, PeerId, GossipKind), util::SipHasherBuild>,
 }
 
 struct Chain {
@@ -512,7 +512,7 @@ where
         debug_assert!(_was_inserted);
 
         self.opened_gossip_undesired
-            .remove(&(peer_id.clone(), chain_id, kind));
+            .remove(&(chain_id, peer_id.clone(), kind));
 
         //  Add either to `unconnected_desired` or to `connected_unopened_gossip_desired`,
         // depending on the situation.
@@ -631,7 +631,7 @@ where
         {
             let _was_inserted =
                 self.opened_gossip_undesired
-                    .insert((peer_id.clone(), chain_id, kind));
+                    .insert((chain_id, peer_id.clone(), kind));
             debug_assert!(_was_inserted);
         }
     }
@@ -687,7 +687,7 @@ where
     ///
     /// > **Note**: Connections that are currently in the process of shutting down are also
     /// >           ignored for the purpose of this function.
-    pub fn unconnected_desired(&'_ self) -> impl Iterator<Item = &'_ PeerId> + '_ {
+    pub fn unconnected_desired(&'_ self) -> impl ExactSizeIterator<Item = &'_ PeerId> + Clone + '_ {
         self.unconnected_desired.iter()
     }
 
@@ -695,7 +695,7 @@ where
     /// connection exists, but for which no substream connection attempt exists.
     pub fn connected_unopened_gossip_desired(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ PeerId, ChainId, GossipKind)> + '_ {
+    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
         self.connected_unopened_gossip_desired
             .iter()
             .map(move |(peer_id, chain_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
@@ -705,10 +705,28 @@ where
     /// exists but that are not marked as desired.
     pub fn opened_gossip_undesired(
         &'_ self,
-    ) -> impl Iterator<Item = (&'_ PeerId, ChainId, GossipKind)> + '_ {
+    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
         self.opened_gossip_undesired
             .iter()
-            .map(move |(peer_id, chain_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
+            .map(move |(chain_id, peer_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
+    }
+
+    /// Returns the list of [`PeerId`]s for which a substream connection or connection attempt
+    /// exists against the given chain but that are not marked as desired.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn opened_gossip_undesired_by_chain(
+        &'_ self,
+        chain_id: ChainId,
+    ) -> impl Iterator<Item = (&'_ PeerId, GossipKind)> + Clone + '_ {
+        // TODO: optimize and add an ExactSizeIterator bound to the return value, and update the users to use len() instead of count()
+        self.opened_gossip_undesired
+            .iter()
+            .filter(move |(c, _, _)| *c == chain_id)
+            .map(move |(_, peer_id, gossip_kind)| (peer_id, *gossip_kind))
     }
 
     /// Adds a single-stream connection to the state machine.
@@ -1618,8 +1636,8 @@ where
                                     }
 
                                     self.opened_gossip_undesired.remove(&(
-                                        peer_id.clone(),
                                         ChainId(chain_index),
+                                        peer_id.clone(),
                                         GossipKind::ConsensusTransactions,
                                     ));
 
@@ -1875,8 +1893,8 @@ where
                     match substream_info.protocol {
                         Protocol::BlockAnnounces { chain_index } => {
                             self.opened_gossip_undesired.remove(&(
-                                peer_id.clone(),
                                 ChainId(chain_index),
+                                peer_id.clone(),
                                 GossipKind::ConsensusTransactions,
                             ));
 
@@ -2954,8 +2972,8 @@ where
             .contains(&(target.clone(), kind, chain_id.0))
         {
             let _was_inserted = self.opened_gossip_undesired.insert((
-                target.clone(),
                 chain_id,
+                target.clone(),
                 GossipKind::ConsensusTransactions,
             ));
             debug_assert!(_was_inserted);
@@ -3037,8 +3055,8 @@ where
             debug_assert!(_was_in.is_some());
 
             self.opened_gossip_undesired.remove(&(
-                peer_id.clone(),
                 chain_id,
+                peer_id.clone(),
                 GossipKind::ConsensusTransactions,
             ));
 
