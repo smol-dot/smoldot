@@ -945,21 +945,29 @@ async fn background_task(mut inner: Inner) {
                                     peer_id, inner.chains[&chain_id].log_name, HashDisplay(&header_hash), decoded.is_best, error
                                 ));
 
-                                inner.network.gossip_remove_desired(
+                                if inner.network.gossip_remove_desired(
                                     chain_id,
                                     &peer_id,
                                     service::GossipKind::ConsensusTransactions,
-                                );
+                                ) {
+                                    inner.peering_strategy.unassign_slot_and_ban(
+                                        &chain_id,
+                                        &peer_id,
+                                        Instant::now() + Duration::from_secs(10),
+                                    );
+                                    inner.log_callback.log(
+                                        LogLevel::Debug,
+                                        format!(
+                                            "slot-unassigned; peer_id={}; chain={}",
+                                            peer_id, inner.chains[&chain_id].log_name
+                                        ),
+                                    );
+                                }
                                 let _ = inner.network.gossip_close(
                                     chain_id,
                                     &peer_id,
                                     service::GossipKind::ConsensusTransactions,
                                 ); // TODO: what is the return value?
-                                inner.peering_strategy.unassign_slot_and_ban(
-                                    &chain_id,
-                                    &peer_id,
-                                    Instant::now() + Duration::from_secs(10),
-                                );
 
                                 inner.process_network_service_events = true;
                             }
@@ -1007,11 +1015,19 @@ async fn background_task(mut inner: Inner) {
                             &peer_id,
                             Instant::now() + Duration::from_secs(10),
                         );
-                        inner.network.gossip_remove_desired(
+                        if inner.network.gossip_remove_desired(
                             chain_id,
                             &peer_id,
                             service::GossipKind::ConsensusTransactions,
-                        );
+                        ) {
+                            inner.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "slot-unassigned; peer_id={}; chain={}",
+                                    peer_id, inner.chains[&chain_id].log_name
+                                ),
+                            );
+                        }
 
                         inner.process_network_service_events = true;
 
@@ -1033,11 +1049,19 @@ async fn background_task(mut inner: Inner) {
 
                         // Note that peer doesn't necessarily have an out slot, as this event
                         // might happen as a result of an inbound gossip connection.
-                        inner.network.gossip_remove_desired(
+                        if inner.network.gossip_remove_desired(
                             chain_id,
                             &peer_id,
                             service::GossipKind::ConsensusTransactions,
-                        );
+                        ) {
+                            inner.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "slot-unassigned; peer_id={}; chain={}",
+                                    peer_id, inner.chains[&chain_id].log_name
+                                ),
+                            );
+                        }
 
                         if let service::GossipConnectError::GenesisMismatch { .. } = error {
                             inner
@@ -1275,6 +1299,14 @@ async fn background_task(mut inner: Inner) {
                             &peer_id,
                             Instant::now() + Duration::from_secs(5),
                         );
+                        // TODO: log chain names?
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "all-slots-unassigned; reason=no-address; peer_id={}",
+                                peer_id
+                            ),
+                        );
                         inner.process_network_service_events = true;
                     }
                 }
@@ -1369,6 +1401,14 @@ async fn background_task(mut inner: Inner) {
                     inner
                         .peering_strategy
                         .unassign_slots_and_ban(&peer_id, Instant::now() + Duration::from_secs(10));
+                    // TODO: log chain names?
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "all-slots-unassigned; reason=no-address; peer_id={}",
+                            peer_id
+                        ),
+                    );
                     continue;
                 };
 
@@ -1376,6 +1416,10 @@ async fn background_task(mut inner: Inner) {
                     Ok(a) => a,
                     Err(multiaddr::FromVecError { addr }) => {
                         // Address is in an invalid format.
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("invalid-address; peer_id={}; address={:?}", peer_id, addr),
+                        );
                         let _was_in = inner.peering_strategy.remove_address(&peer_id, &addr);
                         debug_assert!(_was_in);
                         continue;
@@ -1388,9 +1432,13 @@ async fn background_task(mut inner: Inner) {
                     Ok(socket) => socket,
                     Err(_) => {
                         // Address is in an invalid format or isn't supported.
-                        inner
-                            .log_callback
-                            .log(LogLevel::Debug, format!("not-tcp; address={}", multiaddr));
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "invalid-address; peer_id={}; address={}",
+                                peer_id, multiaddr
+                            ),
+                        );
                         let _was_in = inner
                             .peering_strategy
                             .remove_address(&peer_id, multiaddr.as_ref());

@@ -487,11 +487,19 @@ where
     ///
     /// Has no effect if it was already marked as desired.
     ///
+    /// Returns `true` if the peer has been marked as desired, and `false` if it was already
+    /// marked as desired.
+    ///
     /// # Panic
     ///
     /// Panics if the given [`ChainId`] is invalid.
     ///
-    pub fn gossip_insert_desired(&mut self, chain_id: ChainId, peer_id: PeerId, kind: GossipKind) {
+    pub fn gossip_insert_desired(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: PeerId,
+        kind: GossipKind,
+    ) -> bool {
         assert!(self.chains.contains(chain_id.0));
 
         // TODO: a lot of peerid cloning overhead in this function
@@ -503,7 +511,7 @@ where
             // Return if already marked as desired, as there's nothing more to update.
             // Note that this doesn't cover the possibility where the peer was desired with
             // another chain.
-            return;
+            return false;
         }
 
         let _was_inserted = self
@@ -564,17 +572,26 @@ where
             // which case it is already present in `unconnected_desired`.
             self.unconnected_desired.insert(peer_id);
         }
+
+        true
     }
 
     /// Removes the given chain-peer combination from the list of desired chain-peers.
     ///
     /// Has no effect if it was not marked as desired.
     ///
+    /// Returns `true` if the peer was desired on this chain.
+    ///
     /// # Panic
     ///
     /// Panics if the given [`ChainId`] is invalid.
     ///
-    pub fn gossip_remove_desired(&mut self, chain_id: ChainId, peer_id: &PeerId, kind: GossipKind) {
+    pub fn gossip_remove_desired(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: &PeerId,
+        kind: GossipKind,
+    ) -> bool {
         assert!(self.chains.contains(chain_id.0));
 
         if !self
@@ -583,7 +600,7 @@ where
         // TODO: spurious cloning
         {
             // Return if wasn't marked as desired, as there's nothing more to update.
-            return;
+            return false;
         }
 
         self.gossip_desired_peers
@@ -634,6 +651,8 @@ where
                     .insert((chain_id, peer_id.clone(), kind));
             debug_assert!(_was_inserted);
         }
+
+        true
     }
 
     /// Removes the given peer from the list of desired chain-peers of all the chains that exist.
