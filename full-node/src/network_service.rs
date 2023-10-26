@@ -1060,39 +1060,33 @@ async fn background_task(mut inner: Inner) {
                     } => {
                         // TODO: log this
                         // TODO: arbitrary constant
-                        match inner
-                            .peering_strategy
-                            .try_assign_in_slot(chain_id, 4, &peer_id)
+                        // The networking state machine guarantees that `GossipInDesired`
+                        // can't happen if we are already opening an out slot, which we do
+                        // immediately.
+                        // TODO: add debug_assert! ^
+                        if inner
+                            .network
+                            .opened_gossip_undesired_by_chain(chain_id)
+                            .count()
+                            < 4
                         {
-                            Ok(()) => {
-                                inner
-                                    .network
-                                    .gossip_open(
-                                        chain_id,
-                                        &peer_id,
-                                        service::GossipKind::ConsensusTransactions,
-                                    )
-                                    .unwrap();
-                            }
-                            Err(
-                                basic_peering_strategy::AssignInSlotError::MaximumInSlotsReached,
-                            ) => {
-                                inner
-                                    .network
-                                    .gossip_close(
-                                        chain_id,
-                                        &peer_id,
-                                        service::GossipKind::ConsensusTransactions,
-                                    )
-                                    .unwrap();
-                            }
-                            Err(basic_peering_strategy::AssignInSlotError::PeerHasOutSlot) => {
-                                // The networking state machine guarantees that `GossipInDesired`
-                                // can't happen if we are already opening an out slot, which we do
-                                // immediately.
-                                // TODO: re-review this sentence ^ after this code is mature, as we still need to instantaneously call gossip_open after assigning the slot for this to be true
-                                unreachable!()
-                            }
+                            inner
+                                .network
+                                .gossip_open(
+                                    chain_id,
+                                    &peer_id,
+                                    service::GossipKind::ConsensusTransactions,
+                                )
+                                .unwrap();
+                        } else {
+                            inner
+                                .network
+                                .gossip_close(
+                                    chain_id,
+                                    &peer_id,
+                                    service::GossipKind::ConsensusTransactions,
+                                )
+                                .unwrap();
                         }
                     }
                     service::Event::GossipInDesiredCancel { .. } => {

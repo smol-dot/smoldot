@@ -1468,7 +1468,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service::GossipKind::ConsensusTransactions,
                 );
                 if let service::GossipConnectError::GenesisMismatch { .. } = error {
-                    task.peering_strategy.unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
+                    task.peering_strategy
+                        .unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
                 } else {
                     task.peering_strategy.unassign_slot_and_ban(
                         &chain_id,
@@ -1655,48 +1656,43 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 chain_id,
                 kind: service::GossipKind::ConsensusTransactions,
             }) => {
-                // TODO: arbitrary constant
-                match task
-                    .peering_strategy
-                    .try_assign_in_slot(chain_id, 4, &peer_id)
+                // The networking state machine guarantees that `GossipInDesired`
+                // can't happen if we are already opening an out slot, which we do
+                // immediately.
+                // TODO: add debug_assert! ^
+                if task
+                    .network
+                    .opened_gossip_undesired_by_chain(chain_id)
+                    .count()
+                    < 4
                 {
-                    Ok(()) => {
-                        log::debug!(
-                            target: "connections",
-                            "InSlots({}) ∋ {}",
-                            &task.log_chain_names[&chain_id],
-                            peer_id
-                        );
-                        task.network
-                            .gossip_open(
-                                chain_id,
-                                &peer_id,
-                                service::GossipKind::ConsensusTransactions,
-                            )
-                            .unwrap();
-                    }
-                    Err(basic_peering_strategy::AssignInSlotError::MaximumInSlotsReached) => {
-                        log::debug!(
-                            target: "connections",
-                            "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
-                            peer_id,
-                            &task.log_chain_names[&chain_id],
-                        );
-                        task.network
-                            .gossip_close(
-                                chain_id,
-                                &peer_id,
-                                service::GossipKind::ConsensusTransactions,
-                            )
-                            .unwrap();
-                    }
-                    Err(basic_peering_strategy::AssignInSlotError::PeerHasOutSlot) => {
-                        // The networking state machine guarantees that `GossipInDesired`
-                        // can't happen if we are already opening an out slot, which we do
-                        // immediately.
-                        // TODO: re-review this sentence ^ after this code is mature, as we still need to instantaneously call gossip_open after assigning the slot for this to be true
-                        unreachable!()
-                    }
+                    log::debug!(
+                        target: "connections",
+                        "InSlots({}) ∋ {}",
+                        &task.log_chain_names[&chain_id],
+                        peer_id
+                    );
+                    task.network
+                        .gossip_open(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .unwrap();
+                } else {
+                    log::debug!(
+                        target: "connections",
+                        "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
+                        peer_id,
+                        &task.log_chain_names[&chain_id],
+                    );
+                    task.network
+                        .gossip_close(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .unwrap();
                 }
 
                 continue;
