@@ -1683,7 +1683,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             &task.log_chain_names[&chain_id],
                         );
                         task.network
-                            .gossip_reject(
+                            .gossip_close(
                                 chain_id,
                                 &peer_id,
                                 service::GossipKind::ConsensusTransactions,

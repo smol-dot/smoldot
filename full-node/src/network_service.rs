@@ -950,6 +950,11 @@ async fn background_task(mut inner: Inner) {
                                     &peer_id,
                                     service::GossipKind::ConsensusTransactions,
                                 );
+                                let _ = inner.network.gossip_close(
+                                    chain_id,
+                                    &peer_id,
+                                    service::GossipKind::ConsensusTransactions,
+                                ); // TODO: what is the return value?
                                 inner.peering_strategy.unassign_slot_and_ban(
                                     &chain_id,
                                     &peer_id,
@@ -1074,7 +1079,7 @@ async fn background_task(mut inner: Inner) {
                             ) => {
                                 inner
                                     .network
-                                    .gossip_reject(
+                                    .gossip_close(
                                         chain_id,
                                         &peer_id,
                                         service::GossipKind::ConsensusTransactions,

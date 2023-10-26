@@ -2767,7 +2767,7 @@ where
     /// Open a gossiping substream with the given peer on the given chain.
     ///
     /// Either a [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is guaranteed to later
-    /// be generated.
+    /// be generated, unless [`ChainNetwork::gossip_close`] is called in the meanwhile.
     ///
     /// # Panic
     ///
@@ -2885,27 +2885,35 @@ where
         Ok(())
     }
 
-    /// Respond to a [`Event::GossipInDesired`] by rejecting the request.
+    /// Switches the gossip link to the given peer to the "closed" state.
+    ///
+    /// This can be used:
+    ///
+    /// - To close a opening in progress after having called [`ChainNetwork::gossip_open`], in
+    /// which case no [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is generated.
+    /// - To close a fully open gossip link. All the notifications that have been queued are still
+    /// delivered. No event is generated.
+    /// - To respond to a [`Event::GossipInDesired`] by rejecting the request.
     ///
     /// # Panic
     ///
     /// Panics if [`ChainId`] is invalid.
     ///
-    pub fn gossip_reject(
+    pub fn gossip_close(
         &mut self,
         chain_id: ChainId,
         peer_id: &PeerId,
         kind: GossipKind,
-    ) -> Result<(), GossipRejectError> {
+    ) -> Result<(), ()> {
+        // TODO: proper return value
         let GossipKind::ConsensusTransactions = kind;
 
         // An `assert!` is necessary because we don't actually access the chain information
         // anywhere, but still want to panic if the chain is invalid.
         assert!(self.chains.contains(chain_id.0));
 
-        // It is forbidden to open more than one gossip notifications substream with any given
-        // peer.
-        let Some(substream_id) = self
+        // Reject inbound requests, if any.
+        if let Some(substream_id) = self
             .notification_substreams_by_peer_id
             .range(
                 (
@@ -2929,27 +2937,77 @@ where
             )
             .next()
             .map(|(_, _, _, _, substream_id)| *substream_id)
-        else {
-            return Err(GossipRejectError::NoInGossipRequest);
-        };
+        {
+            self.inner.reject_in_notifications(substream_id);
 
-        // TODO: debug_assert that there's no inbound tx/gp substream?
+            let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                NotificationsProtocol::BlockAnnounces {
+                    chain_index: chain_id.0,
+                },
+                peer_id.clone(),
+                SubstreamDirection::In,
+                NotificationsSubstreamState::Pending,
+                substream_id,
+            ));
+            debug_assert!(_was_in);
 
-        self.inner.reject_in_notifications(substream_id);
+            let _was_in = self.substreams.remove(&substream_id);
+            debug_assert!(_was_in.is_some());
 
-        let _was_in = self.notification_substreams_by_peer_id.remove(&(
+            // TODO: debug_assert that there's no inbound tx/gp substream?
+        }
+
+        // Close outbound substreams, if any.
+        for protocol in [
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
             },
-            peer_id.clone(),
-            SubstreamDirection::In,
-            NotificationsSubstreamState::Pending,
-            substream_id,
-        ));
-        debug_assert!(_was_in);
+            NotificationsProtocol::Transactions {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Grandpa {
+                chain_index: chain_id.0,
+            },
+        ] {
+            if let Some((substream_id, state)) = self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::min_value(),
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            protocol,
+                            peer_id.clone(),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::max_value(),
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .next()
+                .map(|(_, _, _, state, substream_id)| (*substream_id, *state))
+            {
+                self.inner.close_out_notifications(substream_id);
 
-        let _was_in = self.substreams.remove(&substream_id);
-        debug_assert!(_was_in.is_some());
+                let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                    protocol,
+                    peer_id.clone(),
+                    SubstreamDirection::Out,
+                    state,
+                    substream_id,
+                ));
+                debug_assert!(_was_in);
+
+                let _was_in = self.substreams.remove(&substream_id);
+                debug_assert!(_was_in.is_some());
+
+                // TODO: close tx and gp as well
+                // TODO: doesn't close inbound substreams
+            }
+        }
 
         Ok(())
     }
@@ -3480,13 +3538,6 @@ pub enum Event {
         peer_id: PeerId,
         transactions: EncodedTransactions,
     }*/
-}
-
-/// See [`ChainNetwork::gossip_reject`].
-#[derive(Debug, Clone, derive_more::Display)]
-pub enum GossipRejectError {
-    /// No request in progress.
-    NoInGossipRequest,
 }
 
 /// See [`Event::ProtocolError`].
