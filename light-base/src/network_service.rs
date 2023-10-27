@@ -923,45 +923,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
         task.active_connections.retain(|_, tx| !tx.is_closed());
 
-        // TODO: handle differently
-        // TODO: doc
-        for chain_id in task.log_chain_names.keys() {
-            loop {
-                // TODO: 4 is an arbitrary constant, make configurable
-                if task
-                    .network
-                    .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
-                    >= 4
-                {
-                    break;
-                }
-
-                let peer_id = match task.peering_strategy.choose_peer_and_assign_slot(chain_id, &task.platform.now()) {
-                    basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
-                        peer_id.clone()
-                    }
-                    basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                    | basic_peering_strategy::AssignablePeer::NoPeer => break,
-                };
-
-                log::debug!(
-                    target: "connections",
-                    "OutSlots({}) ∋ {}",
-                    &task.log_chain_names[chain_id],
-                    peer_id
-                );
-
-                task.network.gossip_insert_desired(
-                    *chain_id,
-                    peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
-            }
-        }
-
         enum WhatHappened {
             Message(ToBackground),
             NetworkEvent(service::Event),
+            CanAssignSlot(PeerId, ChainId),
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
             MessageToConnection {
@@ -1002,6 +967,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         connection_id,
                         message,
                     }
+                } else if let Some((peer_id, chain_id)) = task.log_chain_names.keys().find_map(|chain_id| {
+                    // TODO: 4 is an arbitrary constant, make configurable
+                    if task
+                        .network
+                        .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
+                        >= 4
+                    {
+                        return None;
+                    }
+    
+                    match task.peering_strategy.pick_assignable_peer(chain_id, &task.platform.now()) {
+                        basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                            Some((peer_id.clone(), *chain_id))
+                        }
+                        basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
+                        | basic_peering_strategy::AssignablePeer::NoPeer => None,
+                    }
+                }) {
+                    WhatHappened::CanAssignSlot(peer_id, chain_id) 
                 } else {
                     future::pending().await
                 }
@@ -1749,6 +1733,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // TODO: disconnect peer
+                continue;
+            }
+            WhatHappened::CanAssignSlot(peer_id, chain_id) => {
+                task.peering_strategy.assign_slot(&chain_id, &peer_id);
+
+                log::debug!(
+                    target: "connections",
+                    "OutSlots({}) ∋ {}",
+                    &task.log_chain_names[&chain_id],
+                    peer_id
+                );
+
+                task.network.gossip_insert_desired(
+                    chain_id,
+                    peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
+
                 continue;
             }
             WhatHappened::CanStartConnect(peer_id) => {

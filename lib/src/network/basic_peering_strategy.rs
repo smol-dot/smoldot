@@ -170,7 +170,7 @@ where
     ) -> AssignablePeer<'_, TInstant> {
         // TODO: choose randomly which peer to assign
         // TODO: optimize
-        if let Some(((peer_id, _), state)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
+        if let Some(((peer_id, _), _)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
             *c == *chain
                 && (matches!(*s, PeerChainState::Assignable)
                     || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
