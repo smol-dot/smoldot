@@ -3477,6 +3477,7 @@ impl fmt::Debug for LogEmit {
 }
 
 /// Detail about what a [`LogEmit`] should output. See [`LogEmit::info`].
+#[derive(Debug)]
 pub enum LogEmitInfo<'a> {
     /// Must output a single number.
     Num(u64),
