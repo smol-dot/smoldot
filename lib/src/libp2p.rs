@@ -60,8 +60,8 @@
 //!
 //! # State machine
 //!
-//! The main object of this module is the [`peers::Peers`]. It is a state machine which, in
-//! summary, contains:
+//! The main object of this module is the [`collection::Network`]. It is a state machine which
+//! contains:
 //!
 //! - A list of handshaking and established connections, that the API user must manually
 //! synchronize by calling [`collection::SingleStreamConnectionTask::read_write`],
@@ -69,26 +69,21 @@
 //! [`collection::MultiStreamConnectionTask::substream_read_write`],
 //! [`collection::MultiStreamConnectionTask::reset`],
 //! [`collection::MultiStreamConnectionTask::add_substream`], and/or
-//! [`collection::MultiStreamConnectionTask::desired_outbound_substreams`]. When
-//! inserting a new outgoing connection, the API user can specify which [`PeerId`] this connection
-//! is expected to reach.
-//! - A list of [`̀PeerId`]s that have been marked by the API user as desired. The [`peers::Peers`]
-//! is then able to provide the list of [`PeerId`]s that have been marked as desired but that no
-//! existing connection reaches or tries to reach.
+//! [`collection::MultiStreamConnectionTask::desired_outbound_substreams`].
 //! - A list of events that happen on the set of peer-to-peer connections, and that can be
-//! retrieved one by one by calling [`peers::Peers::next_event`].
+//! retrieved one by one by calling [`collection::Network::next_event`].
 //!
 //! It is the responsibility of the API user to grab the list of unfulfilled [`̀PeerId`]s and
 //! insert new connections that are expected to reach these unfulfilled [`PeerId`]s. To do so,
 //! one must run a certain discovery mechanism in order to find out the addresses that will
 //! permit to reach peers. This is out of scope of this module.
 //!
-//! It is also the responsibility of the API user to call [`peers::Peers::next_event`] in order to
-//! react to the activity on the various connections, and user the various other methods of the
-//! [`peers::Peers`] state machine, such as for example [`peers::Peers::start_request`], to
-//! interact with the remotes.
+//! It is also the responsibility of the API user to call [`collection::Network::next_event`] in
+//! order to react to the activity on the various connections, and user the various other methods
+//! of the [`collection::Network`] state machine, such as for example
+//! [`collection::Network::start_request`], to interact with the remotes.
 //!
-//! See also the documentation of [`peers`] for more information.
+//! See also the documentation of [`collection`] for more information.
 //!
 
 pub mod collection;
@@ -96,7 +91,6 @@ pub mod connection;
 pub mod multiaddr;
 pub mod multihash;
 pub mod peer_id;
-pub mod peers;
 pub mod read_write;
 pub mod websocket;
 pub mod with_buffers;

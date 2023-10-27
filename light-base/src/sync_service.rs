@@ -61,7 +61,10 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    pub network_service: (
+        Arc<network_service::NetworkService<TPlat>>,
+        network_service::ChainId,
+    ),
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
@@ -141,7 +144,7 @@ pub struct SyncService<TPlat: PlatformRef> {
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
 }
@@ -192,7 +195,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             to_background,
             platform: config.platform,
             network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_chain_id: config.network_service.1,
             block_number_bytes: config.block_number_bytes,
         }
     }
@@ -348,7 +351,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .clone()
                 .blocks_request(
                     target,
-                    self.network_chain_index,
+                    self.network_chain_id,
                     request_config.clone(),
                     timeout_per_request,
                 )
@@ -385,7 +388,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         // TODO: better peers selection ; don't just take the first
         for target in self
             .network_service
-            .peers_list()
+            .peers_list(self.network_chain_id)
             .await
             .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
         {
@@ -394,7 +397,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .clone()
                 .blocks_request(
                     target,
-                    self.network_chain_index,
+                    self.network_chain_id,
                     request_config.clone(),
                     timeout_per_request,
                 )
@@ -577,7 +580,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .storage_proof_request(
-                    self.network_chain_index,
+                    self.network_chain_id,
                     target,
                     protocol::StorageProofRequestConfig {
                         block_hash: *block_hash,
@@ -825,7 +828,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .call_proof_request(
-                    self.network_chain_index,
+                    self.network_chain_id,
                     target,
                     config.clone(),
                     timeout_per_request,
@@ -837,7 +840,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
-                        smoldot::libp2p::peers::RequestError::Substream(
+                        smoldot::network::service::RequestError::Substream(
                             smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                         ),
                     ),

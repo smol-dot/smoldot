@@ -44,9 +44,12 @@ pub struct Config {
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
