@@ -77,9 +77,12 @@ pub struct Config {
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// Access to the network, and identifier of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
@@ -333,7 +336,7 @@ impl ConsensusService {
             keystore: config.keystore,
             finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
             network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_chain_id: config.network_service.1,
             to_background_rx,
             blocks_notifications: Vec::with_capacity(8),
             from_network_service: config.network_events_receiver,
@@ -630,7 +633,7 @@ struct SyncBackground {
     /// Index, within the [`SyncBackground::network_service`], of the chain that this sync service
     /// is syncing from. This value must be passed as parameter when starting requests on the
     /// network service.
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
 
     /// Stream of events coming from the [`SyncBackground::network_service`]. Used to know what
     /// happens on the peer-to-peer network.
@@ -974,10 +977,10 @@ impl SyncBackground {
 
                 WhatHappened::NetworkEvent(network_service::Event::Connected {
                     peer_id,
-                    chain_index,
+                    chain_id,
                     best_block_number,
                     best_block_hash,
-                }) if chain_index == self.network_chain_index => {
+                }) if chain_id == self.network_chain_id => {
                     // Most of the time, we insert a new source in the state machine.
                     // However, a source of that `PeerId` might already exist but be considered as
                     // disconnected. If that is the case, we simply mark it as no
@@ -1005,8 +1008,8 @@ impl SyncBackground {
                 }
                 WhatHappened::NetworkEvent(network_service::Event::Disconnected {
                     peer_id,
-                    chain_index,
-                }) if chain_index == self.network_chain_index => {
+                    chain_id,
+                }) if chain_id == self.network_chain_id => {
                     // Sources that disconnect are only immediately removed from the sync state
                     // machine if they have no request in progress. If that is not the case, they
                     // are instead only marked as disconnected.
@@ -1022,11 +1025,11 @@ impl SyncBackground {
                     }
                 }
                 WhatHappened::NetworkEvent(network_service::Event::BlockAnnounce {
-                    chain_index,
+                    chain_id,
                     peer_id,
                     scale_encoded_header,
                     is_best,
-                }) if chain_index == self.network_chain_index => {
+                }) if chain_id == self.network_chain_id => {
                     let _jaeger_span = self.jaeger_service.block_announce_process_span(
                         &header::hash_from_scale_encoded_header(&scale_encoded_header),
                     );
@@ -1534,7 +1537,7 @@ impl SyncBackground {
 
                     let request = self.network_service.clone().blocks_request(
                         peer_id,
-                        self.network_chain_index,
+                        self.network_chain_id,
                         network::protocol::BlocksRequestConfig {
                             start: if let Some(first_block_hash) = first_block_hash {
                                 network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
@@ -1839,7 +1842,7 @@ impl SyncBackground {
                             if is_new_best {
                                 // Update the networking.
                                 let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_index,
+                                    self.network_chain_id,
                                     self.sync.best_block_hash(),
                                     self.sync.best_block_number(),
                                 );
@@ -1885,7 +1888,7 @@ impl SyncBackground {
                                     .clone()
                                     .send_block_announce(
                                         peer_id.clone(),
-                                        0,
+                                        self.network_chain_id,
                                         scale_encoded_header.clone(),
                                         is_new_best,
                                     )
@@ -2049,7 +2052,7 @@ impl SyncBackground {
 
                         if updates_best_block {
                             let fut = self.network_service.set_local_best_block(
-                                self.network_chain_index,
+                                self.network_chain_id,
                                 self.sync.best_block_hash(),
                                 self.sync.best_block_number(),
                             );

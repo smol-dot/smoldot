@@ -198,6 +198,6 @@ pub fn decode_block_announces_handshake(
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 #[display(fmt = "Failed to decode a block announces handshake")]
 pub struct BlockAnnouncesHandshakeDecodeError(nom::error::ErrorKind);

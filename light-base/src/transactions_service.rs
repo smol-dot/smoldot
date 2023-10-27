@@ -112,9 +112,12 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service responsible for synchronizing the chain.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Access to the network, and index of the chain to use to gossip transactions from the point
-    /// of view of the network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    /// Access to the network, and identifier of the chain to use to gossip transactions from the
+    /// point of view of the network service.
+    pub network_service: (
+        Arc<network_service::NetworkService<TPlat>>,
+        network_service::ChainId,
+    ),
 
     /// Maximum number of pending transactions allowed in the service.
     ///
@@ -151,7 +154,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_chain_id: config.network_service.1,
             from_foreground,
             max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
@@ -310,7 +313,7 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
     from_foreground: async_channel::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
@@ -327,7 +330,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         network_service: config.network_service,
-        network_chain_index: config.network_chain_index,
+        network_chain_id: config.network_chain_id,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity,
             blocks_capacity,
@@ -804,7 +807,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
-                            worker.network_chain_index,
+                            worker.network_chain_id,
                             worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
@@ -1012,7 +1015,7 @@ struct Worker<TPlat: PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
 
     /// Which chain to use in combination with the [`Worker::network_service`].
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
 
     /// List of pending transactions.
     ///

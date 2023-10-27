@@ -1469,6 +1469,7 @@ pub enum InboundTy {
         /// Maximum allowed size of the request.
         /// If `None`, then no data is expected on the substream, not even the length of the
         /// request.
+        // TODO: use a proper enum
         request_max_size: Option<usize>,
     },
     Notifications {
