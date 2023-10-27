@@ -1092,7 +1092,7 @@ async fn background_task(mut inner: Inner) {
                             .network
                             .opened_gossip_undesired_by_chain(chain_id)
                             .count()
-                            < 4
+                            < 25
                         {
                             inner
                                 .network
@@ -1343,11 +1343,11 @@ async fn background_task(mut inner: Inner) {
             // TODO: doc
             for chain_id in inner.chains.keys() {
                 loop {
-                    // TODO: 4 is an arbitrary constant, make configurable
+                    // TODO: 25 is an arbitrary constant, make configurable
                     if inner
                         .network
                         .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
-                        >= 4
+                        >= 25
                     {
                         break;
                     }
