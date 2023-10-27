@@ -2170,9 +2170,9 @@ impl ReadyToRun {
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry: LogEmitInner::Log {
-                        _log_level: log_level,
-                        _target_str_ptr: target_str_ptr,
-                        _target_str_size: target_str_size,
+                        log_level,
+                        target_str_ptr,
+                        target_str_size,
                         msg_str_ptr,
                         msg_str_size,
                     },
@@ -3386,11 +3386,11 @@ enum LogEmitInner {
     },
     Log {
         /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
-        _log_level: u32,
+        log_level: u32,
         /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
-        _target_str_ptr: u32,
+        target_str_ptr: u32,
         /// Size of the string of the log target. Guaranteed to be in range and to be UTF-8.
-        _target_str_size: u32,
+        target_str_size: u32,
         /// Pointer to the string of the log message. Guaranteed to be in range and to be UTF-8.
         msg_str_ptr: u32,
         /// Size of the string of the log message. Guaranteed to be in range and to be UTF-8.
@@ -3399,6 +3399,47 @@ enum LogEmitInner {
 }
 
 impl LogEmit {
+    /// Returns the data that the runtime would like to print.
+    pub fn info(&self) -> LogEmitInfo {
+        match self.log_entry {
+            LogEmitInner::Num(n) => LogEmitInfo::Num(n),
+            LogEmitInner::Utf8 { str_ptr, str_size } => LogEmitInfo::Utf8(LogEmitInfoStr {
+                data: Box::new(self.inner.vm.read_memory(str_ptr, str_size).unwrap()),
+            }),
+            LogEmitInner::Hex {
+                data_ptr,
+                data_size,
+            } => LogEmitInfo::Hex(LogEmitInfoHex {
+                data: Box::new(self.inner.vm.read_memory(data_ptr, data_size).unwrap()),
+            }),
+            LogEmitInner::Log {
+                msg_str_ptr,
+                msg_str_size,
+                target_str_ptr,
+                target_str_size,
+                log_level,
+            } => LogEmitInfo::Log {
+                log_level,
+                target: LogEmitInfoStr {
+                    data: Box::new(
+                        self.inner
+                            .vm
+                            .read_memory(target_str_ptr, target_str_size)
+                            .unwrap(),
+                    ),
+                },
+                message: LogEmitInfoStr {
+                    data: Box::new(
+                        self.inner
+                            .vm
+                            .read_memory(msg_str_ptr, msg_str_size)
+                            .unwrap(),
+                    ),
+                },
+            },
+        }
+    }
+
     /// Resumes execution after having set the value.
     pub fn resume(self) -> HostVm {
         HostVm::ReadyToRun(ReadyToRun {
@@ -3408,35 +3449,20 @@ impl LogEmit {
     }
 }
 
+// TODO: consider removing this Display implementation due to the ambiguity in how to display a LogEmitInfo::Log
 impl fmt::Display for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.log_entry {
-            LogEmitInner::Num(num) => write!(f, "{num}"),
-            LogEmitInner::Utf8 { str_ptr, str_size } => {
-                let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
-                let str = str::from_utf8(str.as_ref()).unwrap();
+        match self.info() {
+            LogEmitInfo::Num(num) => write!(f, "{num}"),
+            LogEmitInfo::Utf8(str) => {
                 write!(f, "{str}")
             }
-            LogEmitInner::Hex {
-                data_ptr,
-                data_size,
-            } => {
-                let data = self.inner.vm.read_memory(data_ptr, data_size).unwrap();
-                write!(f, "{}", hex::encode(data.as_ref()))
+            LogEmitInfo::Hex(data) => {
+                write!(f, "{data}")
             }
-            LogEmitInner::Log {
-                msg_str_ptr,
-                msg_str_size,
-                ..
-            } => {
-                let str = self
-                    .inner
-                    .vm
-                    .read_memory(msg_str_ptr, msg_str_size)
-                    .unwrap();
-                let str = str::from_utf8(str.as_ref()).unwrap();
-                // TODO: don't just ignore the target and log level? better log representation? more control? also, it's unclear whether it should be an individual line
-                writeln!(f, "{str}")
+            LogEmitInfo::Log { message, .. } => {
+                // TODO: don't just ignore the target and log level? also, it's unclear whether it should be an individual line
+                writeln!(f, "{message}")
             }
         }
     }
@@ -3447,6 +3473,77 @@ impl fmt::Debug for LogEmit {
         f.debug_struct("LogEmit")
             .field("message", &self.to_string())
             .finish()
+    }
+}
+
+/// Detail about what a [`LogEmit`] should output. See [`LogEmit::info`].
+pub enum LogEmitInfo<'a> {
+    /// Must output a single number.
+    Num(u64),
+    /// Must output a UTF-8 string.
+    Utf8(LogEmitInfoStr<'a>),
+    /// Must output the hexadecimal encoding of the given buffer.
+    Hex(LogEmitInfoHex<'a>),
+    /// Must output a log line.
+    Log {
+        /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
+        log_level: u32,
+        /// "Target" of the log. Arbitrary string indicated by the runtime. Typically indicates
+        /// the subsystem which has emitted the log line.
+        target: LogEmitInfoStr<'a>,
+        /// Actual log message being emitted.
+        message: LogEmitInfoStr<'a>,
+    },
+}
+
+/// See [`LogEmitInfo`]. Use the `AsRef` trait implementation to retrieve the buffer.
+pub struct LogEmitInfoHex<'a> {
+    // TODO: don't use a Box once Rust supports type Foo = impl Trait;
+    data: Box<dyn AsRef<[u8]> + Send + Sync + 'a>,
+}
+
+impl<'a> AsRef<[u8]> for LogEmitInfoHex<'a> {
+    fn as_ref(&self) -> &[u8] {
+        (*self.data).as_ref()
+    }
+}
+
+impl<'a> fmt::Debug for LogEmitInfoHex<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl<'a> fmt::Display for LogEmitInfoHex<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&hex::encode(self.as_ref()), f)
+    }
+}
+
+/// See [`LogEmitInfo`]. Use the `AsRef` trait implementation to retrieve the string.
+pub struct LogEmitInfoStr<'a> {
+    // TODO: don't use a Box once Rust supports type Foo = impl Trait;
+    data: Box<dyn AsRef<[u8]> + Send + Sync + 'a>,
+}
+
+impl<'a> AsRef<str> for LogEmitInfoStr<'a> {
+    fn as_ref(&self) -> &str {
+        let data = (*self.data).as_ref();
+        // The creator of `LogEmitInfoStr` always makes sure that the string is indeed UTF-8
+        // before creating it.
+        str::from_utf8(data).unwrap()
+    }
+}
+
+impl<'a> fmt::Debug for LogEmitInfoStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl<'a> fmt::Display for LogEmitInfoStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_ref(), f)
     }
 }
 
