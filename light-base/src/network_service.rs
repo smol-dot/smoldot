@@ -959,38 +959,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
         }
 
-        // TODO: handle differently
-        // TODO: doc
-        loop {
-            let Some((peer_id, chain_id)) = task
-                .network
-                .connected_unopened_gossip_desired()
-                .next()
-                .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
-            else {
-                break;
-            };
-
-            task.network
-                .gossip_open(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                )
-                .unwrap();
-
-            log::debug!(
-                target: "network",
-                "Gossip({}, {}) <= Open",
-                peer_id,
-                &task.log_chain_names[&chain_id],
-            );
-        }
-
         enum WhatHappened {
             Message(ToBackground),
             NetworkEvent(service::Event),
-            StartConnect(PeerId),
+            CanStartConnect(PeerId),
+            CanOpenGossip(PeerId, ChainId),
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -1003,16 +976,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
             let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                // TODO: move down, but causes borrowck errors
-                let start_connect = task.network.unconnected_desired().next().cloned();
-                if let Some(event) = if can_generate_event {
-                    task.network.next_event()
-                } else {
-                    None
-                } {
+                if let Some(event) = can_generate_event
+                    .then(|| task.network.next_event())
+                    .flatten()
+                {
                     WhatHappened::NetworkEvent(event)
-                } else if let Some(start_connect) = start_connect {
-                    WhatHappened::StartConnect(start_connect)
+                } else if let Some(start_connect) = {
+                    let x = task.network.unconnected_desired().next().cloned();
+                    x
+                } {
+                    WhatHappened::CanStartConnect(start_connect)
+                } else if let Some((peer_id, chain_id)) = {
+                    let x = task
+                        .network
+                        .connected_unopened_gossip_desired()
+                        .next()
+                        .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
+                    x
+                } {
+                    WhatHappened::CanOpenGossip(peer_id, chain_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -1769,7 +1751,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: disconnect peer
                 continue;
             }
-            WhatHappened::StartConnect(peer_id) => {
+            WhatHappened::CanStartConnect(peer_id) => {
                 // TODO: restore rate limiting
 
                 let Some(multiaddr) = task.peering_strategy.addr_to_connected(&peer_id) else {
@@ -1925,6 +1907,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
+
+                continue;
+            }
+            WhatHappened::CanOpenGossip(peer_id, chain_id) => {
+                task.network
+                    .gossip_open(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .unwrap();
+
+                log::debug!(
+                    target: "network",
+                    "Gossip({}, {}) <= Open",
+                    peer_id,
+                    &task.log_chain_names[&chain_id],
+                );
 
                 continue;
             }
