@@ -151,6 +151,67 @@ where
             .map(|((_, a), _)| &a[..])
     }
 
+    /// Chooses a [`PeerId`] that is known to belong to the given chain, that is not banned, and
+    /// that doesn't have a slot assigned to it.
+    ///
+    /// A `TInstant` must be provided in order to determine whether past bans have expired.
+    ///
+    /// If multiple peers can be assigned a slot, the one returned is chosen randomly. Calling
+    /// this function multiple times might return different peers.
+    /// For this reason, this function requires `&mut self`.
+    ///
+    /// Note that this function return a peer for which no address is present. While this is often
+    /// not desirable, it is preferable to keep the API simple and straight-forward rather than
+    /// try to be smart about function behaviours.
+    pub fn pick_assignable_peer(
+        &'_ mut self,
+        chain: &TChainId,
+        now: &TInstant,
+    ) -> AssignablePeer<'_, TInstant> {
+        // TODO: choose randomly which peer to assign
+        // TODO: optimize
+        if let Some(((peer_id, _), state)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
+            *c == *chain
+                && (matches!(*s, PeerChainState::Assignable)
+                    || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
+        }) {
+            AssignablePeer::Assignable(peer_id)
+        } else {
+            // TODO: never returns `AllBanned`
+            AssignablePeer::NoPeer
+        }
+    }
+
+    /// Assigns a slot to the given peer on the given chain.
+    ///
+    /// Acts as an implicit call to [`BasicPeeringStrategy::insert_chain_peer`].
+    ///
+    /// A slot is assigned even if the peer is banned. API users that call this function are
+    /// expected to be aware of that.
+    pub fn assign_slot(&'_ mut self, chain: &TChainId, peer_id: &PeerId) {
+        match self.peers_chains.entry((peer_id.clone(), chain.clone())) {
+            btree_map::Entry::Occupied(e) => {
+                let _was_removed = self.peers_chains_by_state.remove(&(
+                    chain.clone(),
+                    e.get().clone(),
+                    peer_id.clone(),
+                ));
+                debug_assert!(_was_removed);
+                *e.into_mut() = PeerChainState::Slot;
+            }
+            btree_map::Entry::Vacant(e) => {
+                e.insert(PeerChainState::Slot);
+            }
+        }
+
+        let _was_inserted = self.peers_chains_by_state.insert((
+            chain.clone(),
+            PeerChainState::Slot,
+            peer_id.clone(),
+        ));
+        debug_assert!(_was_inserted);
+    }
+
     /// Choose a [`PeerId`] known to belong to the given chain, that is not banned and doesn't
     /// have a slot assigned to it, and assigns a slot to it. Returns the [`PeerId`] that was
     /// chosen, or `None` if no [`PeerId`] matches this criteria.
@@ -160,11 +221,12 @@ where
     /// Note that this function might assign a slot to a peer for which no address is present.
     /// While this is often not desirable, it is preferable to keep the API simple and
     /// straight-forward rather than try to be smart about function behaviours.
-    pub fn assign_slot(
+    // TODO: consider removing this function
+    pub fn choose_peer_and_assign_slot(
         &'_ mut self,
         chain: &TChainId,
         now: &TInstant,
-    ) -> AssignSlotOutcome<'_, TInstant> {
+    ) -> AssignablePeer<'_, TInstant> {
         // TODO: choose randomly which peer to assign
         // TODO: optimize
         if let Some(((peer_id, _), state)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
@@ -184,10 +246,10 @@ where
                     .insert((chain.clone(), state.clone(), peer_id.clone()));
             debug_assert!(_was_inserted);
 
-            AssignSlotOutcome::Assigned(peer_id)
+            AssignablePeer::Assignable(peer_id)
         } else {
             // TODO: never returns `AllBanned`
-            AssignSlotOutcome::NoPeer
+            AssignablePeer::NoPeer
         }
     }
 
@@ -295,8 +357,8 @@ pub enum DisconnectAddrError {
     NotConnected,
 }
 
-pub enum AssignSlotOutcome<'a, TInstant> {
-    Assigned(&'a PeerId),
+pub enum AssignablePeer<'a, TInstant> {
+    Assignable(&'a PeerId),
     AllPeersBanned { next_unban: &'a TInstant },
     NoPeer,
 }
