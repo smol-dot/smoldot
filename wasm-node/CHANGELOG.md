@@ -4,8 +4,8 @@
 
 ### Changed
 
-- Smoldot will now generate an individual network key every time it initiates a connection. This prevents the full nodes it connects to from being able to maintain a mapping of network key <-> IP address and thus being able to track where the machine running a light client moves around the world. It also makes it harder for colluding full nodes from coordinating an eclipse attack against a specific light client user.
-- As a consequence of the previous change, the `system_localPeerId` JSON-RPC function is no longer supported.
+- Smoldot will now generate an individual network key every time it initiates a connection. This prevents the full nodes it connects to from being able to maintain a mapping of network key <-> IP address and thus being able to track where the machine running a light client moves around the world. It also makes it harder for colluding full nodes from coordinating an eclipse attack against a specific light client user. Note that this is not completely full proof, as it assumes that connections are shut down and reopened, which is only the case if connectivity is lost or if the machine is put to sleep at some point during the IP address change. ([#1255](https://github.com/smol-dot/smoldot/pull/1255))
+- As a consequence of the previous change, the `system_localPeerId` JSON-RPC function is no longer supported. ([#1255](https://github.com/smol-dot/smoldot/pull/1255))
 - The `chain_getBlock` JSON-RPC function now always returns an empty list of justifications, because there is no (reasonable) way for smoldot to verify whether the justifications sent by full nodes are valid. ([#1238](https://github.com/smol-dot/smoldot/pull/1238))
 
 ## 2.0.6 - 2023-10-13
