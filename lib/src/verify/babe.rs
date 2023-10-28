@@ -523,6 +523,7 @@ fn calculate_primary_threshold(
     assert!(theta > 0.0);
 
     // The calculations below has been copy-pasted from Substrate and is guaranteed to not panic.
+    // TODO: use `u64::powf` when `cfg(feature = "std")` for speed
     let p = num_rational::BigRational::from_float(1f64 - libm::pow(1f64 - c, theta)).unwrap();
     let numer = p.numer().to_biguint().unwrap();
     let denom = p.denom().to_biguint().unwrap();
