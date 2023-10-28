@@ -123,13 +123,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request.respond(methods::Response::system_localListenAddresses(Vec::new()));
     }
 
-    /// Handles a call to [`methods::MethodCall::system_localPeerId`].
-    pub(super) async fn system_local_peer_id(self: &Arc<Self>, request: service::RequestProcess) {
-        request.respond(methods::Response::system_localPeerId(
-            (&self.peer_id_base58).into(),
-        ));
-    }
-
     /// Handles a call to [`methods::MethodCall::system_name`].
     pub(super) async fn system_name(self: &Arc<Self>, request: service::RequestProcess) {
         request.respond(methods::Response::system_name((&self.system_name).into()));
