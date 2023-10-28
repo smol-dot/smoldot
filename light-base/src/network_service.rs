@@ -976,7 +976,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     {
                         return None;
                     }
-    
+
                     match task.peering_strategy.pick_assignable_peer(chain_id, &task.platform.now()) {
                         basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
                             Some((peer_id.clone(), *chain_id))
@@ -985,7 +985,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         | basic_peering_strategy::AssignablePeer::NoPeer => None,
                     }
                 }) {
-                    WhatHappened::CanAssignSlot(peer_id, chain_id) 
+                    WhatHappened::CanAssignSlot(peer_id, chain_id)
                 } else {
                     future::pending().await
                 }
