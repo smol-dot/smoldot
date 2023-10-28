@@ -22,8 +22,8 @@ use super::Background;
 use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
-    boxed::Box,
     borrow::ToOwned as _,
+    boxed::Box,
     format,
     string::{String, ToString as _},
     sync::Arc,
