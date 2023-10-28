@@ -1352,13 +1352,15 @@ async fn background_task(mut inner: Inner) {
                         break;
                     }
 
-                    let peer_id = match inner.peering_strategy.choose_peer_and_assign_slot(chain_id, &Instant::now()) {
+                    let peer_id = match inner.peering_strategy.pick_assignable_peer(chain_id, &Instant::now()) {
                         basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
                             peer_id.clone()
                         }
                         basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
                         | basic_peering_strategy::AssignablePeer::NoPeer => break,
                     };
+
+                    inner.peering_strategy.assign_slot(&chain_id, &peer_id);
 
                     inner.log_callback.log(
                         LogLevel::Debug,

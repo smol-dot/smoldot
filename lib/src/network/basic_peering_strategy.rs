@@ -212,47 +212,6 @@ where
         debug_assert!(_was_inserted);
     }
 
-    /// Choose a [`PeerId`] known to belong to the given chain, that is not banned and doesn't
-    /// have a slot assigned to it, and assigns a slot to it. Returns the [`PeerId`] that was
-    /// chosen, or `None` if no [`PeerId`] matches this criteria.
-    ///
-    /// A `TInstant` must be provided in order to determine whether past bans have expired.
-    ///
-    /// Note that this function might assign a slot to a peer for which no address is present.
-    /// While this is often not desirable, it is preferable to keep the API simple and
-    /// straight-forward rather than try to be smart about function behaviours.
-    // TODO: consider removing this function
-    pub fn choose_peer_and_assign_slot(
-        &'_ mut self,
-        chain: &TChainId,
-        now: &TInstant,
-    ) -> AssignablePeer<'_, TInstant> {
-        // TODO: choose randomly which peer to assign
-        // TODO: optimize
-        if let Some(((peer_id, _), state)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
-            *c == *chain
-                && (matches!(*s, PeerChainState::Assignable)
-                    || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
-        }) {
-            let _was_in =
-                self.peers_chains_by_state
-                    .remove(&(chain.clone(), state.clone(), peer_id.clone()));
-            debug_assert!(_was_in);
-
-            *state = PeerChainState::Slot;
-
-            let _was_inserted =
-                self.peers_chains_by_state
-                    .insert((chain.clone(), state.clone(), peer_id.clone()));
-            debug_assert!(_was_inserted);
-
-            AssignablePeer::Assignable(peer_id)
-        } else {
-            // TODO: never returns `AllBanned`
-            AssignablePeer::NoPeer
-        }
-    }
-
     /// Unassign the slot that has been assigned to the given peer and bans the peer, preventing
     /// it from being assigned a slot on this chain for a certain amount of time.
     pub fn unassign_slot_and_ban(
