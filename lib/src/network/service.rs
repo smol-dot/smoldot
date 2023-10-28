@@ -85,7 +85,7 @@ use core::{
     fmt,
     hash::Hash,
     iter, mem,
-    ops::{Add, Sub},
+    ops::{self, Add, Sub},
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
@@ -132,7 +132,11 @@ pub struct Config {
 /// Configuration for a specific overlay network.
 ///
 /// See [`ChainNetwork::add_chain`].
-pub struct ChainConfig {
+pub struct ChainConfig<TChain> {
+    /// Opaque data chosen by the API user. Can later be accessed using the `Index`/`IndexMut`
+    /// trait implementation of the [`ChainNetwork`].
+    pub user_data: TChain,
+
     /// Hash of the genesis block (i.e. block number 0) according to the local node.
     pub genesis_hash: [u8; 32],
 
@@ -168,13 +172,13 @@ pub struct ChainId(usize);
 
 /// Data structure containing the list of all connections and their latest known state. See also
 /// [the module-level documentation](..).
-pub struct ChainNetwork<TNow> {
+pub struct ChainNetwork<TChain, TNow> {
     /// Underlying data structure.
     inner: collection::Network<ConnectionInfo, TNow>,
 
     /// List of all chains that have been added.
     // TODO: shrink to fit from time to time
-    chains: slab::Slab<Chain>,
+    chains: slab::Slab<Chain<TChain>>,
 
     /// All the substreams of [`ChainNetwork::inner`], with info attached to them.
     // TODO: add a substream user data to `collection::Network` instead
@@ -231,7 +235,7 @@ pub struct ChainNetwork<TNow> {
         hashbrown::HashSet<(ChainId, PeerId, GossipKind), util::SipHasherBuild>,
 }
 
-struct Chain {
+struct Chain<TChain> {
     /// See [`ChainConfig::block_number_bytes`].
     block_number_bytes: usize,
 
@@ -253,6 +257,9 @@ struct Chain {
 
     /// See [`ChainConfig::allow_inbound_block_requests`].
     allow_inbound_block_requests: bool,
+
+    /// See [`ChainConfig::user_data`].
+    user_data: TChain,
 }
 
 /// See [`ChainNetwork::inner`].
@@ -344,7 +351,7 @@ impl NotificationsSubstreamState {
     }
 }
 
-impl<TNow> ChainNetwork<TNow>
+impl<TChain, TNow> ChainNetwork<TChain, TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -414,7 +421,7 @@ where
     ///
     /// It is not possible to add a chain if its protocol names would conflict with an existing
     /// chain.
-    pub fn add_chain(&mut self, config: ChainConfig) -> Result<ChainId, AddChainError> {
+    pub fn add_chain(&mut self, config: ChainConfig<TChain>) -> Result<ChainId, AddChainError> {
         let chain_entry = self.chains.vacant_entry();
         let chain_id = chain_entry.key();
 
@@ -441,6 +448,7 @@ where
             best_number: config.best_number,
             allow_inbound_block_requests: config.allow_inbound_block_requests,
             grandpa_protocol_config: config.grandpa_protocol_config,
+            user_data: config.user_data,
         });
 
         Ok(ChainId(chain_id))
@@ -3413,6 +3421,20 @@ where
                     .ok_or(())?,
             },
         })
+    }
+}
+
+impl<TChain, TNow> ops::Index<ChainId> for ChainNetwork<TChain, TNow> {
+    type Output = TChain;
+
+    fn index(&self, index: ChainId) -> &Self::Output {
+        &self.chains[index.0].user_data
+    }
+}
+
+impl<TChain, TNow> ops::IndexMut<ChainId> for ChainNetwork<TChain, TNow> {
+    fn index_mut(&mut self, index: ChainId) -> &mut Self::Output {
+        &mut self.chains[index.0].user_data
     }
 }
 
