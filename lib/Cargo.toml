@@ -66,7 +66,7 @@ pbkdf2 = { version = "0.12.1", default-features = false }
 poly1305 = { version = "0.8.0", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
-ruzstd = { version = "0.4.0" }  # TODO: uses `#![feature(error_in_core)]` when the `std` feature is disabled, see https://github.com/rust-lang/rust/issues/103765
+ruzstd = { git = "https://github.com/KillingSpark/zstd-rs" } #{ version = "0.4.0" }  # TODO: uses `#![feature(error_in_core)]` when the `std` feature is disabled, see https://github.com/rust-lang/rust/issues/103765
 schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc"] }
 serde = { version = "1.0.183", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc", "raw_value"] }
