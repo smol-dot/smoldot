@@ -33,6 +33,8 @@ This repository contains the following components:
     - 📚 <https://docs.rs/smoldot-full-node> (latest published version)
     - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_full_node/index.html> (latest commit)
 
+[![dependency status](https://deps.rs/repo/github/smol-dot/smoldot/status.svg)](https://deps.rs/repo/github/smol-dot/smoldot)
+
 # Frequently asked questions
 
 ## Does smoldot support &lt;blockchain&gt;?
