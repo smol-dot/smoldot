@@ -2364,6 +2364,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "itertools 0.11.0",
+ "libm",
  "libsecp256k1",
  "merlin",
  "no-std-net",
