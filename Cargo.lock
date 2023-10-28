@@ -143,6 +143,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-channel"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "336d835910fab747186c56586562cb46f42809c2843ef3a84f47509009522838"
+dependencies = [
+ "concurrent-queue",
+ "event-listener 3.0.0",
+ "event-listener-strategy",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-executor"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -371,7 +384,7 @@ version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c36a4d0d48574b3dd360b4b7d95cc651d2b6557b6402848a27d4b228a473e2a"
 dependencies = [
- "async-channel",
+ "async-channel 1.9.0",
  "async-lock 2.8.0",
  "async-task",
  "fastrand 2.0.1",
@@ -2326,7 +2339,7 @@ version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13f2b548cd8447f8de0fdf1c592929f70f4fc7039a05e47404b0d096ec6987a1"
 dependencies = [
- "async-channel",
+ "async-channel 1.9.0",
  "async-executor",
  "async-fs",
  "async-io",
@@ -2363,6 +2376,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "itertools 0.11.0",
+ "libm",
  "libsecp256k1",
  "merlin",
  "no-std-net",
@@ -2400,7 +2414,7 @@ dependencies = [
 name = "smoldot-full-node"
 version = "0.3.0"
 dependencies = [
- "async-channel",
+ "async-channel 1.9.0",
  "blake2-rfc",
  "clap",
  "ctrlc",
@@ -2432,7 +2446,7 @@ dependencies = [
 name = "smoldot-light"
 version = "0.10.0"
 dependencies = [
- "async-channel",
+ "async-channel 2.0.0",
  "async-lock 3.0.0",
  "base64 0.21.5",
  "blake2-rfc",

@@ -52,7 +52,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
-    mut from_foreground: async_channel::Receiver<ToBackground>,
+    mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_id: network_service::ChainId,
     mut from_network_service: stream::BoxStream<'static, network_service::Event>,

@@ -202,6 +202,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let on_service_killed = event_listener::Event::new();
 
         let (messages_tx, messages_rx) = async_channel::bounded(32);
+        let messages_rx = Box::pin(messages_rx);
 
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
@@ -880,7 +881,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
         Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
     >,
 
-    messages_rx: async_channel::Receiver<ToBackground>,
+    messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
     active_connections: HashMap<
         service::ConnectionId,

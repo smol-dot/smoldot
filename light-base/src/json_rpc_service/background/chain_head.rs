@@ -23,6 +23,7 @@ use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
+    boxed::Box,
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -31,6 +32,7 @@ use alloc::{
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
+    pin,
     time::Duration,
 };
 use futures_lite::FutureExt as _;
@@ -289,6 +291,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 let sync_service = self.sync_service.clone();
                 let platform = self.platform.clone();
                 let (to_operation_handlers, from_operation_handlers) = async_channel::bounded(8);
+                let from_operation_handlers = Box::pin(from_operation_handlers);
 
                 ChainHeadFollowTask {
                     platform,
@@ -299,7 +302,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             notifications: sub.new_blocks,
                             subscription_id: id,
                         },
-                        either::Right(sub) => Subscription::WithoutRuntime(sub.new_blocks),
+                        either::Right(sub) => {
+                            Subscription::WithoutRuntime(Box::pin(sub.new_blocks))
+                        }
                     },
                     log_target,
                     runtime_service,
@@ -510,7 +515,7 @@ struct ChainHeadFollowTask<TPlat: PlatformRef> {
 
     to_main_task: async_channel::Sender<OperationEvent>,
 
-    from_operation_handlers: async_channel::Receiver<OperationEvent>,
+    from_operation_handlers: pin::Pin<Box<async_channel::Receiver<OperationEvent>>>,
 
     /// Identifier to assign to the next body/call/storage operation.
     next_operation_id: u128,
@@ -538,7 +543,7 @@ enum Subscription<TPlat: PlatformRef> {
         subscription_id: runtime_service::SubscriptionId,
     },
     // TODO: better typing?
-    WithoutRuntime(async_channel::Receiver<sync_service::Notification>),
+    WithoutRuntime(pin::Pin<Box<async_channel::Receiver<sync_service::Notification>>>),
 }
 
 impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {

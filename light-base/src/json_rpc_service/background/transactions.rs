@@ -22,6 +22,7 @@ use super::{Background, PlatformRef};
 use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
+use core::pin;
 use futures_lite::future;
 use futures_util::StreamExt as _;
 use smoldot::json_rpc::{methods, service};
@@ -91,12 +92,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         self.platform
             .spawn_task(format!("{}-transaction-watch", self.log_target).into(), {
-                let mut transaction_updates = self
+                let transaction_updates = self
                     .transactions_service
                     .submit_and_watch_transaction(transaction.0, 16)
                     .await;
 
                 async move {
+                    let mut transaction_updates = pin::pin!(transaction_updates);
+
                     let mut subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
 
