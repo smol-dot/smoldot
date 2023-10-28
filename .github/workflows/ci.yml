@@ -110,8 +110,8 @@ jobs:
     - uses: Swatinem/rust-cache@v2
     - run: rustup component add rust-src --toolchain nightly-2023-10-24-x86_64-unknown-linux-gnu # Necessary for `-Z build-std` below
     # Note that we use `thumbv7m-none-eabi` as this target seems to generally work fine. Many targets unfortunately have Rust/LLVM bugs preventing compilation.
-    - run: RUSTFLAGS=-Dwarnings cargo +nightly build -Z unstable-options --keep-going --package smoldot --locked --no-default-features -Z build-std=core,alloc --target=thumbv7m-none-eabi
-    - run: RUSTFLAGS=-Dwarnings cargo +nightly build -Z unstable-options --keep-going --package smoldot-light --locked --no-default-features -Z build-std=core,alloc --target=thumbv7m-none-eabi
+    - run: RUSTFLAGS=-Dwarnings cargo +nightly-2023-10-24 build -Z unstable-options --keep-going --package smoldot --locked --no-default-features -Z build-std=core,alloc --target=thumbv7m-none-eabi
+    - run: RUSTFLAGS=-Dwarnings cargo +nightly-2023-10-24 build -Z unstable-options --keep-going --package smoldot-light --locked --no-default-features -Z build-std=core,alloc --target=thumbv7m-none-eabi
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
