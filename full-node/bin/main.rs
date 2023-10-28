@@ -25,9 +25,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::StreamExt as _;
-use smol::future;
-
 mod cli;
 
 fn main() {
@@ -264,6 +261,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
                 keystore_path: base_storage_directory
                     .as_ref()
                     .map(|path| path.join(parsed_relay_spec.id()).join("keys")),
+                json_rpc_listen: None,
             };
 
             (Some(cfg), Some(relay_chain_name.to_owned()))
@@ -291,8 +289,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
             let mut actual_key = Box::new([0u8; 32]);
             rand::Fill::try_fill(&mut *actual_key, &mut rand::thread_rng()).unwrap();
             let mut hex_encoded = Box::new([0; 64]);
-            hex::encode_to_slice(&*actual_key, &mut *hex_encoded).unwrap();
-            fs::write(&path, &*hex_encoded).expect("failed to write libp2p secret key file");
+            hex::encode_to_slice(*actual_key, &mut *hex_encoded).unwrap();
+            fs::write(&path, *hex_encoded).expect("failed to write libp2p secret key file");
             zeroize::Zeroize::zeroize(&mut *hex_encoded);
             actual_key
         };
@@ -317,7 +315,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
 
         let spawn_result = thread::Builder::new()
             .name(format!("tasks-pool-{}", n))
-            .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
+            .spawn(move || smol::block_on(executor.run(smol::future::pending::<()>())));
 
         // Ignore a failure to spawn a thread, as we're going to run tasks on the current thread
         // later down this function.
@@ -373,18 +371,18 @@ async fn run(cli_options: cli::CliOptionsRun) {
             sqlite_database_path,
             sqlite_cache_size: cli_options.database_cache_size.0,
             keystore_path,
+            json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
+                Some(smoldot_full_node::JsonRpcListenConfig {
+                    address,
+                    max_json_rpc_clients: cli_options.json_rpc_max_clients,
+                })
+            } else {
+                None
+            },
         },
         relay_chain,
         libp2p_key,
         listen_addresses: cli_options.listen_addr,
-        json_rpc_listen: if let Some(address) = cli_options.json_rpc_address.0 {
-            Some(smoldot_full_node::JsonRpcListenConfig {
-                address,
-                max_json_rpc_clients: cli_options.json_rpc_max_clients,
-            })
-        } else {
-            None
-        },
         tasks_executor: {
             let executor = executor.clone();
             Arc::new(move |task| executor.spawn(task).detach())
@@ -449,13 +447,14 @@ async fn run(cli_options: cli::CliOptionsRun) {
 
         async move {
             let mut informant_timer = if show_informant {
-                smol::Timer::interval(Duration::from_millis(100))
+                smol::Timer::after(Duration::new(0, 0))
             } else {
                 smol::Timer::never()
             };
 
             loop {
-                let _ = informant_timer.next().await;
+                informant_timer =
+                    smol::Timer::at(informant_timer.await + Duration::from_millis(100));
 
                 // We end the informant line with a `\r` so that it overwrites itself
                 // every time. If any other line gets printed, it will overwrite the

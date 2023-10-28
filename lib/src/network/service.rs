@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
+// Copyright (C) 2023  Pierre Krieger
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,55 +15,101 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::libp2p::{connection, multiaddr, peer_id, peers, PeerId};
-use crate::network::{kademlia, protocol};
-use crate::util::SipHasherBuild;
+//! State machine of all networking connections.
+//!
+//! The [`ChainNetwork`] struct is a state machine containing multiple collections that are
+//! controlled by the API user:
+//!
+//! - A list of networking connections, identified by a [`ConnectionId`]. Each connection is
+//! either in the handshake phase, healthy, or shutting down. Each connection in the handshake
+//! phase has an optional expected [`PeerId`] representing the identity of the node that is
+//! expected to be reached once the handshake is finished. Each connection that is healthy or
+//! shutting down has an (actual) [`PeerId`] associated to it.
+//! - A list of chains, identified by a [`ChainId`].
+//! - A set of "desired" `(ChainId, PeerId, GossipKind)` tuples representing, for each chain, the
+//! identities of the nodes that the API user wants to establish a gossip link with.
+//!
+//! In addition to this, the [`ChainNetwork`] also exposes:
+//!
+//! - A set of `(ChainId, PeerId, GossipKind)` tuples representing the gossip links that have been
+//! established.
+//! - A list of outgoing requests, identified by a [`SubstreamId`], that have been sent to a peer
+//! and that are awaiting a response.
+//! - A list of ingoing requests, identified by a [`SubstreamId`], that have been received from a
+//! peer and that must be answered by the API user.
+//! - A list of outgoing gossip link connection attempts, identified by a [`SubstreamId`], that
+//! must be answered by the peer.
+//! - A set of `(ChainId, PeerId, GossipKind)` tuples representing the peers that would like to
+//! establish a gossip link with the local node, and that are awaiting a response by the API user.
+//!
+//! # Usage
+//!
+//! At initialization, create a new [`ChainNetwork`] with [`ChainNetwork::new`], and add chains
+//! using [`ChainNetwork::add_chain`].
+//!
+//! The [`ChainNetwork`] doesn't automatically open connections to peers. This must be done
+//! manually using [`ChainNetwork::add_single_stream_connection`] or
+//! [`ChainNetwork::add_multi_stream_connection`]. Choosing which peer to connect to and through
+//! which address is outside of the scope of this module.
+//!
+//! Adding a connection using [`ChainNetwork::add_single_stream_connection`] or
+//! [`ChainNetwork::add_multi_stream_connection`] returns a "connection task". This connection task
+//! must be processed. TODO: expand explanation here
+//!
+//! After a message has been injected using [`ChainNetwork::inject_connection_message`], repeatedly
+//! [`ChainNetwork::next_event`] until it returns `None` in order to determine what has happened.
+//!
+//! Once a connection has been established (which is indicated by a [`Event::HandshakeFinished`]
+//! event), one can open a gossip link to this peer using [`ChainNetwork::gossip_open`].
+//!
+//! In order to faciliate this process, the [`ChainNetwork`] provides a "desired gossip links"
+//! system. Use [`ChainNetwork::gossip_insert_desired`] and [`ChainNetwork::gossip_remove_desired`]
+//! to insert or remove `(ChainId, PeerId, GossipKind)` tuples into the state machine. You can
+//! then use [`ChainNetwork::unconnected_desired`] to obtain a list of [`PeerId`]s that are marked
+//! as desired and for which a connection should be opened, and
+//! [`ChainNetwork::connected_unopened_gossip_desired`] to obtain a list of [`PeerId`]s that are
+//! marked as desired and that have a healthy connection and for which a gossip link should be
+//! opened. Marking peers as desired only influences the return values of
+//! [`ChainNetwork::unconnected_desired`] and [`ChainNetwork::connected_unopened_gossip_desired`]
+//! and has no other effect.
+//!
 
-use alloc::{collections::VecDeque, format, string::String, vec::Vec};
+// TODO: expand explanations once the API is finalized
+
+use crate::libp2p::collection;
+use crate::network::protocol;
+use crate::util::{self, SipHasherBuild};
+
+use alloc::{borrow::ToOwned as _, collections::BTreeSet, string::String, vec::Vec};
 use core::{
+    fmt,
     hash::Hash,
-    iter,
-    num::NonZeroUsize,
-    ops::{Add, Sub},
+    iter, mem,
+    ops::{self, Add, Sub},
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 
 pub use crate::libp2p::{
-    collection::ReadWrite,
-    peers::{
-        ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
-        MultiStreamConnectionTask, MultiStreamHandshakeKind, OutRequestId,
-        SingleStreamConnectionTask, SingleStreamHandshakeKind, StartRequestError,
+    collection::{
+        ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InboundError,
+        MultiStreamConnectionTask, NotificationsOutErr, ReadWrite, RequestError,
+        SingleStreamConnectionTask, SubstreamId,
     },
+    connection::noise::{self, NoiseKey},
+    multiaddr::{self, Multiaddr},
+    peer_id::{self, PeerId},
 };
 
-mod addresses;
-mod notifications;
-mod requests_responses;
-
-pub use notifications::{
-    EncodedBlockAnnounce, EncodedBlockAnnounceHandshake, EncodedGrandpaCommitMessage, GrandpaState,
-    NotificationsOutErr,
-};
-
-pub use requests_responses::{
-    BlocksRequestError, BlocksRequestResponseEntryError, CallProofRequestError, DiscoveryError,
-    EncodedGrandpaWarpSyncResponse, EncodedMerkleProof, EncodedStateResponse,
-    GrandpaWarpSyncRequestError, KademliaFindNodeError, KademliaOperationId, RequestResult,
-    StateRequestError, StorageProofRequestError,
-};
+pub use crate::network::protocol::{BlockAnnouncesHandshakeDecodeError, Role};
 
 /// Configuration for a [`ChainNetwork`].
-pub struct Config<TNow> {
-    /// Time at the moment of the initialization of the service.
-    pub now: TNow,
-
+pub struct Config {
     /// Capacity to initially reserve to the list of connections.
     pub connections_capacity: usize,
 
-    /// Capacity to initially reserve to the list of peers.
-    pub peers_capacity: usize,
+    /// Capacity to reserve for the list of chains.
+    pub chains_capacity: usize,
 
     /// Seed for the randomness within the networking state machine.
     ///
@@ -73,36 +119,27 @@ pub struct Config<TNow> {
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
     pub randomness_seed: [u8; 32],
 
-    /// List of blockchain peer-to-peer networks to be connected to.
-    ///
-    /// > **Note**: As documented in [the module-level documentation](..), the [`ChainNetwork`]
-    /// >           can connect to multiple blockchain networks at the same time.
-    ///
-    /// The order in which the chains are list is important. The index of each entry needs to be
-    /// used later in order to refer to a specific chain.
-    pub chains: Vec<ChainConfig>,
-
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
-    pub noise_key: connection::NoiseKey,
+    pub noise_key: NoiseKey,
 
-    /// Amount of time after which a connection handshake is considered to have taken too long
+    /// Amount of time after which a connection hathat ndshake is considered to have taken too long
     /// and must be aborted.
     pub handshake_timeout: Duration,
-
-    /// Maximum number of addresses kept in memory per network identity.
-    ///
-    /// > **Note**: As the number of network identities kept in memory is capped, having a
-    /// >           maximum number of addresses per peer ensures that the total number of
-    /// >           addresses is capped as well.
-    pub max_addresses_per_peer: NonZeroUsize,
 }
 
 /// Configuration for a specific overlay network.
 ///
-/// See [`Config::chains`].
-pub struct ChainConfig {
+/// See [`ChainNetwork::add_chain`].
+pub struct ChainConfig<TChain> {
+    /// Opaque data chosen by the API user. Can later be accessed using the `Index`/`IndexMut`
+    /// trait implementation of the [`ChainNetwork`].
+    pub user_data: TChain,
+
+    /// Hash of the genesis block (i.e. block number 0) according to the local node.
+    pub genesis_hash: [u8; 32],
+
     /// Optional identifier to insert into the networking protocol names. Used to differentiate
     /// between chains with the same genesis hash.
     ///
@@ -119,343 +156,743 @@ pub struct ChainConfig {
     /// `true` if incoming block requests are allowed.
     pub allow_inbound_block_requests: bool,
 
-    pub in_slots: u32,
-
-    pub out_slots: u32,
-
     /// Hash of the best block according to the local node.
     pub best_hash: [u8; 32],
     /// Height of the best block according to the local node.
     pub best_number: u64,
-    /// Hash of the genesis block (i.e. block number 0) according to the local node.
-    pub genesis_hash: [u8; 32],
-    pub role: protocol::Role,
+
+    /// Role of the local node. Sent to the remote nodes and used as a hint. Has no incidence
+    /// on the behavior of any function.
+    pub role: Role,
 }
 
-/// Identifier of a pending connection requested by the network through a [`StartConnect`].
+/// Identifier of a chain added through [`ChainNetwork::add_chain`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PendingId(usize);
+pub struct ChainId(usize);
 
-/// Data structure containing the list of all connections, pending or not, and their latest known
-/// state. See also [the module-level documentation](..).
-pub struct ChainNetwork<TNow> {
+/// Data structure containing the list of all connections and their latest known state. See also
+/// [the module-level documentation](..).
+pub struct ChainNetwork<TChain, TNow> {
     /// Underlying data structure.
-    inner: peers::Peers<multiaddr::Multiaddr, TNow>,
+    inner: collection::Network<ConnectionInfo, TNow>,
 
-    /// See [`Config::handshake_timeout`].
-    handshake_timeout: Duration,
+    /// List of all chains that have been added.
+    // TODO: shrink to fit from time to time
+    chains: slab::Slab<Chain<TChain>>,
 
-    /// See [`Config::max_addresses_per_peer`].
-    max_addresses_per_peer: NonZeroUsize,
+    /// All the substreams of [`ChainNetwork::inner`], with info attached to them.
+    // TODO: add a substream user data to `collection::Network` instead
+    // TODO: shrink to fit from time to time
+    substreams: hashbrown::HashMap<SubstreamId, SubstreamInfo, fnv::FnvBuildHasher>,
 
-    /// Contains an entry for each peer present in at least one k-bucket of a chain.
-    kbuckets_peers: hashbrown::HashMap<PeerId, KBucketsPeer, SipHasherBuild>,
+    /// Connections indexed by the value in [`ConnectionInfo::peer_id`].
+    connections_by_peer_id: BTreeSet<(PeerId, collection::ConnectionId)>,
 
-    /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
+    /// All the outbound notification substreams, indexed by protocol, `PeerId`, and state.
+    // TODO: unclear whether PeerId should come before or after the state, same for direction/state
+    notification_substreams_by_peer_id: BTreeSet<(
+        NotificationsProtocol,
+        PeerId,
+        SubstreamDirection,
+        NotificationsSubstreamState,
+        collection::SubstreamId,
+    )>,
+
+    /// See [`Config::noise_key`].
+    // TODO: make rotatable, see <https://github.com/smol-dot/smoldot/issues/44>
+    noise_key: NoiseKey,
+
+    /// Chains indexed by genesis hash and fork ID.
     ///
-    /// This is a subset of the block announce notification protocol substreams that are open.
-    /// Some substreams might have been opened and have been left out of this map if their
-    /// handshake was invalid, or had a different genesis hash, or similar problem.
-    open_chains: hashbrown::HashSet<(PeerId, usize), SipHasherBuild>,
+    /// Contains the same number of entries as [`ChainNetwork::chains`]. The values are `usize`s
+    /// that are indices into [`ChainNetwork::chains`].
+    // TODO: shrink to fit from time to time
+    chains_by_protocol_info:
+        hashbrown::HashMap<([u8; 32], Option<String>), usize, fnv::FnvBuildHasher>,
 
-    /// For each peer, the number of pending attempts.
-    num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, SipHasherBuild>,
+    /// List of peers that have been marked as desired. Can include peers not connected to the
+    /// local node yet.
+    gossip_desired_peers_by_chain: BTreeSet<(usize, GossipKind, PeerId)>,
 
-    /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
-    /// [`PendingId`].
-    /// The entries here correspond to the entries in
-    /// [`ChainNetwork::num_pending_per_peer`].
-    pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
+    /// Same entries as [`ChainNetwork::gossip_desired_peers_by_chain`] but indexed differently.
+    gossip_desired_peers: BTreeSet<(PeerId, GossipKind, usize)>,
 
-    /// Identifier to assign to the next Kademlia operation that is started.
-    next_kademlia_operation_id: KademliaOperationId,
+    /// Subset of peers in [`ChainNetwork::gossip_desired_peers`] for which no healthy
+    /// connection exists.
+    // TODO: shrink to fit from time to time
+    unconnected_desired: hashbrown::HashSet<PeerId, util::SipHasherBuild>,
 
-    /// Errors during a Kademlia operation that is yet to be reported to the user.
-    pending_kademlia_errors: VecDeque<(KademliaOperationId, DiscoveryError)>,
+    /// List of [`PeerId`]s that are marked as desired, and for which a healthy connection exists,
+    /// but for which no substream connection (attempt or established) exists.
+    // TODO: shrink to fit from time to time
+    connected_unopened_gossip_desired:
+        hashbrown::HashSet<(PeerId, ChainId, GossipKind), util::SipHasherBuild>,
 
-    /// For each item in [`Config::chains`], the corresponding chain state.
-    ///
-    /// The `Vec` always has the same length as [`Config::chains`].
-    chains: Vec<Chain<TNow>>,
-
-    /// Generator for randomness.
-    randomness: rand_chacha::ChaCha20Rng,
-
-    in_requests_types: hashbrown::HashMap<InRequestId, InRequestTy, fnv::FnvBuildHasher>,
-
-    // TODO: could be a user data in the request
-    out_requests_types:
-        hashbrown::HashMap<OutRequestId, (OutRequestTy, usize), fnv::FnvBuildHasher>,
+    /// List of [`PeerId`]s for which a substream connection (attempt or established) exists, but
+    /// that are not marked as desired.
+    // TODO: shrink to fit from time to time
+    opened_gossip_undesired:
+        hashbrown::HashSet<(ChainId, PeerId, GossipKind), util::SipHasherBuild>,
 }
 
-struct Chain<TNow> {
-    /// See [`ChainConfig`].
-    chain_config: ChainConfig,
+struct Chain<TChain> {
+    /// See [`ChainConfig::block_number_bytes`].
+    block_number_bytes: usize,
 
-    // TODO: merge in_peers and out_peers into one hashmap<_, SlotTy>
-    /// List of peers with an inbound slot attributed to them. Only includes peers the local node
-    /// is connected to and who have opened a block announces substream with the local node.
-    in_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
+    /// See [`ChainConfig::genesis_hash`].
+    genesis_hash: [u8; 32],
+    /// See [`ChainConfig::fork_id`].
+    fork_id: Option<String>,
 
-    /// List of peers with an outbound slot attributed to them. Can include peers not connected to
-    /// the local node yet. The peers in this list are always marked as desired in the underlying
-    /// state machine.
-    out_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
+    /// See [`ChainConfig::role`].
+    role: Role,
 
-    /// Kademlia k-buckets of this chain.
-    ///
-    /// Used in order to hold the list of peers that are known to be part of this chain.
-    ///
-    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open
-    /// and that the remote's handshake is valid (i.e. can be parsed and containing a correct
-    /// genesis hash), and disconnected when it is closed or that the remote's handshake isn't
-    /// satisfactory.
-    kbuckets: kademlia::kbuckets::KBuckets<PeerId, (), TNow, 20>,
+    /// See [`ChainConfig::best_hash`].
+    best_hash: [u8; 32],
+    /// See [`ChainConfig::best_number`].
+    best_number: u64,
+
+    /// See [`ChainConfig::grandpa_protocol_config`].
+    grandpa_protocol_config: Option<GrandpaState>,
+
+    /// See [`ChainConfig::allow_inbound_block_requests`].
+    allow_inbound_block_requests: bool,
+
+    /// See [`ChainConfig::user_data`].
+    user_data: TChain,
 }
 
-struct KBucketsPeer {
-    /// Number of k-buckets containing this peer. Used to know when to remove this entry.
-    num_references: NonZeroUsize,
+/// See [`ChainNetwork::inner`].
+struct ConnectionInfo {
+    address: Vec<u8>,
 
-    /// List of addresses known for this peer, and whether we currently have an outgoing connection
-    /// to each of them. In this context, "connected" means "outgoing connection whose handshake is
-    /// finished and is not shutting down".
+    /// Identity of the remote. Can be either the expected or the actual identity.
     ///
-    /// It is not possible to have multiple outgoing connections for a single address.
-    /// Incoming connections are not taken into account at all.
-    ///
-    /// An address is marked as pending when there is a "pending connection" (see
-    /// [`ChainNetwork::pending_ids`]) to it, or if there is an outgoing connection to it that is
-    /// still handshaking.
-    ///
-    /// An address is marked as disconnected as soon as the shutting down is starting.
-    ///
-    /// Must never be empty.
-    addresses: addresses::Addresses,
+    /// `None` if unknown, which can only be the case if the connection is still in its handshake
+    /// phase.
+    peer_id: Option<PeerId>,
 }
 
-enum InRequestTy {
-    Identify { observed_addr: multiaddr::Multiaddr },
-    Blocks,
+/// See [`ChainNetwork::substreams`].
+#[derive(Debug, Clone)]
+struct SubstreamInfo {
+    // TODO: substream <-> connection mapping should be provided by collection.rs instead
+    connection_id: collection::ConnectionId,
+    protocol: Protocol,
 }
 
-enum OutRequestTy {
-    Blocks {
-        checked: Option<protocol::BlocksRequestConfig>,
-    },
-    GrandpaWarpSync,
-    State,
-    StorageProof,
-    CallProof,
-    KademliaFindNode,
-    KademliaDiscoveryFindNode(KademliaOperationId),
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum Protocol {
+    Identify,
+    Ping,
+    BlockAnnounces { chain_index: usize },
+    Transactions { chain_index: usize },
+    Grandpa { chain_index: usize },
+    Sync { chain_index: usize },
+    LightUnknown { chain_index: usize },
+    LightStorage { chain_index: usize },
+    LightCall { chain_index: usize },
+    Kad { chain_index: usize },
+    SyncWarp { chain_index: usize },
+    State { chain_index: usize },
 }
 
-// Update this when a new notifications protocol is added.
-const NOTIFICATIONS_PROTOCOLS_PER_CHAIN: usize = 3;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum NotificationsProtocol {
+    BlockAnnounces { chain_index: usize },
+    Transactions { chain_index: usize },
+    Grandpa { chain_index: usize },
+}
 
-impl<TNow> ChainNetwork<TNow>
+impl TryFrom<Protocol> for NotificationsProtocol {
+    type Error = ();
+
+    fn try_from(value: Protocol) -> Result<Self, Self::Error> {
+        match value {
+            Protocol::BlockAnnounces { chain_index } => {
+                Ok(NotificationsProtocol::BlockAnnounces { chain_index })
+            }
+            Protocol::Transactions { chain_index } => {
+                Ok(NotificationsProtocol::Transactions { chain_index })
+            }
+            Protocol::Grandpa { chain_index } => Ok(NotificationsProtocol::Grandpa { chain_index }),
+            Protocol::Identify => Err(()),
+            Protocol::Ping => Err(()),
+            Protocol::Sync { .. } => Err(()),
+            Protocol::LightUnknown { .. } => Err(()),
+            Protocol::LightStorage { .. } => Err(()),
+            Protocol::LightCall { .. } => Err(()),
+            Protocol::Kad { .. } => Err(()),
+            Protocol::SyncWarp { .. } => Err(()),
+            Protocol::State { .. } => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum SubstreamDirection {
+    In,
+    Out,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum NotificationsSubstreamState {
+    Pending,
+    Open,
+}
+
+impl NotificationsSubstreamState {
+    fn min_value() -> Self {
+        NotificationsSubstreamState::Pending
+    }
+
+    fn max_value() -> Self {
+        NotificationsSubstreamState::Open
+    }
+}
+
+impl<TChain, TNow> ChainNetwork<TChain, TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Initializes a new [`ChainNetwork`].
-    pub fn new(config: Config<TNow>) -> Self {
-        let notification_protocols = notifications::protocols(config.chains.iter());
-        let request_response_protocols = requests_responses::protocols(config.chains.iter());
-
+    pub fn new(config: Config) -> Self {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
-        let local_peer_id = PeerId::from_public_key(&peer_id::PublicKey::Ed25519(
-            *config.noise_key.libp2p_public_ed25519_key(),
-        ));
-
-        let chains = config
-            .chains
-            .into_iter()
-            .map(|chain| {
-                Chain {
-                    in_peers: hashbrown::HashSet::with_capacity_and_hasher(
-                        usize::try_from(chain.in_slots).unwrap_or(0),
-                        SipHasherBuild::new({
-                            let mut seed = [0; 16];
-                            randomness.fill_bytes(&mut seed);
-                            seed
-                        }),
-                    ),
-                    out_peers: hashbrown::HashSet::with_capacity_and_hasher(
-                        usize::try_from(chain.out_slots).unwrap_or(0),
-                        SipHasherBuild::new({
-                            let mut seed = [0; 16];
-                            randomness.fill_bytes(&mut seed);
-                            seed
-                        }),
-                    ),
-                    chain_config: chain,
-                    kbuckets: kademlia::kbuckets::KBuckets::new(
-                        local_peer_id.clone(),
-                        Duration::from_secs(20), // TODO: hardcoded
-                    ),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        // Maximum number that each remote is allowed to open.
-        // Note that this maximum doesn't have to be precise. There only needs to be *a* limit
-        // that is not exaggerately large, and this limit shouldn't be too low as to cause
-        // legitimate substreams to be refused.
-        // According to the protocol, a remote can only open one substream of each protocol at
-        // a time. However, we multiply this value by 2 in order to be generous. We also add 1
-        // to account for the ping protocol.
-        let max_inbound_substreams = chains.len()
-            * (1 + requests_responses::REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN
-                + NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-            * 2;
-
         ChainNetwork {
-            inner: peers::Peers::new(peers::Config {
-                connections_capacity: config.connections_capacity,
-                peers_capacity: config.peers_capacity,
-                max_inbound_substreams,
-                request_response_protocols,
-                noise_key: config.noise_key,
+            inner: collection::Network::new(collection::Config {
+                capacity: config.connections_capacity,
+                max_inbound_substreams: 128, // TODO: arbitrary value ; this value should be dynamically adjusted based on the number of chains that have been added
                 randomness_seed: {
                     let mut seed = [0; 32];
                     randomness.fill_bytes(&mut seed);
                     seed
                 },
-                notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 handshake_timeout: config.handshake_timeout,
             }),
-            open_chains: hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity * chains.len(),
+            substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                config.connections_capacity * 20, // TODO: capacity?
+                fnv::FnvBuildHasher::default(),
+            ),
+            connections_by_peer_id: BTreeSet::new(),
+            notification_substreams_by_peer_id: BTreeSet::new(),
+            gossip_desired_peers_by_chain: BTreeSet::new(),
+            gossip_desired_peers: BTreeSet::new(),
+            unconnected_desired: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
                     seed
                 }),
             ),
-            kbuckets_peers: hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
+            connected_unopened_gossip_desired: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
                     seed
                 }),
             ),
-            num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
+            opened_gossip_undesired: hashbrown::HashSet::with_capacity_and_hasher(
+                config.connections_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
                     seed
                 }),
             ),
-            pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-            next_kademlia_operation_id: KademliaOperationId(0),
-            pending_kademlia_errors: VecDeque::with_capacity(4),
-            chains,
-            handshake_timeout: config.handshake_timeout,
-            max_addresses_per_peer: config.max_addresses_per_peer,
-            out_requests_types: hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
+            chains: slab::Slab::with_capacity(config.chains_capacity),
+            chains_by_protocol_info: hashbrown::HashMap::with_capacity_and_hasher(
+                config.chains_capacity,
                 Default::default(),
             ),
-            in_requests_types: hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
-                Default::default(),
-            ),
-            randomness,
+            noise_key: config.noise_key,
         }
     }
 
-    fn protocol_index(&self, chain_index: usize, protocol: usize) -> usize {
-        1 + chain_index * requests_responses::REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + protocol
+    /// Returns the Noise key originally passed as [`Config::noise_key`].
+    pub fn noise_key(&self) -> &NoiseKey {
+        &self.noise_key
     }
 
-    /// Returns the number of established TCP connections, both incoming and outgoing.
-    pub fn num_established_connections(&self) -> usize {
-        // TODO: better impl
-        self.peers_list().count()
+    /// Adds a chain to the list of chains that is handled by the [`ChainNetwork`].
+    ///
+    /// It is not possible to add a chain if its protocol names would conflict with an existing
+    /// chain.
+    pub fn add_chain(&mut self, config: ChainConfig<TChain>) -> Result<ChainId, AddChainError> {
+        let chain_entry = self.chains.vacant_entry();
+        let chain_id = chain_entry.key();
+
+        match self
+            .chains_by_protocol_info
+            .entry((config.genesis_hash, config.fork_id.clone()))
+        {
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                entry.insert(chain_id);
+            }
+            hashbrown::hash_map::Entry::Occupied(entry) => {
+                return Err(AddChainError::Duplicate {
+                    existing_identical: ChainId(*entry.get()),
+                })
+            }
+        }
+
+        chain_entry.insert(Chain {
+            block_number_bytes: config.block_number_bytes,
+            genesis_hash: config.genesis_hash,
+            fork_id: config.fork_id,
+            role: config.role,
+            best_hash: config.best_hash,
+            best_number: config.best_number,
+            allow_inbound_block_requests: config.allow_inbound_block_requests,
+            grandpa_protocol_config: config.grandpa_protocol_config,
+            user_data: config.user_data,
+        });
+
+        Ok(ChainId(chain_id))
     }
 
-    /// Returns the number of peers we have a substream with.
-    pub fn num_peers(&self, chain_index: usize) -> usize {
-        self.inner
-            .num_outgoing_substreams(self.protocol_index(chain_index, 0))
+    // TODO: add `fn remove_chain(&mut self, chain_id: ChainId)` but the behavior w.r.t. closing that chain's substreams is tricky
+
+    /// Modifies the best block of the local node for the given chain. See
+    /// [`ChainConfig::best_hash`] and [`ChainConfig::best_number`].
+    ///
+    /// This information is sent to remotes whenever a block announces substream is opened.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is out of range.
+    ///
+    pub fn set_chain_local_best_block(
+        &mut self,
+        chain_id: ChainId,
+        best_hash: [u8; 32],
+        best_number: u64,
+    ) {
+        let chain = &mut self.chains[chain_id.0];
+        chain.best_hash = best_hash;
+        chain.best_number = best_number;
     }
 
-    /// Returns the number of chains. Always equal to the length of [`Config::chains`].
-    pub fn num_chains(&self) -> usize {
-        self.chains.len()
+    /// Returns the list of all the chains that have been added.
+    pub fn chains(&'_ self) -> impl Iterator<Item = ChainId> + '_ {
+        self.chains.iter().map(|(idx, _)| ChainId(idx))
     }
 
     /// Returns the value passed as [`ChainConfig::block_number_bytes`] for the given chain.
     ///
     /// # Panic
     ///
-    /// Panics if `chain_index` is out of range.
+    /// Panics if the given [`ChainId`] is invalid.
     ///
-    pub fn block_number_bytes(&self, chain_index: usize) -> usize {
-        self.chains[chain_index].chain_config.block_number_bytes
+    pub fn block_number_bytes(&self, chain_id: ChainId) -> usize {
+        self.chains[chain_id.0].block_number_bytes
     }
 
-    /// Returns the Noise key originally passed as [`Config::noise_key`].
-    pub fn noise_key(&self) -> &connection::NoiseKey {
-        self.inner.noise_key()
+    /// Marks the given chain-peer combination as "desired".
+    ///
+    /// Has no effect if it was already marked as desired.
+    ///
+    /// Returns `true` if the peer has been marked as desired, and `false` if it was already
+    /// marked as desired.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub fn gossip_insert_desired(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: PeerId,
+        kind: GossipKind,
+    ) -> bool {
+        assert!(self.chains.contains(chain_id.0));
+
+        // TODO: a lot of peerid cloning overhead in this function
+
+        if !self
+            .gossip_desired_peers_by_chain
+            .insert((chain_id.0, kind, peer_id.clone()))
+        {
+            // Return if already marked as desired, as there's nothing more to update.
+            // Note that this doesn't cover the possibility where the peer was desired with
+            // another chain.
+            return false;
+        }
+
+        let _was_inserted = self
+            .gossip_desired_peers
+            .insert((peer_id.clone(), kind, chain_id.0));
+        debug_assert!(_was_inserted);
+
+        self.opened_gossip_undesired
+            .remove(&(chain_id, peer_id.clone(), kind));
+
+        //  Add either to `unconnected_desired` or to `connected_unopened_gossip_desired`,
+        // depending on the situation.
+        if self
+            .connections_by_peer_id
+            .range(
+                (peer_id.clone(), ConnectionId::min_value())
+                    ..=(peer_id.clone(), ConnectionId::max_value()),
+            )
+            .any(|(_, connection_id)| {
+                let state = self.inner.connection_state(*connection_id);
+                !state.shutting_down
+            })
+        {
+            if self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::min_value(),
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            NotificationsProtocol::BlockAnnounces {
+                                chain_index: chain_id.0,
+                            },
+                            peer_id.clone(),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::max_value(),
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .next()
+                .is_none()
+            {
+                let _was_inserted = self.connected_unopened_gossip_desired.insert((
+                    peer_id.clone(),
+                    chain_id,
+                    kind,
+                ));
+                debug_assert!(_was_inserted);
+            }
+        } else {
+            // Note that that `PeerId` might already be desired towards a different chain, in
+            // which case it is already present in `unconnected_desired`.
+            self.unconnected_desired.insert(peer_id);
+        }
+
+        true
     }
 
-    /// Adds a single-stream incoming connection to the state machine.
+    /// Removes the given chain-peer combination from the list of desired chain-peers.
+    ///
+    /// Has no effect if it was not marked as desired.
+    ///
+    /// Returns `true` if the peer was desired on this chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub fn gossip_remove_desired(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: &PeerId,
+        kind: GossipKind,
+    ) -> bool {
+        assert!(self.chains.contains(chain_id.0));
+
+        if !self
+            .gossip_desired_peers_by_chain
+            .remove(&(chain_id.0, kind, peer_id.clone()))
+        // TODO: spurious cloning
+        {
+            // Return if wasn't marked as desired, as there's nothing more to update.
+            return false;
+        }
+
+        self.gossip_desired_peers
+            .remove(&(peer_id.clone(), kind, chain_id.0));
+
+        self.connected_unopened_gossip_desired
+            .remove(&(peer_id.clone(), chain_id, kind)); // TODO: cloning
+
+        if self
+            .gossip_desired_peers
+            .range(
+                (peer_id.clone(), kind, usize::min_value())
+                    ..=(peer_id.clone(), kind, usize::max_value()),
+            )
+            .next()
+            .is_none()
+        {
+            self.unconnected_desired.remove(peer_id);
+        }
+
+        if self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    peer_id.clone(),
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::min_value(),
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::max_value(),
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .is_some()
+        {
+            let _was_inserted =
+                self.opened_gossip_undesired
+                    .insert((chain_id, peer_id.clone(), kind));
+            debug_assert!(_was_inserted);
+        }
+
+        true
+    }
+
+    /// Removes the given peer from the list of desired chain-peers of all the chains that exist.
+    ///
+    /// Has no effect if it was not marked as desired.
+    pub fn gossip_remove_desired_all(&mut self, peer_id: &PeerId, kind: GossipKind) {
+        let chains = self
+            .gossip_desired_peers
+            .range(
+                (peer_id.clone(), kind, usize::min_value())
+                    ..=(peer_id.clone(), kind, usize::max_value()),
+            )
+            .map(|(_, _, chain_index)| *chain_index)
+            .collect::<Vec<_>>();
+
+        for chain_index in chains {
+            let _was_in =
+                self.gossip_desired_peers_by_chain
+                    .remove(&(chain_index, kind, peer_id.clone()));
+            debug_assert!(_was_in);
+            let _was_in = self
+                .gossip_desired_peers
+                .remove(&(peer_id.clone(), kind, chain_index));
+            debug_assert!(_was_in);
+            self.connected_unopened_gossip_desired.remove(&(
+                peer_id.clone(),
+                ChainId(chain_index),
+                kind,
+            ));
+        }
+
+        self.unconnected_desired.remove(peer_id);
+    }
+
+    /// Returns the number of gossip-desired peers for the given chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub fn gossip_desired_num(&mut self, chain_id: ChainId, kind: GossipKind) -> usize {
+        // TODO: O(n), optimize
+        self.gossip_desired_peers_by_chain
+            .iter()
+            .filter(|(c, k, _)| *c == chain_id.0 && *k == kind)
+            .count()
+    }
+
+    /// Returns the list of [`PeerId`]s that are desired (for any chain) but for which no
+    /// connection exists.
+    ///
+    /// > **Note**: Connections that are currently in the process of shutting down are also
+    /// >           ignored for the purpose of this function.
+    pub fn unconnected_desired(&'_ self) -> impl ExactSizeIterator<Item = &'_ PeerId> + Clone + '_ {
+        self.unconnected_desired.iter()
+    }
+
+    /// Returns the list of [`PeerId`]s that are marked as desired, and for which a healthy
+    /// connection exists, but for which no substream connection attempt exists.
+    pub fn connected_unopened_gossip_desired(
+        &'_ self,
+    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+        self.connected_unopened_gossip_desired
+            .iter()
+            .map(move |(peer_id, chain_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
+    }
+
+    /// Returns the list of [`PeerId`]s for which a substream connection or connection attempt
+    /// exists but that are not marked as desired.
+    pub fn opened_gossip_undesired(
+        &'_ self,
+    ) -> impl ExactSizeIterator<Item = (&'_ PeerId, ChainId, GossipKind)> + Clone + '_ {
+        self.opened_gossip_undesired
+            .iter()
+            .map(move |(chain_id, peer_id, gossip_kind)| (peer_id, *chain_id, *gossip_kind))
+    }
+
+    /// Returns the list of [`PeerId`]s for which a substream connection or connection attempt
+    /// exists against the given chain but that are not marked as desired.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn opened_gossip_undesired_by_chain(
+        &'_ self,
+        chain_id: ChainId,
+    ) -> impl Iterator<Item = (&'_ PeerId, GossipKind)> + Clone + '_ {
+        // TODO: optimize and add an ExactSizeIterator bound to the return value, and update the users to use len() instead of count()
+        self.opened_gossip_undesired
+            .iter()
+            .filter(move |(c, _, _)| *c == chain_id)
+            .map(move |(_, peer_id, gossip_kind)| (peer_id, *gossip_kind))
+    }
+
+    /// Adds a single-stream connection to the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// If `expected_peer_id` is `Some`, this connection is expected to reach the given [`PeerId`].
+    /// The `expected_peer_id` is only used to influence the result of
+    /// [`ChainNetwork::unconnected_desired`].
     ///
-    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// Must be passed the moment (as a `TNow`) when the connection has first been opened, in
+    /// order to determine when the handshake timeout expires.
+    ///
+    /// The `remote_addr` is the multiaddress used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
-    /// libp2p protocol, its own address, in which case we send it.
-    pub fn add_single_stream_incoming_connection(
+    /// libp2p protocol, its own address, in which case we send it. Because the multiaddress
+    /// specification is flexible, this module doesn't attempt to parse the address.
+    pub fn add_single_stream_connection(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
-        remote_addr: multiaddr::Multiaddr,
+        remote_addr: Vec<u8>,
+        expected_peer_id: Option<PeerId>,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        self.inner.add_single_stream_incoming_connection(
-            when_connected,
-            handshake_kind,
-            remote_addr,
-        )
+        // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
+        let max_protocol_name_len = 256;
+        let substreams_capacity = 16; // TODO: ?
+        let (id, task) = self.inner.insert_single_stream(
+            when_connection_start,
+            match handshake_kind {
+                SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { is_initiator } => {
+                    collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                        is_initiator,
+                        noise_key: &self.noise_key,
+                    }
+                }
+            },
+            substreams_capacity,
+            max_protocol_name_len,
+            ConnectionInfo {
+                address: remote_addr,
+                peer_id: expected_peer_id.clone(),
+            },
+        );
+        if let Some(expected_peer_id) = expected_peer_id {
+            self.unconnected_desired.remove(&expected_peer_id);
+            self.connections_by_peer_id.insert((expected_peer_id, id));
+        }
+        (id, task)
     }
 
-    /// Adds a multi-stream incoming connection to the state machine.
+    /// Adds a multi-stream connection to the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// If `expected_peer_id` is `Some`, this connection is expected to reach the given [`PeerId`].
+    /// The `expected_peer_id` is only used to influence the result of
+    /// [`ChainNetwork::unconnected_desired`].
     ///
-    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// Must be passed the moment (as a `TNow`) when the connection has first been opened, in
+    /// order to determine when the handshake timeout expires.
+    ///
+    /// The `remote_addr` is the multiaddress used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
-    /// libp2p protocol, its own address, in which case we send it.
-    pub fn add_multi_stream_incoming_connection<TSubId>(
+    /// libp2p protocol, its own address, in which case we send it. Because the multiaddress
+    /// specification is flexible, this module doesn't attempt to parse the address.
+    pub fn add_multi_stream_connection<TSubId>(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
-        remote_addr: multiaddr::Multiaddr,
+        remote_addr: Vec<u8>,
+        expected_peer_id: Option<PeerId>,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
-        self.inner
-            .add_multi_stream_incoming_connection(when_connected, handshake_kind, remote_addr)
+        // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
+        let max_protocol_name_len = 256;
+        let substreams_capacity = 16; // TODO: ?
+        let (id, task) = self.inner.insert_multi_stream(
+            when_connection_start,
+            match handshake_kind {
+                MultiStreamHandshakeKind::WebRtc {
+                    is_initiator,
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash,
+                } => collection::MultiStreamHandshakeKind::WebRtc {
+                    is_initiator,
+                    noise_key: &self.noise_key,
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash,
+                },
+            },
+            substreams_capacity,
+            max_protocol_name_len,
+            ConnectionInfo {
+                address: remote_addr,
+                peer_id: expected_peer_id.clone(),
+            },
+        );
+        if let Some(expected_peer_id) = expected_peer_id {
+            self.unconnected_desired.remove(&expected_peer_id);
+            self.connections_by_peer_id.insert((expected_peer_id, id));
+        }
+        (id, task)
     }
 
+    /// Returns the number of connections, both handshaking or established.
+    pub fn num_connections(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns the remote address that was passed to [`ChainNetwork::add_single_stream_connection`]
+    /// or [`ChainNetwork::add_multi_stream_connection`] for the given connection.
+    ///
+    /// > **Note**: This module does in no way attempt to parse the address. This function simply
+    /// >           returns the value that was provided by the API user, whatever it is.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ConnectionId`] is invalid.
+    ///
+    pub fn connection_remote_addr(&self, id: ConnectionId) -> &[u8] {
+        &self.inner[id].address
+    }
+
+    /// Pulls a message that must be sent to a connection.
+    ///
+    /// The message must be passed to [`SingleStreamConnectionTask::inject_coordinator_message`]
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] in the appropriate connection.
+    ///
+    /// This function guarantees that the [`ConnectionId`] always refers to a connection that
+    /// is still alive, in the sense that [`SingleStreamConnectionTask::inject_coordinator_message`]
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
     pub fn pull_message_to_connection(
         &mut self,
-    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+    ) -> Option<(ConnectionId, CoordinatorToConnection)> {
         self.inner.pull_message_to_connection()
     }
 
@@ -470,796 +907,2737 @@ where
         self.inner.inject_connection_message(connection_id, message)
     }
 
-    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
-    /// the network.
-    ///
-    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
-    /// that a node that has been added through [`ChainNetwork::discover`] will later be returned
-    /// by [`ChainNetwork::discovered_nodes`].
-    pub fn discovered_nodes(
-        &'_ self,
-        chain_index: usize,
-    ) -> impl Iterator<Item = (&'_ PeerId, impl Iterator<Item = &'_ multiaddr::Multiaddr>)> + '_
-    {
-        let kbuckets = &self.chains[chain_index].kbuckets;
-        kbuckets.iter_ordered().map(move |(peer_id, _)| {
-            (
-                peer_id,
-                self.kbuckets_peers.get(peer_id).unwrap().addresses.iter(),
-            )
-        })
-    }
-
-    /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
-    /// success of the dialing attempt.
-    ///
-    /// See also [`ChainNetwork::pending_outcome_err`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`PendingId`] is invalid.
-    ///
-    pub fn pending_outcome_ok_single_stream(
-        &mut self,
-        id: PendingId,
-        handshake_kind: SingleStreamHandshakeKind,
-    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
-
-        let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
-            when_connected,
-            handshake_kind,
-            &expected_peer_id,
-            multiaddr,
-        );
-
-        // Update `self.peers`.
-        {
-            let value = self
-                .num_pending_per_peer
-                .get_mut(&expected_peer_id)
-                .unwrap();
-            if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
-                *value = new_value;
-            } else {
-                self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
-            }
-        }
-
-        (connection_id, connection_task)
-    }
-
-    /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
-    /// success of the dialing attempt.
-    ///
-    /// See also [`ChainNetwork::pending_outcome_err`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`PendingId`] is invalid.
-    ///
-    pub fn pending_outcome_ok_multi_stream<TSubId>(
-        &mut self,
-        id: PendingId,
-        handshake_kind: MultiStreamHandshakeKind,
-    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
-    where
-        TSubId: Clone + PartialEq + Eq + Hash,
-    {
-        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.remove(id.0);
-
-        let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
-            when_connected,
-            handshake_kind,
-            &expected_peer_id,
-            multiaddr,
-        );
-
-        // Update `self.peers`.
-        {
-            let value = self
-                .num_pending_per_peer
-                .get_mut(&expected_peer_id)
-                .unwrap();
-            if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
-                *value = new_value;
-            } else {
-                self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
-            }
-        }
-
-        (connection_id, connection_task)
-    }
-
-    /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
-    /// failure of the dialing attempt.
-    ///
-    /// See also [`ChainNetwork::pending_outcome_ok_single_stream`] and
-    /// [`ChainNetwork::pending_outcome_ok_multi_stream`].
-    ///
-    /// `is_bad_address` should be `true` if the address is invalid or definitely unreachable and
-    /// should thus not be attempted again. If `false` is passed, the address might be attempted
-    /// again.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`PendingId`] is invalid.
-    ///
-    pub fn pending_outcome_err(&mut self, id: PendingId, is_bad_address: bool) {
-        let (expected_peer_id, multiaddr, _) = self.pending_ids.remove(id.0);
-
-        let has_any_attempt_left = self
-            .num_pending_per_peer
-            .get(&expected_peer_id)
-            .unwrap()
-            .get()
-            != 1;
-
-        // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left
-            && self
-                .inner
-                .established_peer_connections(&expected_peer_id)
-                .count()
-                == 0
-        {
-            let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
-
-            for chain_index in 0..self.chains.len() {
-                // TODO: report as event or something
-                self.unassign_slot(chain_index, &expected_peer_id);
-            }
-        }
-
-        // Updates the addresses book.
-        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(&expected_peer_id)
-        {
-            if is_bad_address {
-                // Do not remove last remaining address, in order to prevent the addresses
-                // list from ever becoming empty.
-                debug_assert!(!addresses.is_empty());
-                if addresses.len() > 1 {
-                    addresses.remove(&multiaddr);
-                } else {
-                    // TODO: remove peer from k-buckets instead?
-                    addresses.set_disconnected(&multiaddr);
-                }
-            } else {
-                addresses.set_disconnected(&multiaddr);
-
-                // Shuffle the known addresses, otherwise the same address might get picked
-                // again.
-                addresses.shuffle();
-            }
-        }
-
-        {
-            let value = self
-                .num_pending_per_peer
-                .get_mut(&expected_peer_id)
-                .unwrap();
-            if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
-                *value = new_value;
-            } else {
-                self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
-            }
-        }
-    }
-
     /// Returns the next event produced by the service.
-    // TODO: this `now` parameter, it's a hack
-    pub fn next_event(&mut self, now: TNow) -> Option<Event> {
-        if let Some((kademlia_operation_id, error)) = self.pending_kademlia_errors.pop_front() {
-            return Some(Event::KademliaDiscoveryResult {
-                operation_id: kademlia_operation_id,
-                result: Err(error),
-            });
-        }
+    pub fn next_event(&mut self) -> Option<Event> {
+        loop {
+            let inner_event = self.inner.next_event()?;
+            match inner_event {
+                collection::Event::HandshakeFinished {
+                    id,
+                    peer_id: actual_peer_id,
+                } => {
+                    // Store the actual `PeerId` into the connection, making sure to update `self`.
+                    let connection_info = &mut self.inner[id];
+                    let expected_peer_id = connection_info.peer_id.clone();
+                    match &mut connection_info.peer_id {
+                        Some(expected_peer_id) if *expected_peer_id == actual_peer_id => {}
+                        peer_id_refmut @ None => {
+                            self.unconnected_desired.remove(&actual_peer_id);
+                            *peer_id_refmut = Some(actual_peer_id.clone());
+                        }
+                        Some(peer_id_refmut) => {
+                            // The actual PeerId doesn't match the expected PeerId.
+                            let expected_peer_id =
+                                mem::replace(peer_id_refmut, actual_peer_id.clone());
 
-        let event_to_return = loop {
-            // Instead of simply calling `next_event()` from the inner state machine to grab the
-            // inner event, we first call `fulfilled_undesired_outbound_substreams` and determine
-            // whether there is any already-open or opening-in-progress substream to close. If so,
-            // we perform the closing, then continue running the body of `next_event` but pretend
-            // that the underlying state machine has generated an event corresponding to that
-            // substream having been closed.
-            let inner_event = {
-                let event = loop {
-                    let to_close = self
-                        .inner
-                        .fulfilled_undesired_outbound_substreams()
-                        .next()
-                        .map(|(peer_id, idx, _)| (peer_id.clone(), idx));
-                    if let Some((peer_id, notifications_protocol_index)) = to_close {
-                        let open_or_pending = self
-                            .inner
-                            .close_out_notification(&peer_id, notifications_protocol_index);
-                        match open_or_pending {
-                            peers::OpenOrPending::Pending => {
-                                // Intentionally ignored, as it concerns a peer that is no longer
-                                // desired, and thus didn't have a slot.
+                            let _was_removed = self
+                                .connections_by_peer_id
+                                .remove(&(expected_peer_id.clone(), id));
+                            debug_assert!(_was_removed);
+                            if self
+                                .gossip_desired_peers
+                                .range(
+                                    (
+                                        expected_peer_id.clone(),
+                                        GossipKind::ConsensusTransactions,
+                                        usize::min_value(),
+                                    )
+                                        ..=(
+                                            expected_peer_id.clone(),
+                                            GossipKind::ConsensusTransactions,
+                                            usize::max_value(),
+                                        ),
+                                )
+                                .next()
+                                .is_some()
+                            {
+                                if !self
+                                    .connections_by_peer_id
+                                    .range(
+                                        (expected_peer_id.clone(), ConnectionId::min_value())
+                                            ..=(
+                                                expected_peer_id.clone(),
+                                                ConnectionId::max_value(),
+                                            ),
+                                    )
+                                    .any(|(_, connection_id)| {
+                                        let state = self.inner.connection_state(*connection_id);
+                                        !state.shutting_down
+                                    })
+                                {
+                                    let _was_inserted =
+                                        self.unconnected_desired.insert(expected_peer_id.clone());
+                                    debug_assert!(_was_inserted);
+                                }
                             }
-                            peers::OpenOrPending::Open => {
-                                // TODO: refactor to directly call on_notifications_out_close, making the code more readable
-                                break Some(peers::Event::NotificationsOutClose {
-                                    notifications_protocol_index,
+                            let _was_inserted = self
+                                .connections_by_peer_id
+                                .insert((actual_peer_id.clone(), id));
+                            debug_assert!(_was_inserted);
+                            self.unconnected_desired.remove(&actual_peer_id);
+                        }
+                    }
+
+                    debug_assert!(!self.unconnected_desired.contains(&actual_peer_id));
+
+                    // TODO: limit the number of connections per peer?
+
+                    for (_, _, chain_id) in self.gossip_desired_peers.range(
+                        (
+                            actual_peer_id.clone(),
+                            GossipKind::ConsensusTransactions,
+                            usize::min_value(),
+                        )
+                            ..=(
+                                actual_peer_id.clone(),
+                                GossipKind::ConsensusTransactions,
+                                usize::max_value(),
+                            ),
+                    ) {
+                        if self
+                            .notification_substreams_by_peer_id
+                            .range(
+                                (
+                                    NotificationsProtocol::BlockAnnounces {
+                                        chain_index: *chain_id,
+                                    },
+                                    actual_peer_id.clone(),
+                                    SubstreamDirection::Out,
+                                    NotificationsSubstreamState::min_value(),
+                                    SubstreamId::min_value(),
+                                )
+                                    ..=(
+                                        NotificationsProtocol::BlockAnnounces {
+                                            chain_index: *chain_id,
+                                        },
+                                        actual_peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        NotificationsSubstreamState::max_value(),
+                                        SubstreamId::max_value(),
+                                    ),
+                            )
+                            .next()
+                            .is_none()
+                        {
+                            self.connected_unopened_gossip_desired.insert((
+                                actual_peer_id.clone(),
+                                ChainId(*chain_id),
+                                GossipKind::ConsensusTransactions,
+                            ));
+                        }
+                    }
+
+                    return Some(Event::HandshakeFinished {
+                        id,
+                        expected_peer_id,
+                        peer_id: actual_peer_id,
+                    });
+                }
+
+                collection::Event::PingOutFailed { id }
+                | collection::Event::StartShutdown { id, .. } => {
+                    if let collection::Event::PingOutFailed { .. } = inner_event {
+                        self.inner.start_shutdown(id);
+                    }
+
+                    // TODO: IMPORTANT this event should be turned into `NewOutboundSubstreamsForbidden` and the `reason` removed; see <https://github.com/smol-dot/smoldot/pull/391>
+
+                    let connection_info = &self.inner[id];
+
+                    // If peer is desired, and we have no connection or only shutting down
+                    // connections, add peer to `unconnected_desired` and remove it from
+                    // `connected_unopened_gossip_desired`.
+                    if let Some(peer_id) = &connection_info.peer_id {
+                        if self
+                            .gossip_desired_peers
+                            .range(
+                                (
+                                    peer_id.clone(),
+                                    GossipKind::ConsensusTransactions,
+                                    usize::min_value(),
+                                )
+                                    ..=(
+                                        peer_id.clone(),
+                                        GossipKind::ConsensusTransactions,
+                                        usize::max_value(),
+                                    ),
+                            )
+                            .count()
+                            != 0
+                        {
+                            if !self
+                                .connections_by_peer_id
+                                .range(
+                                    (peer_id.clone(), ConnectionId::min_value())
+                                        ..=(peer_id.clone(), ConnectionId::max_value()),
+                                )
+                                .any(|(_, connection_id)| {
+                                    let state = self.inner.connection_state(*connection_id);
+                                    !state.shutting_down
+                                })
+                            {
+                                self.unconnected_desired.insert(peer_id.clone());
+                                for (_, _, chain_index) in self.gossip_desired_peers.range(
+                                    (
+                                        peer_id.clone(),
+                                        GossipKind::ConsensusTransactions,
+                                        usize::min_value(),
+                                    )
+                                        ..=(
+                                            peer_id.clone(),
+                                            GossipKind::ConsensusTransactions,
+                                            usize::max_value(),
+                                        ),
+                                ) {
+                                    self.connected_unopened_gossip_desired.remove(&(
+                                        peer_id.clone(),
+                                        ChainId(*chain_index),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                collection::Event::Shutdown {
+                    id,
+                    was_established,
+                    user_data: connection_info,
+                } => {
+                    // A connection has been closed.
+                    // Note that the underlying state machine guarantees that all the substreams
+                    // have been closed beforehand through other events.
+
+                    debug_assert!(connection_info.peer_id.is_some() || !was_established);
+
+                    if let Some(peer_id) = &connection_info.peer_id {
+                        let _was_removed =
+                            self.connections_by_peer_id.remove(&(peer_id.clone(), id));
+                        debug_assert!(_was_removed);
+                    }
+
+                    // TODO: IMPORTANT this event should indicate a clean shutdown, a pre-handshake interruption, a protocol error, a reset, etc. and should get a `reason`; see <https://github.com/smol-dot/smoldot/pull/391>
+
+                    if was_established {
+                        return Some(Event::Disconnected {
+                            id,
+                            address: connection_info.address,
+                            peer_id: connection_info.peer_id.unwrap(),
+                        });
+                    } else {
+                        return Some(Event::PreHandshakeDisconnected {
+                            id,
+                            address: connection_info.address,
+                            expected_peer_id: connection_info.peer_id,
+                        });
+                    }
+                }
+
+                collection::Event::InboundError { .. } => {
+                    // TODO: report the error for diagnostic purposes, but revisit the concept of "InboundError"
+                    continue;
+                }
+
+                collection::Event::InboundNegotiated {
+                    id,
+                    substream_id,
+                    protocol_name,
+                } => {
+                    // An inbound substream has negotiated a protocol. We must decide whether to
+                    // accept this protocol or instead reject the substream.
+                    // If accepted, we must also save the protocol somewhere in `self` in order to
+                    // load it later once things happen on this substream.
+                    match self.recognize_protocol(&protocol_name) {
+                        Ok(protocol) => {
+                            let inbound_type = match protocol {
+                                Protocol::Identify => collection::InboundTy::Request {
+                                    request_max_size: None,
+                                },
+                                Protocol::Ping => collection::InboundTy::Ping,
+                                Protocol::BlockAnnounces { .. } => {
+                                    collection::InboundTy::Notifications {
+                                        max_handshake_size: 1024 * 1024, // TODO: arbitrary
+                                    }
+                                }
+                                Protocol::Transactions { .. } => {
+                                    collection::InboundTy::Notifications {
+                                        max_handshake_size: 4,
+                                    }
+                                }
+                                Protocol::Grandpa { chain_index }
+                                    if self.chains[chain_index]
+                                        .grandpa_protocol_config
+                                        .is_some() =>
+                                {
+                                    collection::InboundTy::Notifications {
+                                        max_handshake_size: 4,
+                                    }
+                                }
+                                Protocol::Grandpa { .. } => {
+                                    self.inner.reject_inbound(substream_id);
+                                    continue;
+                                }
+                                Protocol::Sync { chain_index }
+                                    if self.chains[chain_index].allow_inbound_block_requests =>
+                                {
+                                    collection::InboundTy::Request {
+                                        request_max_size: Some(1024),
+                                    }
+                                }
+                                Protocol::Sync { .. } => {
+                                    self.inner.reject_inbound(substream_id);
+                                    continue;
+                                }
+
+                                // TODO: protocols that are not supported
+                                Protocol::LightUnknown { .. }
+                                | Protocol::Kad { .. }
+                                | Protocol::SyncWarp { .. }
+                                | Protocol::State { .. } => {
+                                    self.inner.reject_inbound(substream_id);
+                                    continue;
+                                }
+
+                                Protocol::LightStorage { .. } | Protocol::LightCall { .. } => {
+                                    unreachable!()
+                                }
+                            };
+
+                            self.inner.accept_inbound(substream_id, inbound_type);
+
+                            let _prev_value = self.substreams.insert(
+                                substream_id,
+                                SubstreamInfo {
+                                    connection_id: id,
+                                    protocol,
+                                },
+                            );
+                            debug_assert!(_prev_value.is_none());
+                        }
+                        Err(()) => {
+                            self.inner.reject_inbound(substream_id);
+                        }
+                    }
+                    continue;
+                }
+
+                collection::Event::InboundNegotiatedCancel { .. } => {
+                    // Because we immediately accept or reject substreams, this event can never
+                    // happen.
+                    unreachable!()
+                }
+
+                collection::Event::InboundAcceptedCancel { substream_id } => {
+                    // An inbound substream has been aborted after having been accepted.
+                    // Since we don't report any event to the API user when a substream is
+                    // accepted, we have nothing to do but clean up our state.
+                    let _was_in = self.substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
+                    continue;
+                }
+
+                collection::Event::Response {
+                    substream_id,
+                    response,
+                } => {
+                    // Received a response to a request in a request-response protocol.
+                    let substream_info = self
+                        .substreams
+                        .remove(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+
+                    // Decode/verify the response.
+                    let response = match substream_info.protocol {
+                        Protocol::Identify => todo!(), // TODO: we don't send identify requests yet, so it's fine to leave this unimplemented
+                        Protocol::Sync { .. } => RequestResult::Blocks(
+                            response
+                                .map_err(BlocksRequestError::Request)
+                                .and_then(|response| {
+                                    protocol::decode_block_response(&response)
+                                        .map_err(BlocksRequestError::Decode)
+                                }),
+                        ),
+                        Protocol::LightUnknown { .. } => unreachable!(),
+                        Protocol::LightStorage { .. } => RequestResult::StorageProof(
+                            response
+                                .map_err(StorageProofRequestError::Request)
+                                .and_then(|payload| {
+                                    match protocol::decode_storage_or_call_proof_response(
+                                        protocol::StorageOrCallProof::StorageProof,
+                                        &payload,
+                                    ) {
+                                        Err(err) => Err(StorageProofRequestError::Decode(err)),
+                                        Ok(None) => {
+                                            Err(StorageProofRequestError::RemoteCouldntAnswer)
+                                        }
+                                        Ok(Some(_)) => Ok(EncodedMerkleProof(
+                                            payload,
+                                            protocol::StorageOrCallProof::StorageProof,
+                                        )),
+                                    }
+                                }),
+                        ),
+                        Protocol::LightCall { .. } => {
+                            RequestResult::CallProof(
+                                response.map_err(CallProofRequestError::Request).and_then(
+                                    |payload| match protocol::decode_storage_or_call_proof_response(
+                                        protocol::StorageOrCallProof::CallProof,
+                                        &payload,
+                                    ) {
+                                        Err(err) => Err(CallProofRequestError::Decode(err)),
+                                        Ok(None) => Err(CallProofRequestError::RemoteCouldntAnswer),
+                                        Ok(Some(_)) => Ok(EncodedMerkleProof(
+                                            payload,
+                                            protocol::StorageOrCallProof::CallProof,
+                                        )),
+                                    },
+                                ),
+                            )
+                        }
+                        Protocol::Kad { .. } => RequestResult::KademliaFindNode(
+                            response
+                                .map_err(KademliaFindNodeError::RequestFailed)
+                                .and_then(|payload| {
+                                    match protocol::decode_find_node_response(&payload) {
+                                        Err(err) => Err(KademliaFindNodeError::DecodeError(err)),
+                                        Ok(nodes) => Ok(nodes),
+                                    }
+                                }),
+                        ),
+                        Protocol::SyncWarp { chain_index } => RequestResult::GrandpaWarpSync(
+                            response
+                                .map_err(GrandpaWarpSyncRequestError::Request)
+                                .and_then(|message| {
+                                    if let Err(err) = protocol::decode_grandpa_warp_sync_response(
+                                        &message,
+                                        self.chains[chain_index].block_number_bytes,
+                                    ) {
+                                        Err(GrandpaWarpSyncRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedGrandpaWarpSyncResponse {
+                                            message,
+                                            block_number_bytes: self.chains[chain_index]
+                                                .block_number_bytes,
+                                        })
+                                    }
+                                }),
+                        ),
+                        Protocol::State { .. } => RequestResult::State(
+                            response
+                                .map_err(StateRequestError::Request)
+                                .and_then(|payload| {
+                                    if let Err(err) = protocol::decode_state_response(&payload) {
+                                        Err(StateRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedStateResponse(payload))
+                                    }
+                                }),
+                        ),
+
+                        // The protocols below aren't request-response protocols.
+                        Protocol::Ping
+                        | Protocol::BlockAnnounces { .. }
+                        | Protocol::Transactions { .. }
+                        | Protocol::Grandpa { .. } => unreachable!(),
+                    };
+
+                    return Some(Event::RequestResult {
+                        substream_id,
+                        response,
+                    });
+                }
+
+                collection::Event::RequestIn {
+                    substream_id,
+                    request_payload,
+                } => {
+                    // Received a request on a connection.
+                    let substream_info = self
+                        .substreams
+                        .get(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+                    let connection_info = &self.inner[substream_info.connection_id];
+                    // Requests can only happen on connections after their handshake phase is
+                    // finished, therefore their `PeerId` is known.
+                    let peer_id = connection_info
+                        .peer_id
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .clone();
+
+                    match substream_info.protocol {
+                        Protocol::Identify => {
+                            if request_payload.is_empty() {
+                                return Some(Event::IdentifyRequestIn {
                                     peer_id,
+                                    substream_id,
+                                });
+                            } else {
+                                // TODO: can this actually be reached? isn't the inner code going to refuse a bad request anyway due to no length prefix?
+                                let _ = self.substreams.remove(&substream_id);
+                                self.inner.respond_in_request(substream_id, Err(()));
+                                return Some(Event::ProtocolError {
+                                    peer_id,
+                                    error: ProtocolError::BadIdentifyRequest,
                                 });
                             }
                         }
-                    } else {
-                        break None;
+                        Protocol::Sync { chain_index } => {
+                            match protocol::decode_block_request(
+                                self.chains[chain_index].block_number_bytes,
+                                &request_payload,
+                            ) {
+                                Ok(config) => {
+                                    return Some(Event::BlocksRequestIn {
+                                        peer_id,
+                                        chain_id: ChainId(chain_index),
+                                        config,
+                                        substream_id,
+                                    })
+                                }
+                                Err(error) => {
+                                    let _ = self.substreams.remove(&substream_id);
+                                    self.inner.respond_in_request(substream_id, Err(()));
+                                    return Some(Event::ProtocolError {
+                                        peer_id,
+                                        error: ProtocolError::BadBlocksRequest(error),
+                                    });
+                                }
+                            }
+                        }
+                        // Any other protocol is declined when the protocol is negotiated.
+                        _ => unreachable!(),
                     }
-                };
-
-                // No event due to closing substreams. Grab the "actual" inner event.
-                match event {
-                    Some(ev) => ev,
-                    None => match self.inner.next_event() {
-                        Some(ev) => ev,
-                        None => break None,
-                    },
                 }
-            };
 
-            match inner_event {
-                peers::Event::HandshakeFinished {
-                    connection_id,
-                    peer_id,
-                    num_healthy_peer_connections,
-                    expected_peer_id,
+                collection::Event::RequestInCancel { substream_id } => {
+                    let _was_in = self.substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
+                    return Some(Event::RequestInCancel { substream_id });
+                }
+
+                collection::Event::NotificationsOutResult {
+                    substream_id,
+                    result,
                 } => {
-                    let multiaddr = &self.inner[connection_id];
+                    // Outgoing notifications substream has finished opening.
+                    let substream_info = if result.is_ok() {
+                        self.substreams
+                            .get(&substream_id)
+                            .unwrap_or_else(|| unreachable!())
+                            .clone()
+                    } else {
+                        self.substreams.remove(&substream_id).unwrap()
+                    };
 
-                    debug_assert_eq!(
-                        self.inner.connection_state(connection_id).outbound,
-                        expected_peer_id.is_some()
-                    );
+                    let connection_id = substream_info.connection_id;
+                    let connection_info = &self.inner[connection_id];
+                    // Notification substreams can only happen on connections after their
+                    // handshake phase is finished, therefore their `PeerId` is known.
+                    let peer_id = connection_info
+                        .peer_id
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .clone();
 
-                    if let Some(expected_peer_id) = expected_peer_id.as_ref() {
-                        if *expected_peer_id != peer_id {
-                            if let Some(KBucketsPeer { addresses, .. }) =
-                                self.kbuckets_peers.get_mut(expected_peer_id)
-                            {
-                                debug_assert!(!addresses.is_empty());
-                                if addresses.len() > 1 {
-                                    addresses.remove(multiaddr);
-                                } else {
-                                    // TODO: remove peer from k-buckets instead?
-                                    addresses.set_disconnected(multiaddr);
+                    let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                        substream_info.protocol.try_into().unwrap(),
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::Pending,
+                        substream_id,
+                    ));
+                    debug_assert!(_was_in);
+
+                    // The behaviour is very specific to the protocol.
+                    match substream_info.protocol {
+                        Protocol::BlockAnnounces { chain_index } => {
+                            let result = match &result {
+                                Ok(handshake) => {
+                                    match protocol::decode_block_announces_handshake(
+                                        self.chains[chain_index].block_number_bytes,
+                                        &handshake,
+                                    ) {
+                                        Ok(decoded_handshake)
+                                            if *decoded_handshake.genesis_hash
+                                                == self.chains[chain_index].genesis_hash =>
+                                        {
+                                            Ok(decoded_handshake)
+                                        }
+                                        Ok(decoded_handshake) => {
+                                            Err(GossipConnectError::GenesisMismatch {
+                                                local_genesis: self.chains[chain_index]
+                                                    .genesis_hash,
+                                                remote_genesis: *decoded_handshake.genesis_hash,
+                                            })
+                                        }
+                                        Err(err) => Err(GossipConnectError::HandshakeDecode(err)),
+                                    }
+                                }
+                                Err(err) => Err(GossipConnectError::Substream(err.clone())),
+                            };
+
+                            match result {
+                                Ok(decoded_handshake) => {
+                                    let _was_inserted =
+                                        self.notification_substreams_by_peer_id.insert((
+                                            NotificationsProtocol::BlockAnnounces { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Open,
+                                            substream_id,
+                                        ));
+                                    debug_assert!(_was_inserted);
+
+                                    if self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Transactions { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Transactions {
+                                                        chain_index,
+                                                    },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .next()
+                                        .is_none()
+                                    {
+                                        let new_substream_id = self.inner.open_out_notifications(
+                                            connection_id,
+                                            protocol::encode_protocol_name_string(
+                                                protocol::ProtocolName::Transactions {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                },
+                                            ),
+                                            Duration::from_secs(10), // TODO: arbitrary
+                                            Vec::new(),
+                                            128, // TODO: arbitrary
+                                        );
+
+                                        self.substreams.insert(
+                                            new_substream_id,
+                                            SubstreamInfo {
+                                                connection_id,
+                                                protocol: Protocol::Transactions { chain_index },
+                                            },
+                                        );
+
+                                        self.notification_substreams_by_peer_id.insert((
+                                            NotificationsProtocol::Transactions { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Pending,
+                                            new_substream_id,
+                                        ));
+                                    }
+
+                                    if self.chains[chain_index].grandpa_protocol_config.is_some()
+                                        && self
+                                            .notification_substreams_by_peer_id
+                                            .range(
+                                                (
+                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::min_value(),
+                                                    SubstreamId::min_value(),
+                                                )
+                                                    ..=(
+                                                        NotificationsProtocol::Grandpa {
+                                                            chain_index,
+                                                        },
+                                                        peer_id.clone(),
+                                                        SubstreamDirection::Out,
+                                                        NotificationsSubstreamState::max_value(),
+                                                        SubstreamId::max_value(),
+                                                    ),
+                                            )
+                                            .next()
+                                            .is_none()
+                                    {
+                                        let new_substream_id = self.inner.open_out_notifications(
+                                            connection_id,
+                                            protocol::encode_protocol_name_string(
+                                                protocol::ProtocolName::Grandpa {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                },
+                                            ),
+                                            Duration::from_secs(10), // TODO: arbitrary
+                                            self.chains[chain_index].role.scale_encoding().to_vec(),
+                                            1024 * 1024, // TODO: arbitrary
+                                        );
+
+                                        self.substreams.insert(
+                                            new_substream_id,
+                                            SubstreamInfo {
+                                                connection_id,
+                                                protocol: Protocol::Grandpa { chain_index },
+                                            },
+                                        );
+
+                                        self.notification_substreams_by_peer_id.insert((
+                                            NotificationsProtocol::Grandpa { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Pending,
+                                            new_substream_id,
+                                        ));
+                                    }
+
+                                    return Some(Event::GossipConnected {
+                                        peer_id,
+                                        chain_id: ChainId(chain_index),
+                                        kind: GossipKind::ConsensusTransactions,
+                                        role: decoded_handshake.role,
+                                        best_number: decoded_handshake.best_number,
+                                        best_hash: *decoded_handshake.best_hash,
+                                    });
+                                }
+                                Err(error) => {
+                                    // TODO: lots of unnecessary cloning below
+                                    if self
+                                        .connections_by_peer_id
+                                        .range(
+                                            (peer_id.clone(), ConnectionId::min_value())
+                                                ..=(peer_id.clone(), ConnectionId::min_value()),
+                                        )
+                                        .any(|(_, c)| {
+                                            let state = self.inner.connection_state(*c);
+                                            state.established && !state.shutting_down
+                                        })
+                                        && self.gossip_desired_peers_by_chain.contains(&(
+                                            chain_index,
+                                            GossipKind::ConsensusTransactions,
+                                            peer_id.clone(),
+                                        ))
+                                    {
+                                        debug_assert!(self
+                                            .notification_substreams_by_peer_id
+                                            .range(
+                                                (
+                                                    NotificationsProtocol::BlockAnnounces {
+                                                        chain_index
+                                                    },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::Open,
+                                                    SubstreamId::min_value(),
+                                                )
+                                                    ..=(
+                                                        NotificationsProtocol::BlockAnnounces {
+                                                            chain_index
+                                                        },
+                                                        peer_id.clone(),
+                                                        SubstreamDirection::Out,
+                                                        NotificationsSubstreamState::Open,
+                                                        SubstreamId::max_value(),
+                                                    ),
+                                            )
+                                            .next()
+                                            .is_none());
+
+                                        self.connected_unopened_gossip_desired.insert((
+                                            peer_id.clone(),
+                                            ChainId(chain_index),
+                                            GossipKind::ConsensusTransactions,
+                                        ));
+                                    }
+
+                                    self.opened_gossip_undesired.remove(&(
+                                        ChainId(chain_index),
+                                        peer_id.clone(),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+
+                                    if let GossipConnectError::HandshakeDecode(_)
+                                    | GossipConnectError::GenesisMismatch { .. } = error
+                                    {
+                                        self.inner.close_out_notifications(substream_id);
+                                        self.substreams.remove(&substream_id).unwrap();
+                                    }
+
+                                    for substream_id in self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Transactions { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Transactions {
+                                                        chain_index,
+                                                    },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .map(|(_, _, _, _, s)| *s)
+                                        .collect::<Vec<_>>()
+                                    {
+                                        self.inner.close_out_notifications(substream_id);
+                                    }
+
+                                    for substream_id in self
+                                        .notification_substreams_by_peer_id
+                                        .range(
+                                            (
+                                                NotificationsProtocol::Grandpa { chain_index },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::min_value(),
+                                                SubstreamId::min_value(),
+                                            )
+                                                ..=(
+                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                    peer_id.clone(),
+                                                    SubstreamDirection::Out,
+                                                    NotificationsSubstreamState::max_value(),
+                                                    SubstreamId::max_value(),
+                                                ),
+                                        )
+                                        .map(|(_, _, _, _, s)| *s)
+                                        .collect::<Vec<_>>()
+                                    {
+                                        self.inner.close_out_notifications(substream_id);
+                                    }
+
+                                    // TODO: also close the ingoing ba+tx+gp substreams
+
+                                    return Some(Event::GossipOpenFailed {
+                                        peer_id,
+                                        chain_id: ChainId(chain_index),
+                                        kind: GossipKind::ConsensusTransactions,
+                                        error,
+                                    });
                                 }
                             }
                         }
 
-                        // Mark the address as connected.
-                        // Note that this is done only for outgoing connections.
-                        if let Some(KBucketsPeer { addresses, .. }) =
-                            self.kbuckets_peers.get_mut(&peer_id)
-                        {
-                            if *expected_peer_id != peer_id {
-                                addresses.insert_discovered(multiaddr.clone());
+                        Protocol::Transactions { chain_index }
+                        | Protocol::Grandpa { chain_index } => {
+                            // This can only happen if we have a block announces substream with
+                            // that peer, otherwise the substream opening attempt should have
+                            // been cancelled.
+                            debug_assert!(self
+                                .notification_substreams_by_peer_id
+                                .range(
+                                    (
+                                        NotificationsProtocol::BlockAnnounces { chain_index },
+                                        peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        NotificationsSubstreamState::Open,
+                                        SubstreamId::min_value()
+                                    )
+                                        ..=(
+                                            NotificationsProtocol::BlockAnnounces { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Open,
+                                            SubstreamId::max_value()
+                                        )
+                                )
+                                .next()
+                                .is_some());
+
+                            // If the substream failed to open, we simply try again.
+                            // Trying agains means that we might be hammering the remote with
+                            // substream requests, however as of the writing of this text this is
+                            // necessary in order to bypass an issue in Substrate.
+                            if result.is_err()
+                                && !self.inner.connection_state(connection_id).shutting_down
+                            {
+                                let new_substream_id = self.inner.open_out_notifications(
+                                    connection_id,
+                                    protocol::encode_protocol_name_string(
+                                        match substream_info.protocol {
+                                            Protocol::Transactions { .. } => {
+                                                protocol::ProtocolName::Transactions {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                }
+                                            }
+                                            Protocol::Grandpa { .. } => {
+                                                protocol::ProtocolName::Grandpa {
+                                                    genesis_hash: self.chains[chain_index]
+                                                        .genesis_hash,
+                                                    fork_id: self.chains[chain_index]
+                                                        .fork_id
+                                                        .as_deref(),
+                                                }
+                                            }
+                                            _ => unreachable!(),
+                                        },
+                                    ),
+                                    Duration::from_secs(10), // TODO: arbitrary
+                                    match substream_info.protocol {
+                                        Protocol::Transactions { .. } => Vec::new(),
+                                        Protocol::Grandpa { .. } => {
+                                            self.chains[chain_index].role.scale_encoding().to_vec()
+                                        }
+                                        _ => unreachable!(),
+                                    },
+                                    1024 * 1024, // TODO: arbitrary
+                                );
+
+                                let _was_inserted =
+                                    self.notification_substreams_by_peer_id.insert((
+                                        NotificationsProtocol::try_from(substream_info.protocol)
+                                            .unwrap(),
+                                        peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        NotificationsSubstreamState::Pending,
+                                        new_substream_id,
+                                    ));
+                                debug_assert!(_was_inserted);
+
+                                let _prev_value = self.substreams.insert(
+                                    new_substream_id,
+                                    SubstreamInfo {
+                                        connection_id,
+                                        protocol: substream_info.protocol.clone(),
+                                    },
+                                );
+                                debug_assert!(_prev_value.is_none());
+
+                                continue;
                             }
 
-                            addresses.set_connected(multiaddr);
+                            let _was_inserted = self.notification_substreams_by_peer_id.insert((
+                                NotificationsProtocol::try_from(substream_info.protocol).unwrap(),
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Open,
+                                substream_id,
+                            ));
+                            debug_assert!(_was_inserted);
+
+                            // In case of Grandpa, we immediately send a neighbor packet with
+                            // the current local state.
+                            if matches!(substream_info.protocol, Protocol::Grandpa { .. }) {
+                                let grandpa_state = &self.chains[chain_index]
+                                    .grandpa_protocol_config
+                                    .as_ref()
+                                    .unwrap();
+                                let packet = protocol::GrandpaNotificationRef::Neighbor(
+                                    protocol::NeighborPacket {
+                                        round_number: grandpa_state.round_number,
+                                        set_id: grandpa_state.set_id,
+                                        commit_finalized_height: grandpa_state
+                                            .commit_finalized_height,
+                                    },
+                                )
+                                .scale_encoding(self.chains[chain_index].block_number_bytes)
+                                .fold(Vec::new(), |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                });
+                                match self.inner.queue_notification(substream_id, packet) {
+                                    Ok(()) => {}
+                                    Err(collection::QueueNotificationError::QueueFull) => {
+                                        unreachable!()
+                                    }
+                                }
+                            }
                         }
-                    }
 
-                    if num_healthy_peer_connections.get() == 1 {
-                        break Some(Event::Connected(peer_id));
-                    }
-                }
-
-                peers::Event::Shutdown { .. } => {
-                    // TODO:
-                }
-
-                peers::Event::StartShutdown {
-                    connection_id,
-                    peer:
-                        peers::ShutdownPeer::Established {
-                            peer_id,
-                            num_healthy_peer_connections,
-                        },
-                    ..
-                } if num_healthy_peer_connections == 0 => {
-                    // TODO: O(n)
-                    let chain_indices = self
-                        .open_chains
-                        .iter()
-                        .filter(|(pid, _)| pid == &peer_id)
-                        .map(|(_, c)| *c)
-                        .collect::<Vec<_>>();
-
-                    // Un-assign all the slots of that peer.
-                    for idx in &chain_indices {
-                        self.unassign_slot(*idx, &peer_id);
-                    }
-
-                    // Update the list of addresses of this peer.
-                    if self.inner.connection_state(connection_id).outbound {
-                        let address = &self.inner[connection_id];
-                        if let Some(KBucketsPeer { addresses, .. }) =
-                            self.kbuckets_peers.get_mut(&peer_id)
-                        {
-                            addresses.set_disconnected(address);
-                            debug_assert_eq!(addresses.iter_connected().count(), 0);
-                        }
-                    }
-
-                    for idx in &chain_indices {
-                        self.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
-                    }
-
-                    break Some(Event::Disconnected {
-                        peer_id,
-                        chain_indices,
-                    });
-                }
-                peers::Event::StartShutdown {
-                    connection_id,
-                    peer: peers::ShutdownPeer::Established { peer_id, .. },
-                    ..
-                } => {
-                    // Update the list of addresses of this peer.
-                    if self.inner.connection_state(connection_id).outbound {
-                        let address = &self.inner[connection_id];
-                        if let Some(KBucketsPeer { addresses, .. }) =
-                            self.kbuckets_peers.get_mut(&peer_id)
-                        {
-                            addresses.set_disconnected(address);
-                            debug_assert_ne!(addresses.iter_connected().count(), 0);
-                        }
+                        // The other protocols aren't notification protocols.
+                        Protocol::Identify
+                        | Protocol::Ping
+                        | Protocol::Sync { .. }
+                        | Protocol::LightUnknown { .. }
+                        | Protocol::LightStorage { .. }
+                        | Protocol::LightCall { .. }
+                        | Protocol::Kad { .. }
+                        | Protocol::SyncWarp { .. }
+                        | Protocol::State { .. } => unreachable!(),
                     }
                 }
-                peers::Event::StartShutdown {
-                    connection_id,
-                    peer:
-                        peers::ShutdownPeer::OutgoingHandshake {
-                            expected_peer_id, ..
-                        },
-                    ..
-                } => {
-                    // Update the k-buckets.
-                    let address = &self.inner[connection_id];
-                    if let Some(KBucketsPeer { addresses, .. }) =
-                        self.kbuckets_peers.get_mut(&expected_peer_id)
-                    {
-                        addresses.set_disconnected(address);
-                    }
-                }
-                peers::Event::StartShutdown {
-                    peer: peers::ShutdownPeer::IngoingHandshake,
-                    ..
-                } => {}
 
-                // Insubstantial error for diagnostic purposes.
-                peers::Event::InboundError { peer_id, error, .. } => {
-                    break Some(Event::ProtocolError {
-                        peer_id,
-                        error: ProtocolError::InboundError(error),
-                    });
-                }
+                collection::Event::NotificationsOutCloseDemanded { substream_id }
+                | collection::Event::NotificationsOutReset { substream_id } => {
+                    // Outgoing notifications substream has been closed or must be closed.
 
-                // Incoming requests.
-                peers::Event::RequestIn {
-                    peer_id,
-                    connection_id,
-                    request_id,
-                    protocol_index,
-                    request_payload,
-                    ..
-                } => {
-                    break Some(self.on_request_in(
-                        request_id,
-                        peer_id,
-                        connection_id,
-                        protocol_index,
-                        request_payload,
-                    ))
-                }
-
-                // Remote is no longer interested in the response.
-                peers::Event::RequestInCancel { id, .. } => {
-                    break Some(self.on_request_in_cancel(id))
-                }
-
-                peers::Event::NotificationsOutResult {
-                    peer_id,
-                    notifications_protocol_index,
-                    result,
-                } => {
-                    if let Some(event) = self.on_notifications_out_result(
-                        &now,
-                        peer_id,
-                        notifications_protocol_index,
-                        result,
+                    // If the request demands the closing, we immediately comply.
+                    if matches!(
+                        inner_event,
+                        collection::Event::NotificationsOutCloseDemanded { .. }
                     ) {
-                        return Some(event);
+                        self.inner.close_out_notifications(substream_id);
+                    }
+
+                    let substream_info = self
+                        .substreams
+                        .remove(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+                    let connection_id = substream_info.connection_id;
+                    let connection_info = &self.inner[connection_id];
+                    // Notification substreams can only happen on connections after their
+                    // handshake phase is finished, therefore their `PeerId` is known.
+                    let peer_id = connection_info
+                        .peer_id
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!())
+                        .clone();
+
+                    // Clean up the local state.
+                    let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                        NotificationsProtocol::try_from(substream_info.protocol).unwrap(),
+                        peer_id.clone(), // TODO: cloning overhead :-/
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::Open,
+                        substream_id,
+                    ));
+                    debug_assert!(_was_in);
+
+                    // Some substreams are tied to the state of the block announces substream.
+                    match substream_info.protocol {
+                        Protocol::BlockAnnounces { chain_index } => {
+                            self.opened_gossip_undesired.remove(&(
+                                ChainId(chain_index),
+                                peer_id.clone(),
+                                GossipKind::ConsensusTransactions,
+                            ));
+
+                            // Insert back in `connected_unopened_gossip_desired` if relevant.
+                            if self.gossip_desired_peers_by_chain.contains(&(
+                                chain_index,
+                                GossipKind::ConsensusTransactions,
+                                peer_id.clone(),
+                            )) && !self
+                                .connections_by_peer_id
+                                .range(
+                                    (peer_id.clone(), ConnectionId::min_value())
+                                        ..=(peer_id.clone(), ConnectionId::max_value()),
+                                )
+                                .any(|(_, connection_id)| {
+                                    let state = self.inner.connection_state(*connection_id);
+                                    !state.shutting_down
+                                })
+                            {
+                                debug_assert!(self
+                                    .notification_substreams_by_peer_id
+                                    .range(
+                                        (
+                                            NotificationsProtocol::BlockAnnounces { chain_index },
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::Open,
+                                            SubstreamId::min_value(),
+                                        )
+                                            ..=(
+                                                NotificationsProtocol::BlockAnnounces {
+                                                    chain_index
+                                                },
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::Open,
+                                                SubstreamId::max_value(),
+                                            ),
+                                    )
+                                    .next()
+                                    .is_none());
+
+                                let _was_inserted =
+                                    self.connected_unopened_gossip_desired.insert((
+                                        peer_id.clone(),
+                                        ChainId(chain_index),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+                                debug_assert!(_was_inserted);
+                            }
+
+                            for proto in [
+                                NotificationsProtocol::Transactions { chain_index },
+                                NotificationsProtocol::Grandpa { chain_index },
+                            ] {
+                                for (substream_state, substream_id) in self
+                                    .notification_substreams_by_peer_id
+                                    .range(
+                                        (
+                                            proto,
+                                            peer_id.clone(),
+                                            SubstreamDirection::Out,
+                                            NotificationsSubstreamState::min_value(),
+                                            SubstreamId::min_value(),
+                                        )
+                                            ..=(
+                                                proto,
+                                                peer_id.clone(),
+                                                SubstreamDirection::Out,
+                                                NotificationsSubstreamState::max_value(),
+                                                SubstreamId::max_value(),
+                                            ),
+                                    )
+                                    .map(|(_, _, _, state, substream_id)| (*state, *substream_id))
+                                    .collect::<Vec<_>>()
+                                {
+                                    self.inner.close_out_notifications(substream_id);
+                                    self.substreams.remove(&substream_id);
+                                    self.notification_substreams_by_peer_id.remove(&(
+                                        proto,
+                                        peer_id.clone(),
+                                        SubstreamDirection::Out,
+                                        substream_state,
+                                        substream_id,
+                                    ));
+                                }
+                            }
+
+                            // TODO: also close inbound substreams?
+
+                            return Some(Event::GossipDisconnected {
+                                peer_id: peer_id.clone(),
+                                chain_id: ChainId(chain_index),
+                                kind: GossipKind::ConsensusTransactions,
+                            });
+                        }
+                        // The transactions and Grandpa protocols are tied to the block announces
+                        // substream. If there is a block announce substream with the peer, we try
+                        // to reopen these two substreams.
+                        Protocol::Transactions { chain_index } => {
+                            let new_substream_id = self.inner.open_out_notifications(
+                                connection_id,
+                                protocol::encode_protocol_name_string(
+                                    protocol::ProtocolName::Transactions {
+                                        genesis_hash: self.chains[chain_index].genesis_hash,
+                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                    },
+                                ),
+                                Duration::from_secs(10), // TODO: arbitrary
+                                Vec::new(),
+                                1024 * 1024, // TODO: arbitrary
+                            );
+                            self.substreams.insert(
+                                new_substream_id,
+                                SubstreamInfo {
+                                    connection_id,
+                                    protocol: Protocol::Transactions { chain_index },
+                                },
+                            );
+                            self.notification_substreams_by_peer_id.insert((
+                                NotificationsProtocol::Transactions { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Pending,
+                                new_substream_id,
+                            ));
+                        }
+                        Protocol::Grandpa { chain_index } => {
+                            let new_substream_id = self.inner.open_out_notifications(
+                                connection_id,
+                                protocol::encode_protocol_name_string(
+                                    protocol::ProtocolName::Grandpa {
+                                        genesis_hash: self.chains[chain_index].genesis_hash,
+                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                    },
+                                ),
+                                Duration::from_secs(10), // TODO: arbitrary
+                                self.chains[chain_index].role.scale_encoding().to_vec(),
+                                1024 * 1024, // TODO: arbitrary
+                            );
+                            self.substreams.insert(
+                                new_substream_id,
+                                SubstreamInfo {
+                                    connection_id,
+                                    protocol: Protocol::Grandpa { chain_index },
+                                },
+                            );
+                            self.notification_substreams_by_peer_id.insert((
+                                NotificationsProtocol::Grandpa { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Pending,
+                                new_substream_id,
+                            ));
+                        }
+                        _ => unreachable!(),
                     }
                 }
 
-                peers::Event::Response {
-                    request_id,
-                    response,
-                } => break Some(self.on_response(request_id, response)),
+                collection::Event::NotificationsInOpen { substream_id, .. } => {
+                    // Remote would like to open a notifications substream with us.
 
-                peers::Event::NotificationsOutClose {
-                    notifications_protocol_index,
-                    peer_id,
-                } => {
-                    if let Some(event) =
-                        self.on_notifications_out_close(&now, peer_id, notifications_protocol_index)
+                    // There exists three possible ways to handle this event:
+                    //
+                    // - Accept the demand immediately. This happens if the API user has opened
+                    //   a gossip substream in the past or is currently trying to open a gossip
+                    //   substream with this peer.
+                    // - Refuse the demand immediately. This happens if there already exists a
+                    //   pending inbound notifications substream. Opening multiple notification
+                    //   substreams of the same protocol is a protocol violation. This also happens
+                    //   for transactions and grandpa substreams if no block announce substream is
+                    //   open.
+                    // - Generate an event to ask the API user whether to accept the demand. This
+                    //   happens specifically for block announce substreams.
+
+                    let substream_info = self
+                        .substreams
+                        .get(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+                    let connection_info = &self.inner[substream_info.connection_id];
+                    // Notification substreams can only happen on connections after their
+                    // handshake phase is finished, therefore their `PeerId` is known.
+                    let peer_id = connection_info
+                        .peer_id
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
+
+                    // Check whether a substream with the same protocol already exists with that
+                    // peer, and if so deny the request.
+                    if self
+                        .notification_substreams_by_peer_id
+                        .range(
+                            (
+                                substream_info.protocol.try_into().unwrap(),
+                                peer_id.clone(),
+                                SubstreamDirection::In,
+                                NotificationsSubstreamState::min_value(),
+                                SubstreamId::min_value(),
+                            )
+                                ..=(
+                                    substream_info.protocol.try_into().unwrap(),
+                                    peer_id.clone(),
+                                    SubstreamDirection::In,
+                                    NotificationsSubstreamState::max_value(),
+                                    SubstreamId::max_value(),
+                                ),
+                        )
+                        .next()
+                        .is_some()
                     {
-                        return Some(event);
+                        self.inner.reject_in_notifications(substream_id);
+                        self.substreams.remove(&substream_id);
+                        continue;
                     }
-                }
 
-                peers::Event::NotificationsInClose {
-                    peer_id,
-                    notifications_protocol_index,
-                    ..
-                } => {
-                    if let Some(event) =
-                        self.on_notifications_in_close(peer_id, notifications_protocol_index)
+                    // Find the `chain_index`.
+                    let (Protocol::BlockAnnounces { chain_index }
+                    | Protocol::Transactions { chain_index }
+                    | Protocol::Grandpa { chain_index }) = substream_info.protocol
+                    else {
+                        // Any other protocol isn't a notifications protocol.
+                        unreachable!()
+                    };
+
+                    // If an outgoing block announces notifications protocol (either pending or
+                    // fully open) exists, accept the substream immediately.
+                    if self
+                        .notification_substreams_by_peer_id
+                        .range(
+                            (
+                                NotificationsProtocol::BlockAnnounces { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::min_value(),
+                                SubstreamId::min_value(),
+                            )
+                                ..=(
+                                    NotificationsProtocol::BlockAnnounces { chain_index },
+                                    peer_id.clone(),
+                                    SubstreamDirection::Out,
+                                    NotificationsSubstreamState::max_value(),
+                                    SubstreamId::max_value(),
+                                ),
+                        )
+                        .next()
+                        .is_some()
                     {
-                        return Some(event);
+                        self.notification_substreams_by_peer_id.insert((
+                            substream_info.protocol.try_into().unwrap(),
+                            peer_id.clone(),
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Open,
+                            substream_id,
+                        ));
+                        let handshake = match substream_info.protocol {
+                            Protocol::BlockAnnounces { .. } => {
+                                protocol::encode_block_announces_handshake(
+                                    protocol::BlockAnnouncesHandshakeRef {
+                                        best_hash: &self.chains[chain_index].best_hash,
+                                        best_number: self.chains[chain_index].best_number,
+                                        role: self.chains[chain_index].role,
+                                        genesis_hash: &self.chains[chain_index].genesis_hash,
+                                    },
+                                    self.chains[chain_index].block_number_bytes,
+                                )
+                                .fold(Vec::new(), |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                })
+                            }
+                            Protocol::Grandpa { .. } => {
+                                self.chains[chain_index].role.scale_encoding().to_vec()
+                            }
+                            Protocol::Transactions { .. } => Vec::new(),
+                            _ => unreachable!(),
+                        };
+                        self.inner.accept_in_notifications(
+                            substream_id,
+                            handshake,
+                            1024 * 1024, // TODO: ?!
+                        );
+                        continue;
                     }
+
+                    // It is forbidden to cold-open a substream other than the block announces
+                    // substream.
+                    if !matches!(substream_info.protocol, Protocol::BlockAnnounces { .. }) {
+                        self.inner.reject_in_notifications(substream_id);
+                        self.substreams.remove(&substream_id);
+                        continue;
+                    }
+
+                    // Update the local state and return the event.
+                    self.notification_substreams_by_peer_id.insert((
+                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        peer_id.clone(),
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Pending,
+                        substream_id,
+                    ));
+                    return Some(Event::GossipInDesired {
+                        peer_id: peer_id.clone(),
+                        chain_id: ChainId(chain_index),
+                        kind: GossipKind::ConsensusTransactions,
+                    });
                 }
 
-                peers::Event::NotificationsIn {
-                    notifications_protocol_index,
-                    peer_id,
+                collection::Event::NotificationsInOpenCancel { substream_id } => {
+                    // Remote has cancelled a pending `NotificationsInOpen`.
+
+                    let substream_info = self
+                        .substreams
+                        .get(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+                    let connection_info = &self.inner[substream_info.connection_id];
+                    // Notification substreams can only happen on connections after their
+                    // handshake phase is finished, therefore their `PeerId` is known.
+                    let peer_id = connection_info
+                        .peer_id
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
+
+                    // All incoming notification substreams are immediately accepted/rejected
+                    // except for block announce substreams. Therefore, this event can only happen
+                    // for block announce substreams.
+                    let Protocol::BlockAnnounces { chain_index } = substream_info.protocol else {
+                        unreachable!()
+                    };
+
+                    // Clean up the local state.
+                    let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        peer_id.clone(), // TODO: cloning overhead :-/
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::Open,
+                        substream_id,
+                    ));
+                    debug_assert!(_was_in);
+
+                    // Notify API user.
+                    return Some(Event::GossipInDesiredCancel {
+                        peer_id: peer_id.clone(),
+                        chain_id: ChainId(chain_index),
+                        kind: GossipKind::ConsensusTransactions,
+                    });
+                }
+
+                collection::Event::NotificationsIn {
+                    substream_id,
                     notification,
                 } => {
-                    if let Some(event) =
-                        self.on_notification_in(peer_id, notifications_protocol_index, notification)
+                    // Received a notification from a remote.
+                    let substream_info = self
+                        .substreams
+                        .get(&substream_id)
+                        .unwrap_or_else(|| unreachable!());
+                    let chain_index = match substream_info.protocol {
+                        Protocol::BlockAnnounces { chain_index } => chain_index,
+                        Protocol::Transactions { chain_index } => chain_index,
+                        Protocol::Grandpa { chain_index } => chain_index,
+                        // Other protocols are not notification protocols.
+                        Protocol::Identify
+                        | Protocol::Ping
+                        | Protocol::Sync { .. }
+                        | Protocol::LightUnknown { .. }
+                        | Protocol::LightStorage { .. }
+                        | Protocol::LightCall { .. }
+                        | Protocol::Kad { .. }
+                        | Protocol::SyncWarp { .. }
+                        | Protocol::State { .. } => unreachable!(),
+                    };
+                    let connection_info = &self.inner[substream_info.connection_id];
+                    // Notification substreams can only happen on connections after their
+                    // handshake phase is finished, therefore their `PeerId` is known.
+                    let peer_id = connection_info
+                        .peer_id
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
+
+                    // Check whether there is an open outgoing block announces substream, as this
+                    // means that we are "gossip-connected". If not, then the notification is
+                    // silently discarded.
+                    // TODO: cloning of the peer_id
+                    if self
+                        .notification_substreams_by_peer_id
+                        .range(
+                            (
+                                NotificationsProtocol::BlockAnnounces { chain_index },
+                                peer_id.clone(),
+                                SubstreamDirection::Out,
+                                NotificationsSubstreamState::Open,
+                                collection::SubstreamId::min_value(),
+                            )
+                                ..=(
+                                    NotificationsProtocol::BlockAnnounces { chain_index },
+                                    peer_id.clone(),
+                                    SubstreamDirection::Out,
+                                    NotificationsSubstreamState::Open,
+                                    collection::SubstreamId::max_value(),
+                                ),
+                        )
+                        .next()
+                        .is_none()
                     {
-                        break Some(event);
+                        continue;
+                    }
+
+                    // Decode the notification and return an event.
+                    match substream_info.protocol {
+                        Protocol::BlockAnnounces { .. } => {
+                            if let Err(err) = protocol::decode_block_announce(
+                                &notification,
+                                self.chains[chain_index].block_number_bytes,
+                            ) {
+                                return Some(Event::ProtocolError {
+                                    error: ProtocolError::BadBlockAnnounce(err),
+                                    peer_id: peer_id.clone(),
+                                });
+                            }
+
+                            return Some(Event::BlockAnnounce {
+                                chain_id: ChainId(chain_index),
+                                peer_id: peer_id.clone(),
+                                announce: EncodedBlockAnnounce {
+                                    message: notification,
+                                    block_number_bytes: self.chains[chain_index].block_number_bytes,
+                                },
+                            });
+                        }
+                        Protocol::Transactions { .. } => {
+                            // TODO: not implemented
+                        }
+                        Protocol::Grandpa { .. } => {
+                            let decoded_notif = match protocol::decode_grandpa_notification(
+                                &notification,
+                                self.chains[chain_index].block_number_bytes,
+                            ) {
+                                Ok(n) => n,
+                                Err(err) => {
+                                    return Some(Event::ProtocolError {
+                                        error: ProtocolError::BadGrandpaNotification(err),
+                                        peer_id: peer_id.clone(),
+                                    })
+                                }
+                            };
+
+                            match decoded_notif {
+                                protocol::GrandpaNotificationRef::Commit(_) => {
+                                    return Some(Event::GrandpaCommitMessage {
+                                        chain_id: ChainId(chain_index),
+                                        peer_id: peer_id.clone(),
+                                        message: EncodedGrandpaCommitMessage {
+                                            message: notification,
+                                            block_number_bytes: self.chains[chain_index]
+                                                .block_number_bytes,
+                                        },
+                                    })
+                                }
+                                protocol::GrandpaNotificationRef::Neighbor(n) => {
+                                    return Some(Event::GrandpaNeighborPacket {
+                                        chain_id: ChainId(chain_index),
+                                        peer_id: peer_id.clone(),
+                                        state: GrandpaState {
+                                            round_number: n.round_number,
+                                            set_id: n.set_id,
+                                            commit_finalized_height: n.commit_finalized_height,
+                                        },
+                                    })
+                                }
+                                _ => {
+                                    // Any other type of message is currently ignored. Support
+                                    // for them could be added in the future.
+                                }
+                            }
+                        }
+
+                        // Other protocols are not notification protocols.
+                        Protocol::Identify
+                        | Protocol::Ping
+                        | Protocol::Sync { .. }
+                        | Protocol::LightUnknown { .. }
+                        | Protocol::LightStorage { .. }
+                        | Protocol::LightCall { .. }
+                        | Protocol::Kad { .. }
+                        | Protocol::SyncWarp { .. }
+                        | Protocol::State { .. } => unreachable!(),
                     }
                 }
 
-                peers::Event::NotificationsInOpen {
-                    peer_id,
-                    handshake,
-                    id,
-                    notifications_protocol_index,
-                } => {
-                    if let Some(event) = self.on_notifications_in_open(
-                        id,
-                        peer_id,
-                        notifications_protocol_index,
-                        handshake,
-                    ) {
-                        break Some(event);
-                    }
+                collection::Event::NotificationsInClose { substream_id, .. } => {
+                    // An incoming notifications substream has been closed.
+                    // Nothing to do except clean up the local state.
+                    let _was_in = self.substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
                 }
 
-                peers::Event::NotificationsInOpenCancel { id } => {
-                    if let Some(event) = self.on_notifications_in_open_cancel(id) {
-                        break Some(event);
-                    }
+                collection::Event::PingOutSuccess { .. } => {
+                    // We ignore ping events.
+                    // TODO: report to end user or something
                 }
             }
-        };
+        }
+    }
 
-        // Before returning the event, we check whether there is any desired outbound substream
-        // to open.
-        // Note: we can't use a `while let` due to borrow checker errors.
-        loop {
-            // Query the list of substreams that need to be opened.
-            // When a substream is refused by the remote, we make sure to mark it as "not desired"
-            // unless that substream really is supposed to be open. For this reason, substreams
-            // that have been tried in the past are also included in the list.
-            let (peer_id, notifications_protocol_index) = match self
-                .inner
-                .unfulfilled_desired_outbound_substream(true)
-                .next()
-            {
-                Some((peer_id, idx)) => (peer_id.clone(), idx),
-                None => break,
-            };
-
-            let chain_config = &self.chains
-                [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
-                .chain_config;
-
-            let handshake = if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0
-            {
-                protocol::encode_block_announces_handshake(
-                    protocol::BlockAnnouncesHandshakeRef {
-                        best_hash: &chain_config.best_hash,
-                        best_number: chain_config.best_number,
-                        genesis_hash: &chain_config.genesis_hash,
-                        role: chain_config.role,
-                    },
-                    chain_config.block_number_bytes,
-                )
+    /// Sends a blocks request to the given peer.
+    ///
+    /// The code in this module does not verify the response in any way. The blocks might be
+    /// completely different from the ones requested, or might be missing some information. In
+    /// other words, the response is completely untrusted.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    // TODO: more docs
+    pub fn start_blocks_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        config: protocol::BlocksRequestConfig,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestError> {
+        let request_data =
+            protocol::build_block_request(self.chains[chain_id.0].block_number_bytes, &config)
                 .fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
-                })
-            } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
-                Vec::new()
-            } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
-                chain_config.role.scale_encoding().to_vec()
-            } else {
-                unreachable!()
-            };
+                });
 
-            self.inner.open_out_notification(
-                &peer_id,
-                notifications_protocol_index,
-                now.clone(),
-                handshake,
-            );
-        }
-
-        event_to_return
-    }
-
-    /// Allocates a [`PendingId`] and returns a [`StartConnect`] indicating a multiaddress that
-    /// the API user must try to dial.
-    ///
-    /// Later, the API user must use [`ChainNetwork::pending_outcome_ok_single_stream`],
-    /// [`ChainNetwork::pending_outcome_ok_multi_stream`], or [`ChainNetwork::pending_outcome_err`]
-    /// to report how the connection attempt went.
-    ///
-    /// The returned [`StartConnect`] contains the [`StartConnect::timeout`] field. It is the
-    /// responsibility of the API user to ensure that [`ChainNetwork::pending_outcome_err`] is
-    /// called if this timeout is reached.
-    // TODO: give more control, with number of slots and node choice
-    // TODO: this API with now is a bit hacky?
-    pub fn next_start_connect(&mut self, now: impl FnOnce() -> TNow) -> Option<StartConnect<TNow>> {
-        // Ask the underlying state machine which nodes are desired but don't have any
-        // associated connection attempt yet.
-        // Since the underlying state machine is only made aware of connections when
-        // `pending_outcome_ok` is reached, we must filter out nodes that already have an
-        // associated `PendingId`.
-        let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers();
-
-        for peer_id in unfulfilled_desired_peers {
-            // TODO: allow more than one simultaneous dial per peer, and distribute the dials so that we don't just return the same peer multiple times in a row while there are other peers waiting
-            // TODO: cloning the peer_id :-/
-            let entry = match self.num_pending_per_peer.entry(peer_id.clone()) {
-                hashbrown::hash_map::Entry::Occupied(_) => continue,
-                hashbrown::hash_map::Entry::Vacant(entry) => entry,
-            };
-
-            // TODO: O(n)
-            let multiaddr: multiaddr::Multiaddr = {
-                let potential = self
-                    .chains
-                    .iter_mut()
-                    .flat_map(|chain| chain.kbuckets.iter_mut_ordered())
-                    .find(|(p, _)| **p == *entry.key())
-                    .and_then(|(peer_id, _)| {
-                        self.kbuckets_peers
-                            .get_mut(peer_id)
-                            .unwrap()
-                            .addresses
-                            .addr_to_pending()
-                    });
-                match potential {
-                    Some(a) => a.clone(),
-                    None => continue,
-                }
-            };
-
-            let now = now();
-            let pending_id = PendingId(self.pending_ids.insert((
-                entry.key().clone(),
-                multiaddr.clone(),
-                now.clone(),
-            )));
-
-            let start_connect = StartConnect {
-                expected_peer_id: entry.key().clone(),
-                id: pending_id,
-                multiaddr,
-                timeout: now + self.handshake_timeout,
-            };
-
-            entry.insert(NonZeroUsize::new(1).unwrap());
-
-            return Some(start_connect);
-        }
-
-        // No valid desired peer has been found.
-        None
-    }
-
-    /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
-    /// with.
-    pub fn peers_list(&self) -> impl Iterator<Item = &PeerId> {
-        self.inner.peers_list()
-    }
-
-    // TODO: docs and appropriate naming
-    pub fn slots_to_assign(&'_ self, chain_index: usize) -> impl Iterator<Item = &'_ PeerId> + '_ {
-        let chain = &self.chains[chain_index];
-
-        // Check if maximum number of slots is reached.
-        if chain.out_peers.len()
-            >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
-        {
-            return either::Right(iter::empty());
-        }
-
-        // TODO: return in some specific order?
-        either::Left(
-            chain
-                .kbuckets
-                .iter_ordered()
-                .map(|(peer_id, _)| peer_id)
-                .filter(|peer_id| {
-                    // Don't assign slots to peers that already have a slot.
-                    !chain.out_peers.contains(*peer_id) && !chain.in_peers.contains(*peer_id)
-                }),
+        self.start_request(
+            target,
+            request_data,
+            Protocol::Sync {
+                chain_index: chain_id.0,
+            },
+            timeout,
         )
     }
 
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
     // TODO: docs
-    // TODO: when to call this?
-    pub fn assign_out_slot(&mut self, chain_index: usize, peer_id: PeerId) {
-        let chain = &mut self.chains[chain_index];
+    pub fn start_grandpa_warp_sync_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestError> {
+        let request_data = begin_hash.to_vec();
 
-        // Check if maximum number of slots is reached.
-        if chain.out_peers.len()
-            >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
-        {
-            return; // TODO: return error?
-        }
-
-        // Don't assign slots to peers that already have a slot.
-        if chain.out_peers.contains(&peer_id) || chain.in_peers.contains(&peer_id) {
-            return; // TODO: return error?
-        }
-
-        self.inner.set_peer_notifications_out_desired(
-            &peer_id,
-            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-            peers::DesiredState::DesiredReset, // TODO: ?
-        );
-
-        chain.out_peers.insert(peer_id);
+        self.start_request(
+            target,
+            request_data,
+            Protocol::SyncWarp {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )
     }
 
-    /// Removes the slot assignment of the given peer, if any.
-    pub fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
-        self.inner.set_peer_notifications_out_desired(
-            peer_id,
-            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-            peers::DesiredState::NotDesired,
+    /// Sends a state request to a peer.
+    ///
+    /// A state request makes it possible to download the storage of the chain at a given block.
+    /// The response is not unverified by this function. In other words, the peer is free to send
+    /// back erroneous data. It is the responsibility of the API user to verify the storage by
+    /// calculating the state trie root hash and comparing it with the value stored in the
+    /// block's header.
+    ///
+    /// Because response have a size limit, it is unlikely that a single request will return the
+    /// entire storage of the chain at once. Instead, call this function multiple times, each call
+    /// passing a `start_key` that follows the last key of the previous response.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn start_state_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        block_hash: &[u8; 32],
+        start_key: protocol::StateRequestStart,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestError> {
+        let request_data = protocol::build_state_request(protocol::StateRequest {
+            block_hash,
+            start_key,
+        })
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        self.start_request(
+            target,
+            request_data,
+            Protocol::State {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )
+    }
+
+    /// Sends a storage request to the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    // TODO: more docs
+    pub fn start_storage_proof_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
+        let request_data =
+            protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+
+        // The request data can possibly by higher than the protocol limit, especially due to the
+        // call data.
+        // TODO: check limit
+
+        Ok(self.start_request(
+            target,
+            request_data,
+            Protocol::LightStorage {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )?)
+    }
+
+    /// Sends a call proof request to the given peer.
+    ///
+    /// This request is similar to [`ChainNetwork::start_storage_proof_request`]. Instead of
+    /// requesting specific keys, we request the list of all the keys that are accessed for a
+    /// specific runtime call.
+    ///
+    /// There exists no guarantee that the proof is complete (i.e. that it contains all the
+    /// necessary entries), as it is impossible to know this from just the proof itself. As such,
+    /// this method is just an optimization. When performing the actual call, regular storage proof
+    /// requests should be performed if the key is not present in the call proof response.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn start_call_proof_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
+        let request_data =
+            protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+
+        // The request data can possibly by higher than the protocol limit, especially due to the
+        // call data.
+        // TODO: check limit
+
+        Ok(self.start_request(
+            target,
+            request_data,
+            Protocol::LightCall {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )?)
+    }
+
+    /// Sends a Kademlia find node request to the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn start_kademlia_find_node_request(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        peer_id_to_find: &PeerId,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestError> {
+        let request_data = protocol::build_find_node_request(peer_id_to_find.as_bytes());
+
+        // The request data can possibly by higher than the protocol limit, especially due to the
+        // call data.
+        // TODO: check limit
+
+        Ok(self.start_request(
+            target,
+            request_data,
+            Protocol::Kad {
+                chain_index: chain_id.0,
+            },
+            timeout,
+        )?)
+    }
+
+    /// Underlying implementation of all the functions that start requests.
+    fn start_request(
+        &mut self,
+        target: &PeerId,
+        request_data: Vec<u8>,
+        protocol: Protocol,
+        timeout: Duration,
+    ) -> Result<SubstreamId, StartRequestError> {
+        // TODO: cloning of `PeerId` overhead
+        // TODO: this is O(n) but is it really a problem? you're only supposed to have max 1 or 2 connections per PeerId
+        let connection_id = self
+            .connections_by_peer_id
+            .range(
+                (target.clone(), collection::ConnectionId::min_value())
+                    ..=(target.clone(), collection::ConnectionId::max_value()),
+            )
+            .map(|(_, connection_id)| *connection_id)
+            .find(|connection_id| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+            .ok_or(StartRequestError::NoConnection)?;
+
+        let protocol_name = {
+            let protocol_name = match protocol {
+                Protocol::Identify => protocol::ProtocolName::Identify,
+                Protocol::Ping => protocol::ProtocolName::Ping,
+                Protocol::BlockAnnounces { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::BlockAnnounces {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::Transactions { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Transactions {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::Grandpa { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Grandpa {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::Sync { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Sync {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::LightUnknown { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Light {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::LightStorage { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Light {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::LightCall { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Light {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::Kad { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::Kad {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::SyncWarp { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::SyncWarp {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+                Protocol::State { chain_index } => {
+                    let chain_info = &self.chains[chain_index];
+                    protocol::ProtocolName::State {
+                        genesis_hash: chain_info.genesis_hash,
+                        fork_id: chain_info.fork_id.as_deref(),
+                    }
+                }
+            };
+
+            protocol::encode_protocol_name_string(protocol_name)
+        };
+
+        let substream_id = self.inner.start_request(
+            connection_id,
+            protocol_name,
+            Some(request_data),
+            timeout,
+            16 * 1024 * 1024,
         );
 
-        let was_in_out = self.chains[chain_index].out_peers.remove(peer_id);
-        let was_in_in = self.chains[chain_index].in_peers.remove(peer_id);
+        let _prev_value = self.substreams.insert(
+            substream_id,
+            SubstreamInfo {
+                connection_id,
+                protocol,
+            },
+        );
+        debug_assert!(_prev_value.is_none());
 
-        match (was_in_in, was_in_out) {
-            (true, false) => Some(SlotTy::Inbound),
-            (false, true) => Some(SlotTy::Outbound),
-            (false, false) => None,
-            (true, true) => {
-                unreachable!()
+        Ok(substream_id)
+    }
+
+    /// Responds to an identify request. Call this function in response to
+    /// a [`Event::IdentifyRequestIn`].
+    ///
+    /// Only the `agent_version` needs to be specified. The other fields are automatically
+    /// filled by the [`ChainNetwork`].
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid or doesn't correspond to a blocks request or
+    /// if the request has been cancelled with a [`Event::RequestInCancel`].
+    ///
+    pub fn respond_identify(&mut self, substream_id: SubstreamId, agent_version: &str) {
+        let substream_info = self.substreams.remove(&substream_id).unwrap();
+        assert!(matches!(substream_info.protocol, Protocol::Identify { .. }));
+
+        let response = {
+            let observed_addr = &self.inner[substream_info.connection_id].address;
+
+            // TODO: all protocols
+            let supported_protocols = [protocol::ProtocolName::Ping].into_iter();
+
+            let supported_protocols_names = supported_protocols
+                .map(|proto| protocol::encode_protocol_name_string(proto))
+                .collect::<Vec<_>>();
+
+            protocol::build_identify_response(protocol::IdentifyResponse {
+                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate, see also https://github.com/paritytech/substrate/issues/14331
+                agent_version,
+                ed25519_public_key: *self.noise_key.libp2p_public_ed25519_key(),
+                listen_addrs: iter::empty(), // TODO:
+                observed_addr,
+                protocols: supported_protocols_names.iter().map(|p| &p[..]),
+            })
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            })
+        };
+
+        self.inner.respond_in_request(substream_id, Ok(response));
+    }
+
+    /// Responds to a blocks request. Call this function in response to
+    /// a [`Event::BlocksRequestIn`].
+    ///
+    /// Pass `None` in order to deny the request. Do this if blocks aren't available locally.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is invalid or doesn't correspond to a blocks request or
+    /// if the request has been cancelled with a [`Event::RequestInCancel`].
+    ///
+    // TOOD: more zero-cost parameter
+    pub fn respond_blocks(
+        &mut self,
+        substream_id: SubstreamId,
+        response: Option<Vec<protocol::BlockData>>,
+    ) {
+        let substream_info = self.substreams.remove(&substream_id).unwrap();
+        assert!(matches!(substream_info.protocol, Protocol::Sync { .. }));
+
+        let response = if let Some(response) = response {
+            Ok(
+                protocol::build_block_response(response).fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                }),
+            )
+        } else {
+            Err(())
+        };
+
+        self.inner.respond_in_request(substream_id, response);
+    }
+
+    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
+    /// been emitted.
+    /// It is possible to send gossip notifications to these peers.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn gossip_connected_peers(
+        &'_ self,
+        chain_id: ChainId,
+        kind: GossipKind,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        assert!(self.chains.contains(chain_id.0));
+        let GossipKind::ConsensusTransactions = kind;
+        // TODO: O(n) ; optimize this by using range(), but that's a bit complicated
+        self.notification_substreams_by_peer_id
+            .iter()
+            .filter(move |(p, _, d, s, _)| {
+                *p == NotificationsProtocol::BlockAnnounces {
+                    chain_index: chain_id.0,
+                } && *d == SubstreamDirection::Out
+                    && *s == NotificationsSubstreamState::Open
+            })
+            .map(|(_, peer_id, _, _, _)| peer_id)
+    }
+
+    /// Open a gossiping substream with the given peer on the given chain.
+    ///
+    /// Either a [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is guaranteed to later
+    /// be generated, unless [`ChainNetwork::gossip_close`] is called in the meanwhile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    // TODO: proper error
+    pub fn gossip_open(
+        &mut self,
+        chain_id: ChainId,
+        target: &PeerId,
+        kind: GossipKind,
+    ) -> Result<(), ()> {
+        let GossipKind::ConsensusTransactions = kind;
+
+        let chain_info = &self.chains[chain_id.0];
+
+        // It is forbidden to open more than one gossip notifications substream with any given
+        // peer.
+        if self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    target.clone(),
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::min_value(),
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        target.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::max_value(),
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .is_some()
+        {
+            return Err(());
+        }
+
+        let protocol_name =
+            protocol::encode_protocol_name_string(protocol::ProtocolName::BlockAnnounces {
+                genesis_hash: chain_info.genesis_hash,
+                fork_id: chain_info.fork_id.as_deref(),
+            });
+
+        // TODO: cloning of `PeerId` overhead
+        // TODO: this is O(n) but is it really a problem? you're only supposed to have max 1 or 2 connections per PeerId
+        let connection_id = self
+            .connections_by_peer_id
+            .range(
+                (target.clone(), collection::ConnectionId::min_value())
+                    ..=(target.clone(), collection::ConnectionId::max_value()),
+            )
+            .map(|(_, connection_id)| *connection_id)
+            .find(|connection_id| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+            .ok_or(())?;
+
+        let handshake = protocol::encode_block_announces_handshake(
+            protocol::BlockAnnouncesHandshakeRef {
+                best_hash: &chain_info.best_hash,
+                best_number: chain_info.best_number,
+                role: chain_info.role,
+                genesis_hash: &chain_info.genesis_hash,
+            },
+            self.chains[chain_id.0].block_number_bytes,
+        )
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        let substream_id = self.inner.open_out_notifications(
+            connection_id,
+            protocol_name,
+            Duration::from_secs(10), // TODO: arbitrary
+            handshake,
+            1024 * 1024, // TODO: arbitrary
+        );
+
+        let _prev_value = self.substreams.insert(
+            substream_id,
+            SubstreamInfo {
+                connection_id,
+                protocol: Protocol::BlockAnnounces {
+                    chain_index: chain_id.0,
+                },
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+
+        let _was_inserted = self.notification_substreams_by_peer_id.insert((
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            target.clone(),
+            SubstreamDirection::Out,
+            NotificationsSubstreamState::Pending,
+            substream_id,
+        ));
+        debug_assert!(_was_inserted);
+
+        if !self
+            .gossip_desired_peers
+            .contains(&(target.clone(), kind, chain_id.0))
+        {
+            let _was_inserted = self.opened_gossip_undesired.insert((
+                chain_id,
+                target.clone(),
+                GossipKind::ConsensusTransactions,
+            ));
+            debug_assert!(_was_inserted);
+        }
+
+        self.connected_unopened_gossip_desired
+            .remove(&(target.clone(), chain_id, kind)); // TODO: clone
+
+        Ok(())
+    }
+
+    /// Switches the gossip link to the given peer to the "closed" state.
+    ///
+    /// This can be used:
+    ///
+    /// - To close a opening in progress after having called [`ChainNetwork::gossip_open`], in
+    /// which case no [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is generated.
+    /// - To close a fully open gossip link. All the notifications that have been queued are still
+    /// delivered. No event is generated.
+    /// - To respond to a [`Event::GossipInDesired`] by rejecting the request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`ChainId`] is invalid.
+    ///
+    pub fn gossip_close(
+        &mut self,
+        chain_id: ChainId,
+        peer_id: &PeerId,
+        kind: GossipKind,
+    ) -> Result<(), ()> {
+        // TODO: proper return value
+        let GossipKind::ConsensusTransactions = kind;
+
+        // An `assert!` is necessary because we don't actually access the chain information
+        // anywhere, but still want to panic if the chain is invalid.
+        assert!(self.chains.contains(chain_id.0));
+
+        // Reject inbound requests, if any.
+        if let Some(substream_id) = self
+            .notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    peer_id.clone(),
+                    SubstreamDirection::In,
+                    NotificationsSubstreamState::Pending,
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_id.clone(),
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Pending,
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .map(|(_, _, _, _, substream_id)| *substream_id)
+        {
+            self.inner.reject_in_notifications(substream_id);
+
+            let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                NotificationsProtocol::BlockAnnounces {
+                    chain_index: chain_id.0,
+                },
+                peer_id.clone(),
+                SubstreamDirection::In,
+                NotificationsSubstreamState::Pending,
+                substream_id,
+            ));
+            debug_assert!(_was_in);
+
+            let _was_in = self.substreams.remove(&substream_id);
+            debug_assert!(_was_in.is_some());
+
+            self.opened_gossip_undesired.remove(&(
+                chain_id,
+                peer_id.clone(),
+                GossipKind::ConsensusTransactions,
+            ));
+
+            // TODO: debug_assert that there's no inbound tx/gp substream?
+        }
+
+        // Close outbound substreams, if any.
+        for protocol in [
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Transactions {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Grandpa {
+                chain_index: chain_id.0,
+            },
+        ] {
+            if let Some((substream_id, state)) = self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_id.clone(),
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::min_value(),
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            protocol,
+                            peer_id.clone(),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::max_value(),
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .next()
+                .map(|(_, _, _, state, substream_id)| (*substream_id, *state))
+            {
+                self.inner.close_out_notifications(substream_id);
+
+                let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                    protocol,
+                    peer_id.clone(),
+                    SubstreamDirection::Out,
+                    state,
+                    substream_id,
+                ));
+                debug_assert!(_was_in);
+
+                let _was_in = self.substreams.remove(&substream_id);
+                debug_assert!(_was_in.is_some());
+
+                // TODO: close tx and gp as well
+                // TODO: doesn't close inbound substreams
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the state of the local node with regards to GrandPa rounds.
+    ///
+    /// Calling this method does two things:
+    ///
+    /// - Send on all the active GrandPa substreams a "neighbor packet" indicating the state of
+    ///   the local node.
+    /// - Update the neighbor packet that is automatically sent to peers when a GrandPa substream
+    ///   gets opened.
+    ///
+    /// In other words, calling this function atomically informs all the present and future peers
+    /// of the state of the local node regarding the GrandPa protocol.
+    ///
+    /// > **Note**: The information passed as parameter isn't validated in any way by this method.
+    ///
+    /// This function might generate a message destined to connections. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process these messages after it has
+    /// returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`ChainId`] is invalid, or if the chain has GrandPa disabled.
+    ///
+    pub fn gossip_broadcast_grandpa_state_and_update(
+        &mut self,
+        chain_id: ChainId,
+        grandpa_state: GrandpaState,
+    ) {
+        // Bytes of the neighbor packet to send out.
+        let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
+            round_number: grandpa_state.round_number,
+            set_id: grandpa_state.set_id,
+            commit_finalized_height: grandpa_state.commit_finalized_height,
+        })
+        .scale_encoding(self.chains[chain_id.0].block_number_bytes)
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        // Now sending out to all the grandpa substreams that exist.
+        // TODO: O(n)
+        for (_, _, _, _, substream_id) in
+            self.notification_substreams_by_peer_id
+                .iter()
+                .filter(|(p, _, d, s, _)| {
+                    *p == NotificationsProtocol::Grandpa {
+                        chain_index: chain_id.0,
+                    } && *d == SubstreamDirection::Out
+                        && *s == NotificationsSubstreamState::Open
+                })
+        {
+            match self.inner.queue_notification(*substream_id, packet.clone()) {
+                Ok(()) => {}
+                Err(collection::QueueNotificationError::QueueFull) => {}
+            }
+        }
+
+        // Update the locally-stored state.
+        *self.chains[chain_id.0]
+            .grandpa_protocol_config
+            .as_mut()
+            .unwrap() = grandpa_state;
+    }
+
+    /// Sends a block announce gossip message to the given peer.
+    ///
+    /// If no [`Event::GossipConnected`] event of kind [`GossipKind::ConsensusTransactions`] has
+    /// been emitted for the given peer, then a [`QueueNotificationError::NoConnection`] will be
+    /// returned.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    // TODO: there this extra parameter in block announces that is unused on many chains but not always
+    pub fn gossip_send_block_announce(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        scale_encoded_header: &[u8],
+        is_best: bool,
+    ) -> Result<(), QueueNotificationError> {
+        let notification = protocol::encode_block_announce(protocol::BlockAnnounceRef {
+            scale_encoded_header,
+            is_best,
+        })
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        self.queue_notification(
+            target,
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            notification,
+        )
+    }
+
+    /// Sends a transaction gossip message to the given peer.
+    ///
+    /// Must be passed the SCALE-encoded transaction.
+    ///
+    /// If no [`Event::GossipConnected`] event of kind [`GossipKind::ConsensusTransactions`] has
+    /// been emitted for the given peer, then a [`QueueNotificationError::NoConnection`] will be
+    /// returned.
+    ///
+    /// This function might generate a message destined connections. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    // TODO: function is awkward due to tx substream not being necessarily always open
+    pub fn gossip_send_transaction(
+        &mut self,
+        target: &PeerId,
+        chain_id: ChainId,
+        extrinsic: &[u8],
+    ) -> Result<(), QueueNotificationError> {
+        let mut val = Vec::with_capacity(1 + extrinsic.len());
+        val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
+        val.extend_from_slice(extrinsic);
+        self.queue_notification(
+            target,
+            NotificationsProtocol::Transactions {
+                chain_index: chain_id.0,
+            },
+            val,
+        )
+    }
+
+    /// Inner implementation for all the notifications sends.
+    fn queue_notification(
+        &mut self,
+        target: &PeerId,
+        protocol: NotificationsProtocol,
+        notification: Vec<u8>,
+    ) -> Result<(), QueueNotificationError> {
+        let chain_index = match protocol {
+            NotificationsProtocol::BlockAnnounces { chain_index } => chain_index,
+            NotificationsProtocol::Transactions { chain_index } => chain_index,
+            NotificationsProtocol::Grandpa { chain_index } => chain_index,
+        };
+
+        assert!(self.chains.contains(chain_index));
+
+        // We first find a block announces substream for that peer.
+        // TODO: only relevant for GossipKind::ConsensusTransactions
+        // If none is found, then we are not considered "gossip-connected", and return an error
+        // no matter what, even if a substream of the requested protocol exists.
+        // TODO: O(n) ; optimize this by using range()
+        let block_announces_substream = self
+            .notification_substreams_by_peer_id
+            .iter()
+            .find(move |(p, id, d, s, _)| {
+                *p == NotificationsProtocol::BlockAnnounces { chain_index }
+                    && id == target
+                    && *d == SubstreamDirection::Out
+                    && *s == NotificationsSubstreamState::Open
+            })
+            .map(|(_, _, _, _, substream_id)| *substream_id)
+            .ok_or(QueueNotificationError::NoConnection)?;
+
+        // Now find a substream of the requested protocol.
+        let substream_id = if matches!(protocol, NotificationsProtocol::BlockAnnounces { .. }) {
+            block_announces_substream
+        } else {
+            // TODO: O(n) ; optimize this by using range()
+            let id = self
+                .notification_substreams_by_peer_id
+                .iter()
+                .find(move |(p, id, d, s, _)| {
+                    *p == protocol
+                        && id == target
+                        && *d == SubstreamDirection::Out
+                        && *s == NotificationsSubstreamState::Open
+                })
+                .map(|(_, _, _, _, substream_id)| *substream_id);
+            // If we are "gossip-connected" but no open transaction/grandpa substream exists, we
+            // silently discard the notification.
+            // TODO: this is a questionable behavior
+            let Some(id) = id else { return Ok(()) };
+            id
+        };
+
+        match self.inner.queue_notification(substream_id, notification) {
+            Ok(()) => Ok(()),
+            Err(collection::QueueNotificationError::QueueFull) => {
+                Err(QueueNotificationError::QueueFull)
             }
         }
     }
+
+    fn recognize_protocol(&self, protocol_name: &str) -> Result<Protocol, ()> {
+        Ok(match protocol::decode_protocol_name(protocol_name)? {
+            protocol::ProtocolName::Identify => Protocol::Identify,
+            protocol::ProtocolName::Ping => Protocol::Ping,
+            protocol::ProtocolName::BlockAnnounces {
+                genesis_hash,
+                fork_id,
+            } => Protocol::BlockAnnounces {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::Transactions {
+                genesis_hash,
+                fork_id,
+            } => Protocol::Transactions {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::Grandpa {
+                genesis_hash,
+                fork_id,
+            } => Protocol::Grandpa {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::Sync {
+                genesis_hash,
+                fork_id,
+            } => Protocol::Sync {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::Light {
+                genesis_hash,
+                fork_id,
+            } => Protocol::LightUnknown {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::Kad {
+                genesis_hash,
+                fork_id,
+            } => Protocol::Kad {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::SyncWarp {
+                genesis_hash,
+                fork_id,
+            } => Protocol::SyncWarp {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+            protocol::ProtocolName::State {
+                genesis_hash,
+                fork_id,
+            } => Protocol::State {
+                chain_index: *self
+                    .chains_by_protocol_info
+                    .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
+                    .ok_or(())?,
+            },
+        })
+    }
 }
 
-/// User must start connecting to the given multiaddress.
-///
-/// One of [`ChainNetwork::pending_outcome_ok_single_stream`],
-/// [`ChainNetwork::pending_outcome_ok_multi_stream`], or [`ChainNetwork::pending_outcome_err`]
-/// must later be called in order to inform of the outcome of the connection.
-#[derive(Debug, Clone)]
-#[must_use]
-pub struct StartConnect<TNow> {
-    /// Identifier of this connection request. Must be passed back later.
-    pub id: PendingId,
-    /// Address to attempt to connect to.
-    pub multiaddr: multiaddr::Multiaddr,
-    /// [`PeerId`] that is expected to be reached with this connection attempt.
-    pub expected_peer_id: PeerId,
-    /// When the attempt should be considered as a failure. You must call
-    /// [`ChainNetwork::pending_outcome_err`] if this moment is reached.
-    pub timeout: TNow,
+impl<TChain, TNow> ops::Index<ChainId> for ChainNetwork<TChain, TNow> {
+    type Output = TChain;
+
+    fn index(&self, index: ChainId) -> &Self::Output {
+        &self.chains[index.0].user_data
+    }
+}
+
+impl<TChain, TNow> ops::IndexMut<ChainId> for ChainNetwork<TChain, TNow> {
+    fn index_mut(&mut self, index: ChainId) -> &mut Self::Output {
+        &mut self.chains[index.0].user_data
+    }
+}
+
+/// What kind of handshake to perform on the newly-added connection.
+pub enum SingleStreamHandshakeKind {
+    /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
+    /// multistream-select protocol to negotiate the Yamux multiplexing.
+    MultistreamSelectNoiseYamux {
+        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
+        /// initiated by the remote.
+        is_initiator: bool,
+    },
+}
+
+/// What kind of handshake to perform on the newly-added connection.
+pub enum MultiStreamHandshakeKind {
+    /// The connection is a WebRTC connection.
+    ///
+    /// See <https://github.com/libp2p/specs/pull/412> for details.
+    ///
+    /// The reading and writing side of substreams must never be closed. Substreams can only be
+    /// abruptly destroyed by either side.
+    WebRtc {
+        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
+        /// initiated by the remote.
+        is_initiator: bool,
+        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_multihash: Vec<u8>,
+        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_multihash: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GossipKind {
+    ConsensusTransactions,
+}
+
+/// Error returned by [`ChainNetwork::add_chain`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum AddChainError {
+    /// The genesis hash and fork id are identical to the ones of an existing chain.
+    #[display(fmt = "Genesis hash and fork id are identical to the ones of an existing chain.")]
+    Duplicate {
+        /// Identifier of the chain that uses the same genesis hash and fork id.
+        existing_identical: ChainId,
+    },
 }
 
 /// Event generated by [`ChainNetwork::next_event`].
 #[derive(Debug)]
 pub enum Event {
-    /// Established a transport-level connection (e.g. a TCP socket) with the given peer.
-    Connected(PeerId),
-
-    /// A transport-level connection (e.g. a TCP socket) has been closed.
-    ///
-    /// This event is called unconditionally when a connection with the given peer has been
-    /// closed. If `chain_indices` isn't empty, this event is also equivalent to one or more
-    /// [`Event::ChainDisconnected`] events.
-    Disconnected {
+    /// A connection that was added with [`ChainNetwork::add_single_stream_connection`] or
+    /// [`ChainNetwork::add_multi_stream_connection`] has now finished its handshake phase.
+    /// Its [`PeerId`] is now known which certainty.
+    HandshakeFinished {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        expected_peer_id: Option<PeerId>,
+        /// Actual [`PeerId`] of the connection.
         peer_id: PeerId,
-        chain_indices: Vec<usize>,
     },
 
-    ChainConnected {
-        chain_index: usize,
+    /// A connection has shut down before finishing its handshake.
+    PreHandshakeDisconnected {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        address: Vec<u8>,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        expected_peer_id: Option<PeerId>,
+    },
+
+    /// A connection has shut down after finishing its handshake.
+    Disconnected {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// Parameter that was passed to [`ChainNetwork::add_single_stream_connection`] or
+        /// [`ChainNetwork::add_multi_stream_connection`].
+        address: Vec<u8>,
+        /// Peer that was connected.
         peer_id: PeerId,
-        /// Type of the slot that the peer has.
-        slot_ty: SlotTy,
+    },
+
+    /// Now connected to the given peer for gossiping purposes.
+    ///
+    /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
+    GossipConnected {
+        /// Peer we are now connected to.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Which kind of gossip link is concerned.
+        kind: GossipKind,
         /// Role the node reports playing on the network.
-        role: protocol::Role,
+        role: Role,
         /// Height of the best block according to this node.
         best_number: u64,
         /// Hash of the best block according to this node.
         best_hash: [u8; 32],
     },
-    ChainDisconnected {
-        peer_id: PeerId,
-        chain_index: usize,
-        /// Type of the slot that the peer had and no longer has.
-        unassigned_slot_ty: SlotTy,
-    },
 
-    /// An attempt has been made to open the given chain, but a problem happened.
-    ChainConnectAttemptFailed {
-        chain_index: usize,
-        peer_id: PeerId,
-        /// Problem that happened.
-        error: NotificationsOutErr,
-        /// Type of the slot that the peer had and no longer has.
-        unassigned_slot_ty: SlotTy,
-    },
-
-    RequestResult {
-        request_id: OutRequestId,
-        response: RequestResult,
-    },
-
-    /// The given peer has opened a block announces substream with the local node, and an inbound
-    /// slot has been assigned locally to this peer.
+    /// An attempt has been made to open the given chain, but something wrong happened.
     ///
-    /// A [`Event::ChainConnected`] or [`Event::ChainConnectAttemptFailed`] will later be
-    /// generated for this peer.
-    InboundSlotAssigned {
-        chain_index: usize,
+    /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
+    GossipOpenFailed {
+        /// Peer concerned by the event.
         peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Which kind of gossip link is concerned.
+        kind: GossipKind,
+        /// Problem that happened.
+        error: GossipConnectError,
+    },
+
+    /// No longer connected to the given peer for gossiping purposes.
+    GossipDisconnected {
+        /// Peer we are no longer connected to.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Which kind of gossip link is concerned.
+        kind: GossipKind,
+    },
+
+    /// A peer would like to open a gossiping link with the local node.
+    // TODO: document what to do
+    // TODO: include handshake content?
+    GossipInDesired {
+        /// Peer concerned by the event.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Which kind of gossip link is concerned.
+        kind: GossipKind,
+    },
+
+    /// A previously-emitted [`Event::GossipInDesired`] is no longer relevant as the peer has
+    /// stopped the opening attempt.
+    GossipInDesiredCancel {
+        /// Peer concerned by the event.
+        peer_id: PeerId,
+        /// Chain of the gossip connection.
+        chain_id: ChainId,
+        /// Which kind of gossip link is concerned.
+        kind: GossipKind,
+    },
+
+    /// An outgoing request has finished, either successfully or not.
+    RequestResult {
+        /// Identifier of the request that was returned by the function that started the request.
+        substream_id: SubstreamId,
+        /// Outcome of the request.
+        response: RequestResult,
     },
 
     /// Received a new block announce from a peer.
     ///
-    /// Can only happen after a [`Event::ChainConnected`] with the given `PeerId` and chain index
+    /// Can only happen after a [`Event::GossipConnected`] with the given [`PeerId`] and [`ChainId`]
     /// combination has happened.
     BlockAnnounce {
         /// Identity of the sender of the block announce.
         peer_id: PeerId,
         /// Index of the chain the block relates to.
-        chain_index: usize,
+        chain_id: ChainId,
         announce: EncodedBlockAnnounce,
     },
 
-    /// Received a  GrandPa neighbor packet from the network. This contains an update to the
+    /// Received a GrandPa neighbor packet from the network. This contains an update to the
     /// finality state of the given peer.
+    ///
+    /// Can only happen after a [`Event::GossipConnected`] with the given [`PeerId`] and [`ChainId`]
+    /// combination has happened.
     GrandpaNeighborPacket {
         /// Identity of the sender of the message.
         peer_id: PeerId,
         /// Index of the chain the message relates to.
-        chain_index: usize,
+        chain_id: ChainId,
         /// State of the remote.
         state: GrandpaState,
     },
 
     /// Received a GrandPa commit message from the network.
+    ///
+    /// Can only happen after a [`Event::GossipConnected`] with the given [`PeerId`] and [`ChainId`]
+    /// combination has happened.
     GrandpaCommitMessage {
         /// Identity of the sender of the message.
         peer_id: PeerId,
         /// Index of the chain the commit message relates to.
-        chain_index: usize,
+        chain_id: ChainId,
         message: EncodedGrandpaCommitMessage,
     },
 
     /// Error in the protocol in a connection, such as failure to decode a message. This event
     /// doesn't have any consequence on the health of the connection, and is purely for diagnostic
     /// purposes.
+    // TODO: review the concept of protocol error
     ProtocolError {
         /// Peer that has caused the protocol error.
         peer_id: PeerId,
@@ -1274,8 +3652,9 @@ pub enum Event {
         /// Remote that has sent the request.
         peer_id: PeerId,
         /// Identifier of the request. Necessary to send back the answer.
-        request_id: InRequestId,
+        substream_id: SubstreamId,
     },
+
     /// A remote has sent a request for blocks.
     ///
     /// Can only happen for chains where [`ChainConfig::allow_inbound_block_requests`] is `true`.
@@ -1285,20 +3664,22 @@ pub enum Event {
         /// Remote that has sent the request.
         peer_id: PeerId,
         /// Index of the chain concerned by the request.
-        chain_index: usize,
+        chain_id: ChainId,
         /// Information about the request.
         config: protocol::BlocksRequestConfig,
         /// Identifier of the request. Necessary to send back the answer.
-        request_id: InRequestId,
+        substream_id: SubstreamId,
     },
 
+    /// A remote is no longer interested in the response to a request.
+    ///
+    /// Calling [`ChainNetwork::respond_identify`], [`ChainNetwork::respond_blocks`], or similar
+    /// will now panic.
     RequestInCancel {
-        request_id: InRequestId,
-    },
-
-    KademliaDiscoveryResult {
-        operation_id: KademliaOperationId,
-        result: Result<Vec<(PeerId, Vec<Vec<u8>>)>, DiscoveryError>,
+        /// Identifier of the request.
+        ///
+        /// This [`SubstreamId`] is considered dead and no longer valid.
+        substream_id: SubstreamId,
     },
     /*Transactions {
         peer_id: PeerId,
@@ -1306,13 +3687,8 @@ pub enum Event {
     }*/
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SlotTy {
-    Inbound,
-    Outbound,
-}
-
 /// See [`Event::ProtocolError`].
+// TODO: reexport these error types
 #[derive(Debug, derive_more::Display)]
 pub enum ProtocolError {
     /// Error in an incoming substream.
@@ -1320,7 +3696,7 @@ pub enum ProtocolError {
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
     #[display(fmt = "Error while decoding the handshake of the block announces substream: {_0}")]
-    BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
+    BadBlockAnnouncesHandshake(BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
     #[display(fmt = "Error while decoding a received block announce: {_0}")]
     BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
@@ -1332,4 +3708,297 @@ pub enum ProtocolError {
     /// Error while decoding a received blocks request.
     #[display(fmt = "Error while decoding a received blocks request: {_0}")]
     BadBlocksRequest(protocol::DecodeBlockRequestError),
+}
+
+/// Error potentially returned when starting a request.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum StartRequestError {
+    /// There is no valid connection to the given peer on which the request can be started.
+    NoConnection,
+}
+
+/// Error potentially returned when starting a request that might be too large.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum StartRequestMaybeTooLargeError {
+    /// There is no valid connection to the given peer on which the request can be started.
+    NoConnection,
+    /// Size of the request is over maximum allowed by the protocol.
+    RequestTooLarge,
+}
+
+impl From<StartRequestError> for StartRequestMaybeTooLargeError {
+    fn from(err: StartRequestError) -> StartRequestMaybeTooLargeError {
+        match err {
+            StartRequestError::NoConnection => StartRequestMaybeTooLargeError::NoConnection,
+        }
+    }
+}
+
+/// Response to an outgoing request.
+///
+/// See [`Event::RequestResult`̀].
+#[derive(Debug)]
+pub enum RequestResult {
+    Blocks(Result<Vec<protocol::BlockData>, BlocksRequestError>),
+    GrandpaWarpSync(Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>),
+    State(Result<EncodedStateResponse, StateRequestError>),
+    StorageProof(Result<EncodedMerkleProof, StorageProofRequestError>),
+    CallProof(Result<EncodedMerkleProof, CallProofRequestError>),
+    KademliaFindNode(Result<Vec<(peer_id::PeerId, Vec<Vec<u8>>)>, KademliaFindNodeError>),
+}
+
+/// Error returned by [`ChainNetwork::start_blocks_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum BlocksRequestError {
+    /// Error while waiting for the response from the peer.
+    #[display(fmt = "{_0}")]
+    Request(RequestError),
+    /// Error while decoding the response returned by the peer.
+    #[display(fmt = "Response decoding error: {_0}")]
+    Decode(protocol::DecodeBlockResponseError),
+}
+
+/// Error returned by [`ChainNetwork::start_storage_proof_request`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum StorageProofRequestError {
+    #[display(fmt = "{_0}")]
+    Request(RequestError),
+    #[display(fmt = "Response decoding error: {_0}")]
+    Decode(protocol::DecodeStorageCallProofResponseError),
+    /// The remote is incapable of answering this specific request.
+    RemoteCouldntAnswer,
+}
+
+/// Error returned by [`ChainNetwork::start_call_proof_request`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum CallProofRequestError {
+    #[display(fmt = "{_0}")]
+    Request(RequestError),
+    #[display(fmt = "Response decoding error: {_0}")]
+    Decode(protocol::DecodeStorageCallProofResponseError),
+    /// The remote is incapable of answering this specific request.
+    RemoteCouldntAnswer,
+}
+
+impl CallProofRequestError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        match self {
+            CallProofRequestError::Request(_) => true,
+            CallProofRequestError::Decode(_) => false,
+            CallProofRequestError::RemoteCouldntAnswer => true,
+        }
+    }
+}
+
+/// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum GrandpaWarpSyncRequestError {
+    #[display(fmt = "{_0}")]
+    Request(RequestError),
+    #[display(fmt = "Response decoding error: {_0}")]
+    Decode(protocol::DecodeGrandpaWarpSyncResponseError),
+}
+
+/// Error returned by [`ChainNetwork::start_state_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum StateRequestError {
+    #[display(fmt = "{_0}")]
+    Request(RequestError),
+    #[display(fmt = "Response decoding error: {_0}")]
+    Decode(protocol::DecodeStateResponseError),
+}
+
+/// Error during [`ChainNetwork::start_kademlia_find_node_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum KademliaFindNodeError {
+    /// Error during the request.
+    #[display(fmt = "{_0}")]
+    RequestFailed(RequestError),
+    /// Failed to decode the response.
+    #[display(fmt = "Response decoding error: {_0}")]
+    DecodeError(protocol::DecodeFindNodeResponseError),
+}
+
+/// Error potentially returned when queueing a notification.
+#[derive(Debug, derive_more::Display)]
+pub enum QueueNotificationError {
+    /// There is no valid substream to the given peer on which the notification can be sent.
+    NoConnection,
+    /// Queue of notifications with that peer is full.
+    QueueFull,
+}
+
+/// Undecoded but valid block announce.
+#[derive(Clone)]
+pub struct EncodedBlockAnnounce {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
+
+impl EncodedBlockAnnounce {
+    /// Returns the decoded version of the announcement.
+    pub fn decode(&self) -> protocol::BlockAnnounceRef {
+        protocol::decode_block_announce(&self.message, self.block_number_bytes).unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedBlockAnnounce {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid Merkle proof.
+#[derive(Clone)]
+pub struct EncodedMerkleProof(Vec<u8>, protocol::StorageOrCallProof);
+
+impl EncodedMerkleProof {
+    /// Returns the SCALE-encoded Merkle proof.
+    pub fn decode(&self) -> &[u8] {
+        protocol::decode_storage_or_call_proof_response(self.1, &self.0)
+            .unwrap()
+            .unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedMerkleProof {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid GrandPa warp sync response.
+#[derive(Clone)]
+pub struct EncodedGrandpaWarpSyncResponse {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
+
+impl EncodedGrandpaWarpSyncResponse {
+    /// Returns the encoded bytes of the warp sync message.
+    pub fn as_encoded(&self) -> &[u8] {
+        &self.message
+    }
+
+    /// Returns the decoded version of the warp sync message.
+    pub fn decode(&self) -> protocol::GrandpaWarpSyncResponse {
+        match protocol::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
+            Ok(msg) => msg,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedGrandpaWarpSyncResponse {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid state response.
+// TODO: merge with EncodedMerkleProof?
+#[derive(Clone)]
+pub struct EncodedStateResponse(Vec<u8>);
+
+impl EncodedStateResponse {
+    /// Returns the Merkle proof of the state response.
+    pub fn decode(&self) -> &[u8] {
+        match protocol::decode_state_response(&self.0) {
+            Ok(r) => r,
+            Err(_) => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedStateResponse {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+// TODO: link to some doc about how GrandPa works: what is a round, what is the set id, etc.
+pub struct GrandpaState {
+    pub round_number: u64,
+    /// Set of authorities that will be used by the node to try finalize the children of the block
+    /// of [`GrandpaState::commit_finalized_height`].
+    pub set_id: u64,
+    /// Height of the highest block considered final by the node.
+    pub commit_finalized_height: u64,
+}
+
+/// Undecoded but valid block announce handshake.
+pub struct EncodedBlockAnnounceHandshake {
+    handshake: Vec<u8>,
+    block_number_bytes: usize,
+}
+
+impl EncodedBlockAnnounceHandshake {
+    /// Returns the decoded version of the handshake.
+    pub fn decode(&self) -> protocol::BlockAnnouncesHandshakeRef {
+        protocol::decode_block_announces_handshake(self.block_number_bytes, &self.handshake)
+            .unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedBlockAnnounceHandshake {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Error that can happen when trying to open an outbound block announces notifications substream.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum GossipConnectError {
+    /// Error in the underlying protocol.
+    #[display(fmt = "{_0}")]
+    Substream(NotificationsOutErr),
+    /// Error decoding the block announces handshake.
+    HandshakeDecode(BlockAnnouncesHandshakeDecodeError),
+    /// Mismatch between the genesis hash of the remote and the local genesis hash.
+    #[display(fmt = "Mismatch between the genesis hash of the remote and the local genesis hash")]
+    GenesisMismatch {
+        /// Hash of the genesis block of the chain according to the local node.
+        local_genesis: [u8; 32],
+        /// Hash of the genesis block of the chain according to the remote node.
+        remote_genesis: [u8; 32],
+    },
+}
+
+/// Undecoded but valid GrandPa commit message.
+#[derive(Clone)]
+pub struct EncodedGrandpaCommitMessage {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
+
+impl EncodedGrandpaCommitMessage {
+    /// Returns the encoded bytes of the commit message.
+    pub fn into_encoded(mut self) -> Vec<u8> {
+        // Skip the first byte because `self.message` is a `GrandpaNotificationRef`.
+        self.message.remove(0);
+        self.message
+    }
+
+    /// Returns the encoded bytes of the commit message.
+    pub fn as_encoded(&self) -> &[u8] {
+        // Skip the first byte because `self.message` is a `GrandpaNotificationRef`.
+        &self.message[1..]
+    }
+
+    /// Returns the decoded version of the commit message.
+    pub fn decode(&self) -> protocol::CommitMessageRef {
+        match protocol::decode_grandpa_notification(&self.message, self.block_number_bytes) {
+            Ok(protocol::GrandpaNotificationRef::Commit(msg)) => msg,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedGrandpaCommitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
 }

@@ -29,7 +29,7 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
@@ -61,7 +61,10 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    pub network_service: (
+        Arc<network_service::NetworkService<TPlat>>,
+        network_service::ChainId,
+    ),
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
@@ -141,7 +144,7 @@ pub struct SyncService<TPlat: PlatformRef> {
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
 }
@@ -192,7 +195,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             to_background,
             platform: config.platform,
             network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_chain_id: config.network_service.1,
             block_number_bytes: config.block_number_bytes,
         }
     }
@@ -348,7 +351,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .clone()
                 .blocks_request(
                     target,
-                    self.network_chain_index,
+                    self.network_chain_id,
                     request_config.clone(),
                     timeout_per_request,
                 )
@@ -385,7 +388,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         // TODO: better peers selection ; don't just take the first
         for target in self
             .network_service
-            .peers_list()
+            .peers_list(self.network_chain_id)
             .await
             .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
         {
@@ -394,7 +397,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .clone()
                 .blocks_request(
                     target,
-                    self.network_chain_index,
+                    self.network_chain_id,
                     request_config.clone(),
                     timeout_per_request,
                 )
@@ -434,7 +437,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         _max_parallel: NonZeroU32,
     ) -> Result<Vec<StorageResultItem>, StorageQueryError> {
         // TODO: this should probably be extracted to a state machine in `/lib`, with unit tests
-        // TODO: big requests should be split into multiple smaller ones
         // TODO: handle max_parallel
         enum RequestImpl {
             PrefixScan {
@@ -484,6 +486,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut final_results =
             Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
 
+        // Number of nodes that are possible in a response before exceeding the response size
+        // limit. Because the size of a trie node is unknown, this can only ever be a gross
+        // estimate.
+        let mut response_nodes_cap = (16 * 1024 * 1024) / 164;
+
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
             let mut seed = [0; 32];
             self.platform.fill_random_bytes(&mut seed);
@@ -517,27 +524,50 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
             // Build the list of keys to request.
             let keys_to_request = {
+                // Keep track of the number of nodes that might be found in the response.
+                // This is a generous overestimation of the actual number.
+                let mut max_reponse_nodes = 0;
+
                 let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
                     requests_remaining.len() * 4,
                     fnv::FnvBuildHasher::default(),
                 );
 
                 for request in &requests_remaining {
+                    if max_reponse_nodes >= response_nodes_cap {
+                        break;
+                    }
+
                     match request {
                         RequestImpl::PrefixScan { scan, .. } => {
-                            keys.extend(scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
-                            }));
+                            for scan_key in scan.requested_keys() {
+                                if max_reponse_nodes >= response_nodes_cap {
+                                    break;
+                                }
+
+                                let scan_key = trie::nibbles_to_bytes_suffix_extend(scan_key)
+                                    .collect::<Vec<_>>();
+                                let scan_key_len = scan_key.len();
+                                if keys.insert(scan_key) {
+                                    max_reponse_nodes += scan_key_len * 2;
+                                }
+                            }
                         }
                         RequestImpl::ValueOrHash { key, .. } => {
-                            keys.insert(key.clone());
+                            if keys.insert(key.clone()) {
+                                max_reponse_nodes += key.len() * 2;
+                            }
                         }
                         RequestImpl::ClosestDescendantMerkleValue { key } => {
                             // We query the parent of `key`.
                             if key.is_empty() {
-                                keys.insert(Vec::new());
+                                if keys.insert(Vec::new()) {
+                                    max_reponse_nodes += 1;
+                                }
                             } else {
-                                keys.insert(key[..key.len() - 1].to_owned());
+                                if keys.insert(key[..key.len() - 1].to_owned()) {
+                                    max_reponse_nodes += key.len() * 2 - 1;
+                                }
                             }
                         }
                     }
@@ -550,7 +580,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .storage_proof_request(
-                    self.network_chain_index,
+                    self.network_chain_id,
                     target,
                     protocol::StorageProofRequestConfig {
                         block_hash: *block_hash,
@@ -563,7 +593,28 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let proof = match result {
                 Ok(r) => r,
                 Err(err) => {
-                    outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    // In case of error that isn't a protocol error, we reduce the number of
+                    // trie node items to request.
+                    let reduce_max = match &err {
+                        network_service::StorageProofRequestError::RequestTooLarge => true,
+                        network_service::StorageProofRequestError::Request(
+                            service::StorageProofRequestError::Request(err),
+                        ) => !err.is_protocol_error(),
+                        _ => false,
+                    };
+
+                    if !matches!(
+                        err,
+                        network_service::StorageProofRequestError::RequestTooLarge
+                    ) || response_nodes_cap == 1
+                    {
+                        outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    }
+
+                    if reduce_max {
+                        response_nodes_cap = cmp::max(1, response_nodes_cap / 2);
+                    }
+
                     continue;
                 }
             };
@@ -578,14 +629,18 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 }
             };
 
+            let mut proof_has_advanced_verification = false;
+
             for request in mem::take(&mut requests_remaining) {
                 match request {
                     RequestImpl::PrefixScan {
                         scan,
                         requested_key,
                     } => {
-                        match scan.resume(proof.decode()) {
+                        // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
+                        match scan.resume_partial(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                proof_has_advanced_verification = true;
                                 requests_remaining.push(RequestImpl::PrefixScan {
                                     scan,
                                     requested_key,
@@ -595,6 +650,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 entries,
                                 full_storage_values_required,
                             }) => {
+                                proof_has_advanced_verification = true;
                                 // The value of `full_storage_values_required` determines whether
                                 // we wanted full values (`true`) or hashes (`false`).
                                 for (key, value) in entries {
@@ -633,15 +689,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                     }
                                 }
                             }
-                            Err((_, prefix_proof::Error::InvalidProof(err))) => {
+                            Err((_, prefix_proof::Error::InvalidProof(_))) => {
                                 // Since we decode the proof above, this is never supposed to
                                 // be reachable.
-                                debug_assert!(false);
-                                outcome_errors
-                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                                unreachable!()
                             }
-                            Err((_, prefix_proof::Error::MissingProofEntry)) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            Err((scan, prefix_proof::Error::MissingProofEntry)) => {
+                                requests_remaining.push(RequestImpl::PrefixScan {
+                                    requested_key,
+                                    scan,
+                                });
                             }
                         }
                     }
@@ -653,15 +710,17 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         ) {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
+                                    proof_has_advanced_verification = true;
                                     final_results.push(StorageResultItem::Hash {
                                         key,
                                         hash: Some(*h),
                                     });
                                 }
                                 proof_decode::StorageValue::HashKnownValueMissing(_) => {
-                                    outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                    requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
                                 }
                                 proof_decode::StorageValue::Known { value, .. } => {
+                                    proof_has_advanced_verification = true;
                                     if hash {
                                         let hashed_value =
                                             blake2_rfc::blake2b::blake2b(32, &[], value);
@@ -680,6 +739,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                     }
                                 }
                                 proof_decode::StorageValue::None => {
+                                    proof_has_advanced_verification = true;
                                     if hash {
                                         final_results
                                             .push(StorageResultItem::Hash { key, hash: None });
@@ -690,7 +750,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 }
                             },
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
                             }
                         }
                     }
@@ -704,7 +764,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining
+                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
                                 continue;
                             }
                         };
@@ -715,10 +776,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                             Ok(Some(ancestor)) => Some(ancestor.to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining
+                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
                                 continue;
                             }
                         };
+
+                        proof_has_advanced_verification = true;
 
                         final_results.push(StorageResultItem::ClosestDescendantMerkleValue {
                             requested_key: key,
@@ -727,6 +791,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         })
                     }
                 }
+            }
+
+            // If the proof doesn't contain any item that reduces the number of things to request,
+            // then we push an error.
+            if !proof_has_advanced_verification {
+                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
             }
         }
     }
@@ -758,7 +828,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .call_proof_request(
-                    self.network_chain_index,
+                    self.network_chain_id,
                     target,
                     config.clone(),
                     timeout_per_request,
@@ -770,7 +840,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
-                        smoldot::libp2p::peers::RequestError::Substream(
+                        smoldot::network::service::RequestError::Substream(
                             smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                         ),
                     ),

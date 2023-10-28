@@ -14495,7 +14495,7 @@ fn regression_test_174() {
     });
 
     for proof in PROOFS {
-        match prefix_scan.resume(proof) {
+        match prefix_scan.resume_all_keys(proof) {
             Ok(ResumeOutcome::InProgress(scan)) => {
                 prefix_scan = scan;
                 continue;

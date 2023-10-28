@@ -52,8 +52,6 @@ pub struct Config<'a> {
     pub libp2p_key: Box<[u8; 32]>,
     /// List of addresses to listen on.
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
-    /// Configuration of the JSON-RPC server. If `None`, no TCP server is started.
-    pub json_rpc_listen: Option<JsonRpcListenConfig>,
     /// Function that can be used to spawn background tasks.
     ///
     /// The tasks passed as parameter must be executed until they shut down.
@@ -64,7 +62,8 @@ pub struct Config<'a> {
     pub jaeger_agent: Option<SocketAddr>,
 }
 
-/// See [`Config::json_rpc_listen`].
+/// See [`ChainConfig::json_rpc_listen`].
+#[derive(Debug, Clone)]
 pub struct JsonRpcListenConfig {
     /// Bind point of the JSON-RPC server.
     pub address: SocketAddr,
@@ -115,12 +114,15 @@ pub struct ChainConfig<'a> {
     ///
     /// If `None`, no keys are stored in disk.
     pub keystore_path: Option<PathBuf>,
+    /// Configuration of the JSON-RPC server. If `None`, no TCP server is started.
+    pub json_rpc_listen: Option<JsonRpcListenConfig>,
 }
 
 /// Running client. As long as this object is alive, the client reads/writes the database and has
 /// a JSON-RPC server open.
 pub struct Client {
     json_rpc_service: json_rpc_service::JsonRpcService,
+    relay_chain_json_rpc_service: Option<json_rpc_service::JsonRpcService>,
     consensus_service: Arc<consensus_service::ConsensusService>,
     relay_chain_consensus_service: Option<Arc<consensus_service::ConsensusService>>,
     network_service: Arc<network_service::NetworkService>,
@@ -130,9 +132,20 @@ pub struct Client {
 impl Client {
     /// Returns the address the JSON-RPC server is listening on.
     ///
-    /// Returns `None` if and only if [`Config::json_rpc_listen`] was `None`.
+    /// Returns `None` if and only if [`ChainConfig::json_rpc_listen`] was `None`
+    /// in [`Config::chain`].
     pub fn json_rpc_server_addr(&self) -> Option<SocketAddr> {
         self.json_rpc_service.listen_addr()
+    }
+
+    /// Returns the address the relay chain JSON-RPC server is listening on.
+    ///
+    /// Returns `None` if and only if [`Config::relay_chain`] was `None` or if
+    /// [`ChainConfig::json_rpc_listen`] was `None` in [`Config::relay_chain`].
+    pub fn relay_chain_json_rpc_server_addr(&self) -> Option<SocketAddr> {
+        self.relay_chain_json_rpc_service
+            .as_ref()
+            .and_then(|j| j.listen_addr())
     }
 
     /// Returns the best block according to the networking.
@@ -140,15 +153,16 @@ impl Client {
         *self.network_known_best.lock().await
     }
 
-    /// Returns the current number of peers of the client.
+    /// Returns the current total number of peers of the client.
+    // TODO: weird API
     pub async fn num_peers(&self) -> u64 {
-        u64::try_from(self.network_service.num_peers(0).await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::max_value())
     }
 
-    /// Returns the current number of network connections of the client.
+    /// Returns the current total number of network connections of the client.
+    // TODO: weird API
     pub async fn num_network_connections(&self) -> u64 {
-        u64::try_from(self.network_service.num_established_connections().await)
-            .unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::max_value())
     }
 
     // TODO: not the best API
@@ -180,6 +194,37 @@ impl Client {
     pub async fn next_json_rpc_response(&self) -> String {
         self.json_rpc_service.next_response().await
     }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint of the
+    /// relay chain.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    pub fn relay_chain_send_json_rpc_request(
+        &self,
+        request: String,
+    ) -> Result<(), RelayChainSendJsonRpcRequestError> {
+        let Some(relay_chain_json_rpc_service) = &self.relay_chain_json_rpc_service else {
+            return Err(RelayChainSendJsonRpcRequestError::NoRelayChain);
+        };
+
+        relay_chain_json_rpc_service.send_request(request);
+        Ok(())
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`Client::relay_chain_send_json_rpc_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    ///
+    /// If [`Config::relay_chain`] was `None`, this function waits indefinitely.
+    pub async fn relay_chain_next_json_rpc_response(&self) -> String {
+        if let Some(relay_chain_json_rpc_service) = &self.relay_chain_json_rpc_service {
+            relay_chain_json_rpc_service.next_response().await
+        } else {
+            future::pending().await
+        }
+    }
 }
 
 /// Error potentially returned by [`start`].
@@ -197,6 +242,8 @@ pub enum StartError {
     NetworkInit(network_service::InitError),
     /// Error initializing the JSON-RPC service.
     JsonRpcServiceInit(json_rpc_service::InitError),
+    /// Error initializing the JSON-RPC service of the relay chain.
+    RelayChainJsonRpcServiceInit(json_rpc_service::InitError),
     ConsensusServiceInit(consensus_service::InitError),
     RelayChainConsensusServiceInit(consensus_service::InitError),
     /// Error initializing the keystore of the chain.
@@ -205,6 +252,13 @@ pub enum StartError {
     RelayChainKeystoreInit(io::Error),
     /// Error initializing the Jaeger service.
     JaegerInit(io::Error),
+}
+
+/// Error potentially returned by [`Client::relay_chain_send_json_rpc_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum RelayChainSendJsonRpcRequestError {
+    /// There is no relay chain to send the JSON-RPC request to.
+    NoRelayChain,
 }
 
 /// Runs the node using the given configuration.
@@ -238,6 +292,47 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         ),
         None => None,
     };
+
+    // The `protocolId` field of chain specifications is deprecated. Print a warning.
+    if chain_spec.protocol_id().is_some() {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!("chain-spec-has-protocol-id; chain={}", chain_spec.name()),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.protocol_id().is_some() {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-protocol-id; chain={}",
+                    relay_chain_spec.name()
+                ),
+            );
+        }
+    }
+
+    // The `telemetryEndpoints` field of chain specifications isn't supported.
+    if chain_spec.telemetry_endpoints().count() != 0 {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!(
+                "chain-spec-has-telemetry-endpoints; chain={}",
+                chain_spec.name()
+            ),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.telemetry_endpoints().count() != 0 {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-telemetry-endpoints; chain={}",
+                    relay_chain_spec.name()
+                ),
+            );
+        }
+    }
 
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
@@ -311,11 +406,12 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     .await
     .map_err(StartError::JaegerInit)?;
 
-    let (network_service, network_events_receivers) =
+    let (network_service, network_service_chain_ids, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
             listen_addresses: config.listen_addresses,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
+                log_name: chain_spec.name().to_owned(),
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
@@ -385,6 +481,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             .chain(
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
+                        log_name: relay_chains_specs.name().to_owned(),
                         fork_id: relay_chains_specs.fork_id().map(|n| n.to_owned()),
                         block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
@@ -494,7 +591,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         log_callback: config.log_callback.clone(),
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
-        network_service: (network_service.clone(), 0),
+        network_service: (network_service.clone(), network_service_chain_ids[0]),
         database: database.clone(),
         block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
@@ -504,7 +601,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     .await
     .map_err(StartError::ConsensusServiceInit)?;
 
-    let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
+    let relay_chain_consensus_service = if let Some(relay_chain_database) = &relay_chain_database {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: {
@@ -521,8 +618,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                     )),
                 network_events_receiver: network_events_receivers.next().unwrap(),
-                network_service: (network_service.clone(), 1),
-                database: relay_chain_database,
+                network_service: (network_service.clone(), network_service_chain_ids[1]),
+                database: relay_chain_database.clone(),
                 block_number_bytes: usize::from(
                     relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                 ),
@@ -563,17 +660,17 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         log_callback: config.log_callback.clone(),
         database,
         consensus_service: consensus_service.clone(),
-        network_service: network_service.clone(),
-        bind_address: config
-            .json_rpc_listen
-            .as_ref()
-            .map(|cfg| cfg.address.clone()),
+        network_service: (network_service.clone(), network_service_chain_ids[0]),
+        bind_address: config.chain.json_rpc_listen.as_ref().map(|cfg| cfg.address),
         max_parallel_requests: 32,
         max_json_rpc_clients: config
+            .chain
             .json_rpc_listen
             .map_or(0, |cfg| cfg.max_json_rpc_clients),
         chain_name: chain_spec.name().to_owned(),
+        chain_type: chain_spec.chain_type().to_owned(),
         chain_properties_json: chain_spec.properties().to_owned(),
+        chain_is_live: chain_spec.has_live_network(),
         genesis_block_hash: genesis_chain_information
             .as_ref()
             .finalized_block_header
@@ -581,6 +678,43 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     })
     .await
     .map_err(StartError::JsonRpcServiceInit)?;
+
+    // Start the JSON-RPC service of the relay chain.
+    // See remarks above.
+    let relay_chain_json_rpc_service = if let Some(relay_chain_cfg) = config.relay_chain {
+        let relay_chain_spec = relay_chain_spec.as_ref().unwrap();
+        Some(
+            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+                tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback.clone(),
+                database: relay_chain_database.clone().unwrap(),
+                consensus_service: relay_chain_consensus_service.clone().unwrap(),
+                network_service: (network_service.clone(), network_service_chain_ids[1]),
+                bind_address: relay_chain_cfg
+                    .json_rpc_listen
+                    .as_ref()
+                    .map(|cfg| cfg.address),
+                max_parallel_requests: 32,
+                max_json_rpc_clients: relay_chain_cfg
+                    .json_rpc_listen
+                    .map_or(0, |cfg| cfg.max_json_rpc_clients),
+                chain_name: relay_chain_spec.name().to_owned(),
+                chain_type: relay_chain_spec.chain_type().to_owned(),
+                chain_properties_json: relay_chain_spec.properties().to_owned(),
+                chain_is_live: relay_chain_spec.has_live_network(),
+                genesis_block_hash: relay_genesis_chain_information
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .finalized_block_header
+                    .hash(usize::from(relay_chain_spec.block_number_bytes())),
+            })
+            .await
+            .map_err(StartError::JsonRpcServiceInit)?,
+        )
+    } else {
+        None
+    };
 
     // Spawn the task printing the informant.
     // This is not just a dummy task that just prints on the output, but is actually the main
@@ -591,6 +725,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     let network_known_best = Arc::new(Mutex::new(None));
     (config.tasks_executor)(Box::pin({
         let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+        let network_service_chain_id = network_service_chain_ids[0];
         let network_known_best = network_known_best.clone();
 
         // TODO: shut down this task if the client stops?
@@ -601,10 +736,10 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
 
                 match network_event {
                     network_service::Event::BlockAnnounce {
-                        chain_index: 0,
+                        chain_id,
                         scale_encoded_header,
                         ..
-                    } => match (
+                    } if chain_id == network_service_chain_id => match (
                         *network_known_best,
                         header::decode(
                             &scale_encoded_header,
@@ -619,10 +754,10 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         }
                     },
                     network_service::Event::Connected {
-                        chain_index: 0,
+                        chain_id,
                         best_block_number,
                         ..
-                    } => match *network_known_best {
+                    } if chain_id == network_service_chain_id => match *network_known_best {
                         Some(n) if n >= best_block_number => {}
                         _ => *network_known_best = Some(best_block_number),
                     },
@@ -649,6 +784,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         consensus_service,
         relay_chain_consensus_service,
         json_rpc_service,
+        relay_chain_json_rpc_service,
         network_service,
         network_known_best,
     })

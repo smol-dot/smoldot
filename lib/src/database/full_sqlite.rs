@@ -145,6 +145,24 @@ impl SqliteFullDatabase {
         Ok(out)
     }
 
+    /// Returns the hash of the parent of the given block, or `None` if the block is unknown.
+    ///
+    /// > **Note**: If this method is called twice times in a row with the same block hash, it
+    /// >           is possible for the first time to return `Some` and the second time to return
+    /// >           `None`, in case the block has since been removed from the database.
+    pub fn block_parent(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, CorruptedError> {
+        let connection = self.database.lock();
+
+        let out = connection
+            .prepare_cached(r#"SELECT parent_hash FROM blocks WHERE hash = ?"#)
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_row((&block_hash[..],), |row| row.get::<_, [u8; 32]>(0))
+            .optional()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        Ok(out)
+    }
+
     /// Returns the list of extrinsics of the given block, or `None` if the block is unknown.
     ///
     /// > **Note**: The list of extrinsics of a block is also known as its *body*.
@@ -829,7 +847,7 @@ impl SqliteFullDatabase {
                 )
 
             SELECT
-                COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1,
+                COUNT(trie_node.hash) >= 1,
                 CASE COALESCE(SUBSTR(MIN(next_key.node_full_key), 1, LENGTH(:prefix)), X'') = :prefix
                     WHEN TRUE THEN MIN(next_key.node_full_key)
                     ELSE NULL END
@@ -863,7 +881,7 @@ impl SqliteFullDatabase {
             v
         };
 
-        let (has_block, block_has_storage, mut next_key) = statement
+        let result = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -872,19 +890,19 @@ impl SqliteFullDatabase {
                     ":skip_branches": !branch_nodes
                 },
                 |row| {
-                    let has_block = row.get::<_, i64>(0)? != 0;
-                    let block_has_storage = row.get::<_, i64>(1)? != 0;
-                    let next_key = row.get::<_, Option<Vec<u8>>>(2)?;
-                    Ok((has_block, block_has_storage, next_key))
+                    let block_has_storage = row.get::<_, i64>(0)? != 0;
+                    let next_key = row.get::<_, Option<Vec<u8>>>(1)?;
+                    Ok((block_has_storage, next_key))
                 },
             )
+            .optional()
             .map_err(|err| {
                 StorageAccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
             })?;
 
-        if !has_block {
+        let Some((block_has_storage, mut next_key)) = result else {
             return Err(StorageAccessError::UnknownBlock);
-        }
+        };
 
         if !block_has_storage {
             return Err(StorageAccessError::StoragePruned);
@@ -1228,7 +1246,7 @@ fn set_best_chain(
     new_best_block_hash: &[u8],
 ) -> Result<(), CorruptedError> {
     // TODO: can this not be embedded in the SQL statement below?
-    let current_best = meta_get_blob(&database, "best")?.ok_or(CorruptedError::MissingMetaKey)?;
+    let current_best = meta_get_blob(database, "best")?.ok_or(CorruptedError::MissingMetaKey)?;
 
     // TODO: untested except in the most basic situation
     // In the SQL below, the temporary table `changes` is built by walking down (highest to lowest
@@ -1281,7 +1299,7 @@ fn set_best_chain(
         })
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
-    meta_set_blob(&database, "best", new_best_block_hash)?;
+    meta_set_blob(database, "best", new_best_block_hash)?;
     Ok(())
 }
 
@@ -1433,12 +1451,12 @@ fn purge_block(database: &rusqlite::Connection, hash: &[u8]) -> Result<(), Corru
     database
         .prepare_cached("DELETE FROM blocks_body WHERE hash = ?")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute((&hash[..],))
+        .execute((hash,))
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     database
         .prepare_cached("DELETE FROM blocks WHERE hash = ?")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute((&hash[..],))
+        .execute((hash,))
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
 }
@@ -1461,7 +1479,7 @@ fn purge_block_storage(database: &rusqlite::Connection, hash: &[u8]) -> Result<(
         )
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?
         .execute(rusqlite::named_params! {
-            ":block_hash": &hash[..],
+            ":block_hash": hash,
         })
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 

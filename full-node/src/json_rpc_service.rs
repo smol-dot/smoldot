@@ -54,8 +54,12 @@ pub struct Config {
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
-    /// Access to the peer-to-peer networking.
-    pub network_service: Arc<network_service::NetworkService>,
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Where to bind the WebSocket server. If `None`, no TCP server is started.
     pub bind_address: Option<SocketAddr>,
@@ -69,8 +73,14 @@ pub struct Config {
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
 
+    /// Type of the chain, as found in the chain specification.
+    pub chain_type: String,
+
     /// JSON-encoded properties of the chain, as found in the chain specification.
     pub chain_properties_json: String,
+
+    /// Whether the chain is a live network. Found in the chain specification.
+    pub chain_is_live: bool,
 
     /// Hash of the genesis block.
     // TODO: load from database maybe?
@@ -113,7 +123,7 @@ impl JsonRpcService {
                         Ok(addr) => addr,
                         Err(error) => {
                             return Err(InitError::ListenError {
-                                bind_address: addr.clone(),
+                                bind_address: *addr,
                                 error,
                             })
                         }
@@ -123,7 +133,7 @@ impl JsonRpcService {
                 }
                 Err(error) => {
                     return Err(InitError::ListenError {
-                        bind_address: addr.clone(),
+                        bind_address: *addr,
                         error,
                     })
                 }
@@ -168,7 +178,9 @@ impl JsonRpcService {
                 network_service: config.network_service.clone(),
                 receiver: from_background.clone(),
                 chain_name: config.chain_name.clone(),
+                chain_type: config.chain_type.clone(),
                 chain_properties_json: config.chain_properties_json.clone(),
+                chain_is_live: config.chain_is_live,
                 genesis_block_hash: config.genesis_block_hash,
                 consensus_service: config.consensus_service.clone(),
                 runtime_caches_service: runtime_caches_service.clone(),
@@ -203,7 +215,7 @@ impl JsonRpcService {
     /// Returns `None` if and only if [`Config::bind_address`] was `None`. However, if `Some`,
     /// the address is not necessarily equal to the one in [`Config::bind_address`].
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        self.listen_addr.clone()
+        self.listen_addr
     }
 
     /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint.

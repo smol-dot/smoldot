@@ -561,10 +561,10 @@ where
     ///
     /// An error is returned if the protocol is being violated by the remote or if the nonce
     /// overflows. When that happens, the connection should be closed altogether.
-    pub fn read_write<'a>(
+    pub fn read_write(
         mut self,
-        outer_read_write: &'a mut ReadWrite<TNow>,
-    ) -> Result<ReadWriteOutcome<'a, TNow, TSub>, Error> {
+        outer_read_write: &mut ReadWrite<TNow>,
+    ) -> Result<ReadWriteOutcome<'_, TNow, TSub>, Error> {
         // Queue something for writing if necessary.
         if let Outgoing::WritingOut { buffers } = &mut self.inner.outgoing {
             // Make sure that it's not just a list of empty buffers.
@@ -694,7 +694,7 @@ where
                     debug_assert_eq!(outer_read_write.write_bytes_queued, 0);
                     outer_read_write.write_buffers = mem::take(buffers);
                 } else {
-                    outer_read_write.write_buffers.extend(buffers.drain(..));
+                    outer_read_write.write_buffers.append(buffers);
                 }
 
                 outer_read_write.write_bytes_queued += buffers_total_size;
@@ -1963,7 +1963,7 @@ where
         }
 
         // When to wake up the substream for reading again.
-        debug_assert!(matches!(substreams_wake_up_key, None));
+        debug_assert!(substreams_wake_up_key.is_none());
         let will_wake_up_read_again = match (
             self.inner_read_write.read_bytes,
             &self.inner_read_write.wake_up_after,
@@ -2102,31 +2102,29 @@ where
                 .inner
                 .substreams_write_ready
                 .contains(&self.substream_id)
-        {
-            if !matches!(self.yamux.inner.outgoing,  Outgoing::PreparingDataFrame {
+            && !matches!(self.yamux.inner.outgoing,  Outgoing::PreparingDataFrame {
                 substream_id,
                 ..
             } if substream_id == self.substream_id)
-            {
-                let _was_inserted = self.yamux.inner.dead_substreams.insert(self.substream_id);
-                debug_assert!(_was_inserted);
-                debug_assert!(!self
-                    .yamux
-                    .inner
-                    .substreams_wake_up
-                    .iter()
-                    .any(|(_, s)| *s == self.substream_id));
-                debug_assert!(!self
-                    .yamux
-                    .inner
-                    .substreams_write_ready
-                    .contains(&self.substream_id));
-                debug_assert!(!self
-                    .yamux
-                    .inner
-                    .window_frames_to_send
-                    .contains_key(&self.substream_id));
-            }
+        {
+            let _was_inserted = self.yamux.inner.dead_substreams.insert(self.substream_id);
+            debug_assert!(_was_inserted);
+            debug_assert!(!self
+                .yamux
+                .inner
+                .substreams_wake_up
+                .iter()
+                .any(|(_, s)| *s == self.substream_id));
+            debug_assert!(!self
+                .yamux
+                .inner
+                .substreams_write_ready
+                .contains(&self.substream_id));
+            debug_assert!(!self
+                .yamux
+                .inner
+                .window_frames_to_send
+                .contains_key(&self.substream_id));
         }
 
         self.yamux

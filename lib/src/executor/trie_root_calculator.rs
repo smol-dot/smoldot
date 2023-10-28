@@ -697,7 +697,7 @@ impl Inner {
             let child_nibble = Nibble::try_from(maybe_child_nibble_u8).ok();
 
             iter::once(either::Right(&node.partial_key))
-                .chain(child_nibble.map(|n| either::Left([n])).into_iter())
+                .chain(child_nibble.map(|n| either::Left([n])))
         })
     }
 }

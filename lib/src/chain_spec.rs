@@ -85,6 +85,12 @@ impl ChainSpec {
         Ok(ChainSpec { client_spec })
     }
 
+    /// Turns this chain specification into a JSON document representing it.
+    pub fn serialize(&self) -> String {
+        // Can only panic in case of a bug in this module.
+        serde_json::to_string_pretty(&self.client_spec).unwrap()
+    }
+
     /// Builds the [`ChainInformation`] corresponding to the genesis block contained in this chain
     /// spec.
     ///
@@ -280,8 +286,8 @@ impl ChainSpec {
     /// default value is returned.
     ///
     /// > **Note**: This mechanism is legacy and no longer used.
-    pub fn protocol_id(&self) -> &str {
-        self.client_spec.protocol_id.as_deref().unwrap_or("sup")
+    pub fn protocol_id(&self) -> Option<&str> {
+        self.client_spec.protocol_id.as_deref()
     }
 
     /// Returns the "fork id" of the chain. This is arbitrary string that can be used in order to

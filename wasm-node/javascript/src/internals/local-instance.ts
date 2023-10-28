@@ -120,16 +120,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         currentTask: string | null,
         bufferIndices: Uint8Array[],
         advanceExecutionPromise: null | (() => void),
-        stdoutBuffer: string,
-        stderrBuffer: string,
         onShutdownExecutorOrWasmPanic: () => void,
     } = {
         instance: null,
         currentTask: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
-        stdoutBuffer: "",
-        stderrBuffer: "",
         onShutdownExecutorOrWasmPanic: () => { }
     };
 

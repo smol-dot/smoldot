@@ -77,17 +77,15 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use async_lock::Mutex;
 use core::{
     cmp, iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     header,
@@ -114,9 +112,12 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service responsible for synchronizing the chain.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Access to the network, and index of the chain to use to gossip transactions from the point
-    /// of view of the network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    /// Access to the network, and identifier of the chain to use to gossip transactions from the
+    /// point of view of the network service.
+    pub network_service: (
+        Arc<network_service::NetworkService<TPlat>>,
+        network_service::ChainId,
+    ),
 
     /// Maximum number of pending transactions allowed in the service.
     ///
@@ -136,7 +137,7 @@ pub struct Config<TPlat: PlatformRef> {
 /// See [the module-level documentation](..).
 pub struct TransactionsService<TPlat> {
     /// Sending messages to the background task.
-    to_background: Mutex<mpsc::Sender<ToBackground>>,
+    to_background: async_channel::Sender<ToBackground>,
 
     platform: PhantomData<fn() -> TPlat>,
 }
@@ -145,7 +146,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
     pub async fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
-        let (to_background, from_foreground) = mpsc::channel(8);
+        let (to_background, from_foreground) = async_channel::bounded(8);
 
         let task = Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
             log_target: log_target.clone(),
@@ -153,7 +154,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_chain_id: config.network_service.1,
             from_foreground,
             max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
@@ -171,7 +172,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             });
 
         TransactionsService {
-            to_background: Mutex::new(to_background),
+            to_background,
             platform: PhantomData,
         }
     }
@@ -194,12 +195,10 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
-    ) -> mpsc::Receiver<TransactionStatus> {
-        let (updates_report, rx) = mpsc::channel(channel_size);
+    ) -> async_channel::Receiver<TransactionStatus> {
+        let (updates_report, rx) = async_channel::bounded(channel_size);
 
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SubmitTransaction {
                 transaction_bytes,
                 updates_report: Some(updates_report),
@@ -214,8 +213,6 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// channel.
     pub async fn submit_transaction(&self, transaction_bytes: Vec<u8>) {
         self.to_background
-            .lock()
-            .await
             .send(ToBackground::SubmitTransaction {
                 transaction_bytes,
                 updates_report: None,
@@ -305,7 +302,7 @@ enum ValidationError {
 enum ToBackground {
     SubmitTransaction {
         transaction_bytes: Vec<u8>,
-        updates_report: Option<mpsc::Sender<TransactionStatus>>,
+        updates_report: Option<async_channel::Sender<TransactionStatus>>,
     },
 }
 
@@ -316,8 +313,8 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_index: usize,
-    from_foreground: mpsc::Receiver<ToBackground>,
+    network_chain_id: network_service::ChainId,
+    from_foreground: async_channel::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
     max_concurrent_validations: usize,
@@ -333,7 +330,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         network_service: config.network_service,
-        network_chain_index: config.network_chain_index,
+        network_chain_id: config.network_chain_id,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity,
             blocks_capacity,
@@ -379,7 +376,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 loop {
                     match from_foreground.next().await {
                         Some(ToBackground::SubmitTransaction {
-                            updates_report: Some(mut updates_report),
+                            updates_report: Some(updates_report),
                             ..
                         }) => {
                             let _ = updates_report
@@ -607,7 +604,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         block_hash,
                         protocol::BlocksRequestFields {
                             body: true,
-                            header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
+                            header: true, // TODO: must be true in order to avoid an error being generated, fix this in sync service
                             justifications: false,
                         },
                         3,
@@ -615,9 +612,12 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         NonZeroU32::new(3).unwrap(),
                     );
 
-                    Box::pin(
-                        async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) },
-                    )
+                    Box::pin(async move {
+                        (
+                            block_hash,
+                            download_future.await.and_then(|b| b.body.ok_or(())),
+                        )
+                    })
                 });
 
                 worker
@@ -707,7 +707,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
                 download = worker.block_downloads.select_next_some() => {
                     // A block body download has finished, successfully or not.
-                    let (block_hash, block_body) = download;
+                    let (block_hash, mut block_body) = download;
 
                     let block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
@@ -720,8 +720,14 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
                     debug_assert!(block.downloading);
                     block.downloading = false;
-                    if block_body.is_err() {
-                        block.failed_downloads = block.failed_downloads.saturating_add(1);
+
+                    // Make sure that the downloaded body is the one of this block, otherwise
+                    // we consider the download as failed.
+                    if let Ok(body) = &block_body {
+                        // TODO: unwrap the decoding?! is that correct?
+                        if header::extrinsics_root(body) != *header::decode(&block.scale_encoded_header, worker.sync_service.block_number_bytes()).unwrap().extrinsics_root {
+                            block_body = Err(());
+                        }
                     }
 
                     if let Ok(block_body) = block_body {
@@ -749,6 +755,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         }
 
                     } else {
+                        block.failed_downloads = block.failed_downloads.saturating_add(1);
                         log::debug!(
                             target: &config.log_target,
                             "BlockDownloads => Failed(block={})",
@@ -800,7 +807,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
-                            worker.network_chain_index,
+                            worker.network_chain_id,
                             worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
@@ -964,7 +971,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                             // We intentionally limit the number of transactions in the pool,
                             // and immediately drop new transactions of this limit is reached.
                             if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
-                                if let Some(mut updates_report) = updates_report {
+                                if let Some(updates_report) = updates_report {
                                     let _ = updates_report.try_send(TransactionStatus::Dropped(DropReason::MaxPendingTransactionsReached));
                                 }
                                 continue;
@@ -1008,7 +1015,7 @@ struct Worker<TPlat: PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
 
     /// Which chain to use in combination with the [`Worker::network_service`].
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
 
     /// List of pending transactions.
     ///
@@ -1124,7 +1131,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
     when_reannounce: TPlat::Instant,
 
     /// List of channels that should receive changes to the transaction status.
-    status_update: Vec<mpsc::Sender<TransactionStatus>>,
+    status_update: Vec<async_channel::Sender<TransactionStatus>>,
 
     /// Latest known status of the transaction. Used when a new sender is added to
     /// [`PendingTransaction::status_update`].
@@ -1140,7 +1147,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
-    fn add_status_update(&mut self, mut channel: mpsc::Sender<TransactionStatus>) {
+    fn add_status_update(&mut self, channel: async_channel::Sender<TransactionStatus>) {
         if let Some(latest_status) = &self.latest_status {
             if channel.try_send(latest_status.clone()).is_err() {
                 return;
@@ -1152,7 +1159,7 @@ impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
 
     fn update_status(&mut self, status: TransactionStatus) {
         for n in 0..self.status_update.len() {
-            let mut channel = self.status_update.swap_remove(n);
+            let channel = self.status_update.swap_remove(n);
             if channel.try_send(status.clone()).is_ok() {
                 self.status_update.push(channel);
             }

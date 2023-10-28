@@ -266,6 +266,7 @@ struct RunningChain<TPlat: platform::PlatformRef> {
 
 struct ChainServices<TPlat: platform::PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
+    network_service_chain_id: network_service::ChainId,
     network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -276,6 +277,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
+            network_service_chain_id: self.network_service_chain_id.clone(),
             network_identity: self.network_identity.clone(),
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
@@ -695,6 +697,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     let fork_id = chain_spec.fork_id().map(|f| f.to_owned());
                     let chain_name = chain_spec.name().to_owned();
                     let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
+                    let has_protocol_id = chain_spec.protocol_id().is_some();
+                    let has_telemetry_endpoints = chain_spec.telemetry_endpoints().count() != 0;
                     let log_name = log_name.clone();
                     let block_number_bytes = usize::from(chain_spec.block_number_bytes());
                     let starting_block_number = chain_information
@@ -808,6 +812,24 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             )
                         }
 
+                        if has_protocol_id {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain specification of {} contains a `protocolId` field. This \
+                                field is deprecated and its value is no longer used. It can be \
+                                safely removed from the JSON document.", log_name
+                            );
+                        }
+
+                        if has_telemetry_endpoints {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain specification of {} contains a non-empty \
+                                `telemetryEndpoints` field. Smoldot doesn't support telemetry \
+                                endpoints and as such this field is unused.", log_name
+                            );
+                        }
+
                         // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
                         if has_bad_blocks {
                             log::warn!(
@@ -891,8 +913,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     future::MaybeDone::Gone => unreachable!(),
                 };
 
-                let platform = self.platform.clone();
-
                 async move {
                     // Wait for the chain to finish initializing to proceed.
                     (&mut running_chain_init).await;
@@ -901,11 +921,15 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                         .unwrap();
                     running_chain
                         .network_service
-                        .discover(&platform.now(), 0, known_nodes, false)
+                        .discover(running_chain.network_service_chain_id, known_nodes, false)
                         .await;
                     running_chain
                         .network_service
-                        .discover(&platform.now(), 0, bootstrap_nodes, true)
+                        .discover(
+                            running_chain.network_service_chain_id,
+                            bootstrap_nodes,
+                            true,
+                        )
                         .await;
                 }
                 .boxed()
@@ -952,7 +976,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 service_starter.start(json_rpc_service::StartConfig {
                     platform,
                     sync_service: running_chain.sync_service,
-                    network_service: (running_chain.network_service, 0), // TODO: 0?
+                    network_service: (
+                        running_chain.network_service,
+                        running_chain.network_service_chain_id,
+                    ),
                     transactions_service: running_chain.transactions_service,
                     runtime_service: running_chain.runtime_service,
                     chain_spec: &chain_spec,
@@ -1156,7 +1183,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
         peer_id::PublicKey::Ed25519(*network_noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
     // The network service is responsible for connecting to the peer-to-peer network.
-    let (network_service, mut network_event_receivers) =
+    let (network_service, network_service_chain_ids, mut network_event_receivers) =
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
@@ -1218,6 +1245,8 @@ async fn start_services<TPlat: platform::PlatformRef>(
         })
         .await;
 
+    let network_service_chain_id = network_service_chain_ids.into_iter().next().unwrap();
+
     let (sync_service, runtime_service) = match config {
         StartServicesChainTy::Parachain {
             relay_chain,
@@ -1235,7 +1264,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                     platform: platform.clone(),
                     log_name: log_name.clone(),
                     block_number_bytes,
-                    network_service: (network_service.clone(), 0),
+                    network_service: (network_service.clone(), network_service_chain_id),
                     network_events_receiver: network_event_receivers.pop().unwrap(),
                     chain_type: sync_service::ConfigChainType::Parachain(
                         sync_service::ConfigParachain {
@@ -1276,7 +1305,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     block_number_bytes,
                     platform: platform.clone(),
-                    network_service: (network_service.clone(), 0),
+                    network_service: (network_service.clone(), network_service_chain_id),
                     network_events_receiver: network_event_receivers.pop().unwrap(),
                     chain_type: sync_service::ConfigChainType::RelayChain(
                         sync_service::ConfigRelayChain {
@@ -1320,7 +1349,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
             platform: platform.clone(),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
-            network_service: (network_service.clone(), 0),
+            network_service: (network_service.clone(), network_service_chain_id),
             max_pending_transactions: NonZeroU32::new(64).unwrap(),
             max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
             max_concurrent_validations: NonZeroU32::new(2).unwrap(),
@@ -1330,6 +1359,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
 
     ChainServices {
         network_service,
+        network_service_chain_id,
         network_identity,
         runtime_service,
         sync_service,
