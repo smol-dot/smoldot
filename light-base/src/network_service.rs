@@ -923,74 +923,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
         task.active_connections.retain(|_, tx| !tx.is_closed());
 
-        // TODO: handle differently
-        // TODO: doc
-        for chain_id in task.log_chain_names.keys() {
-            loop {
-                // TODO: 4 is an arbitrary constant, make configurable
-                if task
-                    .network
-                    .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
-                    >= 4
-                {
-                    break;
-                }
-
-                let peer_id = match task.peering_strategy.assign_slot(chain_id, &task.platform.now()) {
-                    basic_peering_strategy::AssignSlotOutcome::Assigned(peer_id) => {
-                        peer_id.clone()
-                    }
-                    basic_peering_strategy::AssignSlotOutcome::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                    | basic_peering_strategy::AssignSlotOutcome::NoPeer => break,
-                };
-
-                log::debug!(
-                    target: "connections",
-                    "OutSlots({}) ∋ {}",
-                    &task.log_chain_names[chain_id],
-                    peer_id
-                );
-
-                task.network.gossip_insert_desired(
-                    *chain_id,
-                    peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
-            }
-        }
-
-        // TODO: handle differently
-        // TODO: doc
-        loop {
-            let Some((peer_id, chain_id)) = task
-                .network
-                .connected_unopened_gossip_desired()
-                .next()
-                .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
-            else {
-                break;
-            };
-
-            task.network
-                .gossip_open(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                )
-                .unwrap();
-
-            log::debug!(
-                target: "network",
-                "Gossip({}, {}) <= Open",
-                peer_id,
-                &task.log_chain_names[&chain_id],
-            );
-        }
-
         enum WhatHappened {
             Message(ToBackground),
             NetworkEvent(service::Event),
-            StartConnect(PeerId),
+            CanAssignSlot(PeerId, ChainId),
+            CanStartConnect(PeerId),
+            CanOpenGossip(PeerId, ChainId),
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -1003,16 +941,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
             let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                // TODO: move down, but causes borrowck errors
-                let start_connect = task.network.unconnected_desired().next().cloned();
-                if let Some(event) = if can_generate_event {
-                    task.network.next_event()
-                } else {
-                    None
-                } {
+                if let Some(event) = can_generate_event
+                    .then(|| task.network.next_event())
+                    .flatten()
+                {
                     WhatHappened::NetworkEvent(event)
-                } else if let Some(start_connect) = start_connect {
-                    WhatHappened::StartConnect(start_connect)
+                } else if let Some(start_connect) = {
+                    let x = task.network.unconnected_desired().next().cloned();
+                    x
+                } {
+                    WhatHappened::CanStartConnect(start_connect)
+                } else if let Some((peer_id, chain_id)) = {
+                    let x = task
+                        .network
+                        .connected_unopened_gossip_desired()
+                        .next()
+                        .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
+                    x
+                } {
+                    WhatHappened::CanOpenGossip(peer_id, chain_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -1020,6 +967,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         connection_id,
                         message,
                     }
+                } else if let Some((peer_id, chain_id)) = task.log_chain_names.keys().find_map(|chain_id| {
+                    // TODO: 4 is an arbitrary constant, make configurable
+                    if task
+                        .network
+                        .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
+                        >= 4
+                    {
+                        return None;
+                    }
+
+                    match task.peering_strategy.pick_assignable_peer(chain_id, &task.platform.now()) {
+                        basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                            Some((peer_id.clone(), *chain_id))
+                        }
+                        basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
+                        | basic_peering_strategy::AssignablePeer::NoPeer => None,
+                    }
+                }) {
+                    WhatHappened::CanAssignSlot(peer_id, chain_id)
                 } else {
                     future::pending().await
                 }
@@ -1769,7 +1735,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: disconnect peer
                 continue;
             }
-            WhatHappened::StartConnect(peer_id) => {
+            WhatHappened::CanAssignSlot(peer_id, chain_id) => {
+                task.peering_strategy.assign_slot(&chain_id, &peer_id);
+
+                log::debug!(
+                    target: "connections",
+                    "OutSlots({}) ∋ {}",
+                    &task.log_chain_names[&chain_id],
+                    peer_id
+                );
+
+                task.network.gossip_insert_desired(
+                    chain_id,
+                    peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
+
+                continue;
+            }
+            WhatHappened::CanStartConnect(peer_id) => {
                 // TODO: restore rate limiting
 
                 let Some(multiaddr) = task.peering_strategy.addr_to_connected(&peer_id) else {
@@ -1925,6 +1909,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
+
+                continue;
+            }
+            WhatHappened::CanOpenGossip(peer_id, chain_id) => {
+                task.network
+                    .gossip_open(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .unwrap();
+
+                log::debug!(
+                    target: "network",
+                    "Gossip({}, {}) <= Open",
+                    peer_id,
+                    &task.log_chain_names[&chain_id],
+                );
 
                 continue;
             }
