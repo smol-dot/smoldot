@@ -81,6 +81,7 @@ use core::{
     cmp, iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
+    pin,
     time::Duration,
 };
 use futures_lite::FutureExt as _;
@@ -155,7 +156,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             runtime_service: config.runtime_service,
             network_service: config.network_service.0,
             network_chain_id: config.network_service.1,
-            from_foreground,
+            from_foreground: Box::pin(from_foreground),
             max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
             max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
@@ -314,7 +315,7 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_id: network_service::ChainId,
-    from_foreground: async_channel::Receiver<ToBackground>,
+    from_foreground: pin::Pin<Box<async_channel::Receiver<ToBackground>>>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
     max_concurrent_validations: usize,

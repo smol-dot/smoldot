@@ -36,7 +36,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
-    mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
+    coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<ToBackground>,
 ) {
     let address_string = address.to_string();
@@ -45,6 +45,8 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     else {
         unreachable!()
     };
+    // We need to pin the receiver, as the type doesn't implement `Unpin`.
+    let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
 
     let mut socket = pin::pin!(match platform.connect_stream(address).await {
         Ok(s) => s,
@@ -72,7 +74,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
-    let mut message_sending = None;
+    let mut message_sending = pin::pin!(None);
 
     loop {
         // Because only one message should be sent to the coordinator at a time, and that
@@ -123,12 +125,12 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 connection_task = task_update;
                 debug_assert!(message_sending.is_none());
                 if let Some(message) = message {
-                    message_sending = Some(connection_to_coordinator.send(
+                    message_sending.set(Some(connection_to_coordinator.send(
                         super::ToBackground::ConnectionMessage {
                             connection_id,
                             message,
                         },
-                    ));
+                    )));
                 }
             } else {
                 return;
@@ -157,7 +159,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 // must be called. Because we only call `read_write_access` when `message_sending`
                 // is `None`, we also call `wait_read_write_again` only when `message_sending` is
                 // `None`.
-                let fut = if message_sending.is_none() {
+                let fut = if message_sending.as_ref().as_pin_ref().is_none() {
                     Some(platform.wait_read_write_again(socket.as_mut()))
                 } else {
                     None
@@ -173,12 +175,12 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             };
 
             let message_sent = async {
-                let result = if let Some(message_sending) = message_sending.as_mut() {
+                let result = if let Some(message_sending) = message_sending.as_mut().as_pin_mut() {
                     message_sending.await
                 } else {
                     future::pending().await
                 };
-                message_sending = None;
+                message_sending.set(None);
                 if result.is_ok() {
                     WhatHappened::MessageSent
                 } else {
@@ -217,7 +219,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 ) {
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
-    let mut message_sending = None;
+    let mut message_sending = pin::pin!(None);
     // Number of substreams that are currently being opened by the `PlatformRef` implementation
     // and that the `connection_task` state machine isn't aware of yet.
     let mut pending_opening_out_substreams = 0;
@@ -228,6 +230,8 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     >::new();
     // Identifier to assign to the next substream.
     let mut next_substream_id = 0; // TODO: weird API
+                                   // We need to pin the receiver, as the type doesn't implement `Unpin`.
+    let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
 
     loop {
         // Start opening new outbound substreams, if needed.
@@ -263,7 +267,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 // must be called. Because we only call `read_write_access` when `message_sending`
                 // is `None`, we also call `wait_read_write_again` only when `message_sending` is
                 // `None`.
-                let fut = if message_sending.is_none() {
+                let fut = if message_sending.as_ref().as_pin_ref().is_none() {
                     Some(when_substreams_rw_ready.select_next_some())
                 } else {
                     None
@@ -279,13 +283,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             };
 
             let message_sent = async {
-                let result: Result<(), _> = if let Some(message_sending) = message_sending.as_mut()
-                {
-                    message_sending.await
-                } else {
-                    future::pending().await
-                };
-                message_sending = None;
+                let result: Result<(), _> =
+                    if let Some(message_sending) = message_sending.as_mut().as_pin_mut() {
+                        message_sending.await
+                    } else {
+                        future::pending().await
+                    };
+                message_sending.set(None);
                 if result.is_ok() {
                     WhatHappened::MessageSent
                 } else {
@@ -370,12 +374,12 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     connection_task = task_update;
                     debug_assert!(message_sending.is_none());
                     if let Some(message) = message {
-                        message_sending = Some(connection_to_coordinator.send(
+                        message_sending.set(Some(connection_to_coordinator.send(
                             super::ToBackground::ConnectionMessage {
                                 connection_id,
                                 message,
                             },
-                        ));
+                        )));
                     }
                 } else {
                     return;
