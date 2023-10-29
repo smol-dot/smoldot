@@ -100,18 +100,14 @@ jobs:
   check-no-std:
     runs-on: ubuntu-latest
     container:
-      image: rust  # Note: the Rust version doesn't matter as we're using the latest nightly
+      image: rust:1.72
     steps:
     - uses: actions/checkout@v4
-      # Since build artifacts are specific to a nightly version, we pin the specific nightly
-      # version to use in order to not invalidate the build cache every day. The exact version
-      # is completely arbitrary.
-    - run: rustup default nightly-2023-10-24
+    - run: rustup target add thumbv7m-none-eabi
     - uses: Swatinem/rust-cache@v2
-    - run: rustup component add rust-src --toolchain nightly-2023-10-24-x86_64-unknown-linux-gnu # Necessary for `-Z build-std` below
-    # Note that we use `thumbv7m-none-eabi` as this target seems to generally work fine. Many targets unfortunately have Rust/LLVM bugs preventing compilation.
-    - run: RUSTFLAGS=-Dwarnings cargo +nightly-2023-10-24 build -Z unstable-options --keep-going --package smoldot --locked --no-default-features -Z build-std=core,alloc --target=thumbv7m-none-eabi
-    - run: RUSTFLAGS=-Dwarnings cargo +nightly-2023-10-24 build -Z unstable-options --keep-going --package smoldot-light --locked --no-default-features -Z build-std=core,alloc --target=thumbv7m-none-eabi
+    # Note that we use `thumbv7m-none-eabi` as this target seems to generally work fine and doesn't support `std`. Many targets unfortunately have Rust/LLVM bugs preventing compilation.
+    - run: RUSTFLAGS=-Dwarnings cargo build --keep-going --package smoldot --locked --no-default-features --target=thumbv7m-none-eabi
+    - run: RUSTFLAGS=-Dwarnings cargo build --keep-going --package smoldot-light --locked --no-default-features --target=thumbv7m-none-eabi
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
