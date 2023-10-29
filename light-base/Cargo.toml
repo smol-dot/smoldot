@@ -26,7 +26,7 @@ futures-lite = { version = "1.13.0", default-features = false, features = ["allo
 futures-util = { version = "0.3.27", default-features = false, features = ["alloc", "async-await", "async-await-macro", "channel", "sink"] }  # TODO: slim down these features
 hashbrown = { version = "0.14.0", default-features = false }
 hex = { version = "0.4.3", default-features = false }
-itertools = "0.11.0"
+itertools = { version = "0.11.0", default-features = false, features = ["use_alloc"] }
 log = { version = "0.4.18", default-features = false }
 lru = { version = "0.11.0", default-features = false }
 no-std-net = { version = "0.6.0", default-features = false }
