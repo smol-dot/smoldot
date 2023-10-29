@@ -28,8 +28,9 @@ use alloc::{
     collections::{btree_map, BTreeMap, BTreeSet},
     vec::Vec,
 };
-
 use core::hash::Hash;
+use rand::seq::IteratorRandom as _;
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use crate::libp2p::PeerId;
 
@@ -40,6 +41,8 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     peers_chains: BTreeMap<(PeerId, TChainId), PeerChainState<TInstant>>,
 
     peers_chains_by_state: BTreeSet<(TChainId, PeerChainState<TInstant>, PeerId)>,
+
+    randomness: ChaCha20Rng,
 }
 
 #[derive(Debug)]
@@ -61,11 +64,15 @@ where
     TInstant: PartialOrd + Ord + Eq + Clone, // TODO: remove Clone?
 {
     /// Creates a new empty [`BasicPeeringStrategy`].
-    pub fn new() -> Self {
+    ///
+    /// Must be passed a seed for randomness used
+    /// in [`BasicPeeringStrategy::pick_assignable_peer`].
+    pub fn new(randomness_seed: [u8; 32]) -> Self {
         BasicPeeringStrategy {
             addresses: BTreeMap::new(),
             peers_chains: BTreeMap::new(),
             peers_chains_by_state: BTreeSet::new(),
+            randomness: ChaCha20Rng::from_seed(randomness_seed),
         }
     }
 
@@ -168,13 +175,17 @@ where
         chain: &TChainId,
         now: &TInstant,
     ) -> AssignablePeer<'_, TInstant> {
-        // TODO: choose randomly which peer to assign
         // TODO: optimize
-        if let Some(((peer_id, _), _)) = self.peers_chains.iter_mut().find(|((_, c), s)| {
-            *c == *chain
-                && (matches!(*s, PeerChainState::Assignable)
-                    || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
-        }) {
+        if let Some(((peer_id, _), _)) = self
+            .peers_chains
+            .iter_mut()
+            .filter(|((_, c), s)| {
+                *c == *chain
+                    && (matches!(*s, PeerChainState::Assignable)
+                        || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
+            })
+            .choose(&mut self.randomness)
+        {
             AssignablePeer::Assignable(peer_id)
         } else {
             // TODO: never returns `AllBanned`
