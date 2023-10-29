@@ -1809,7 +1809,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 log::debug!(
                     target: "connections",
-                    "Connections({}) <= StartConnecting(remot_addr={}, local_peer_id={})",
+                    "Connections({}) <= StartConnecting(remote_addr={}, local_peer_id={})",
                     peer_id,
                     multiaddr,
                     peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id(),
