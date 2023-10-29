@@ -303,7 +303,8 @@ impl NetworkService {
             randomness_seed: rand::random(),
         });
 
-        let mut peering_strategy = basic_peering_strategy::BasicPeeringStrategy::new();
+        let mut peering_strategy =
+            basic_peering_strategy::BasicPeeringStrategy::new(rand::random());
 
         let mut chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
