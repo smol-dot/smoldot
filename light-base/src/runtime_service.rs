@@ -1441,10 +1441,12 @@ async fn run_background<TPlat: PlatformRef>(
                 WhatHappened::NewNecessaryDownload => {
                     background.start_necessary_downloads().await;
                 }
-                WhatHappened::Notification(notification) => {
+                WhatHappened::Notification(None) => {
+                    break; // Break out of the inner loop in order to reset the background.
+                }
+                WhatHappened::Notification(Some(notification)) => {
                     match notification {
-                        None => break, // Break out of the inner loop in order to reset the background.
-                        Some(sync_service::Notification::Block(new_block)) => {
+                        sync_service::Notification::Block(new_block) => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
@@ -1525,10 +1527,10 @@ async fn run_background<TPlat: PlatformRef>(
 
                             background.advance_and_notify_subscribers(guarded);
                         }
-                        Some(sync_service::Notification::Finalized {
+                        sync_service::Notification::Finalized {
                             hash,
                             best_block_hash,
-                        }) => {
+                        } => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= InputFinalized(hash={}, best={})",
@@ -1537,7 +1539,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                             background.finalize(hash, best_block_hash).await;
                         }
-                        Some(sync_service::Notification::BestBlockChanged { hash }) => {
+                        sync_service::Notification::BestBlockChanged { hash } => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= BestBlockChanged(hash={})",
