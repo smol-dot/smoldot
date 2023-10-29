@@ -711,48 +711,45 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
             };
 
             match what_happened {
-                WhatHappened::Notification(notification) => {
-                    match notification {
-                        Some(runtime_service::Notification::Block(new_block)) => {
-                            let hash = header::hash_from_scale_encoded_header(
-                                &new_block.scale_encoded_header,
-                            );
-                            worker.pending_transactions.add_block(
-                                header::hash_from_scale_encoded_header(
-                                    &new_block.scale_encoded_header,
-                                ),
-                                &new_block.parent_hash,
-                                Block {
-                                    scale_encoded_header: new_block.scale_encoded_header,
-                                    failed_downloads: 0,
-                                    downloading: false,
-                                },
-                            );
-                            if new_block.is_new_best {
-                                worker.set_best_block(&config.log_target, &hash);
-                            }
-                        }
-                        Some(runtime_service::Notification::Finalized {
-                            hash,
-                            best_block_hash,
-                            ..
-                        }) => {
-                            worker.set_best_block(&config.log_target, &best_block_hash);
-                            for pruned in worker.pending_transactions.set_finalized_block(&hash) {
-                                // All blocks in `pending_transactions` are pinned within the
-                                // runtime service. Unpin them when they're removed.
-                                subscribe_all.new_blocks.unpin_block(&pruned.0).await;
-
-                                // Note that we could in principle interrupt any on-going
-                                // download of that block, but it is not worth the effort.
-                            }
-                        }
-                        Some(runtime_service::Notification::BestBlockChanged { hash }) => {
-                            worker.set_best_block(&config.log_target, &hash);
-                        }
-                        None => continue 'channels_rebuild,
+                WhatHappened::Notification(Some(runtime_service::Notification::Block(
+                    new_block,
+                ))) => {
+                    let hash =
+                        header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
+                    worker.pending_transactions.add_block(
+                        header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                        &new_block.parent_hash,
+                        Block {
+                            scale_encoded_header: new_block.scale_encoded_header,
+                            failed_downloads: 0,
+                            downloading: false,
+                        },
+                    );
+                    if new_block.is_new_best {
+                        worker.set_best_block(&config.log_target, &hash);
                     }
                 }
+                WhatHappened::Notification(Some(runtime_service::Notification::Finalized {
+                    hash,
+                    best_block_hash,
+                    ..
+                })) => {
+                    worker.set_best_block(&config.log_target, &best_block_hash);
+                    for pruned in worker.pending_transactions.set_finalized_block(&hash) {
+                        // All blocks in `pending_transactions` are pinned within the
+                        // runtime service. Unpin them when they're removed.
+                        subscribe_all.new_blocks.unpin_block(&pruned.0).await;
+
+                        // Note that we could in principle interrupt any on-going
+                        // download of that block, but it is not worth the effort.
+                    }
+                }
+                WhatHappened::Notification(Some(
+                    runtime_service::Notification::BestBlockChanged { hash },
+                )) => {
+                    worker.set_best_block(&config.log_target, &hash);
+                }
+                WhatHappened::Notification(None) => continue 'channels_rebuild,
 
                 WhatHappened::BlockDownloadFinished(block_hash, mut block_body) => {
                     // A block body download has finished, successfully or not.
@@ -1035,65 +1032,58 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     );
                 }
 
-                WhatHappened::ForegroundMessage(message) => {
-                    let message = match message {
-                        Some(msg) => msg,
-                        None => return,
-                    };
+                WhatHappened::ForegroundMessage(None) => return,
 
-                    match message {
-                        ToBackground::SubmitTransaction {
-                            transaction_bytes,
-                            updates_report,
-                        } => {
-                            // Handle the situation where the same transaction has already been
-                            // submitted in the pool before.
-                            let existing_tx_id = worker
-                                .pending_transactions
-                                .find_transaction(&transaction_bytes)
-                                .next();
-                            if let Some(existing_tx_id) = existing_tx_id {
-                                let existing_tx = worker
-                                    .pending_transactions
-                                    .transaction_user_data_mut(existing_tx_id)
-                                    .unwrap();
-                                if let Some(updates_report) = updates_report {
-                                    existing_tx.add_status_update(updates_report);
-                                }
-                                continue;
-                            }
-
-                            // We intentionally limit the number of transactions in the pool,
-                            // and immediately drop new transactions of this limit is reached.
-                            if worker.pending_transactions.num_transactions()
-                                >= worker.max_pending_transactions
-                            {
-                                if let Some(updates_report) = updates_report {
-                                    let _ = updates_report.try_send(TransactionStatus::Dropped(
-                                        DropReason::MaxPendingTransactionsReached,
-                                    ));
-                                }
-                                continue;
-                            }
-
-                            // Success path. Inserting in pool.
-                            worker.pending_transactions.add_unvalidated(
-                                transaction_bytes,
-                                PendingTransaction {
-                                    when_reannounce: worker.platform.now(),
-                                    status_update: {
-                                        let mut vec = Vec::with_capacity(1);
-                                        if let Some(updates_report) = updates_report {
-                                            vec.push(updates_report);
-                                        }
-                                        vec
-                                    },
-                                    latest_status: None,
-                                    validation_in_progress: None,
-                                },
-                            );
+                WhatHappened::ForegroundMessage(Some(ToBackground::SubmitTransaction {
+                    transaction_bytes,
+                    updates_report,
+                })) => {
+                    // Handle the situation where the same transaction has already been
+                    // submitted in the pool before.
+                    let existing_tx_id = worker
+                        .pending_transactions
+                        .find_transaction(&transaction_bytes)
+                        .next();
+                    if let Some(existing_tx_id) = existing_tx_id {
+                        let existing_tx = worker
+                            .pending_transactions
+                            .transaction_user_data_mut(existing_tx_id)
+                            .unwrap();
+                        if let Some(updates_report) = updates_report {
+                            existing_tx.add_status_update(updates_report);
                         }
+                        continue;
                     }
+
+                    // We intentionally limit the number of transactions in the pool,
+                    // and immediately drop new transactions of this limit is reached.
+                    if worker.pending_transactions.num_transactions()
+                        >= worker.max_pending_transactions
+                    {
+                        if let Some(updates_report) = updates_report {
+                            let _ = updates_report.try_send(TransactionStatus::Dropped(
+                                DropReason::MaxPendingTransactionsReached,
+                            ));
+                        }
+                        continue;
+                    }
+
+                    // Success path. Inserting in pool.
+                    worker.pending_transactions.add_unvalidated(
+                        transaction_bytes,
+                        PendingTransaction {
+                            when_reannounce: worker.platform.now(),
+                            status_update: {
+                                let mut vec = Vec::with_capacity(1);
+                                if let Some(updates_report) = updates_report {
+                                    vec.push(updates_report);
+                                }
+                                vec
+                            },
+                            latest_status: None,
+                            validation_in_progress: None,
+                        },
+                    );
                 }
             }
         }
