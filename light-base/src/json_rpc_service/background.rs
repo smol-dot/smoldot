@@ -66,9 +66,6 @@ struct Background<TPlat: PlatformRef> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`StartConfig::peer_id`]. The only use for this field is to send the Base58 encoding of
-    /// the [`PeerId`]. Consequently, we store the conversion to Base58 ahead of time.
-    peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
     system_name: String,
     /// Value to return when the `system_version` RPC is called.
@@ -145,7 +142,6 @@ pub(super) fn start<TPlat: PlatformRef>(
         chain_ty: config.chain_spec.chain_type().to_owned(),
         chain_is_live: config.chain_spec.has_live_network(),
         chain_properties_json: config.chain_spec.properties().to_owned(),
-        peer_id_base58: config.peer_id.to_base58(),
         system_name: config.system_name.clone(),
         system_version: config.system_version.clone(),
         network_service: config.network_service.clone(),
@@ -428,9 +424,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::system_localListenAddresses {} => {
                 self.system_local_listen_addresses(request).await;
             }
-            methods::MethodCall::system_localPeerId {} => {
-                self.system_local_peer_id(request).await;
-            }
             methods::MethodCall::system_name {} => {
                 self.system_name(request).await;
             }
@@ -508,6 +501,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::state_queryStorage { .. }
             | methods::MethodCall::system_addReservedPeer { .. }
             | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_localPeerId { .. }
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^

@@ -76,9 +76,6 @@ pub struct Config<TPlat> {
     /// Value sent back for the agent version when receiving an identification request.
     pub identify_agent_version: String,
 
-    /// Key to use for the encryption layer of all the connections. Gives the node its identity.
-    pub noise_key: connection::NoiseKey,
-
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
 
@@ -157,7 +154,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
-            noise_key: config.noise_key,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: {
                 let mut seed = [0; 32];
@@ -1803,11 +1799,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     continue;
                 };
 
+                // Each connection has its own individual Noise key.
+                let noise_key = {
+                    let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
+                    task.platform.fill_random_bytes(&mut *noise_static_key);
+                    let mut libp2p_key = zeroize::Zeroizing::new([0u8; 32]);
+                    task.platform.fill_random_bytes(&mut *libp2p_key);
+                    connection::NoiseKey::new(&libp2p_key, &noise_static_key)
+                };
+
                 log::debug!(
                     target: "connections",
-                    "Connections({}) <= StartConnecting({})",
+                    "Connections({}) <= StartConnecting(remote_addr={}, local_peer_id={})",
                     peer_id,
-                    multiaddr
+                    multiaddr,
+                    peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id(),
                 );
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
@@ -1821,6 +1827,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.platform.now(),
                                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                                     is_initiator: true,
+                                    noise_key: &noise_key,
                                 },
                                 multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
@@ -1885,6 +1892,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     is_initiator: true,
                                     local_tls_certificate_multihash,
                                     remote_tls_certificate_multihash,
+                                    noise_key: &noise_key,
                                 },
                                 multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),

@@ -49,7 +49,7 @@ use alloc::{
     sync::Arc,
 };
 use core::num::NonZeroU32;
-use smoldot::{chain_spec, json_rpc::service, libp2p::PeerId};
+use smoldot::{chain_spec, json_rpc::service};
 
 /// Configuration for [`service()`].
 pub struct Config {
@@ -222,9 +222,6 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
-
-    /// Network identity of the node.
-    pub peer_id: &'a PeerId,
 
     /// Value to return when the `system_name` RPC is called. Should be set to the name of the
     /// final executable.
