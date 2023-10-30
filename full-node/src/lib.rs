@@ -297,7 +297,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     if chain_spec.protocol_id().is_some() {
         config.log_callback.log(
             LogLevel::Warn,
-            format!("chain-spec-has-protocol-id; chain={}", chain_spec.name()),
+            format!("chain-spec-has-protocol-id; chain={}", chain_spec.id()),
         );
     }
     if let Some(relay_chain_spec) = &relay_chain_spec {
@@ -306,7 +306,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 LogLevel::Warn,
                 format!(
                     "chain-spec-has-protocol-id; chain={}",
-                    relay_chain_spec.name()
+                    relay_chain_spec.id()
                 ),
             );
         }
@@ -318,7 +318,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             LogLevel::Warn,
             format!(
                 "chain-spec-has-telemetry-endpoints; chain={}",
-                chain_spec.name()
+                chain_spec.id()
             ),
         );
     }
@@ -328,7 +328,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 LogLevel::Warn,
                 format!(
                     "chain-spec-has-telemetry-endpoints; chain={}",
-                    relay_chain_spec.name()
+                    relay_chain_spec.id()
                 ),
             );
         }
@@ -411,7 +411,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             listen_addresses: config.listen_addresses,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
-                log_name: chain_spec.name().to_owned(),
+                log_name: chain_spec.id().to_owned(),
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
@@ -481,7 +481,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             .chain(
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
-                        log_name: relay_chains_specs.name().to_owned(),
+                        log_name: relay_chains_specs.id().to_owned(),
                         fork_id: relay_chains_specs.fork_id().map(|n| n.to_owned()),
                         block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
