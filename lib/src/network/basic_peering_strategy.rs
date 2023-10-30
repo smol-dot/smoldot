@@ -123,6 +123,7 @@ where
         }
     }
 
+    // TODO: must purge an old peer
     pub fn insert_chain_peer(&mut self, chain: TChainId, peer_id: PeerId) {
         let peer_id_index = self.get_or_insert_peer_index(&peer_id);
         let chain_index = self.get_or_insert_chain_index(&chain);
@@ -232,6 +233,7 @@ where
                     .count();
 
                 if num_addresses >= max_addresses {
+                    // TODO: is it a good idea to choose the address randomly to remove? maybe there should be a sorting system with best addresses first?
                     self.addresses
                         .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
                         .filter(|((_, a), s)| {
