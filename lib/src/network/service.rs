@@ -85,7 +85,7 @@ use core::{
     fmt,
     hash::Hash,
     iter, mem,
-    ops::{Add, Sub},
+    ops::{self, Add, Sub},
     time::Duration,
 };
 use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
@@ -93,8 +93,8 @@ use rand_chacha::rand_core::{RngCore as _, SeedableRng as _};
 pub use crate::libp2p::{
     collection::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InboundError,
-        MultiStreamConnectionTask, NotificationsOutErr, ReadWrite, RequestError,
-        SingleStreamConnectionTask, SubstreamId,
+        MultiStreamConnectionTask, MultiStreamHandshakeKind, NotificationsOutErr, ReadWrite,
+        RequestError, SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamId,
     },
     connection::noise::{self, NoiseKey},
     multiaddr::{self, Multiaddr},
@@ -119,11 +119,6 @@ pub struct Config {
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
     pub randomness_seed: [u8; 32],
 
-    /// Key used for the encryption layer.
-    /// This is a Noise static key, according to the Noise specification.
-    /// Signed using the actual libp2p key.
-    pub noise_key: NoiseKey,
-
     /// Amount of time after which a connection hathat ndshake is considered to have taken too long
     /// and must be aborted.
     pub handshake_timeout: Duration,
@@ -132,7 +127,11 @@ pub struct Config {
 /// Configuration for a specific overlay network.
 ///
 /// See [`ChainNetwork::add_chain`].
-pub struct ChainConfig {
+pub struct ChainConfig<TChain> {
+    /// Opaque data chosen by the API user. Can later be accessed using the `Index`/`IndexMut`
+    /// trait implementation of the [`ChainNetwork`].
+    pub user_data: TChain,
+
     /// Hash of the genesis block (i.e. block number 0) according to the local node.
     pub genesis_hash: [u8; 32],
 
@@ -168,13 +167,13 @@ pub struct ChainId(usize);
 
 /// Data structure containing the list of all connections and their latest known state. See also
 /// [the module-level documentation](..).
-pub struct ChainNetwork<TNow> {
+pub struct ChainNetwork<TChain, TNow> {
     /// Underlying data structure.
     inner: collection::Network<ConnectionInfo, TNow>,
 
     /// List of all chains that have been added.
     // TODO: shrink to fit from time to time
-    chains: slab::Slab<Chain>,
+    chains: slab::Slab<Chain<TChain>>,
 
     /// All the substreams of [`ChainNetwork::inner`], with info attached to them.
     // TODO: add a substream user data to `collection::Network` instead
@@ -193,10 +192,6 @@ pub struct ChainNetwork<TNow> {
         NotificationsSubstreamState,
         collection::SubstreamId,
     )>,
-
-    /// See [`Config::noise_key`].
-    // TODO: make rotatable, see <https://github.com/smol-dot/smoldot/issues/44>
-    noise_key: NoiseKey,
 
     /// Chains indexed by genesis hash and fork ID.
     ///
@@ -231,7 +226,7 @@ pub struct ChainNetwork<TNow> {
         hashbrown::HashSet<(ChainId, PeerId, GossipKind), util::SipHasherBuild>,
 }
 
-struct Chain {
+struct Chain<TChain> {
     /// See [`ChainConfig::block_number_bytes`].
     block_number_bytes: usize,
 
@@ -253,11 +248,18 @@ struct Chain {
 
     /// See [`ChainConfig::allow_inbound_block_requests`].
     allow_inbound_block_requests: bool,
+
+    /// See [`ChainConfig::user_data`].
+    user_data: TChain,
 }
 
 /// See [`ChainNetwork::inner`].
 struct ConnectionInfo {
     address: Vec<u8>,
+
+    /// Public key of the local node used for this connection.
+    /// This information can be requested by the remote.
+    ed25519_public_key: [u8; 32],
 
     /// Identity of the remote. Can be either the expected or the actual identity.
     ///
@@ -344,7 +346,7 @@ impl NotificationsSubstreamState {
     }
 }
 
-impl<TNow> ChainNetwork<TNow>
+impl<TChain, TNow> ChainNetwork<TChain, TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -401,20 +403,14 @@ where
                 config.chains_capacity,
                 Default::default(),
             ),
-            noise_key: config.noise_key,
         }
-    }
-
-    /// Returns the Noise key originally passed as [`Config::noise_key`].
-    pub fn noise_key(&self) -> &NoiseKey {
-        &self.noise_key
     }
 
     /// Adds a chain to the list of chains that is handled by the [`ChainNetwork`].
     ///
     /// It is not possible to add a chain if its protocol names would conflict with an existing
     /// chain.
-    pub fn add_chain(&mut self, config: ChainConfig) -> Result<ChainId, AddChainError> {
+    pub fn add_chain(&mut self, config: ChainConfig<TChain>) -> Result<ChainId, AddChainError> {
         let chain_entry = self.chains.vacant_entry();
         let chain_id = chain_entry.key();
 
@@ -441,6 +437,7 @@ where
             best_number: config.best_number,
             allow_inbound_block_requests: config.allow_inbound_block_requests,
             grandpa_protocol_config: config.grandpa_protocol_config,
+            user_data: config.user_data,
         });
 
         Ok(ChainId(chain_id))
@@ -774,20 +771,19 @@ where
         // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
         let max_protocol_name_len = 256;
         let substreams_capacity = 16; // TODO: ?
+        let ed25519_public_key = match handshake_kind {
+            SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key, .. } => {
+                *noise_key.libp2p_public_ed25519_key()
+            }
+        };
         let (id, task) = self.inner.insert_single_stream(
             when_connection_start,
-            match handshake_kind {
-                SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { is_initiator } => {
-                    collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
-                        is_initiator,
-                        noise_key: &self.noise_key,
-                    }
-                }
-            },
+            handshake_kind,
             substreams_capacity,
             max_protocol_name_len,
             ConnectionInfo {
                 address: remote_addr,
+                ed25519_public_key,
                 peer_id: expected_peer_id.clone(),
             },
         );
@@ -827,25 +823,20 @@ where
         // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
         let max_protocol_name_len = 256;
         let substreams_capacity = 16; // TODO: ?
+        let ed25519_public_key = match handshake_kind {
+            MultiStreamHandshakeKind::WebRtc { noise_key, .. } => {
+                *noise_key.libp2p_public_ed25519_key()
+            }
+        };
         let (id, task) = self.inner.insert_multi_stream(
             when_connection_start,
-            match handshake_kind {
-                MultiStreamHandshakeKind::WebRtc {
-                    is_initiator,
-                    local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash,
-                } => collection::MultiStreamHandshakeKind::WebRtc {
-                    is_initiator,
-                    noise_key: &self.noise_key,
-                    local_tls_certificate_multihash,
-                    remote_tls_certificate_multihash,
-                },
-            },
+            handshake_kind,
             substreams_capacity,
             max_protocol_name_len,
             ConnectionInfo {
                 address: remote_addr,
                 peer_id: expected_peer_id.clone(),
+                ed25519_public_key,
             },
         );
         if let Some(expected_peer_id) = expected_peer_id {
@@ -2783,6 +2774,7 @@ where
 
         let response = {
             let observed_addr = &self.inner[substream_info.connection_id].address;
+            let ed25519_public_key = &self.inner[substream_info.connection_id].ed25519_public_key;
 
             // TODO: all protocols
             let supported_protocols = [protocol::ProtocolName::Ping].into_iter();
@@ -2794,7 +2786,7 @@ where
             protocol::build_identify_response(protocol::IdentifyResponse {
                 protocol_version: "/substrate/1.0", // TODO: same value as in Substrate, see also https://github.com/paritytech/substrate/issues/14331
                 agent_version,
-                ed25519_public_key: *self.noise_key.libp2p_public_ed25519_key(),
+                ed25519_public_key: *ed25519_public_key,
                 listen_addrs: iter::empty(), // TODO:
                 observed_addr,
                 protocols: supported_protocols_names.iter().map(|p| &p[..]),
@@ -3416,34 +3408,18 @@ where
     }
 }
 
-/// What kind of handshake to perform on the newly-added connection.
-pub enum SingleStreamHandshakeKind {
-    /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
-    /// multistream-select protocol to negotiate the Yamux multiplexing.
-    MultistreamSelectNoiseYamux {
-        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
-        /// initiated by the remote.
-        is_initiator: bool,
-    },
+impl<TChain, TNow> ops::Index<ChainId> for ChainNetwork<TChain, TNow> {
+    type Output = TChain;
+
+    fn index(&self, index: ChainId) -> &Self::Output {
+        &self.chains[index.0].user_data
+    }
 }
 
-/// What kind of handshake to perform on the newly-added connection.
-pub enum MultiStreamHandshakeKind {
-    /// The connection is a WebRTC connection.
-    ///
-    /// See <https://github.com/libp2p/specs/pull/412> for details.
-    ///
-    /// The reading and writing side of substreams must never be closed. Substreams can only be
-    /// abruptly destroyed by either side.
-    WebRtc {
-        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
-        /// initiated by the remote.
-        is_initiator: bool,
-        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
-        local_tls_certificate_multihash: Vec<u8>,
-        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_multihash: Vec<u8>,
-    },
+impl<TChain, TNow> ops::IndexMut<ChainId> for ChainNetwork<TChain, TNow> {
+    fn index_mut(&mut self, index: ChainId) -> &mut Self::Output {
+        &mut self.chains[index.0].user_data
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

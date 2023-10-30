@@ -132,6 +132,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     config: Config<TPlat>,
 ) -> async_channel::Sender<Message<TPlat>> {
     let (requests_tx, requests_rx) = async_channel::bounded(8);
+    let requests_rx = Box::pin(requests_rx);
 
     config.platform.clone().spawn_task(
         format!("{}-legacy-state-subscriptions", config.log_target).into(),
@@ -206,7 +207,7 @@ struct Task<TPlat: PlatformRef> {
     /// Sending side of [`Task::requests_rx`].
     requests_tx: async_channel::WeakSender<Message<TPlat>>,
     /// How to receive messages from the API user.
-    requests_rx: async_channel::Receiver<Message<TPlat>>,
+    requests_rx: Pin<Box<async_channel::Receiver<Message<TPlat>>>>,
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
     // TODO: shrink_to_fit?

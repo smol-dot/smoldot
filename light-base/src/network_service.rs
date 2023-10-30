@@ -76,9 +76,6 @@ pub struct Config<TPlat> {
     /// Value sent back for the agent version when receiving an identification request.
     pub identify_agent_version: String,
 
-    /// Key to use for the encryption layer of all the connections. Gives the node its identity.
-    pub noise_key: connection::NoiseKey,
-
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
 
@@ -157,7 +154,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 32,
-            noise_key: config.noise_key,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: {
                 let mut seed = [0; 32];
@@ -189,6 +185,9 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     genesis_hash: chain.genesis_block_hash,
                     role: protocol::Role::Light,
                     allow_inbound_block_requests: false,
+                    user_data: Chain {
+                        log_name: chain.log_name.clone(),
+                    },
                 })
                 .unwrap();
 
@@ -199,6 +198,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let on_service_killed = event_listener::Event::new();
 
         let (messages_tx, messages_rx) = async_channel::bounded(32);
+        let messages_rx = Box::pin(messages_rx);
 
         // Spawn task starts a discovery request at a periodic interval.
         // This is done through a separate task due to ease of implementation.
@@ -236,9 +236,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     seed
                 }),
                 identify_agent_version: config.identify_agent_version,
-                log_chain_names: log_chain_names.clone(),
                 messages_tx: messages_tx.clone(),
-                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(),
+                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new({
+                    let mut seed = [0; 32];
+                    config.platform.fill_random_bytes(&mut seed);
+                    seed
+                }),
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),
@@ -856,16 +859,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
 
-    /// Names of the various chains the network service connects to. Used only for logging
-    /// purposes.
-    // TODO: add a user data to the network state machine
-    log_chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
-
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<TPlat::Instant>,
+    network: service::ChainNetwork<Chain, TPlat::Instant>,
 
     /// All known peers and their addresses.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, TPlat::Instant>,
@@ -883,7 +881,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
         Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
     >,
 
-    messages_rx: async_channel::Receiver<ToBackground>,
+    messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -918,79 +916,21 @@ struct BackgroundTask<TPlat: PlatformRef> {
     kademlia_find_node_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
+struct Chain {
+    log_name: String,
+}
+
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
         task.active_connections.retain(|_, tx| !tx.is_closed());
 
-        // TODO: handle differently
-        // TODO: doc
-        for chain_id in task.log_chain_names.keys() {
-            loop {
-                // TODO: 4 is an arbitrary constant, make configurable
-                if task
-                    .network
-                    .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
-                    >= 4
-                {
-                    break;
-                }
-
-                let peer_id = match task.peering_strategy.assign_slot(chain_id, &task.platform.now()) {
-                    basic_peering_strategy::AssignSlotOutcome::Assigned(peer_id) => {
-                        peer_id.clone()
-                    }
-                    basic_peering_strategy::AssignSlotOutcome::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                    | basic_peering_strategy::AssignSlotOutcome::NoPeer => break,
-                };
-
-                log::debug!(
-                    target: "connections",
-                    "OutSlots({}) ∋ {}",
-                    &task.log_chain_names[chain_id],
-                    peer_id
-                );
-
-                task.network.gossip_insert_desired(
-                    *chain_id,
-                    peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
-            }
-        }
-
-        // TODO: handle differently
-        // TODO: doc
-        loop {
-            let Some((peer_id, chain_id)) = task
-                .network
-                .connected_unopened_gossip_desired()
-                .next()
-                .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
-            else {
-                break;
-            };
-
-            task.network
-                .gossip_open(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                )
-                .unwrap();
-
-            log::debug!(
-                target: "network",
-                "Gossip({}, {}) <= Open",
-                peer_id,
-                &task.log_chain_names[&chain_id],
-            );
-        }
-
         enum WhatHappened {
             Message(ToBackground),
             NetworkEvent(service::Event),
-            StartConnect(PeerId),
+            CanAssignSlot(PeerId, ChainId),
+            CanStartConnect(PeerId),
+            CanOpenGossip(PeerId, ChainId),
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -1003,16 +943,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
             let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                // TODO: move down, but causes borrowck errors
-                let start_connect = task.network.unconnected_desired().next().cloned();
-                if let Some(event) = if can_generate_event {
-                    task.network.next_event()
-                } else {
-                    None
-                } {
+                if let Some(event) = can_generate_event
+                    .then(|| task.network.next_event())
+                    .flatten()
+                {
                     WhatHappened::NetworkEvent(event)
-                } else if let Some(start_connect) = start_connect {
-                    WhatHappened::StartConnect(start_connect)
+                } else if let Some(start_connect) = {
+                    let x = task.network.unconnected_desired().next().cloned();
+                    x
+                } {
+                    WhatHappened::CanStartConnect(start_connect)
+                } else if let Some((peer_id, chain_id)) = {
+                    let x = task
+                        .network
+                        .connected_unopened_gossip_desired()
+                        .next()
+                        .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
+                    x
+                } {
+                    WhatHappened::CanOpenGossip(peer_id, chain_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
@@ -1020,6 +969,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         connection_id,
                         message,
                     }
+                } else if let Some((peer_id, chain_id)) = task.network.chains().collect::<Vec<_>>().into_iter().find_map(|chain_id| {
+                    // TODO: 4 is an arbitrary constant, make configurable
+                    if task
+                        .network
+                        .gossip_desired_num(chain_id, service::GossipKind::ConsensusTransactions)
+                        >= 4
+                    {
+                        return None;
+                    }
+
+                    match task.peering_strategy.pick_assignable_peer(&chain_id, &task.platform.now()) {
+                        basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                            Some((peer_id.clone(), chain_id))
+                        }
+                        basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
+                        | basic_peering_strategy::AssignablePeer::NoPeer => None,
+                    }
+                }) {
+                    WhatHappened::CanAssignSlot(peer_id, chain_id)
                 } else {
                     future::pending().await
                 }
@@ -1070,7 +1038,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 log::debug!(
                                     target: "network",
                                     "Connections({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                                    target, task.log_chain_names[&chain_id], HashDisplay(hash),
+                                    target, task.network[chain_id].log_name, HashDisplay(hash),
                                     config.desired_count.get(),
                                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                                     config.fields.header, config.fields.body, config.fields.justifications
@@ -1080,7 +1048,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 log::debug!(
                                     target: "network",
                                     "Connections({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                                    target, task.log_chain_names[&chain_id], number,
+                                    target, task.network[chain_id].log_name, number,
                                     config.desired_count.get(),
                                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                                     config.fields.header, config.fields.body, config.fields.justifications
@@ -1111,7 +1079,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Ok(substream_id) => {
                         log::debug!(
                             target: "network", "Connections({}) <= WarpSyncRequest(chain={}, start={})",
-                            target, task.log_chain_names[&chain_id], HashDisplay(&begin_hash)
+                            target, task.network[chain_id].log_name, HashDisplay(&begin_hash)
                         );
 
                         task.grandpa_warp_sync_requests.insert(substream_id, result);
@@ -1141,7 +1109,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             target: "network",
                             "Connections({}) <= StorageProofRequest(chain={}, block={})",
                             target,
-                            task.log_chain_names[&chain_id],
+                            task.network[chain_id].log_name,
                             HashDisplay(&config.block_hash)
                         );
 
@@ -1175,7 +1143,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             target: "network",
                             "Connections({}) <= CallProofRequest({}, {}, {})",
                             target,
-                            task.log_chain_names[&chain_id],
+                            task.network[chain_id].log_name,
                             HashDisplay(&config.block_hash),
                             config.method
                         );
@@ -1208,7 +1176,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
-                    task.log_chain_names[&chain_id],
+                    task.network[chain_id].log_name,
                     grandpa_state.set_id,
                     grandpa_state.commit_finalized_height,
                 );
@@ -1312,7 +1280,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
-                for chain_id in task.log_chain_names.keys() {
+                for chain_id in task.network.chains().collect::<Vec<_>>() {
                     let random_peer_id = {
                         let mut pub_key = [0; 32];
                         rand_chacha::rand_core::RngCore::fill_bytes(
@@ -1326,7 +1294,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let target = task
                         .network
                         .gossip_connected_peers(
-                            *chain_id,
+                            chain_id,
                             service::GossipKind::ConsensusTransactions,
                         )
                         .next()
@@ -1335,7 +1303,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     if let Some(target) = target {
                         let substream_id = match task.network.start_kademlia_find_node_request(
                             &target,
-                            *chain_id,
+                            chain_id,
                             &random_peer_id,
                             Duration::from_secs(20),
                         ) {
@@ -1345,7 +1313,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                         let _prev_value = task
                             .kademlia_find_node_requests
-                            .insert(substream_id, *chain_id);
+                            .insert(substream_id, chain_id);
                         debug_assert!(_prev_value.is_none());
                     } else {
                         // TODO: log message
@@ -1408,7 +1376,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target: "network",
                     "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                     peer_id,
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                     announce.decode().is_best
                 );
@@ -1430,7 +1398,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target: "network",
                     "Gossip({}, {}) => Opened(best_height={}, best_hash={})",
                     peer_id,
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     best_number,
                     HashDisplay(&best_hash)
                 );
@@ -1451,13 +1419,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => OpenFailed(error={:?})",
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     peer_id, error,
                 );
                 log::debug!(
                     target: "connections",
                     "{}Slots ∌ {}", // TODO:
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     peer_id
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
@@ -1488,12 +1456,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target: "network",
                     "Connection({}, {}) => GossipDisconnected",
                     peer_id,
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                 );
                 log::debug!(
                     target: "connections",
                     "{}Slots ∌ {}", // TODO:
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     peer_id
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
@@ -1565,7 +1533,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 log::debug!(
                     target: "connections", "On chain {}, discovered: {}",
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     nodes.iter().map(|(p, _)| p.to_string()).join(", ")
                 );
 
@@ -1610,7 +1578,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "connections",
                     "Discovery({}) => {:?}",
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     error
                 );
 
@@ -1632,14 +1600,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             This might indicate that the version of Substrate used by \
                             the chain doesn't include \
                             <https://github.com/paritytech/substrate/pull/12545>.",
-                            &task.log_chain_names[&chain_id]
+                            &task.network[chain_id].log_name
                         );
                     }
                     _ => {
                         log::warn!(
                             target: "connections",
                             "Problem during discovery on {}: {}",
-                            &task.log_chain_names[&chain_id],
+                            &task.network[chain_id].log_name,
                             error
                         );
                     }
@@ -1669,7 +1637,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     log::debug!(
                         target: "connections",
                         "InSlots({}) ∋ {}",
-                        &task.log_chain_names[&chain_id],
+                        &task.network[chain_id].log_name,
                         peer_id
                     );
                     task.network
@@ -1684,7 +1652,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         target: "connections",
                         "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
                         peer_id,
-                        &task.log_chain_names[&chain_id],
+                        &task.network[chain_id].log_name,
                     );
                     task.network
                         .gossip_close(
@@ -1728,7 +1696,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target: "network",
                     "Gossip({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
                     peer_id,
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     state.round_number,
                     state.set_id,
                     state.commit_finalized_height,
@@ -1748,7 +1716,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target: "network",
                     "Gossip({}, {}) => GrandpaCommitMessage(target_block_hash={})",
                     peer_id,
-                    &task.log_chain_names[&chain_id],
+                    &task.network[chain_id].log_name,
                     HashDisplay(message.decode().message.target_hash),
                 );
                 Event::GrandpaCommitMessage {
@@ -1769,7 +1737,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // TODO: disconnect peer
                 continue;
             }
-            WhatHappened::StartConnect(peer_id) => {
+            WhatHappened::CanAssignSlot(peer_id, chain_id) => {
+                task.peering_strategy.assign_slot(&chain_id, &peer_id);
+
+                log::debug!(
+                    target: "connections",
+                    "OutSlots({}) ∋ {}",
+                    &task.network[chain_id].log_name,
+                    peer_id
+                );
+
+                task.network.gossip_insert_desired(
+                    chain_id,
+                    peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
+
+                continue;
+            }
+            WhatHappened::CanStartConnect(peer_id) => {
                 // TODO: restore rate limiting
 
                 let Some(multiaddr) = task.peering_strategy.addr_to_connected(&peer_id) else {
@@ -1817,11 +1803,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     continue;
                 };
 
+                // Each connection has its own individual Noise key.
+                let noise_key = {
+                    let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
+                    task.platform.fill_random_bytes(&mut *noise_static_key);
+                    let mut libp2p_key = zeroize::Zeroizing::new([0u8; 32]);
+                    task.platform.fill_random_bytes(&mut *libp2p_key);
+                    connection::NoiseKey::new(&libp2p_key, &noise_static_key)
+                };
+
                 log::debug!(
                     target: "connections",
-                    "Connections({}) <= StartConnecting({})",
+                    "Connections({}) <= StartConnecting(remote_addr={}, local_peer_id={})",
                     peer_id,
-                    multiaddr
+                    multiaddr,
+                    peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id(),
                 );
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
@@ -1835,6 +1831,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.platform.now(),
                                 service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                                     is_initiator: true,
+                                    noise_key: &noise_key,
                                 },
                                 multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
@@ -1899,6 +1896,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     is_initiator: true,
                                     local_tls_certificate_multihash,
                                     remote_tls_certificate_multihash,
+                                    noise_key: &noise_key,
                                 },
                                 multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
@@ -1925,6 +1923,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
+
+                continue;
+            }
+            WhatHappened::CanOpenGossip(peer_id, chain_id) => {
+                task.network
+                    .gossip_open(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .unwrap();
+
+                log::debug!(
+                    target: "network",
+                    "Gossip({}, {}) <= Open",
+                    peer_id,
+                    &task.network[chain_id].log_name,
+                );
 
                 continue;
             }

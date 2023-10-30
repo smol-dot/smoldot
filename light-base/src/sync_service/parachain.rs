@@ -48,7 +48,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
-    from_foreground: async_channel::Receiver<ToBackground>,
+    from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_id: network_service::ChainId,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
@@ -108,7 +108,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     platform: TPlat,
 
     /// Channel receiving message from the sync service frontend.
-    from_foreground: async_channel::Receiver<ToBackground>,
+    from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
     /// Number of bytes to use to encode the parachain block numbers in headers.
     block_number_bytes: usize,

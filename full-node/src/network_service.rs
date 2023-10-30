@@ -220,16 +220,16 @@ struct Inner {
     >,
 
     /// Identity of the local node.
+    noise_key: service::NoiseKey,
+
+    /// Identity of the local node. Can be derived from [`Inner::noise_key`].
     local_peer_id: PeerId,
 
     /// Service to use to report traces.
     jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<Instant>,
-
-    // TODO: should be a user data in `ChainNetwork`
-    chains: hashbrown::HashMap<ChainId, Chain, fnv::FnvBuildHasher>,
+    network: service::ChainNetwork<Chain, Instant>,
 
     /// Data structure holding the addresses and assigned slots.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, Instant>,
@@ -299,15 +299,13 @@ impl NetworkService {
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 100, // TODO: ?
-            noise_key: config.noise_key,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: rand::random(),
         });
 
-        let mut peering_strategy = basic_peering_strategy::BasicPeeringStrategy::new();
+        let mut peering_strategy =
+            basic_peering_strategy::BasicPeeringStrategy::new(rand::random());
 
-        let mut chains =
-            hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
         let mut chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
 
@@ -333,6 +331,10 @@ impl NetworkService {
                         None
                     },
                     allow_inbound_block_requests: true,
+                    user_data: Chain {
+                        log_name: chain.log_name.clone(),
+                        database: chain.database,
+                    },
                 })
                 .unwrap(); // TODO: don't unwrap?
 
@@ -341,22 +343,14 @@ impl NetworkService {
                 peering_strategy.insert_chain_peer(chain_id, peer_id);
             }
 
-            chain_names.insert(chain_id, chain.log_name.clone());
-
-            chains.insert(
-                chain_id,
-                Chain {
-                    log_name: chain.log_name,
-                    database: chain.database,
-                },
-            );
+            chain_names.insert(chain_id, chain.log_name);
         }
 
         let (to_background_tx, to_background_rx) = channel::bounded(64);
         let foreground_shutdown = event_listener::Event::new();
 
         let local_peer_id =
-            peer_id::PublicKey::Ed25519(*network.noise_key().libp2p_public_ed25519_key())
+            peer_id::PublicKey::Ed25519(*config.noise_key.libp2p_public_ed25519_key())
                 .into_peer_id();
 
         // Initialize the inner network service.
@@ -364,7 +358,6 @@ impl NetworkService {
             local_peer_id: local_peer_id.clone(),
             identify_agent_version: config.identify_agent_version,
             event_senders: either::Left(event_senders),
-            chains,
             num_pending_out_attempts: 0,
             to_background_rx,
             to_background_tx: to_background_tx.clone(),
@@ -372,6 +365,7 @@ impl NetworkService {
             tasks_executor: config.tasks_executor,
             log_callback: config.log_callback.clone(),
             network,
+            noise_key: config.noise_key,
             peering_strategy,
             active_connections: hashbrown::HashMap::with_capacity_and_hasher(
                 100, // TODO: ?
@@ -929,7 +923,7 @@ async fn background_task(mut inner: Inner) {
 
                                 inner.log_callback.log(LogLevel::Debug, format!(
                                     "block-announce; peer_id={}; chain={}; hash={}; number={}; is_best={:?}",
-                                    peer_id, inner.chains[&chain_id].log_name, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
+                                    peer_id, inner.network[chain_id].log_name, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
                                 ));
 
                                 break Some(Event::BlockAnnounce {
@@ -942,7 +936,7 @@ async fn background_task(mut inner: Inner) {
                             Err(error) => {
                                 inner.log_callback.log(LogLevel::Warn, format!(
                                     "block-announce-bad-header; peer_id={}; chain={}; hash={}; is_best={:?}; error={}",
-                                    peer_id, inner.chains[&chain_id].log_name, HashDisplay(&header_hash), decoded.is_best, error
+                                    peer_id, inner.network[chain_id].log_name, HashDisplay(&header_hash), decoded.is_best, error
                                 ));
 
                                 if inner.network.gossip_remove_desired(
@@ -959,7 +953,7 @@ async fn background_task(mut inner: Inner) {
                                         LogLevel::Debug,
                                         format!(
                                             "slot-unassigned; peer_id={}; chain={}",
-                                            peer_id, inner.chains[&chain_id].log_name
+                                            peer_id, inner.network[chain_id].log_name
                                         ),
                                     );
                                 }
@@ -985,7 +979,7 @@ async fn background_task(mut inner: Inner) {
                             format!(
                             "chain-connected; peer_id={}; chain={}; best_number={}; best_hash={}",
                             peer_id,
-                            inner.chains[&chain_id].log_name,
+                            inner.network[chain_id].log_name,
                             best_number,
                             HashDisplay(&best_hash),
                         ),
@@ -1004,7 +998,7 @@ async fn background_task(mut inner: Inner) {
                             LogLevel::Debug,
                             format!(
                                 "chain-disconnected; peer_id={}; chain={}",
-                                peer_id, inner.chains[&chain_id].log_name
+                                peer_id, inner.network[chain_id].log_name
                             ),
                         );
 
@@ -1024,7 +1018,7 @@ async fn background_task(mut inner: Inner) {
                                 LogLevel::Debug,
                                 format!(
                                     "slot-unassigned; peer_id={}; chain={}",
-                                    peer_id, inner.chains[&chain_id].log_name
+                                    peer_id, inner.network[chain_id].log_name
                                 ),
                             );
                         }
@@ -1043,7 +1037,7 @@ async fn background_task(mut inner: Inner) {
                             LogLevel::Debug,
                             format!(
                                 "chain-connect-attempt-failed; peer_id={}; chain={}; error={}",
-                                peer_id, inner.chains[&chain_id].log_name, error
+                                peer_id, inner.network[chain_id].log_name, error
                             ),
                         );
 
@@ -1058,7 +1052,7 @@ async fn background_task(mut inner: Inner) {
                                 LogLevel::Debug,
                                 format!(
                                     "slot-unassigned; peer_id={}; chain={}",
-                                    peer_id, inner.chains[&chain_id].log_name
+                                    peer_id, inner.network[chain_id].log_name
                                 ),
                             );
                         }
@@ -1142,7 +1136,7 @@ async fn background_task(mut inner: Inner) {
                             LogLevel::Debug,
                             format!(
                                 "discovered; chain={}; nodes={:?}",
-                                inner.chains[&chain_id].log_name, nodes
+                                inner.network[chain_id].log_name, nodes
                             ),
                         );
 
@@ -1189,7 +1183,7 @@ async fn background_task(mut inner: Inner) {
                             LogLevel::Debug,
                             format!(
                                 "discovery-error; chain={}; error={}",
-                                inner.chains[&chain_id].log_name, error
+                                inner.network[chain_id].log_name, error
                             ),
                         );
                     }
@@ -1223,7 +1217,7 @@ async fn background_task(mut inner: Inner) {
                             LogLevel::Debug,
                             format!(
                                 "incoming-blocks-request; peer_id={}; chain={}",
-                                peer_id, inner.chains[&chain_id].log_name
+                                peer_id, inner.network[chain_id].log_name
                             ),
                         );
                         let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
@@ -1241,7 +1235,7 @@ async fn background_task(mut inner: Inner) {
 
                         // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
                         let response = blocks_request_response(
-                            &inner.chains[&chain_id].database,
+                            &inner.network[chain_id].database,
                             inner.network.block_number_bytes(chain_id),
                             config,
                         )
@@ -1268,7 +1262,7 @@ async fn background_task(mut inner: Inner) {
                         inner.log_callback.log(LogLevel::Debug, format!(
                             "grandpa-neighbor-packet; peer_id={}; chain={}; round_number={}; set_id={}; commit_finalized_height={}",
                             peer_id,
-                            inner.chains[&chain_id].log_name,
+                            inner.network[chain_id].log_name,
                             state.round_number,
                             state.set_id,
                             state.commit_finalized_height,
@@ -1285,7 +1279,7 @@ async fn background_task(mut inner: Inner) {
                             format!(
                                 "grandpa-commit-message; peer_id={}; chain={}; target_hash={}",
                                 peer_id,
-                                inner.chains[&chain_id].log_name,
+                                inner.network[chain_id].log_name,
                                 HashDisplay(message.decode().message.target_hash),
                             ),
                         );
@@ -1341,35 +1335,37 @@ async fn background_task(mut inner: Inner) {
             }
 
             // TODO: doc
-            for chain_id in inner.chains.keys() {
+            for chain_id in inner.network.chains().collect::<Vec<_>>() {
                 loop {
                     // TODO: 25 is an arbitrary constant, make configurable
                     if inner
                         .network
-                        .gossip_desired_num(*chain_id, service::GossipKind::ConsensusTransactions)
+                        .gossip_desired_num(chain_id, service::GossipKind::ConsensusTransactions)
                         >= 25
                     {
                         break;
                     }
 
-                    let peer_id = match inner.peering_strategy.assign_slot(chain_id, &Instant::now()) {
-                        basic_peering_strategy::AssignSlotOutcome::Assigned(peer_id) => {
+                    let peer_id = match inner.peering_strategy.pick_assignable_peer(&chain_id, &Instant::now()) {
+                        basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
                             peer_id.clone()
                         }
-                        basic_peering_strategy::AssignSlotOutcome::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                        | basic_peering_strategy::AssignSlotOutcome::NoPeer => break,
+                        basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
+                        | basic_peering_strategy::AssignablePeer::NoPeer => break,
                     };
+
+                    inner.peering_strategy.assign_slot(&chain_id, &peer_id);
 
                     inner.log_callback.log(
                         LogLevel::Debug,
                         format!(
                             "slot-assigned; peer_id={}; chain={}",
-                            peer_id, inner.chains[chain_id].log_name
+                            peer_id, inner.network[chain_id].log_name
                         ),
                     );
 
                     inner.network.gossip_insert_desired(
-                        *chain_id,
+                        chain_id,
                         peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
@@ -1451,6 +1447,7 @@ async fn background_task(mut inner: Inner) {
                     Instant::now(),
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                         is_initiator: true,
+                        noise_key: &inner.noise_key,
                     },
                     multiaddr.clone().into_vec(),
                     Some(peer_id.clone()),
@@ -1498,7 +1495,7 @@ async fn background_task(mut inner: Inner) {
                 LogLevel::Debug,
                 format!(
                     "gossip-open; peer_id={}; chain={}",
-                    peer_id, &inner.chains[&chain_id].log_name
+                    peer_id, &inner.network[chain_id].log_name
                 ),
             );
         }
@@ -1551,6 +1548,7 @@ async fn background_task(mut inner: Inner) {
                     when_accepted,
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                         is_initiator: false,
+                        noise_key: &inner.noise_key,
                     },
                     multiaddr.clone().into_vec(),
                     None,
@@ -1573,7 +1571,7 @@ async fn background_task(mut inner: Inner) {
             }
 
             ToBackground::StartKademliaDiscoveries { when_done } => {
-                for chain_id in inner.chains.keys() {
+                for chain_id in inner.network.chains().collect::<Vec<_>>() {
                     let random_peer_id =
                         PeerId::from_public_key(&peer_id::PublicKey::Ed25519(rand::random()));
 
@@ -1581,7 +1579,7 @@ async fn background_task(mut inner: Inner) {
                     let target = inner
                         .network
                         .gossip_connected_peers(
-                            *chain_id,
+                            chain_id,
                             service::GossipKind::ConsensusTransactions,
                         )
                         .next()
@@ -1590,7 +1588,7 @@ async fn background_task(mut inner: Inner) {
                     if let Some(target) = target {
                         let substream_id = match inner.network.start_kademlia_find_node_request(
                             &target,
-                            *chain_id,
+                            chain_id,
                             &random_peer_id,
                             Duration::from_secs(20),
                         ) {
@@ -1600,7 +1598,7 @@ async fn background_task(mut inner: Inner) {
 
                         let _prev_value = inner
                             .kademlia_find_nodes_requests
-                            .insert(substream_id, *chain_id);
+                            .insert(substream_id, chain_id);
                         debug_assert!(_prev_value.is_none());
                     } else {
                         // TODO: log message
@@ -1682,13 +1680,13 @@ async fn background_task(mut inner: Inner) {
             ToBackground::ForegroundGetNumTotalPeers { result_tx } => {
                 // TODO: optimize?
                 let total = inner
-                    .chains
-                    .keys()
+                    .network
+                    .chains()
                     .map(|chain_id| {
                         inner
                             .network
                             .gossip_connected_peers(
-                                *chain_id,
+                                chain_id,
                                 service::GossipKind::ConsensusTransactions,
                             )
                             .count()
