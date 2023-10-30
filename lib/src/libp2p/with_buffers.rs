@@ -318,7 +318,7 @@ where
     }
 }
 
-impl<TSocket: fmt::Debug, TNow: Clone> fmt::Debug for WithBuffers<TSocket, TNow> {
+impl<TSocket: fmt::Debug, TNow> fmt::Debug for WithBuffers<TSocket, TNow> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("WithBuffers").field(&self.socket).finish()
     }
