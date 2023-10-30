@@ -38,10 +38,10 @@ use std::io;
 /// Holds an implementation of `AsyncRead` and `AsyncWrite`, alongside with a read buffer and a
 /// write buffer.
 #[pin_project::pin_project]
-pub struct WithBuffers<T, TNow> {
+pub struct WithBuffers<TSocket, TNow> {
     /// Actual socket to read from/write to.
     #[pin]
-    socket: T,
+    socket: TSocket,
     /// Error that has happened on the socket, if any.
     error: Option<io::Error>,
     /// Storage for data read from the socket. The first [`WithBuffers::read_buffer_valid`] bytes
@@ -73,14 +73,14 @@ pub struct WithBuffers<T, TNow> {
     read_write_wake_up_after: Option<TNow>,
 }
 
-impl<T, TNow> WithBuffers<T, TNow>
+impl<TSocket, TNow> WithBuffers<TSocket, TNow>
 where
     TNow: Clone + Ord,
 {
     /// Initializes a new [`WithBuffers`] with the given socket.
     ///
     /// The socket must still be open in both directions.
-    pub fn new(socket: T) -> Self {
+    pub fn new(socket: TSocket) -> Self {
         let read_buffer_reasonable_capacity = 65536; // TODO: make configurable?
 
         WithBuffers {
@@ -155,9 +155,9 @@ where
     }
 }
 
-impl<T, TNow> WithBuffers<T, TNow>
+impl<TSocket, TNow> WithBuffers<TSocket, TNow>
 where
-    T: AsyncRead + AsyncWrite,
+    TSocket: AsyncRead + AsyncWrite,
     TNow: Clone + Ord,
 {
     /// Waits until [`WithBuffers::read_write_access`] should be called again.
@@ -318,7 +318,7 @@ where
     }
 }
 
-impl<T: fmt::Debug, TNow: Clone> fmt::Debug for WithBuffers<T, TNow> {
+impl<TSocket: fmt::Debug, TNow: Clone> fmt::Debug for WithBuffers<TSocket, TNow> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("WithBuffers").field(&self.socket).finish()
     }
