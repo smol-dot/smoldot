@@ -90,7 +90,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         'static,
         Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
     >;
-    type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a>;
+    type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a, Instant>;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type StreamErrorRef<'a> = &'a io::Error;
     type NextSubstreamFuture<'a> = future::Pending<Option<(Self::Stream, SubstreamDirection)>>;
@@ -266,6 +266,6 @@ impl Drop for DefaultPlatform {
 
 /// Implementation detail of [`DefaultPlatform`].
 #[pin_project::pin_project]
-pub struct Stream(#[pin] with_buffers::WithBuffers<TcpOrWs>);
+pub struct Stream(#[pin] with_buffers::WithBuffers<TcpOrWs, Instant>);
 
 type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;

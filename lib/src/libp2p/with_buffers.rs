@@ -33,15 +33,15 @@ use core::{
     task::Poll,
 };
 use futures_util::{AsyncRead, AsyncWrite};
-use std::{io, time::Instant};
+use std::io;
 
 /// Holds an implementation of `AsyncRead` and `AsyncWrite`, alongside with a read buffer and a
 /// write buffer.
 #[pin_project::pin_project]
-pub struct WithBuffers<T> {
+pub struct WithBuffers<TSocket, TNow> {
     /// Actual socket to read from/write to.
     #[pin]
-    socket: T,
+    socket: TSocket,
     /// Error that has happened on the socket, if any.
     error: Option<io::Error>,
     /// Storage for data read from the socket. The first [`WithBuffers::read_buffer_valid`] bytes
@@ -67,17 +67,20 @@ pub struct WithBuffers<T> {
 
     /// Value of [`read_write::ReadWrite::now`] that was fed by the latest call to
     /// [`WithBuffers::read_write_access`].
-    read_write_now: Option<Instant>,
+    read_write_now: Option<TNow>,
     /// Value of [`read_write::ReadWrite::wake_up_after`] produced by the latest call
     /// to [`WithBuffers::read_write_access`].
-    read_write_wake_up_after: Option<Instant>,
+    read_write_wake_up_after: Option<TNow>,
 }
 
-impl<T> WithBuffers<T> {
+impl<TSocket, TNow> WithBuffers<TSocket, TNow>
+where
+    TNow: Clone + Ord,
+{
     /// Initializes a new [`WithBuffers`] with the given socket.
     ///
     /// The socket must still be open in both directions.
-    pub fn new(socket: T) -> Self {
+    pub fn new(socket: TSocket) -> Self {
         let read_buffer_reasonable_capacity = 65536; // TODO: make configurable?
 
         WithBuffers {
@@ -103,8 +106,8 @@ impl<T> WithBuffers<T> {
     /// >           [`WithBuffers::wait_read_write_again`].
     pub fn read_write_access(
         self: Pin<&mut Self>,
-        now: Instant,
-    ) -> Result<ReadWriteAccess, &io::Error> {
+        now: TNow,
+    ) -> Result<ReadWriteAccess<TNow>, &io::Error> {
         let this = self.project();
 
         debug_assert!(this
@@ -112,7 +115,7 @@ impl<T> WithBuffers<T> {
             .as_ref()
             .map_or(true, |old_now| *old_now <= now));
         *this.read_write_wake_up_after = None;
-        *this.read_write_now = Some(now);
+        *this.read_write_now = Some(now.clone());
 
         if let Some(error) = this.error.as_ref() {
             return Err(error);
@@ -152,9 +155,10 @@ impl<T> WithBuffers<T> {
     }
 }
 
-impl<T> WithBuffers<T>
+impl<TSocket, TNow> WithBuffers<TSocket, TNow>
 where
-    T: AsyncRead + AsyncWrite,
+    TSocket: AsyncRead + AsyncWrite,
+    TNow: Clone + Ord,
 {
     /// Waits until [`WithBuffers::read_write_access`] should be called again.
     ///
@@ -162,7 +166,7 @@ where
     /// the future never yields.
     pub async fn wait_read_write_again<F>(
         self: Pin<&mut Self>,
-        timer_builder: impl FnOnce(Instant) -> F,
+        timer_builder: impl FnOnce(TNow) -> F,
     ) where
         F: future::Future<Output = ()>,
     {
@@ -180,7 +184,7 @@ where
             let fut = this
                 .read_write_wake_up_after
                 .as_ref()
-                .map(|when| timer_builder(*when));
+                .map(|when| timer_builder(when.clone()));
             async {
                 if let Some(fut) = fut {
                     fut.await;
@@ -314,15 +318,15 @@ where
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for WithBuffers<T> {
+impl<TSocket: fmt::Debug, TNow> fmt::Debug for WithBuffers<TSocket, TNow> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("WithBuffers").field(&self.socket).finish()
     }
 }
 
 /// See [`WithBuffers::read_write_access`].
-pub struct ReadWriteAccess<'a> {
-    read_write: read_write::ReadWrite<Instant>,
+pub struct ReadWriteAccess<'a, TNow: Clone> {
+    read_write: read_write::ReadWrite<TNow>,
 
     read_buffer_len_before: usize,
     write_buffers_len_before: usize,
@@ -334,24 +338,24 @@ pub struct ReadWriteAccess<'a> {
     write_buffers: &'a mut Vec<Vec<u8>>,
     write_closed: &'a mut bool,
     close_pending: &'a mut bool,
-    read_write_wake_up_after: &'a mut Option<Instant>,
+    read_write_wake_up_after: &'a mut Option<TNow>,
 }
 
-impl<'a> ops::Deref for ReadWriteAccess<'a> {
-    type Target = read_write::ReadWrite<Instant>;
+impl<'a, TNow: Clone> ops::Deref for ReadWriteAccess<'a, TNow> {
+    type Target = read_write::ReadWrite<TNow>;
 
     fn deref(&self) -> &Self::Target {
         &self.read_write
     }
 }
 
-impl<'a> ops::DerefMut for ReadWriteAccess<'a> {
+impl<'a, TNow: Clone> ops::DerefMut for ReadWriteAccess<'a, TNow> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.read_write
     }
 }
 
-impl<'a> Drop for ReadWriteAccess<'a> {
+impl<'a, TNow: Clone> Drop for ReadWriteAccess<'a, TNow> {
     fn drop(&mut self) {
         *self.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
         *self.read_buffer_valid = self.read_buffer.len();
@@ -391,7 +395,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
                 .map_or(false, |b| b <= self.read_buffer.len()))
             || (self.write_buffers_len_before != self.write_buffers.len() && !*self.write_closed)
         {
-            *self.read_write_wake_up_after = Some(self.read_write.now);
+            *self.read_write_wake_up_after = Some(self.read_write.now.clone());
         }
     }
 }
