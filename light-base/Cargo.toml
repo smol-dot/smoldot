@@ -9,7 +9,11 @@ repository.workspace = true
 include.workspace = true
 
 [[example]]
-name = "basic"
+name = "basic-relaychain"
+required-features = ["std"]
+
+[[example]]
+name = "basic-parachain"
 required-features = ["std"]
 
 [dependencies]
