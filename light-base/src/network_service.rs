@@ -1241,8 +1241,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     for addr in addrs {
-                        task.peering_strategy
-                            .insert_address(&peer_id, addr.into_vec());
+                        let _ = task
+                            .peering_strategy
+                            .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
                     }
 
                     task.peering_strategy.insert_chain_peer(chain_id, peer_id);
@@ -1336,8 +1337,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     task.peering_strategy
                         .remove_address(expected_peer_id, remote_addr.as_ref());
-                    task.peering_strategy
-                        .insert_connected_address(&peer_id, remote_addr.clone().into_vec());
+                    let _ = task.peering_strategy.insert_connected_address(
+                        &peer_id,
+                        remote_addr.clone().into_vec(),
+                        10,
+                    );
                 } else {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakeFinished", peer_id, remote_addr);
                 }
@@ -1560,7 +1564,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     for addr in valid_addrs {
                         task.peering_strategy
-                            .insert_address(&peer_id, addr.into_vec());
+                            .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
                     }
                 }
 

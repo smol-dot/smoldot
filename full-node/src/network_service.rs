@@ -339,7 +339,7 @@ impl NetworkService {
                 .unwrap(); // TODO: don't unwrap?
 
             for (peer_id, addr) in chain.bootstrap_nodes {
-                peering_strategy.insert_address(&peer_id, addr.into_vec());
+                peering_strategy.insert_address(&peer_id, addr.into_vec(), usize::max_value());
                 peering_strategy.insert_chain_peer(chain_id, peer_id);
             }
 
@@ -853,9 +853,18 @@ async fn background_task(mut inner: Inner) {
                             inner
                                 .peering_strategy
                                 .remove_address(expected_peer_id, remote_addr.as_ref());
-                            inner
+                            match inner
                                 .peering_strategy
-                                .insert_connected_address(&peer_id, remote_addr.clone().into_vec());
+                                .insert_connected_address(&peer_id, remote_addr.clone().into_vec(), 10) // TODO: constant
+                            {
+                                basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
+                                    let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
+                                    inner
+                                        .log_callback
+                                        .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
+                                }
+                                _ => {}
+                            }
                         } else {
                             inner
                                 .log_callback
@@ -1165,9 +1174,18 @@ async fn background_task(mut inner: Inner) {
                             }
 
                             for addr in valid_addrs {
-                                inner
+                                match inner
                                     .peering_strategy
-                                    .insert_address(&peer_id, addr.into_vec());
+                                     .insert_address(&peer_id, addr.into_vec(), 10) // TODO: constant
+                                    {
+                                        basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
+                                            let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
+                                            inner
+                                                .log_callback
+                                                .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
+                                        }
+                                        _ => {}
+                                    }
                             }
                         }
                     }

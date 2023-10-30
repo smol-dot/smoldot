@@ -68,7 +68,7 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     /// Entries are `(chain_id_index, state, peer_id_index)`.
     peers_chains_by_state: BTreeSet<(usize, PeerChainState<TInstant>, usize)>,
 
-    /// Random number generator used to select peers to assign slots to.
+    /// Random number generator used to select peers to assign slots to and remove addresses/peers.
     randomness: ChaCha20Rng,
 }
 
@@ -187,30 +187,72 @@ where
 
     /// Inserts a new address for the given peer.
     ///
-    /// Returns `true` if an address was inserted, or `false` if the address was already known.
+    /// A maximum number of addresses that are maintained for this peer must be passed as
+    /// parameter. If this number is exceeded, an address in the "not connected" state (other than
+    /// the one passed as parameter) is randomly removed.
     ///
     /// If an address is inserted, it is in the "not connected" state.
-    pub fn insert_address(&mut self, peer_id: &PeerId, address: Vec<u8>) -> bool {
-        let peer_id_index = self.get_or_insert_peer_index(peer_id);
-
-        if let btree_map::Entry::Vacant(entry) =
-            self.addresses.entry((peer_id_index, address.to_owned()))
-        {
-            entry.insert(AddressState::Disconnected);
-            true
-        } else {
-            false
-        }
+    pub fn insert_address(
+        &mut self,
+        peer_id: &PeerId,
+        address: Vec<u8>,
+        max_addresses: usize,
+    ) -> InsertAddressResult {
+        self.insert_address_inner(peer_id, address, max_addresses, AddressState::Disconnected)
     }
 
     // TODO: doc
-    pub fn insert_connected_address(&mut self, peer_id: &PeerId, address: Vec<u8>) {
+    pub fn insert_connected_address(
+        &mut self,
+        peer_id: &PeerId,
+        address: Vec<u8>,
+        max_addresses: usize,
+    ) -> InsertAddressResult {
+        self.insert_address_inner(peer_id, address, max_addresses, AddressState::Connected)
+    }
+
+    fn insert_address_inner(
+        &mut self,
+        peer_id: &PeerId,
+        address: Vec<u8>,
+        max_addresses: usize,
+        initial_state: AddressState,
+    ) -> InsertAddressResult {
         let peer_id_index = self.get_or_insert_peer_index(peer_id);
 
-        *self
-            .addresses
-            .entry((peer_id_index, address.to_owned()))
-            .or_insert(AddressState::Connected) = AddressState::Connected;
+        if let btree_map::Entry::Vacant(entry) =
+            self.addresses.entry((peer_id_index, address.clone()))
+        {
+            entry.insert(initial_state);
+
+            let address_removed = {
+                let num_addresses = self
+                    .addresses
+                    .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
+                    .count();
+
+                if num_addresses >= max_addresses {
+                    self.addresses
+                        .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
+                        .filter(|((_, a), s)| {
+                            matches!(s, AddressState::Disconnected) && *a != address
+                        })
+                        .choose(&mut self.randomness)
+                        .map(|((_, a), _)| a.clone())
+                } else {
+                    None
+                }
+            };
+
+            if let Some(address_removed) = address_removed.as_ref() {
+                self.addresses
+                    .remove(&(peer_id_index, address_removed.clone()));
+            }
+
+            InsertAddressResult::Inserted { address_removed }
+        } else {
+            InsertAddressResult::Duplicate
+        }
     }
 
     /// Removes an address.
@@ -564,6 +606,15 @@ pub enum AssignablePeer<'a, TInstant> {
     Assignable(&'a PeerId),
     AllPeersBanned { next_unban: &'a TInstant },
     NoPeer,
+}
+
+pub enum InsertAddressResult {
+    Inserted {
+        /// If the maximum number of addresses is reached, an old address might have been
+        /// removed. If so, this contains the address.
+        address_removed: Option<Vec<u8>>,
+    },
+    Duplicate,
 }
 
 #[cfg(test)]
