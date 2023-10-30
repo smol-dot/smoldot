@@ -28,11 +28,6 @@ wasmtime = [
     "dep:wasmtime",
     "std"   # TODO: unfortunately doesn't compile without `std`, but could be fixed
 ]
-with-buffers = [
-    "futures-util",
-    "dep:pin-project",
-    "std"
-]
 
 [dependencies]
 # This section contains only no_std-compatible crates. See below for std-only crates.
