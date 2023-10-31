@@ -165,7 +165,7 @@ dependencies = [
  "async-task",
  "concurrent-queue",
  "fastrand 2.0.1",
- "futures-lite",
+ "futures-lite 1.13.0",
  "slab",
 ]
 
@@ -178,7 +178,7 @@ dependencies = [
  "async-lock 2.8.0",
  "autocfg",
  "blocking",
- "futures-lite",
+ "futures-lite 1.13.0",
 ]
 
 [[package]]
@@ -191,7 +191,7 @@ dependencies = [
  "autocfg",
  "cfg-if",
  "concurrent-queue",
- "futures-lite",
+ "futures-lite 1.13.0",
  "log",
  "parking",
  "polling 2.8.0",
@@ -211,7 +211,7 @@ dependencies = [
  "cfg-if",
  "concurrent-queue",
  "futures-io",
- "futures-lite",
+ "futures-lite 1.13.0",
  "parking",
  "polling 3.3.0",
  "rustix 0.38.21",
@@ -249,7 +249,7 @@ checksum = "0434b1ed18ce1cf5769b8ac540e33f01fa9471058b5e89da9e06f3c882a8c12f"
 dependencies = [
  "async-io 1.13.0",
  "blocking",
- "futures-lite",
+ "futures-lite 1.13.0",
 ]
 
 [[package]]
@@ -264,7 +264,7 @@ dependencies = [
  "blocking",
  "cfg-if",
  "event-listener 3.0.1",
- "futures-lite",
+ "futures-lite 1.13.0",
  "rustix 0.38.21",
  "windows-sys",
 ]
@@ -409,7 +409,7 @@ dependencies = [
  "async-task",
  "fastrand 2.0.1",
  "futures-io",
- "futures-lite",
+ "futures-lite 1.13.0",
  "piper",
  "tracing",
 ]
@@ -1134,6 +1134,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-lite"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c1155db57329dca6d018b61e76b1488ce9a2e5e44028cac420a5898f4fcef63"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "futures-macro"
 version = "0.3.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1578,9 +1588,9 @@ checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
 name = "lru"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a83fb7698b3643a0e34f9ae6f2e8f0178c0fd42f8b59d493aa271ff3a5bf21"
+checksum = "1efa59af2ddfad1854ae27d75009d538d0998b4b2fd47083e743ac1a10e46c60"
 
 [[package]]
 name = "mach"
@@ -2382,7 +2392,7 @@ dependencies = [
  "async-net",
  "async-process",
  "blocking",
- "futures-lite",
+ "futures-lite 1.13.0",
 ]
 
 [[package]]
@@ -2405,7 +2415,7 @@ dependencies = [
  "event-listener 3.0.1",
  "fnv",
  "futures-executor",
- "futures-lite",
+ "futures-lite 2.0.0",
  "futures-util",
  "hashbrown 0.14.2",
  "hex",
@@ -2459,7 +2469,7 @@ dependencies = [
  "event-listener 3.0.1",
  "fnv",
  "futures-channel",
- "futures-lite",
+ "futures-lite 2.0.0",
  "futures-util",
  "hashbrown 0.14.2",
  "hex",
@@ -2491,7 +2501,7 @@ dependencies = [
  "event-listener 3.0.1",
  "fnv",
  "futures-channel",
- "futures-lite",
+ "futures-lite 2.0.0",
  "futures-util",
  "hashbrown 0.14.2",
  "hex",
@@ -2521,7 +2531,7 @@ dependencies = [
  "derive_more",
  "event-listener 3.0.1",
  "fnv",
- "futures-lite",
+ "futures-lite 2.0.0",
  "futures-util",
  "hashbrown 0.14.2",
  "log",
@@ -2647,11 +2657,11 @@ dependencies = [
 
 [[package]]
 name = "terminal_size"
-version = "0.2.6"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e6bf6f19e9f8ed8d4048dc22981458ebcf406d67e94cd422e5ecd73d63b3237"
+checksum = "21bebf2b7c9e0a515f6e0f8c51dc0f8e4696391e6f1ff30379559f8365fb0df7"
 dependencies = [
- "rustix 0.37.27",
+ "rustix 0.38.21",
  "windows-sys",
 ]
 
