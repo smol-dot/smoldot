@@ -778,6 +778,10 @@ pub enum InsertAddressResult {
 
 #[cfg(test)]
 mod tests {
+    use super::{BasicPeeringStrategy, Config, InsertAddressResult, InsertChainPeerResult};
+    use crate::network::service::{peer_id::PublicKey, PeerId};
+    use core::time::Duration;
+
     #[test]
     fn peer_state_ordering() {
         // The implementation above relies on the properties tested here.
@@ -790,4 +794,33 @@ mod tests {
             } < PeerChainState::Slot
         );
     }
+
+    #[test]
+    fn addresses_removed_when_peer_has_no_chain_association() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
+
+        assert!(matches!(
+            bps.insert_chain_peer(0, peer_id.clone(), usize::max_value()),
+            InsertChainPeerResult::Inserted { peer_removed: None }
+        ));
+
+        assert!(matches!(
+            bps.insert_address(&peer_id, Vec::new(), usize::max_value()),
+            InsertAddressResult::Inserted {
+                address_removed: None
+            }
+        ));
+
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 1);
+        bps.unassign_slot_and_remove_chain_peer(&0, &peer_id);
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 0);
+    }
+
+    // TODO: more tests
 }
