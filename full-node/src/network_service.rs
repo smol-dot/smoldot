@@ -220,6 +220,9 @@ struct Inner {
     >,
 
     /// Identity of the local node.
+    noise_key: service::NoiseKey,
+
+    /// Identity of the local node. Can be derived from [`Inner::noise_key`].
     local_peer_id: PeerId,
 
     /// Service to use to report traces.
@@ -296,12 +299,12 @@ impl NetworkService {
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
             connections_capacity: 100, // TODO: ?
-            noise_key: config.noise_key,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: rand::random(),
         });
 
-        let mut peering_strategy = basic_peering_strategy::BasicPeeringStrategy::new();
+        let mut peering_strategy =
+            basic_peering_strategy::BasicPeeringStrategy::new(rand::random());
 
         let mut chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
@@ -347,7 +350,7 @@ impl NetworkService {
         let foreground_shutdown = event_listener::Event::new();
 
         let local_peer_id =
-            peer_id::PublicKey::Ed25519(*network.noise_key().libp2p_public_ed25519_key())
+            peer_id::PublicKey::Ed25519(*config.noise_key.libp2p_public_ed25519_key())
                 .into_peer_id();
 
         // Initialize the inner network service.
@@ -362,6 +365,7 @@ impl NetworkService {
             tasks_executor: config.tasks_executor,
             log_callback: config.log_callback.clone(),
             network,
+            noise_key: config.noise_key,
             peering_strategy,
             active_connections: hashbrown::HashMap::with_capacity_and_hasher(
                 100, // TODO: ?
@@ -1443,6 +1447,7 @@ async fn background_task(mut inner: Inner) {
                     Instant::now(),
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                         is_initiator: true,
+                        noise_key: &inner.noise_key,
                     },
                     multiaddr.clone().into_vec(),
                     Some(peer_id.clone()),
@@ -1543,6 +1548,7 @@ async fn background_task(mut inner: Inner) {
                     when_accepted,
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                         is_initiator: false,
+                        noise_key: &inner.noise_key,
                     },
                     multiaddr.clone().into_vec(),
                     None,

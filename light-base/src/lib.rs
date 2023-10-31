@@ -79,7 +79,7 @@ use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec, header,
     informant::HashDisplay,
-    libp2p::{connection, multiaddr, peer_id},
+    libp2p::{multiaddr, peer_id},
 };
 
 mod database;
@@ -267,7 +267,6 @@ struct RunningChain<TPlat: platform::PlatformRef> {
 struct ChainServices<TPlat: platform::PlatformRef> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_service_chain_id: network_service::ChainId,
-    network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
@@ -278,7 +277,6 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
         ChainServices {
             network_service: self.network_service.clone(),
             network_service_chain_id: self.network_service_chain_id.clone(),
-            network_identity: self.network_identity.clone(),
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
@@ -673,16 +671,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 (&mut entry.services, &entry.log_name)
             }
             Entry::Vacant(entry) => {
-                // Key used by the networking. Represents the identity of the node on the
-                // peer-to-peer network.
-                let network_noise_key = {
-                    let mut noise_static_key = zeroize::Zeroizing::new([0u8; 32]);
-                    self.platform.fill_random_bytes(&mut *noise_static_key);
-                    let mut libp2p_key = zeroize::Zeroizing::new([0u8; 32]);
-                    self.platform.fill_random_bytes(&mut *libp2p_key);
-                    connection::NoiseKey::new(&libp2p_key, &noise_static_key)
-                };
-
                 // Version of the client when requested through the networking.
                 let network_identify_agent_version = format!(
                     "{} {}",
@@ -767,7 +755,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 fork_id,
                                 config,
                                 network_identify_agent_version,
-                                network_noise_key,
                             )
                             .await
                         };
@@ -778,11 +765,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log::info!(
                                 target: "smoldot",
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. Network identity: {}. Relay chain: {} (id: {})",
+                                hash: {}. Relay chain: {} (id: {})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                running_chain.network_identity,
                                 relay_chain_log_name,
                                 para_id,
                             );
@@ -790,11 +776,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                             log::info!(
                                 target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. Network identity: {}. {} starting at: {} (#{})",
+                                hash: {}. {} starting at: {} (#{})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
-                                running_chain.network_identity,
                                 if used_database_chain_information { "Database" } else { "Chain specification" },
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number
@@ -983,7 +968,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     transactions_service: running_chain.transactions_service,
                     runtime_service: running_chain.runtime_service,
                     chain_spec: &chain_spec,
-                    peer_id: &running_chain.network_identity,
                     system_name,
                     system_version,
                     genesis_block_hash,
@@ -1175,20 +1159,13 @@ async fn start_services<TPlat: platform::PlatformRef>(
     fork_id: Option<String>,
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
-    network_noise_key: connection::NoiseKey,
 ) -> ChainServices<TPlat> {
-    // Since `network_noise_key` is moved out below, use it to build the network identity ahead
-    // of the network service starting.
-    let network_identity =
-        peer_id::PublicKey::Ed25519(*network_noise_key.libp2p_public_ed25519_key()).into_peer_id();
-
     // The network service is responsible for connecting to the peer-to-peer network.
     let (network_service, network_service_chain_ids, mut network_event_receivers) =
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
             identify_agent_version: network_identify_agent_version,
-            noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),
                 grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
@@ -1360,7 +1337,6 @@ async fn start_services<TPlat: platform::PlatformRef>(
     ChainServices {
         network_service,
         network_service_chain_id,
-        network_identity,
         runtime_service,
         sync_service,
         transactions_service,

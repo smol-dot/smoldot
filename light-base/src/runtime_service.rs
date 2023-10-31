@@ -73,6 +73,7 @@ use core::{
     time::Duration,
 };
 use futures_channel::mpsc;
+use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
@@ -173,11 +174,9 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 guarded,
             ));
             background_task_abort = abort;
-            abortable
-                .map(move |_| {
-                    log::debug!(target: &log_target, "Shutdown");
-                })
-                .boxed()
+            abortable.map(move |_| {
+                log::debug!(target: &log_target, "Shutdown");
+            })
         });
 
         RuntimeService {
@@ -1393,7 +1392,7 @@ async fn run_background<TPlat: PlatformRef>(
             sync_service: sync_service.clone(),
             guarded: guarded.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
-            wake_up_new_necessary_download: future::pending().boxed().fuse(),
+            wake_up_new_necessary_download: Box::pin(future::pending()),
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
@@ -1401,14 +1400,53 @@ async fn run_background<TPlat: PlatformRef>(
 
         // Inner loop. Process incoming events.
         loop {
-            futures_util::select! {
-                _ = &mut background.wake_up_new_necessary_download => {
+            enum WhatHappened {
+                NewNecessaryDownload,
+                Notification(Option<sync_service::Notification>),
+                RuntimeDownloadFinished(
+                    async_tree::AsyncOpId,
+                    Result<
+                        (
+                            Option<Vec<u8>>,
+                            Option<Vec<u8>>,
+                            Option<Vec<u8>>,
+                            Option<Vec<Nibble>>,
+                        ),
+                        RuntimeDownloadError,
+                    >,
+                ),
+            }
+
+            let what_happened: WhatHappened = {
+                let new_necessary_download = async {
+                    (&mut background.wake_up_new_necessary_download).await;
+                    background.wake_up_new_necessary_download = Box::pin(future::pending());
+                    WhatHappened::NewNecessaryDownload
+                };
+                new_necessary_download
+                    .or(async { WhatHappened::Notification(background.blocks_stream.next().await) })
+                    .or(async {
+                        if !background.runtime_downloads.is_empty() {
+                            let (async_op_id, download_result) =
+                                background.runtime_downloads.select_next_some().await;
+                            WhatHappened::RuntimeDownloadFinished(async_op_id, download_result)
+                        } else {
+                            future::pending().await
+                        }
+                    })
+                    .await
+            };
+
+            match what_happened {
+                WhatHappened::NewNecessaryDownload => {
                     background.start_necessary_downloads().await;
-                },
-                notification = background.blocks_stream.next().fuse() => {
+                }
+                WhatHappened::Notification(None) => {
+                    break; // Break out of the inner loop in order to reset the background.
+                }
+                WhatHappened::Notification(Some(notification)) => {
                     match notification {
-                        None => break, // Break out of the inner loop in order to reset the background.
-                        Some(sync_service::Notification::Block(new_block)) => {
+                        sync_service::Notification::Block(new_block) => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
@@ -1417,7 +1455,10 @@ async fn run_background<TPlat: PlatformRef>(
                                 new_block.is_new_best
                             );
 
-                            let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
+                            let near_head_of_chain = background
+                                .sync_service
+                                .is_near_head_of_chain_heuristic()
+                                .await;
 
                             let mut guarded = background.guarded.lock().await;
                             let guarded = &mut *guarded;
@@ -1426,35 +1467,70 @@ async fn run_background<TPlat: PlatformRef>(
                                 guarded.best_near_head_of_chain = near_head_of_chain;
                             }
 
-                            let same_runtime_as_parent = same_runtime_as_parent(&new_block.scale_encoded_header, sync_service.block_number_bytes());
+                            let same_runtime_as_parent = same_runtime_as_parent(
+                                &new_block.scale_encoded_header,
+                                sync_service.block_number_bytes(),
+                            );
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree, finalized_block, ..
+                                    tree,
+                                    finalized_block,
+                                    ..
                                 } => {
-                                    let parent_index = if new_block.parent_hash == finalized_block.hash {
+                                    let parent_index = if new_block.parent_hash
+                                        == finalized_block.hash
+                                    {
                                         None
                                     } else {
-                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
+                                        Some(
+                                            tree.input_output_iter_unordered()
+                                                .find(|block| {
+                                                    block.user_data.hash == new_block.parent_hash
+                                                })
+                                                .unwrap()
+                                                .id,
+                                        )
                                     };
 
-                                    tree.input_insert_block(Block {
-                                        hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
-                                        scale_encoded_header: new_block.scale_encoded_header,
-                                    }, parent_index, same_runtime_as_parent, new_block.is_new_best);
+                                    tree.input_insert_block(
+                                        Block {
+                                            hash: header::hash_from_scale_encoded_header(
+                                                &new_block.scale_encoded_header,
+                                            ),
+                                            scale_encoded_header: new_block.scale_encoded_header,
+                                        },
+                                        parent_index,
+                                        same_runtime_as_parent,
+                                        new_block.is_new_best,
+                                    );
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let parent_index = tree.input_output_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
-                                    tree.input_insert_block(Block {
-                                        hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
-                                        scale_encoded_header: new_block.scale_encoded_header,
-                                    }, Some(parent_index), same_runtime_as_parent, new_block.is_new_best);
+                                    let parent_index = tree
+                                        .input_output_iter_unordered()
+                                        .find(|block| block.user_data.hash == new_block.parent_hash)
+                                        .unwrap()
+                                        .id;
+                                    tree.input_insert_block(
+                                        Block {
+                                            hash: header::hash_from_scale_encoded_header(
+                                                &new_block.scale_encoded_header,
+                                            ),
+                                            scale_encoded_header: new_block.scale_encoded_header,
+                                        },
+                                        Some(parent_index),
+                                        same_runtime_as_parent,
+                                        new_block.is_new_best,
+                                    );
                                 }
                             }
 
                             background.advance_and_notify_subscribers(guarded);
-                        },
-                        Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
+                        }
+                        sync_service::Notification::Finalized {
+                            hash,
+                            best_block_hash,
+                        } => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= InputFinalized(hash={}, best={})",
@@ -1463,14 +1539,17 @@ async fn run_background<TPlat: PlatformRef>(
 
                             background.finalize(hash, best_block_hash).await;
                         }
-                        Some(sync_service::Notification::BestBlockChanged { hash }) => {
+                        sync_service::Notification::BestBlockChanged { hash } => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= BestBlockChanged(hash={})",
                                 HashDisplay(&hash)
                             );
 
-                            let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
+                            let near_head_of_chain = background
+                                .sync_service
+                                .is_near_head_of_chain_heuristic()
+                                .await;
 
                             let mut guarded = background.guarded.lock().await;
                             let guarded = &mut *guarded;
@@ -1479,17 +1558,27 @@ async fn run_background<TPlat: PlatformRef>(
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     finalized_block,
-                                    tree, ..
+                                    tree,
+                                    ..
                                 } => {
                                     let idx = if hash == finalized_block.hash {
                                         None
                                     } else {
-                                        Some(tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id)
+                                        Some(
+                                            tree.input_output_iter_unordered()
+                                                .find(|block| block.user_data.hash == hash)
+                                                .unwrap()
+                                                .id,
+                                        )
                                     };
                                     tree.input_set_best_block(idx);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let idx = tree.input_output_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    let idx = tree
+                                        .input_output_iter_unordered()
+                                        .find(|block| block.user_data.hash == hash)
+                                        .unwrap()
+                                        .id;
                                     tree.input_set_best_block(Some(idx));
                                 }
                             }
@@ -1500,21 +1589,28 @@ async fn run_background<TPlat: PlatformRef>(
 
                     // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
                     background.start_necessary_downloads().await;
-                },
-                (async_op_id, download_result) = background.runtime_downloads.select_next_some() => {
+                }
+                WhatHappened::RuntimeDownloadFinished(async_op_id, download_result) => {
                     let mut guarded = background.guarded.lock().await;
 
                     let concerned_blocks = match &guarded.tree {
-                        GuardedInner::FinalizedBlockRuntimeKnown {
-                            tree, ..
-                        } => either::Left(tree.async_op_blocks(async_op_id)),
+                        GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            either::Left(tree.async_op_blocks(async_op_id))
+                        }
                         GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
                             either::Right(tree.async_op_blocks(async_op_id))
                         }
-                    }.format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash))).to_string();
+                    }
+                    .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
+                    .to_string();
 
                     match download_result {
-                        Ok((storage_code, storage_heap_pages, code_merkle_value, closest_ancestor_excluding)) => {
+                        Ok((
+                            storage_code,
+                            storage_heap_pages,
+                            code_merkle_value,
+                            closest_ancestor_excluding,
+                        )) => {
                             log::debug!(
                                 target: &log_target,
                                 "Worker <= SuccessfulDownload(blocks=[{}])",
@@ -1525,7 +1621,15 @@ async fn run_background<TPlat: PlatformRef>(
                             guarded.best_near_head_of_chain = true;
                             drop(guarded);
 
-                            background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages, code_merkle_value, closest_ancestor_excluding).await;
+                            background
+                                .runtime_download_finished(
+                                    async_op_id,
+                                    storage_code,
+                                    storage_heap_pages,
+                                    code_merkle_value,
+                                    closest_ancestor_excluding,
+                                )
+                                .await;
                         }
                         Err(error) => {
                             log::debug!(
@@ -1544,9 +1648,7 @@ async fn run_background<TPlat: PlatformRef>(
                             }
 
                             match &mut guarded.tree {
-                                GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree, ..
-                                } => {
+                                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                                     tree.async_op_failure(async_op_id, &background.platform.now());
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
@@ -1619,7 +1721,7 @@ struct Background<TPlat: PlatformRef> {
     >,
 
     /// Future that wakes up when a new download to start is potentially ready.
-    wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
+    wake_up_new_necessary_download: future::BoxFuture<'static, ()>,
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -1965,11 +2067,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
                     async_tree::NextNecessaryAsyncOp::NotReady { when } => {
                         self.wake_up_new_necessary_download = if let Some(when) = when {
-                            self.platform.sleep_until(when).boxed()
+                            Box::pin(self.platform.sleep_until(when)) as Pin<Box<_>>
                         } else {
-                            future::pending().boxed()
-                        }
-                        .fuse();
+                            Box::pin(future::pending()) as Pin<Box<_>>
+                        };
                         break;
                     }
                 }
