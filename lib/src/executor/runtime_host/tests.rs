@@ -179,6 +179,7 @@ fn execute_blocks() {
 
                     execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
                 }
+                RuntimeHostVm::LogEmit(log) => execution = log.resume(),
                 RuntimeHostVm::OffchainStorageSet(_) | RuntimeHostVm::Offchain(_) => {
                     unimplemented!()
                 }

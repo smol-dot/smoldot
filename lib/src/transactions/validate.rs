@@ -499,6 +499,11 @@ impl Query {
                     result: Err(Error::ForbiddenHostCall),
                     virtual_machine: ctx.into_prototype(),
                 },
+                runtime_host::RuntimeHostVm::LogEmit(req) => {
+                    // Generated logs are ignored.
+                    inner = req.resume();
+                    continue;
+                }
             };
         }
     }
@@ -568,6 +573,11 @@ impl Query {
                     result: Err(Error::ForbiddenHostCall),
                     virtual_machine: ctx.into_prototype(),
                 },
+                runtime_host::RuntimeHostVm::LogEmit(req) => {
+                    // Generated logs are ignored.
+                    inner = req.resume();
+                    continue;
+                }
             };
         }
     }
