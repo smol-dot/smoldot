@@ -466,7 +466,7 @@ where
     }
 
     /// Returns the list of all the chains that have been added.
-    pub fn chains(&'_ self) -> impl Iterator<Item = ChainId> + '_ {
+    pub fn chains(&'_ self) -> impl ExactSizeIterator<Item = ChainId> + '_ {
         self.chains.iter().map(|(idx, _)| ChainId(idx))
     }
 

@@ -304,7 +304,11 @@ impl NetworkService {
         });
 
         let mut peering_strategy =
-            basic_peering_strategy::BasicPeeringStrategy::new(rand::random());
+            basic_peering_strategy::BasicPeeringStrategy::new(basic_peering_strategy::Config {
+                randomness_seed: rand::random(),
+                peers_capacity: 200, // TODO: ?
+                chains_capacity: config.chains.len(),
+            });
 
         let mut chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());

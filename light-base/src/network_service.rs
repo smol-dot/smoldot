@@ -237,11 +237,17 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 }),
                 identify_agent_version: config.identify_agent_version,
                 messages_tx: messages_tx.clone(),
-                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new({
-                    let mut seed = [0; 32];
-                    config.platform.fill_random_bytes(&mut seed);
-                    seed
-                }),
+                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
+                    basic_peering_strategy::Config {
+                        randomness_seed: {
+                            let mut seed = [0; 32];
+                            config.platform.fill_random_bytes(&mut seed);
+                            seed
+                        },
+                        peers_capacity: 50, // TODO: ?
+                        chains_capacity: network.chains().count(),
+                    },
+                ),
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),

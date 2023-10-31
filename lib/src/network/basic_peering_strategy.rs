@@ -109,22 +109,34 @@ enum PeerChainState<TInstant> {
     Slot,
 }
 
+/// Configuration passed to [`BasicPeeringStrategy::new`].
+pub struct Config {
+    /// Seed used for the randomness for choosing peers and addresses to connect to or remove.
+    pub randomness_seed: [u8; 32],
+
+    /// Number of peers, all chains together, to initially reserve memory for.
+    pub peers_capacity: usize,
+
+    /// Number of chains to initially reserve memory for.
+    pub chains_capacity: usize,
+}
+
 impl<TChainId, TInstant> BasicPeeringStrategy<TChainId, TInstant>
 where
     TChainId: PartialOrd + Ord + Eq + Hash + Clone,
-    TInstant: PartialOrd + Ord + Eq + Clone, // TODO: remove Clone?
+    TInstant: PartialOrd + Ord + Eq + Clone,
 {
     /// Creates a new empty [`BasicPeeringStrategy`].
     ///
     /// Must be passed a seed for randomness used
     /// in [`BasicPeeringStrategy::pick_assignable_peer`].
-    pub fn new(randomness_seed: [u8; 32]) -> Self {
-        let mut randomness = ChaCha20Rng::from_seed(randomness_seed);
+    pub fn new(config: Config) -> Self {
+        let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
         BasicPeeringStrategy {
-            peer_ids: slab::Slab::new(), // TODO: capacity?
+            peer_ids: slab::Slab::with_capacity(config.peers_capacity),
             peer_ids_indices: hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO: ?
+                config.peers_capacity,
                 util::SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
@@ -132,9 +144,9 @@ where
                 }),
             ),
             addresses: BTreeMap::new(),
-            chains: slab::Slab::new(), // TODO: capacity?
+            chains: slab::Slab::with_capacity(config.chains_capacity),
             chains_indices: hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO: ?
+                config.chains_capacity,
                 util::SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
