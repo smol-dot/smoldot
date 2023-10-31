@@ -571,15 +571,13 @@ where
             return None;
         };
 
-        // TODO: could be optimized further
-        for ((_, address), state) in self
+        // TODO: could be optimized further by removing filter() and adjusting the set
+        if let Some(((_, address), state)) = self
             .addresses
             .range_mut((peer_id_index, Vec::new())..(peer_id_index + 1, Vec::new()))
+            .filter(|(_, state)| matches!(state, AddressState::Disconnected))
+            .choose(&mut self.randomness)
         {
-            if matches!(state, AddressState::Connected) {
-                continue;
-            }
-
             *state = AddressState::Connected;
             return Some(address);
         }
