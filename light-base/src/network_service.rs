@@ -237,11 +237,17 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 }),
                 identify_agent_version: config.identify_agent_version,
                 messages_tx: messages_tx.clone(),
-                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new({
-                    let mut seed = [0; 32];
-                    config.platform.fill_random_bytes(&mut seed);
-                    seed
-                }),
+                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
+                    basic_peering_strategy::Config {
+                        randomness_seed: {
+                            let mut seed = [0; 32];
+                            config.platform.fill_random_bytes(&mut seed);
+                            seed
+                        },
+                        peers_capacity: 50, // TODO: ?
+                        chains_capacity: network.chains().count(),
+                    },
+                ),
                 network,
                 platform: config.platform.clone(),
                 event_senders: either::Left(event_senders),
@@ -1240,12 +1246,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.important_nodes.insert(peer_id.clone());
                     }
 
-                    for addr in addrs {
-                        task.peering_strategy
-                            .insert_address(&peer_id, addr.into_vec());
-                    }
+                    // Note that we must call this function before `insert_address`, as documented
+                    // in `basic_peering_strategy`.
+                    task.peering_strategy
+                        .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
 
-                    task.peering_strategy.insert_chain_peer(chain_id, peer_id);
+                    for addr in addrs {
+                        let _ = task
+                            .peering_strategy
+                            .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
+                    }
                 }
 
                 continue;
@@ -1336,8 +1346,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     task.peering_strategy
                         .remove_address(expected_peer_id, remote_addr.as_ref());
-                    task.peering_strategy
-                        .insert_connected_address(&peer_id, remote_addr.clone().into_vec());
+                    let _ = task.peering_strategy.insert_or_set_connected_address(
+                        &peer_id,
+                        remote_addr.clone().into_vec(),
+                        10,
+                    );
                 } else {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakeFinished", peer_id, remote_addr);
                 }
@@ -1554,13 +1567,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     if !valid_addrs.is_empty() {
+                        // Note that we must call this function before `insert_address`,
+                        // as documented in `basic_peering_strategy`.
                         task.peering_strategy
-                            .insert_chain_peer(chain_id, peer_id.clone());
+                            .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
                     }
 
                     for addr in valid_addrs {
-                        task.peering_strategy
-                            .insert_address(&peer_id, addr.into_vec());
+                        let _insert_result =
+                            task.peering_strategy
+                                .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
+                        debug_assert!(!matches!(
+                            _insert_result,
+                            basic_peering_strategy::InsertAddressResult::UnknownPeer
+                        ));
                     }
                 }
 
