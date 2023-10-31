@@ -79,16 +79,16 @@ fn main() {
             user_data: (),
         })
         .unwrap();
-    // Connection to Polkadot is now properly initialized.
+    // The Polkadot chain is now properly initialized.
 
     // `json_rpc_responses` can only be `None` if we had passed `json_rpc: Disabled` in the
     // configuration.
     let mut polkadot_json_rpc_responses = polkadot_connection.json_rpc_responses.unwrap();
 
-    // Ask the client to connect to Assethub.
+    // Ask the client to connect to Polkadot's Assethub, which is one of its parachains.
     let assethub_connection = client
         .add_chain(smoldot_light::AddChainConfig {
-            specification: include_str!("../../demo-chain-specs/asset-hub-polkadot.json"),
+            specification: include_str!("../../demo-chain-specs/polkadot-asset-hub.json"),
             json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 max_subscriptions: 1024,
@@ -99,25 +99,24 @@ fn main() {
             user_data: (),
         })
         .unwrap();
-    // Connection to Assethub is now properly initialized.
+    // The Assethub chain is now properly initialized.
 
+    // Just like above, we are guaranteed that `json_rpc_responses` is `Some` thanks to the
+    // options that we have passed.
     let mut assethub_json_rpc_responses = assethub_connection.json_rpc_responses.unwrap();
 
-    // Send a JSON-RPC request to a chain, Polkadot & Assethub in this case.
-    // The example here asks the client to send us notifications whenever the new best block has
-    // changed.
-    // Calling this function only queues the request. It is not processed immediately.
+    // The example here asks the client to send us notifications whenever the new best block of
+    // Polkadot and the Assethub has changed.
+    // Calling the `json_rpc_request` function only queues the request. It is not processed immediately.
     // An `Err` is returned immediately if and only if the request isn't a proper JSON-RPC request
     // or if the channel of JSON-RPC responses is clogged.
-    //
-    // Polkadot:
     client
         .json_rpc_request(
             r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
             polkadot_connection.chain_id,
         )
         .unwrap();
-    // Assethub:
+
     client
         .json_rpc_request(
             r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
@@ -142,6 +141,7 @@ fn main() {
                 )
             })
             .await;
+
             println!("{chain_name} JSON-RPC response: {response}\n");
         }
     });
