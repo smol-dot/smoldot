@@ -1217,7 +1217,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                     }
                 },
                 fork_id,
-                block_number_bytes: block_number_bytes,
+                block_number_bytes,
             }],
         })
         .await;
