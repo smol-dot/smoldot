@@ -93,8 +93,13 @@ fn main() {
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 max_subscriptions: 1024,
             },
-            // Providing the allocated identifier for Polkadot.
-            potential_relay_chains: vec![polkadot_connection.chain_id].into_iter(),
+            // The chain specification of the asset hub parachain mentions that the identifier
+            // of its relay chain is `polkadot`. Because the `Client` might contain multiple different
+            // chains whose identifier is `polkadot`, we need to provide a list of all the chains
+            // that the `Client` should consider when searching for the relay chain. The `add_chain`
+            // function returns an error if there is no match or if there are multiple matches when
+            // searching for an appropriate relay chain within this list.
+            potential_relay_chains: [polkadot_connection.chain_id].into_iter(),
             database_content: "",
             user_data: (),
         })
