@@ -825,7 +825,7 @@ impl SubscribeStorage {
 
                 if !self.keys.is_empty() {
                     for key in &self.keys {
-                        if storage_changes.main_trie_diff_get(&key).is_some() {
+                        if storage_changes.main_trie_diff_get(key).is_some() {
                             subscription
                                 .pinned_blocks_storage_changes
                                 .insert((node_index, key.clone()));

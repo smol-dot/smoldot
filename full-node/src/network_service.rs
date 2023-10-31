@@ -318,18 +318,14 @@ impl NetworkService {
                     best_number: chain.best_block.0,
                     genesis_hash: chain.genesis_block_hash,
                     role: protocol::Role::Full,
-                    grandpa_protocol_config: if let Some(commit_finalized_height) =
-                        chain.grandpa_protocol_finalized_block_height
-                    {
+                    grandpa_protocol_config: chain.grandpa_protocol_finalized_block_height.map(
                         // TODO: dummy values
-                        Some(service::GrandpaState {
+                        |commit_finalized_height| service::GrandpaState {
                             commit_finalized_height,
                             round_number: 1,
                             set_id: 0,
-                        })
-                    } else {
-                        None
-                    },
+                        },
+                    ),
                     allow_inbound_block_requests: true,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
@@ -1583,7 +1579,7 @@ async fn background_task(mut inner: Inner) {
                             service::GossipKind::ConsensusTransactions,
                         )
                         .next()
-                        .map(|p| p.clone());
+                        .cloned();
 
                     if let Some(target) = target {
                         let substream_id = match inner.network.start_kademlia_find_node_request(

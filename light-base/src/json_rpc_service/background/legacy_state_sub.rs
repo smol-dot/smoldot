@@ -1048,11 +1048,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     ..
                 } = &mut task.subscription
                 {
-                    if let Some(block) = recent_pinned_blocks.get(&block_hash) {
-                        Some(block.scale_encoded_header.clone())
-                    } else {
-                        None
-                    }
+                    recent_pinned_blocks.get(&block_hash).map(|block| block.scale_encoded_header.clone())
                 } else {
                     None
                 };

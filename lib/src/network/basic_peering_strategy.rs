@@ -182,7 +182,7 @@ where
             .filter(|((_, c), s)| {
                 *c == *chain
                     && (matches!(*s, PeerChainState::Assignable)
-                        || matches!(&*s, PeerChainState::Banned { expires } if *expires <= *now))
+                        || matches!(&**s, PeerChainState::Banned { expires } if *expires <= *now))
             })
             .choose(&mut self.randomness)
         {
@@ -290,7 +290,7 @@ where
             self.addresses.iter_mut().find(|((p, _), _)| p == peer_id)
         {
             *state = AddressState::Connected;
-            Some(&address)
+            Some(address)
         } else {
             None
         }

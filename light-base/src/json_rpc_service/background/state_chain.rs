@@ -165,7 +165,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     if let Ok(decoded) =
                         header::decode(header, self.sync_service.block_number_bytes())
                     {
-                        if header::extrinsics_root(&body) != *decoded.extrinsics_root {
+                        if header::extrinsics_root(body) != *decoded.extrinsics_root {
                             result = Err(());
                         }
                     } else {

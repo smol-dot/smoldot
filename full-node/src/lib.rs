@@ -977,13 +977,9 @@ async fn open_database(
                         children_merkle_values: array::from_fn::<_, 16, _>(|n| {
                             let child_index =
                                 trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap();
-                            if let Some(mut child) = node_access.child(child_index) {
-                                Some(Cow::Owned(
-                                    child.user_data().1.as_ref().unwrap().as_ref().to_vec(),
-                                ))
-                            } else {
-                                None
-                            }
+                            node_access.child(child_index).map(|mut child| {
+                                Cow::Owned(child.user_data().1.as_ref().unwrap().as_ref().to_vec())
+                            })
                         }),
                         partial_key_nibbles: Cow::Owned(
                             node_access.partial_key().map(u8::from).collect::<Vec<_>>(),
