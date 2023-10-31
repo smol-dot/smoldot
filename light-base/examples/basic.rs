@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::{iter, num::NonZeroU32};
-use futures_lite::FutureExt;
+use futures_lite::FutureExt as _;
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
