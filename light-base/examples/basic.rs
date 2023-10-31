@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::{iter, num::NonZeroU32};
+use futures_lite::FutureExt;
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
@@ -34,13 +35,13 @@ fn main() {
             env!("CARGO_PKG_VERSION").into(),
         ));
 
-    // Ask the client to connect to Kusama.
-    let kusama_connection = client
+    // Ask the client to connect to Polkadot.
+    let polkadot_connection = client
         .add_chain(smoldot_light::AddChainConfig {
             // The most important field of the configuration is the chain specification. This is a
             // JSON document containing all the information necessary for the client to connect to said
             // chain.
-            specification: include_str!("../../demo-chain-specs/kusama.json"),
+            specification: include_str!("../../demo-chain-specs/polkadot.json"),
 
             // Configures some constants about the JSON-RPC endpoints.
             // It is also possible to pass `Disabled`, in which case the chain will not be able to
@@ -78,49 +79,49 @@ fn main() {
             user_data: (),
         })
         .unwrap();
-    // Connection to Kusama is now properly initialized.
+    // Connection to Polkadot is now properly initialized.
 
     // `json_rpc_responses` can only be `None` if we had passed `json_rpc: Disabled` in the
     // configuration.
-    let mut kusama_json_rpc_responses = kusama_connection.json_rpc_responses.unwrap();
+    let mut polkadot_json_rpc_responses = polkadot_connection.json_rpc_responses.unwrap();
 
-    // Ask the client to connect to Statemine.
-    let statemine_connection = client
+    // Ask the client to connect to Assethub.
+    let assethub_connection = client
         .add_chain(smoldot_light::AddChainConfig {
-            specification: include_str!("../../demo-chain-specs/kusama-statemine.json"),
+            specification: include_str!("../../demo-chain-specs/asset-hub-polkadot.json"),
             json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
                 max_pending_requests: NonZeroU32::new(128).unwrap(),
                 max_subscriptions: 1024,
             },
-            // Providing the allocated identifier for Kusama.
-            potential_relay_chains: vec![kusama_connection.chain_id].into_iter(),
+            // Providing the allocated identifier for Polkadot.
+            potential_relay_chains: vec![polkadot_connection.chain_id].into_iter(),
             database_content: "",
             user_data: (),
         })
         .unwrap();
-    // Connection to Statemine is now properly initialized.
+    // Connection to Assethub is now properly initialized.
 
-    let mut statemine_json_rpc_responses = statemine_connection.json_rpc_responses.unwrap();
+    let mut assethub_json_rpc_responses = assethub_connection.json_rpc_responses.unwrap();
 
-    // Send a JSON-RPC request to a chain, Kusama & Statemine in this case.
+    // Send a JSON-RPC request to a chain, Polkadot & Assethub in this case.
     // The example here asks the client to send us notifications whenever the new best block has
     // changed.
     // Calling this function only queues the request. It is not processed immediately.
     // An `Err` is returned immediately if and only if the request isn't a proper JSON-RPC request
     // or if the channel of JSON-RPC responses is clogged.
     //
-    // Kusama:
+    // Polkadot:
     client
         .json_rpc_request(
             r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
-            kusama_connection.chain_id,
+            polkadot_connection.chain_id,
         )
         .unwrap();
-    // Statemine:
+    // Assethub:
     client
         .json_rpc_request(
             r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
-            statemine_connection.chain_id,
+            assethub_connection.chain_id,
         )
         .unwrap();
 
@@ -128,14 +129,20 @@ fn main() {
     // JSON-RPC responses.
     smol::block_on(async move {
         loop {
-            // The block time of a relay chain is 6 seconds and of a parachain 12 seconds.
-            // As a result, this loop fetches Kusama responses twice for every Statemine response.
-            for _ in 0..2 {
-                let response = kusama_json_rpc_responses.next().await.unwrap();
-                println!("Kusama JSON-RPC response: {response}\n");
+            let (chain_name, response) = async {
+                (
+                    "Polkadot",
+                    polkadot_json_rpc_responses.next().await.unwrap(),
+                )
             }
-            let response = statemine_json_rpc_responses.next().await.unwrap();
-            println!("Statemine JSON-RPC response: {response}\n");
+            .or(async {
+                (
+                    "Assethub",
+                    assethub_json_rpc_responses.next().await.unwrap(),
+                )
+            })
+            .await;
+            println!("{chain_name} JSON-RPC response: {response}\n");
         }
     });
 }
