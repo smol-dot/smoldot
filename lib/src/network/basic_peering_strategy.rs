@@ -43,7 +43,7 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     /// Contains all the `PeerId`s used throughout the collection.
     peer_ids: slab::Slab<PeerId>,
 
-    /// Contains all the keys of [`BasicPeeringStragtegy::peer_ids`] indexed differently.
+    /// Contains all the keys of [`BasicPeeringStrategy::peer_ids`] indexed differently.
     peer_ids_indices: hashbrown::HashMap<PeerId, usize, util::SipHasherBuild>,
 
     addresses: BTreeMap<(usize, Vec<u8>), AddressState>,
@@ -56,7 +56,7 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     /// >           `TChainId`s are instead refered to as a `usize`.
     chains: slab::Slab<TChainId>,
 
-    /// Contains all the keys of [`BasicPeeringStragtegy::chains`] indexed differently.
+    /// Contains all the keys of [`BasicPeeringStrategy::chains`] indexed differently.
     /// While a dumber hasher is in principle enough, we use a `SipHasherBuild` "just in case"
     /// as we don't know the properties of `TChainId`.
     chains_indices: hashbrown::HashMap<TChainId, usize, util::SipHasherBuild>,
@@ -585,7 +585,7 @@ where
         Ok(())
     }
 
-    /// Finds the index of the given [`TChainId`] in [`BasicPeeringStrategy::chains`], or inserts
+    /// Finds the index of the given `TChainId` in [`BasicPeeringStrategy::chains`], or inserts
     /// one if there is none.
     fn get_or_insert_chain_index(&mut self, chain: &TChainId) -> usize {
         debug_assert_eq!(self.chains.len(), self.chains_indices.len());
@@ -600,7 +600,7 @@ where
         }
     }
 
-    /// Check if the given [`TChainId`] is still used within the collection. If no, removes it from
+    /// Check if the given `TChainId` is still used within the collection. If no, removes it from
     /// [`BasicPeeringStrategy::chains`].
     fn try_clean_up_chain(&mut self, chain_index: usize) {
         if self
