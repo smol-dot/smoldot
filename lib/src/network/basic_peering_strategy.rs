@@ -727,34 +727,52 @@ where
     }
 }
 
+/// See [`BasicPeeringStrategy::disconnect_addr`].
 #[derive(Debug, derive_more::Display)]
 pub enum DisconnectAddrError {
+    /// Address isn't known to the collection.
     UnknownAddress,
+    /// The address was not in the "connected" state.
     NotConnected,
 }
 
+/// See [`BasicPeeringStrategy::pick_assignable_peer`].
 pub enum AssignablePeer<'a, TInstant> {
+    /// An assignal peer was found. Note that the peer wasn't assigned yet.
     Assignable(&'a PeerId),
-    AllPeersBanned { next_unban: &'a TInstant },
+    /// No peer was found as all known un-assigned peers are currently in the "banned" state.
+    AllPeersBanned {
+        /// Instant when the first peer will be unbanned.
+        next_unban: &'a TInstant,
+    },
+    /// No un-assigned peer was found.
     NoPeer,
 }
 
+/// See [`BasicPeeringStrategy::insert_chain_peer`].
 pub enum InsertChainPeerResult {
+    /// Peer-chain association has been successfully inserted.
     Inserted {
         /// If the maximum number of peers is reached, an old peer might have been removed. If so,
         /// this contains the peer.
         peer_removed: Option<PeerId>,
     },
+    /// Peer-chain association was already inserted.
     Duplicate,
 }
 
+/// See [`BasicPeeringStrategy::insert_address`] and
+/// [`BasicPeeringStrategy::insert_or_set_connected_address`].
 pub enum InsertAddressResult {
+    /// Address has been successfully inserted.
     Inserted {
         /// If the maximum number of addresses is reached, an old address might have been
         /// removed. If so, this contains the address.
         address_removed: Option<Vec<u8>>,
     },
+    /// Address was already inserted.
     Duplicate,
+    /// The peer isn't associated to any chain, and as such the address was not inserted.
     UnknownPeer,
 }
 
