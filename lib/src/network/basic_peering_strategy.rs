@@ -70,6 +70,8 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     /// Contains all the keys of [`BasicPeeringStrategy::peer_ids`] indexed differently.
     peer_ids_indices: hashbrown::HashMap<PeerId, usize, util::SipHasherBuild>,
 
+    /// List of all known addresses, indexed by `peer_id_index`. The addresses are not intended
+    /// to be in a particular order.
     addresses: BTreeMap<(usize, Vec<u8>), AddressState>,
 
     /// List of all chains throughout the collection.
@@ -303,17 +305,34 @@ where
         address: Vec<u8>,
         max_addresses: usize,
     ) -> InsertAddressResult {
-        self.insert_address_inner(peer_id, address, max_addresses, AddressState::Disconnected)
+        self.insert_address_inner(
+            peer_id,
+            address,
+            max_addresses,
+            AddressState::Disconnected,
+            false,
+        )
     }
 
-    // TODO: doc
-    pub fn insert_connected_address(
+    /// Similar to [`BasicPeeringStrategy::insert_address`], except that the address, if it is
+    /// inserted, is directly in the "connected" state. If the address is already known, switches
+    /// it to the "connected" state.
+    ///
+    /// > **Note**: Use this function if you establish a connection and accidentally reach a
+    /// >           certain [`PeerId`].
+    pub fn insert_or_set_connected_address(
         &mut self,
         peer_id: &PeerId,
         address: Vec<u8>,
         max_addresses: usize,
     ) -> InsertAddressResult {
-        self.insert_address_inner(peer_id, address, max_addresses, AddressState::Connected)
+        self.insert_address_inner(
+            peer_id,
+            address,
+            max_addresses,
+            AddressState::Connected,
+            true,
+        )
     }
 
     fn insert_address_inner(
@@ -322,44 +341,50 @@ where
         address: Vec<u8>,
         max_addresses: usize,
         initial_state: AddressState,
+        update_if_present: bool,
     ) -> InsertAddressResult {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             return InsertAddressResult::UnknownPeer;
         };
 
-        if let btree_map::Entry::Vacant(entry) =
-            self.addresses.entry((peer_id_index, address.clone()))
-        {
-            entry.insert(initial_state);
+        match self.addresses.entry((peer_id_index, address.clone())) {
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(initial_state);
 
-            let address_removed = {
-                let num_addresses = self
-                    .addresses
-                    .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
-                    .count();
-
-                if num_addresses >= max_addresses {
-                    // TODO: is it a good idea to choose the address randomly to remove? maybe there should be a sorting system with best addresses first?
-                    self.addresses
+                let address_removed = {
+                    let num_addresses = self
+                        .addresses
                         .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
-                        .filter(|((_, a), s)| {
-                            matches!(s, AddressState::Disconnected) && *a != address
-                        })
-                        .choose(&mut self.randomness)
-                        .map(|((_, a), _)| a.clone())
-                } else {
-                    None
+                        .count();
+
+                    if num_addresses >= max_addresses {
+                        // TODO: is it a good idea to choose the address randomly to remove? maybe there should be a sorting system with best addresses first?
+                        self.addresses
+                            .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
+                            .filter(|((_, a), s)| {
+                                matches!(s, AddressState::Disconnected) && *a != address
+                            })
+                            .choose(&mut self.randomness)
+                            .map(|((_, a), _)| a.clone())
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(address_removed) = address_removed.as_ref() {
+                    self.addresses
+                        .remove(&(peer_id_index, address_removed.clone()));
                 }
-            };
 
-            if let Some(address_removed) = address_removed.as_ref() {
-                self.addresses
-                    .remove(&(peer_id_index, address_removed.clone()));
+                InsertAddressResult::Inserted { address_removed }
             }
+            btree_map::Entry::Occupied(entry) => {
+                if update_if_present {
+                    *entry.into_mut() = initial_state;
+                }
 
-            InsertAddressResult::Inserted { address_removed }
-        } else {
-            InsertAddressResult::Duplicate
+                InsertAddressResult::Duplicate
+            }
         }
     }
 

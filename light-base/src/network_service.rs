@@ -1346,7 +1346,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     task.peering_strategy
                         .remove_address(expected_peer_id, remote_addr.as_ref());
-                    let _ = task.peering_strategy.insert_connected_address(
+                    let _ = task.peering_strategy.insert_or_set_connected_address(
                         &peer_id,
                         remote_addr.clone().into_vec(),
                         10,

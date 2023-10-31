@@ -861,7 +861,7 @@ async fn background_task(mut inner: Inner) {
                                 .remove_address(expected_peer_id, remote_addr.as_ref());
                             match inner
                                 .peering_strategy
-                                .insert_connected_address(&peer_id, remote_addr.clone().into_vec(), 10) // TODO: constant
+                                .insert_or_set_connected_address(&peer_id, remote_addr.clone().into_vec(), 10) // TODO: constant
                             {
                                 basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
                                     let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
