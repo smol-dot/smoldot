@@ -197,6 +197,10 @@ where
         }
     }
 
+    ///
+    ///
+    /// If the peer isn't assigned to any chain anymore, it is removed from the collection
+    /// alongside with all of its addresses.
     pub fn unassign_slot_and_remove_chain_peer(&mut self, chain: &TChainId, peer_id: &PeerId) {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it wasn't assigned in the first place.
@@ -636,15 +640,6 @@ where
     /// [`BasicPeeringStrategy::peer_ids`].
     fn try_clean_up_peer_id(&mut self, peer_id_index: usize) {
         if self
-            .addresses
-            .range((peer_id_index, Vec::new())..(peer_id_index + 1, Vec::new()))
-            .next()
-            .is_some()
-        {
-            return;
-        }
-
-        if self
             .peers_chains
             .range((peer_id_index, usize::min_value())..=(peer_id_index, usize::max_value()))
             .next()
@@ -657,6 +652,15 @@ where
         let peer_id = self.peer_ids.remove(peer_id_index);
         let _was_in = self.peer_ids_indices.remove(&peer_id);
         debug_assert_eq!(_was_in, Some(peer_id_index));
+        for address in self
+            .addresses
+            .range((peer_id_index, Vec::new())..(peer_id_index + 1, Vec::new()))
+            .map(|((_, a), _)| a.clone())
+            .collect::<Vec<_>>()
+        {
+            let _was_removed = self.addresses.remove(&(peer_id_index, address));
+            debug_assert!(_was_removed.is_some());
+        }
     }
 }
 
