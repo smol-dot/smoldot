@@ -23,10 +23,9 @@ use core::{
     time::Duration,
 };
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
-use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor, header,
     informant::HashDisplay,
@@ -102,6 +101,13 @@ pub(super) enum Message<TPlat: PlatformRef> {
         /// Results provided by the [`sync_service`].
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
+    /// Internal message. Do not use.
+    BlockStateRootAndNumberFinished {
+        /// Hash of the block that has been queried.
+        block_hash: [u8; 32],
+        /// Outcome of the fetch.
+        result: Result<([u8; 32], u64), StateTrieRootHashError>,
+    },
 }
 
 /// Configuration to pass to [`start_task`].
@@ -137,10 +143,6 @@ pub(super) fn start_task<TPlat: PlatformRef>(
     config.platform.clone().spawn_task(
         format!("{}-legacy-state-subscriptions", config.log_target).into(),
         Box::pin(run(Task {
-            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
             best_block_report: Vec::with_capacity(4),
@@ -182,6 +184,14 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                 Default::default(),
             ),
             storage_query_in_progress: false,
+            block_state_root_hashes_numbers_cache: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+            block_state_root_hashes_numbers_pending: hashbrown::HashMap::with_capacity_and_hasher(
+                32,
+                Default::default(),
+            ),
         })),
     );
 
@@ -246,29 +256,30 @@ struct Task<TPlat: PlatformRef> {
     /// subscriptions. This task will send a [`Message::StorageFetch`] once it's finished.
     storage_query_in_progress: bool,
 
-    /// State trie root hashes and numbers of blocks that were not in
+    /// Cache of known state trie root hashes and numbers of blocks that were not in
     /// [`Subscription::Active::pinned_blocks`].
     ///
     /// The state trie root hash can also be an `Err` if the network request failed or if the
     /// header is of an invalid format.
-    ///
-    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
-    /// requests need the state trie root hash and number of the same block, they are only queried
-    /// once and the query is inserted in the cache while in progress. This way, the multiple
-    /// requests can all wait on that single future.
     ///
     /// Most of the time, the JSON-RPC client will query blocks that are found in
     /// [`Subscription::Active::pinned_blocks`], but occasionally it will query older blocks. When
     /// the storage of an older block is queried, it is common for the JSON-RPC client to make
     /// several storage requests to that same old block. In order to avoid having to retrieve the
     /// state trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes_numbers: lru::LruCache<
+    block_state_root_hashes_numbers_cache: lru::LruCache<
         [u8; 32],
-        future::MaybeDone<
-            future::Shared<
-                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
-            >,
-        >,
+        Result<([u8; 32], u64), StateTrieRootHashError>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// Requests for blocks state root hash and numbers that are still in progress.
+    /// For each block hash, contains a list of senders that are interested in the response.
+    /// Once the operation has been finished, the value is inserted in
+    /// [`Task::block_state_root_hashes_numbers_cache`].
+    block_state_root_hashes_numbers_pending: hashbrown::HashMap<
+        [u8; 32],
+        Vec<oneshot::Sender<Result<([u8; 32], u64), StateTrieRootHashError>>>,
         fnv::FnvBuildHasher,
     >,
 }
@@ -1010,10 +1021,6 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                if let Some(future) = task.block_state_root_hashes_numbers.get_mut(&block_hash) {
-                    let _ = future.now_or_never();
-                }
-
                 let block_number = if let Subscription::Active {
                     pinned_blocks: recent_pinned_blocks,
                     ..
@@ -1026,10 +1033,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                 task.runtime_service.block_number_bytes(),
                             )
                         }),
-                        task.block_state_root_hashes_numbers.get(&block_hash),
+                        task.block_state_root_hashes_numbers_cache.get(&block_hash),
                     ) {
                         (Some(Ok(header)), _) => Some(header.number),
-                        (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
+                        (_, Some(Ok((_, num)))) => Some(*num),
                         _ => None,
                     }
                 } else {
@@ -1064,115 +1071,135 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 block_hash,
                 result_tx,
             }) => {
-                let fetch = {
-                    // Try to find an existing entry in cache, and if not create one.
-
-                    // Look in `recent_pinned_blocks`.
-                    if let Subscription::Active {
-                        pinned_blocks: recent_pinned_blocks,
-                        ..
-                    } = &mut task.subscription
-                    {
-                        match recent_pinned_blocks.get(&block_hash).map(|b| {
-                            header::decode(
-                                &b.scale_encoded_header,
-                                task.runtime_service.block_number_bytes(),
-                            )
-                        }) {
-                            Some(Ok(header)) => {
-                                let _ = result_tx.send(Ok((*header.state_root, header.number)));
-                                continue;
-                            }
-                            Some(Err(err)) => {
-                                let _ = result_tx
-                                    .send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
-                                continue;
-                            } // TODO: can this actually happen? unclear
-                            None => {}
+                // Look in `recent_pinned_blocks`.
+                if let Subscription::Active {
+                    pinned_blocks: recent_pinned_blocks,
+                    ..
+                } = &mut task.subscription
+                {
+                    match recent_pinned_blocks.get(&block_hash).map(|b| {
+                        header::decode(
+                            &b.scale_encoded_header,
+                            task.runtime_service.block_number_bytes(),
+                        )
+                    }) {
+                        Some(Ok(header)) => {
+                            let _ = result_tx.send(Ok((*header.state_root, header.number)));
+                            continue;
                         }
+                        Some(Err(err)) => {
+                            let _ =
+                                result_tx.send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
+                            continue;
+                        } // TODO: can this actually happen? unclear
+                        None => {}
                     }
+                }
 
-                    // Look in `block_state_root_hashes`.
-                    match task.block_state_root_hashes_numbers.get(&block_hash) {
-                        Some(future::MaybeDone::Done(Ok(val))) => {
-                            let _ = result_tx.send(Ok(*val));
-                            continue;
-                        }
-                        Some(future::MaybeDone::Future(f)) => f.clone(),
-                        Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
-                        Some(future::MaybeDone::Done(Err(
-                            err @ StateTrieRootHashError::HeaderDecodeError(_),
-                        ))) => {
-                            // In case of a fatal error, return immediately.
-                            let _ = result_tx.send(Err(err.clone()));
-                            continue;
-                        }
-                        Some(future::MaybeDone::Done(Err(
-                            StateTrieRootHashError::NetworkQueryError,
-                        )))
-                        | None => {
-                            // No existing cache entry. Create the future that will perform the fetch
-                            // but do not actually start doing anything now.
-                            let fetch = {
-                                let sync_service = task.sync_service.clone();
-                                async move {
-                                    // The sync service knows which peers are potentially aware of
-                                    // this block.
-                                    let result = sync_service
-                                        .clone()
-                                        .block_query_unknown_number(
-                                            block_hash,
-                                            protocol::BlocksRequestFields {
-                                                header: true,
-                                                body: false,
-                                                justifications: false,
-                                            },
-                                            4,
-                                            Duration::from_secs(8),
-                                            NonZeroU32::new(2).unwrap(),
-                                        )
-                                        .await;
+                // Look in `block_state_root_hashes_numbers_cache`.
+                if let Some(entry) = task.block_state_root_hashes_numbers_cache.get(&block_hash) {
+                    let _ = result_tx.send(entry.clone());
+                    continue;
+                }
 
-                                    if let Ok(block) = result {
-                                        // If successful, the `block_query` function guarantees that the
-                                        // header is present and valid.
-                                        let header = block.header.unwrap();
-                                        debug_assert_eq!(
-                                            header::hash_from_scale_encoded_header(&header),
-                                            block_hash
-                                        );
-                                        let decoded = header::decode(
-                                            &header,
-                                            sync_service.block_number_bytes(),
-                                        )
-                                        .unwrap();
-                                        Ok((*decoded.state_root, decoded.number))
+                // Look in `block_state_root_hashes_numbers_pending`.
+                if let Some(entry) = task
+                    .block_state_root_hashes_numbers_pending
+                    .get_mut(&block_hash)
+                {
+                    entry.push(result_tx);
+                    continue;
+                }
+
+                // Start a new task to retrieve the value.
+                task.platform
+                    .spawn_task("block-state-root-number-fetch∏".into(), {
+                        let sync_service = task.sync_service.clone();
+                        let requests_tx = task.requests_tx.clone();
+                        async move {
+                            // The sync service knows which peers are potentially aware of
+                            // this block.
+                            let result = sync_service
+                                .clone()
+                                .block_query_unknown_number(
+                                    block_hash,
+                                    protocol::BlocksRequestFields {
+                                        header: true,
+                                        body: false,
+                                        justifications: false,
+                                    },
+                                    4,
+                                    Duration::from_secs(8),
+                                    NonZeroU32::new(2).unwrap(),
+                                )
+                                .await;
+
+                            let result = match result {
+                                Ok(block) => {
+                                    if let Some(header) = block.header {
+                                        if header::hash_from_scale_encoded_header(&header)
+                                            == block_hash
+                                        {
+                                            match header::decode(
+                                                &header,
+                                                sync_service.block_number_bytes(),
+                                            ) {
+                                                Ok(decoded) => {
+                                                    Ok((*decoded.state_root, decoded.number))
+                                                }
+                                                Err(err) => Err(
+                                                    StateTrieRootHashError::HeaderDecodeError(err),
+                                                ),
+                                            }
+                                        } else {
+                                            // TODO: try request again?
+                                            Err(StateTrieRootHashError::NetworkQueryError)
+                                        }
                                     } else {
-                                        // TODO: better error details?
+                                        // TODO: try request again?
                                         Err(StateTrieRootHashError::NetworkQueryError)
                                     }
                                 }
+                                Err(_) => {
+                                    // TODO: better error details?
+                                    Err(StateTrieRootHashError::NetworkQueryError)
+                                }
                             };
 
-                            // Insert the future in the cache, so that any other call will use the same
-                            // future.
-                            let wrapped = (Box::pin(fetch)
-                                as Pin<Box<dyn Future<Output = _> + Send>>)
-                                .shared();
-                            task.block_state_root_hashes_numbers
-                                .put(block_hash, future::maybe_done(wrapped.clone()));
-                            wrapped
+                            if let Some(requests_tx) = requests_tx.upgrade() {
+                                let _ = requests_tx
+                                    .send(Message::BlockStateRootAndNumberFinished {
+                                        block_hash,
+                                        result,
+                                    })
+                                    .await;
+                            }
                         }
-                    }
-                };
-
-                // We await separately to be certain that the lock isn't held anymore.
-                // TODO: crappy design
-                task.platform
-                    .spawn_task("dummy-adapter".into(), async move {
-                        let outcome = fetch.await;
-                        let _ = result_tx.send(outcome);
                     });
+
+                // Insert `result_tx` so that it gets sent the result once the operation is
+                // finished.
+                task.block_state_root_hashes_numbers_pending
+                    .insert(block_hash, vec![result_tx]);
+            }
+
+            // Background task dedicated to performing a fetch for a block trie root and number
+            // has finished.
+            WhatHappened::Message(Message::BlockStateRootAndNumberFinished {
+                block_hash,
+                result,
+            }) => {
+                if let Some(senders) = task
+                    .block_state_root_hashes_numbers_pending
+                    .remove(&block_hash)
+                {
+                    for sender in senders {
+                        let _ = sender.send(result.clone());
+                    }
+                }
+
+                task.block_state_root_hashes_numbers_cache
+                    .push(block_hash, result);
             }
 
             // Background task dedicated to performing a storage query for the storage
