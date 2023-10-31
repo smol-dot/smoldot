@@ -18,10 +18,34 @@
 //! Basic address book and slots assignments algorithm.
 //!
 //! The [`BasicPeeringStrategy`] contains a collection of network identities, identified by
-//! a [`PeerId`].
+//! a [`PeerId`]. Each network identity is associated to one or more chains, identified by a
+//! `TChainId`.
 //!
-//! Each network identity is associated with zero or more addresses. Each address is either
-//! "connected" or "disconnected".
+//! Each network-identity-chain association can be in one of these three states:
+//!
+//! - Normal.
+//! - Banned until a certain instant represented by `TInstant`.
+//! - Has a slot.
+//!
+//! "Normal" and "banned" network-identity-chain associations represent the potential peers to
+//! connect to, while "slot" represent pending or established gossip slots.
+//!
+//! Use [`BasicPeeringStrategy::pick_assignable_peer`] in order to assign a slot to a
+//! randomly-chosen network-identity that doesn't currently have one.
+//!
+//! If a gossip slot fails to be established with a certain peer, or if the peer misbehaves,
+//! use [`BasicPeeringStrategy::unassign_slot_and_ban`] to ban the peer, preventing it from
+//! obtaining a slot for a certain amount of time.
+//!
+//! Each network identity that is associated with at least one chain is associated with zero or
+//! more addresses. It is not possible to insert addresses to peers that aren't associated to at
+//! least one chain. Each address is either "connected" or "disconnected".
+//!
+//! There exists a limit to the number of peers per chain and the number of addresses per peer,
+//! guaranteeing that the data structure only uses a bounded amount of memory. If these limits
+//! are reached, peers and addresses are removed randomly. Peers that have a slot and addresses
+//! in the "connected" state are never removed.
+//!
 
 use crate::util;
 use alloc::{
@@ -197,10 +221,13 @@ where
         }
     }
 
+    /// Removes a peer-chain associated previously inserted with
+    /// [`BasicPeeringStrategy::insert_chain_peer`].
     ///
+    /// Has no effect if the peer-chain association didn't exist.
     ///
-    /// If the peer isn't assigned to any chain anymore, it is removed from the collection
-    /// alongside with all of its addresses.
+    /// If the peer isn't assigned to any chain anymore, all of its addresses are also removed
+    /// from the collection.
     pub fn unassign_slot_and_remove_chain_peer(&mut self, chain: &TChainId, peer_id: &PeerId) {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it wasn't assigned in the first place.
@@ -223,7 +250,8 @@ where
         }
     }
 
-    /// Returns the list of all peers that are known to belong to the given chain.
+    /// Returns the list of all peers that are known to belong to the given chain, in other
+    /// words peers added through [`BasicPeeringStrategy::insert_chain_peer`].
     ///
     /// The order of the yielded elements is unspecified.
     pub fn chain_peers_unordered(
