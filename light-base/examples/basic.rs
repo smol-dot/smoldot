@@ -80,6 +80,8 @@ fn main() {
         .unwrap();
     // Connection to Kusama is now properly initialized.
 
+    // `json_rpc_responses` can only be `None` if we had passed `json_rpc: Disabled` in the
+    // configuration.
     let mut kusama_json_rpc_responses = kusama_connection.json_rpc_responses.unwrap();
 
     // Ask the client to connect to Statemine.
