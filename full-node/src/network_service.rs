@@ -339,8 +339,10 @@ impl NetworkService {
                 .unwrap(); // TODO: don't unwrap?
 
             for (peer_id, addr) in chain.bootstrap_nodes {
+                // Note that we must call this function before `insert_address`, as documented
+                // in `basic_peering_strategy`.
+                peering_strategy.insert_chain_peer(chain_id, peer_id.clone(), usize::max_value());
                 peering_strategy.insert_address(&peer_id, addr.into_vec(), usize::max_value());
-                peering_strategy.insert_chain_peer(chain_id, peer_id);
             }
 
             chain_names.insert(chain_id, chain.log_name);
@@ -1168,9 +1170,19 @@ async fn background_task(mut inner: Inner) {
                             }
 
                             if !valid_addrs.is_empty() {
-                                inner
+                                // Note that we must call this function before `insert_address`,
+                                // as documented in `basic_peering_strategy`.
+                                match inner
                                     .peering_strategy
-                                    .insert_chain_peer(chain_id, peer_id.clone());
+                                    .insert_chain_peer(chain_id, peer_id.clone(), 100) // TODO: constant
+                                {
+                                    basic_peering_strategy::InsertChainPeerResult::Inserted { peer_removed: Some(peer_removed) } => {
+                                        inner
+                                            .log_callback
+                                            .log(LogLevel::Debug, format!("peer-forgotten; peer_id={}; chain={}", peer_removed, inner.network[chain_id].log_name));
+                                    }
+                                    _ => {}
+                                }
                             }
 
                             for addr in valid_addrs {
@@ -1184,6 +1196,7 @@ async fn background_task(mut inner: Inner) {
                                                 .log_callback
                                                 .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
                                         }
+                                        basic_peering_strategy::InsertAddressResult::UnknownPeer => unreachable!(),
                                         _ => {}
                                     }
                             }

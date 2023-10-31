@@ -1240,13 +1240,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.important_nodes.insert(peer_id.clone());
                     }
 
+                    // Note that we must call this function before `insert_address`, as documented
+                    // in `basic_peering_strategy`.
+                    task.peering_strategy
+                        .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+
                     for addr in addrs {
                         let _ = task
                             .peering_strategy
                             .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
                     }
-
-                    task.peering_strategy.insert_chain_peer(chain_id, peer_id);
                 }
 
                 continue;
@@ -1558,13 +1561,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
 
                     if !valid_addrs.is_empty() {
+                        // Note that we must call this function before `insert_address`,
+                        // as documented in `basic_peering_strategy`.
                         task.peering_strategy
-                            .insert_chain_peer(chain_id, peer_id.clone());
+                            .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
                     }
 
                     for addr in valid_addrs {
-                        task.peering_strategy
-                            .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
+                        let _insert_result =
+                            task.peering_strategy
+                                .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
+                        debug_assert!(!matches!(
+                            _insert_result,
+                            basic_peering_strategy::InsertAddressResult::UnknownPeer
+                        ));
                     }
                 }
 

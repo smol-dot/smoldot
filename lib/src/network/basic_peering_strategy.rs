@@ -123,14 +123,48 @@ where
         }
     }
 
-    // TODO: must purge an old peer
-    pub fn insert_chain_peer(&mut self, chain: TChainId, peer_id: PeerId) {
+    /// Inserts a chain-peer combination to the collection, indicating that the given peer belongs
+    /// to the given chain.
+    ///
+    /// Has no effect if the peer is already assigned to the given chain, in which case
+    /// [`InsertChainPeerResult::Duplicate`] is returned.
+    ///
+    /// A maximum number of peers per chain must be provided. If the peer is inserted and the
+    /// limit is exceeded, a peer (other than the one that has just been inserted) that belongs
+    /// to the given chain is randomly chosen and removed. Peers that have slots assigned to them
+    /// are never removed.
+    pub fn insert_chain_peer(
+        &mut self,
+        chain: TChainId,
+        peer_id: PeerId,
+        max_peers_per_chain: usize,
+    ) -> InsertChainPeerResult {
         let peer_id_index = self.get_or_insert_peer_index(&peer_id);
         let chain_index = self.get_or_insert_chain_index(&chain);
 
         if let btree_map::Entry::Vacant(entry) =
             self.peers_chains.entry((peer_id_index, chain_index))
         {
+            let peer_to_remove = if self
+                .peers_chains_by_state
+                .range(
+                    (chain_index, PeerChainState::Assignable, usize::min_value())
+                        ..=(chain_index, PeerChainState::Slot, usize::max_value()),
+                )
+                .count()
+                >= max_peers_per_chain
+            {
+                self.peers_chains_by_state
+                    .range(
+                        (chain_index, PeerChainState::Assignable, usize::min_value())
+                            ..(chain_index, PeerChainState::Slot, usize::min_value()),
+                    )
+                    .choose(&mut self.randomness)
+                    .map(|(_, _, peer_index)| *peer_index)
+            } else {
+                None
+            };
+
             let _was_inserted = self.peers_chains_by_state.insert((
                 chain_index,
                 PeerChainState::Assignable,
@@ -139,6 +173,27 @@ where
             debug_assert!(_was_inserted);
 
             entry.insert(PeerChainState::Assignable);
+
+            let peer_removed = if let Some(peer_to_remove) = peer_to_remove {
+                let peer_id_to_remove = self.peer_ids[peer_to_remove].clone();
+                let state = self
+                    .peers_chains
+                    .remove(&(peer_to_remove, chain_index))
+                    .unwrap_or_else(|| unreachable!());
+                debug_assert!(!matches!(state, PeerChainState::Slot));
+                let _was_removed =
+                    self.peers_chains_by_state
+                        .remove(&(chain_index, state, peer_to_remove));
+                debug_assert!(_was_removed);
+                self.try_clean_up_peer_id(peer_to_remove);
+                Some(peer_id_to_remove)
+            } else {
+                None
+            };
+
+            InsertChainPeerResult::Inserted { peer_removed }
+        } else {
+            InsertChainPeerResult::Duplicate
         }
     }
 
@@ -188,6 +243,11 @@ where
 
     /// Inserts a new address for the given peer.
     ///
+    /// If the peer doesn't belong to any chain (see [`BasicPeeringStrategy::insert_chain_peer`]),
+    /// then this function has no effect. This is to avoid accidentally collecting addresses for
+    /// peers that will never be removed and create a memory leak. For this reason, you most likely
+    /// want to call [`BasicPeeringStrategy::insert_chain_peer`] before calling this function.
+    ///
     /// A maximum number of addresses that are maintained for this peer must be passed as
     /// parameter. If this number is exceeded, an address in the "not connected" state (other than
     /// the one passed as parameter) is randomly removed.
@@ -219,7 +279,9 @@ where
         max_addresses: usize,
         initial_state: AddressState,
     ) -> InsertAddressResult {
-        let peer_id_index = self.get_or_insert_peer_index(peer_id);
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            return InsertAddressResult::UnknownPeer;
+        };
 
         if let btree_map::Entry::Vacant(entry) =
             self.addresses.entry((peer_id_index, address.clone()))
@@ -610,6 +672,15 @@ pub enum AssignablePeer<'a, TInstant> {
     NoPeer,
 }
 
+pub enum InsertChainPeerResult {
+    Inserted {
+        /// If the maximum number of peers is reached, an old peer might have been removed. If so,
+        /// this contains the peer.
+        peer_removed: Option<PeerId>,
+    },
+    Duplicate,
+}
+
 pub enum InsertAddressResult {
     Inserted {
         /// If the maximum number of addresses is reached, an old address might have been
@@ -617,6 +688,7 @@ pub enum InsertAddressResult {
         address_removed: Option<Vec<u8>>,
     },
     Duplicate,
+    UnknownPeer,
 }
 
 #[cfg(test)]
