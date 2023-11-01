@@ -1510,6 +1510,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             }).await;
                                             break;
                                         }
+                                        runtime_host::RuntimeHostVm::LogEmit(log) => {
+                                            // Logs are ignored. 
+                                            runtime_call = log.resume();
+                                        }
                                     }
                                 }
                             }

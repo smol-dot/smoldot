@@ -2021,6 +2021,10 @@ impl SyncBackground {
                             runtime_build_duration += before_runtime_build.elapsed();
                             body_verification = outcome;
                         }
+                        body_only::Verify::LogEmit(req) => {
+                            // Logs are ignored.
+                            body_verification = req.resume();
+                        }
                     }
                 }
             }

@@ -1139,6 +1139,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
                     break Err(RuntimeCallError::ForbiddenHostCall);
                 }
+                runtime_host::RuntimeHostVm::LogEmit(log) => {
+                    // Logs are ignored.
+                    runtime_call = log.resume();
+                }
             }
         }
     }
