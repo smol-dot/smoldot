@@ -107,6 +107,7 @@ jobs:
     - uses: Swatinem/rust-cache@v2
     # We use `thumbv7m-none-eabi` as this target seems to generally work fine and doesn't support `std`. Many targets unfortunately have Rust/LLVM bugs preventing compilation.
     - run: RUSTFLAGS=-Dwarnings cargo build --package smoldot --locked --no-default-features --target=thumbv7m-none-eabi
+    - run: RUSTFLAGS=-Dwarnings cargo build --package smoldot-light --locked --no-default-features --target=thumbv7m-none-eabi
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
