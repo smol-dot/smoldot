@@ -128,7 +128,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     ///
     /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
     /// must **not** wait for the connection to be established.
-    /// In the most scenarios, the `Future` returned by this function should immediately produce
+    /// In most scenarios, the `Future` returned by this function should immediately produce
     /// an output.
     ///
     /// # Panic
@@ -142,7 +142,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     ///
     /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
     /// must **not** wait for the connection to be established.
-    /// In the most scenarios, the `Future` returned by this function should immediately produce
+    /// In most scenarios, the `Future` returned by this function should immediately produce
     /// an output.
     ///
     /// # Panic
