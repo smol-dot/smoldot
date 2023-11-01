@@ -147,7 +147,7 @@ fn main() {
             })
             .await;
 
-            println!("{chain_name} JSON-RPC response: {response}\n");
+            println!("{chain_name} JSON-RPC response: {response}");
         }
     });
 }
