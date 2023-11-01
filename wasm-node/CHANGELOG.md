@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.7 - 2023-11-01
+
 ### Changed
 
 - Smoldot will now generate an individual network key every time it initiates a connection. This prevents the full nodes it connects to from being able to maintain a mapping of network key <-> IP address and thus being able to track where the machine running a light client moves around the world. It also makes it harder for colluding full nodes from coordinating an eclipse attack against a specific light client user. Note that this is not completely fool-proof, as it assumes that connections are shut down and reopened during the IP address change, which is generally only the case if connectivity is lost or if the machine is put to sleep. It is unfortunately not technically possible for smoldot to reliably detect IP address changes. ([#1255](https://github.com/smol-dot/smoldot/pull/1255))
