@@ -19,8 +19,8 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{
-    with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress,
-    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
+    with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
+    PlatformRef, SubstreamDirection,
 };
 
 use alloc::{borrow::Cow, sync::Arc};
