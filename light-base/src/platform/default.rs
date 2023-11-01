@@ -19,7 +19,7 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{
-    with_buffers, Address, ConnectError, ConnectionType, IpAddr, MultiStreamAddress,
+    with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress,
     MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
 };
 
@@ -85,11 +85,8 @@ impl PlatformRef for Arc<DefaultPlatform> {
     type Instant = Instant;
     type MultiStream = std::convert::Infallible; // TODO: replace with `!` once stable: https://github.com/rust-lang/rust/issues/35121
     type Stream = Stream;
-    type StreamConnectFuture = future::BoxFuture<'static, Result<Self::Stream, ConnectError>>;
-    type MultiStreamConnectFuture = future::BoxFuture<
-        'static,
-        Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
-    >;
+    type StreamConnectFuture = future::Ready<Self::Stream>;
+    type MultiStreamConnectFuture = future::Pending<MultiStreamWebRtcConnection<Self::MultiStream>>;
     type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a, Instant>;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type StreamErrorRef<'a> = &'a io::Error;
@@ -189,7 +186,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
             _ => unreachable!(),
         };
 
-        Box::pin(async move {
+        let socket_future = async {
             let tcp_socket = match tcp_socket_addr {
                 either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
                 either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
@@ -199,28 +196,25 @@ impl PlatformRef for Arc<DefaultPlatform> {
                 let _ = tcp_socket.set_nodelay(true);
             }
 
-            let socket: TcpOrWs = match (tcp_socket, host_if_websocket) {
-                (Ok(tcp_socket), Some(host)) => future::Either::Right(
+            match (tcp_socket, host_if_websocket) {
+                (Ok(tcp_socket), Some(host)) => {
                     websocket::websocket_client_handshake(websocket::Config {
                         tcp_socket,
                         host: &host,
                         url: "/",
                     })
                     .await
-                    .map_err(|err| ConnectError {
-                        message: format!("Failed to negotiate WebSocket: {err}"),
-                    })?,
-                ),
-                (Ok(tcp_socket), None) => future::Either::Left(tcp_socket),
-                (Err(err), _) => {
-                    return Err(ConnectError {
-                        message: format!("Failed to reach peer: {err}"),
-                    })
+                    .map(TcpOrWs::Right)
                 }
-            };
 
-            Ok(Stream(with_buffers::WithBuffers::new(socket)))
-        })
+                (Ok(tcp_socket), None) => Ok(TcpOrWs::Left(tcp_socket)),
+                (Err(err), _) => Err(err),
+            }
+        };
+
+        future::ready(Stream(with_buffers::WithBuffers::new(Box::pin(
+            socket_future,
+        ))))
     }
 
     fn connect_multistream(&self, _address: MultiStreamAddress) -> Self::MultiStreamConnectFuture {
@@ -266,6 +260,13 @@ impl Drop for DefaultPlatform {
 
 /// Implementation detail of [`DefaultPlatform`].
 #[pin_project::pin_project]
-pub struct Stream(#[pin] with_buffers::WithBuffers<TcpOrWs, Instant>);
+pub struct Stream(
+    #[pin]
+    with_buffers::WithBuffers<
+        future::BoxFuture<'static, Result<TcpOrWs, io::Error>>,
+        TcpOrWs,
+        Instant,
+    >,
+);
 
 type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;

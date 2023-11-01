@@ -52,32 +52,8 @@ pub(super) async fn connection_task(
     mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: channel::Sender<super::ToBackground>,
 ) {
-    // Finishing ongoing connection process.
-    let socket = match socket.await.map_err(|_| ()) {
-        Ok(s) => s,
-        Err(_err) => {
-            // TODO: log
-            connection_task.reset();
-            loop {
-                let (task_update, opaque_message) = connection_task.pull_message_to_coordinator();
-                let _ = connection_to_coordinator
-                    .send(super::ToBackground::FromConnectionTask {
-                        connection_id,
-                        opaque_message,
-                        connection_now_dead: true,
-                    })
-                    .await;
-                if let Some(task_update) = task_update {
-                    connection_task = task_update;
-                } else {
-                    return;
-                }
-            }
-        }
-    };
-
-    // The socket is wrapped around an object containing a read buffer and a write buffer and
-    // allowing easier usage.
+    // The socket future is wrapped around an object containing a read buffer and a write buffer
+    // and allowing easier usage.
     let mut socket = pin::pin!(with_buffers::WithBuffers::new(socket));
 
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator

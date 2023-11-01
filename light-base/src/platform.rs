@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{borrow::Cow, string::String};
+use alloc::borrow::Cow;
 use core::{fmt, future::Future, ops, pin::Pin, str, time::Duration};
 use futures_util::future;
 
@@ -59,8 +59,8 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>> + Send + 'static;
-    type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
+    type StreamConnectFuture: Future<Output = Self::Stream> + Send + 'static;
+    type MultiStreamConnectFuture: Future<Output = MultiStreamWebRtcConnection<Self::MultiStream>>
         + Send
         + 'static;
     type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
@@ -126,6 +126,11 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
 
     /// Starts a connection attempt to the given multiaddress.
     ///
+    /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
+    /// must **not** wait for the connection to be established.
+    /// In the most scenarios, the `Future` returned by this function should immediately produce
+    /// an output.
+    ///
     /// # Panic
     ///
     /// The function implementation panics if [`Address`] is of a type for which
@@ -134,6 +139,11 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     fn connect_stream(&self, address: Address) -> Self::StreamConnectFuture;
 
     /// Starts a connection attempt to the given multiaddress.
+    ///
+    /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
+    /// must **not** wait for the connection to be established.
+    /// In the most scenarios, the `Future` returned by this function should immediately produce
+    /// an output.
     ///
     /// # Panic
     ///
@@ -382,11 +392,4 @@ pub enum MultiStreamAddress {
 pub enum IpAddr {
     V4([u8; 4]),
     V6([u8; 16]),
-}
-
-/// Error potentially returned by [`PlatformRef::connect_stream`] or
-/// [`PlatformRef::connect_multistream`].
-pub struct ConnectError {
-    /// Human-readable error message.
-    pub message: String,
 }

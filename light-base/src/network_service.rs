@@ -1845,7 +1845,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let task_name = format!("connection-{}-{}", peer_id, multiaddr);
 
                 let connection_id = match address {
-                    address_parse::AddressOrMultiStreamAddress::Address(_) => {
+                    address_parse::AddressOrMultiStreamAddress::Address(address) => {
+                        // As documented in the `PlatformRef` trait, `connect_stream` must
+                        // return as soon as possible.
+                        let connection = task.platform.connect_stream(address).await;
+
                         let (connection_id, connection_task) =
                             task.network.add_single_stream_connection(
                                 task.platform.now(),
@@ -1860,7 +1864,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.platform.spawn_task(
                             task_name.into(),
                             tasks::single_stream_connection_task::<TPlat>(
-                                multiaddr,
+                                connection,
+                                multiaddr.to_string(),
                                 task.platform.clone(),
                                 connection_id,
                                 connection_task,
@@ -1878,12 +1883,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             remote_certificate_sha256,
                         },
                     ) => {
-                        // TODO: we unfortunately need to know the local TLS certificate in order to
-                        // insert the connection, and this local TLS certificate can only be given
-                        // to us by the platform implementation, leading to this `await` here which
-                        // really shouldn't exist. For the moment it's fine because the only implementations
-                        // of multistream connections returns very quickly, but in theory this `await`
-                        // could block for a long time.
+                        // We need to know the local TLS certificate in order to insert the
+                        // connection, and as such we need to call `connect_multistream` here.
+                        // As documented in the `PlatformRef` trait, `connect_multistream` must
+                        // return as soon as possible.
                         let connection = task
                             .platform
                             .connect_multistream(platform::MultiStreamAddress::WebRtc {
@@ -1891,8 +1894,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 port,
                                 remote_certificate_sha256,
                             })
-                            .await
-                            .unwrap_or_else(|_| unreachable!()); // TODO: don't unwrap, again we know that the only implementation that exists never unwraps here, but in theory it's possible
+                            .await;
 
                         // Convert the SHA256 hashes into multihashes.
                         let local_tls_certificate_multihash = [12u8, 32]
