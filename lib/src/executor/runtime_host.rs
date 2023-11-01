@@ -169,6 +169,10 @@ impl StorageChanges {
     ///
     /// Each value is either `Some` if the runtime overwrites this value, or `None` if it erases
     /// the underlying value.
+    ///
+    /// > **Note**: This function is equivalent to
+    /// >           [`StorageChanges::storage_changes_iter_unordered`], except that it only returns
+    /// >           changes made to the main trie.
     pub fn main_trie_storage_changes_iter_unordered(
         &'_ self,
     ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
@@ -177,6 +181,44 @@ impl StorageChanges {
             .get(&None)
             .into_iter()
             .flat_map(|list| list.diff_iter_unordered().map(|(k, v, ())| (k, v)))
+    }
+
+    /// Returns the list of all child tries whose content has been modified in some way.
+    pub fn tries_with_storage_changes_unordered(&'_ self) -> impl Iterator<Item = &'_ [u8]> + '_ {
+        self.inner.trie_diffs.keys().filter_map(|k| k.as_deref())
+    }
+
+    /// Returns an iterator to all the entries of the given child trie that are modified by this
+    /// runtime call.
+    ///
+    /// Each value is either `Some` if the runtime overwrites this value, or `None` if it erases
+    /// the underlying value.
+    ///
+    /// > **Note**: This function is equivalent to
+    /// >           [`StorageChanges::storage_changes_iter_unordered`], except that it only returns
+    /// >           changes made to the given child trie.
+    pub fn child_trie_storage_changes_iter_unordered(
+        &'_ self,
+        child_trie: &'_ [u8],
+    ) -> impl Iterator<Item = (&'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+        self.inner
+            .trie_diffs
+            .get(&Some(child_trie.to_vec())) // TODO: annoying unnecessary overhead
+            .into_iter()
+            .flat_map(|list| list.diff_iter_unordered().map(|(k, v, ())| (k, v)))
+    }
+
+    /// Returns an iterator to all the entries that are modified by this runtime call.
+    ///
+    /// Each value is either `Some` if the runtime overwrites this value, or `None` if it erases
+    /// the underlying value.
+    pub fn storage_changes_iter_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (Option<&'_ [u8]>, &'_ [u8], Option<&'_ [u8]>)> + Clone + '_ {
+        self.inner.trie_diffs.iter().flat_map(|(trie, list)| {
+            list.diff_iter_unordered()
+                .map(move |(k, v, ())| (trie.as_deref(), k, v))
+        })
     }
 
     /// Returns an iterator over the list of all changes performed to the tries (main trie and
