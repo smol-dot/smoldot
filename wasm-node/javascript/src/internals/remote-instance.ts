@@ -195,8 +195,8 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             portToServer.postMessage(msg);
         },
 
-        connectionOpened(connectionId, info) {
-            const msg: ClientToServer = { ty: "connection-opened", connectionId, info };
+        connectionMultiStreamSetHandshakeInfo(connectionId, info) {
+            const msg: ClientToServer = { ty: "connection-multistream-set-info", connectionId, info };
             portToServer.postMessage(msg);
         },
 
@@ -205,9 +205,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             portToServer.postMessage(msg);
         },
 
-        streamOpened(connectionId, streamId, direction, initialWritableBytes) {
+        streamOpened(connectionId, streamId, direction) {
             state.connections.get(connectionId)!.add(streamId);
-            const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction, initialWritableBytes };
+            const msg: ClientToServer = { ty: "stream-opened", connectionId, streamId, direction };
             portToServer.postMessage(msg);
         },
 
@@ -375,11 +375,11 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 state.instance!.connectionReset(message.connectionId, message.message);
                 break;
             }
-            case "connection-opened": {
+            case "connection-multistream-set-info": {
                 // The connection might have been reset locally in the past.
                 if (!state.connections.has(message.connectionId))
                     return;
-                state.instance!.connectionOpened(message.connectionId, message.info);
+                state.instance!.connectionMultiStreamSetHandshakeInfo(message.connectionId, message.info);
                 break;
             }
             case "stream-message": {
@@ -397,7 +397,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (!state.connections.has(message.connectionId))
                     return;
                 state.connections.get(message.connectionId)!.add(message.streamId);
-                state.instance!.streamOpened(message.connectionId, message.streamId, message.direction, message.initialWritableBytes);
+                state.instance!.streamOpened(message.connectionId, message.streamId, message.direction);
                 break;
             }
             case "stream-writable-bytes": {
@@ -449,8 +449,8 @@ type ClientToServer =
     { ty: "accept-more-json-rpc-answers", chainId: number } |
     { ty: "shutdown" } |
     { ty: "connection-reset", connectionId: number, message: string } |
-    { ty: "connection-opened", connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array } } |
+    { ty: "connection-multistream-set-info", connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array } } |
     { ty: "stream-message", connectionId: number, streamId?: number, message: Uint8Array } |
-    { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound", initialWritableBytes: number } |
+    { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound" } |
     { ty: "stream-writable-bytes", connectionId: number, streamId?: number, numExtra: number } |
     { ty: "stream-reset", connectionId: number, streamId: number };

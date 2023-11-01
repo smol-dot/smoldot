@@ -16,61 +16,28 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::platform::{address_parse, PlatformRef, SubstreamDirection};
+use crate::platform::{PlatformRef, SubstreamDirection};
 
-use alloc::{
-    boxed::Box,
-    string::{String, ToString as _},
-};
+use alloc::{boxed::Box, string::String};
 use core::{pin, time::Duration};
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream::FuturesUnordered, StreamExt as _};
-use smoldot::{
-    libp2p::{collection::SubstreamFate, Multiaddr},
-    network::service,
-};
+use smoldot::{libp2p::collection::SubstreamFate, network::service};
 
 /// Asynchronous task managing a specific single-stream connection.
 pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
-    address: Multiaddr,
+    mut connection: TPlat::Stream,
+    address_string: String,
     platform: TPlat,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<ToBackground>,
 ) {
-    let address_string = address.to_string();
-    let Ok(address_parse::AddressOrMultiStreamAddress::Address(address)) =
-        address_parse::multiaddr_to_address(&address)
-    else {
-        unreachable!()
-    };
     // We need to pin the receiver, as the type doesn't implement `Unpin`.
     let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
-
-    let mut socket = pin::pin!(match platform.connect_stream(address).await {
-        Ok(s) => s,
-        Err(err) => {
-            log::trace!(target: "connections", "Connection({address_string}) => Reset({:?})", err.message);
-            connection_task.reset();
-            loop {
-                let (task_update, message) = connection_task.pull_message_to_coordinator();
-                if let Some(message) = message {
-                    let _ = connection_to_coordinator
-                        .send(super::ToBackground::ConnectionMessage {
-                            connection_id,
-                            message,
-                        })
-                        .await;
-                }
-                if let Some(task_update) = task_update {
-                    connection_task = task_update;
-                } else {
-                    return;
-                }
-            }
-        }
-    });
+    // We also need to pin the socket, as we don't know whether it implements `Unpin`.
+    let mut socket = pin::pin!(connection);
 
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
