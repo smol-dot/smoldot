@@ -469,7 +469,11 @@ pub fn spawn_requests_handler(mut config: Config) {
                                 executor::runtime_host::RuntimeHostVm::Offchain(_) => {
                                     request.fail(service::ErrorResponse::InternalError);
                                     break;
-                                },
+                                }
+                                executor::runtime_host::RuntimeHostVm::LogEmit(req) => {
+                                    // Logs are ignored.
+                                    call = req.resume();
+                                }
                             }
                         }
                     }

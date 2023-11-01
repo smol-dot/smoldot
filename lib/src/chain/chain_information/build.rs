@@ -845,6 +845,10 @@ impl ChainInformationBuild {
                         virtual_machine,
                     };
                 }
+                runtime_host::RuntimeHostVm::LogEmit(req) => {
+                    // Generated logs are ignored.
+                    call = req.resume();
+                }
             }
         }
     }

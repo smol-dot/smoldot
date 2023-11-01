@@ -25,6 +25,9 @@ import * as remote from './remote-instance.js';
 export interface PlatformBindings {
     /**
      * Tries to open a new connection using the given configuration.
+     * 
+     * In case of a multistream connection, `onMultistreamHandshakeInfo` should be called as soon
+     * as possible.
      *
      * @see Connection
      */
@@ -44,19 +47,14 @@ export interface PlatformBindings {
 /**
  * Connection to a remote node.
  *
- * At any time, a connection can be in one of the three following states:
+ * At any time, a connection can be in one of the following states:
  *
- * - `Opening` (initial state)
- * - `Open`
+ * - `Open` (initial state)
  * - `Reset`
  *
- * When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
- * if the remote closes the connection or refuses the connection altogether. When that
- * happens, `config.onReset` is called. Once in the `Reset` state, the connection cannot
- * transition back to another state.
- *
- * Initially in the `Opening` state, the connection can transition to the `Open` state if the
- * remote accepts the connection. When that happens, `config.onOpen` is called.
+ * When in the `Open` state, the connection can transition to the `Reset` state if the remote
+ * closes the connection or refuses the connection altogether. When that happens, `config.onReset`
+ * is called. Once in the `Reset` state, the connection cannot transition back to `Open`.
  *
  * When in the `Open` state, the connection can receive messages. When a message is received,
  * `config.onMessage` is called.
@@ -139,17 +137,16 @@ export interface ConnectionConfig {
     address: instance.ParsedMultiaddr,
 
     /**
-     * Callback called when the connection transitions from the `Opening` to the `Open` state.
+     * Callback called when a multistream connection knows information about its handshake. Should
+     * be called as soon as possible.
+     *
+     * Can only happen while the connection is in the `Open` state.
      *
      * Must only be called once per connection.
      */
-    onOpen: (info:
+    onMultistreamHandshakeInfo: (info:
         {
-            type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number
-        } |
-        {
-            type: 'multi-stream', handshake: 'webrtc',
+            handshake: 'webrtc',
             localTlsCertificateSha256: Uint8Array,
             remoteTlsCertificateSha256: Uint8Array,
         }
@@ -167,7 +164,7 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void;
+    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void;
 
     /**
      * Callback called when a stream transitions to the `Reset` state.
@@ -183,14 +180,14 @@ export interface ConnectionConfig {
      * written on the stream, meaning that some buffer space is now free.
      *
      * Can only happen while the connection is in the `Open` state.
-     *
      * This callback must not be called after `closeSend` has been called.
+     * 
+     * The total of writable bytes must not go beyond reasonable values (e.g. a few megabytes). It
+     * is not legal to provide a dummy implementation that simply passes an exceedingly large
+     * value.
      *
      * The `streamId` parameter must be provided if and only if the connection is of type
      * "multi-stream".
-     *
-     * Only a number of bytes equal to the size of the data provided to {@link Connection.send}
-     * must be reported. In other words, the `initialWritableBytes` must never be exceeded.
      */
     onWritableBytes: (numExtra: number, streamId?: number) => void;
 
@@ -264,7 +261,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         chainIds: new WeakMap(),
         connections: new Map(),
         addChainResults: [],
-        onExecutorShutdownOrWasmPanic: () => {},
+        onExecutorShutdownOrWasmPanic: () => { },
         chains: new Map(),
     };
 
@@ -302,13 +299,13 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 state.chains.clear();
 
                 const cb = state.onExecutorShutdownOrWasmPanic;
-                state.onExecutorShutdownOrWasmPanic = () => {};
+                state.onExecutorShutdownOrWasmPanic = () => { };
                 cb();
                 break
             }
             case "executor-shutdown": {
                 const cb = state.onExecutorShutdownOrWasmPanic;
-                state.onExecutorShutdownOrWasmPanic = () => {};
+                state.onExecutorShutdownOrWasmPanic = () => { };
                 cb();
                 break;
             }
@@ -343,15 +340,15 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                             throw new Error();
                         state.instance.instance.streamMessage(connectionId, message, streamId);
                     },
-                    onStreamOpened(streamId, direction, initialWritableBytes) {
+                    onStreamOpened(streamId, direction) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
+                        state.instance.instance.streamOpened(connectionId, streamId, direction);
                     },
-                    onOpen(info) {
+                    onMultistreamHandshakeInfo(info) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.connectionOpened(connectionId, info);
+                        state.instance.instance.connectionMultiStreamSetHandshakeInfo(connectionId, info);
                     },
                     onWritableBytes(numExtra, streamId) {
                         if (state.instance.status !== "ready")
@@ -441,14 +438,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 portToServer: portToWorker,
                 eventCallback
             }).then((instance) => {
-                    // The Wasm instance might have been crashed before this callback is called.
-                    if (state.instance.status === "destroyed")
-                        return;
-                    state.instance = {
-                        status: "ready",
-                        instance,
-                    };
-                })
+                // The Wasm instance might have been crashed before this callback is called.
+                if (state.instance.status === "destroyed")
+                    return;
+                state.instance = {
+                    status: "ready",
+                    instance,
+                };
+            })
         };
     }
 

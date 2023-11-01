@@ -194,14 +194,7 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{
-    borrow::ToOwned as _,
-    boxed::Box,
-    string::{String, ToString as _},
-    sync::Arc,
-    vec,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use core::{fmt, hash::Hasher as _, iter, str};
 use functions::HostFunction;
 
@@ -3418,8 +3411,7 @@ impl fmt::Debug for OffchainSubmitTransaction {
 
 /// Report about a log entry being emitted.
 ///
-/// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
-/// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
+/// Use [`LogEmit::info`] to obtain what must be printed.
 pub struct LogEmit {
     inner: Box<Inner>,
     log_entry: LogEmitInner,
@@ -3505,7 +3497,7 @@ impl LogEmit {
         }
     }
 
-    /// Resumes execution after having set the value.
+    /// Resumes execution.
     pub fn resume(self) -> HostVm {
         HostVm::ReadyToRun(ReadyToRun {
             inner: self.inner,
@@ -3514,29 +3506,10 @@ impl LogEmit {
     }
 }
 
-// TODO: consider removing this Display implementation due to the ambiguity in how to display a LogEmitInfo::Log
-impl fmt::Display for LogEmit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.info() {
-            LogEmitInfo::Num(num) => write!(f, "{num}"),
-            LogEmitInfo::Utf8(str) => {
-                write!(f, "{str}")
-            }
-            LogEmitInfo::Hex(data) => {
-                write!(f, "{data}")
-            }
-            LogEmitInfo::Log { message, .. } => {
-                // TODO: don't just ignore the target and log level? also, it's unclear whether it should be an individual line
-                writeln!(f, "{message}")
-            }
-        }
-    }
-}
-
 impl fmt::Debug for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("LogEmit")
-            .field("message", &self.to_string())
+            .field("info", &self.info())
             .finish()
     }
 }

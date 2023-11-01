@@ -128,19 +128,19 @@ export interface Chain {
     /**
      * Enqueues a JSON-RPC request that the client will process as soon as possible.
      *
-     * The response will be sent back using the callback passed when adding the chain.
+     * The response can be pulled by calling {@link Chain.nextJsonRpcResponse}.
      *
      * See <https://www.jsonrpc.org/specification> for a specification of the JSON-RPC format. Only
      * version 2 is supported.
-     * Be aware that some requests will cause notifications to be sent back using the same callback
-     * as the responses.
+     * Be aware that some requests will cause notifications to be sent back through
+     * {@link Chain.nextJsonRpcResponse}.
      *
      * If the request is not a valid JSON-RPC request, then a JSON-RPC error response is later
      * generated with an `id` equal to `null`, in accordance with the JSON-RPC 2.0 specification.
      *
      * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, or
      * if for example some parameters are missing, an error response is properly generated and
-     * yielded through the JSON-RPC callback.
+     * yielded through {@link Chain.nextJsonRpcResponse}.
      *
      * Two JSON-RPC APIs are supported by smoldot:
      *
@@ -160,9 +160,10 @@ export interface Chain {
      * Waits for a JSON-RPC response or notification to be generated.
      *
      * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
-     * pulls one element from the buffer. If this function is called at a slower rate than responses
-     * are generated, then the buffer will eventually become full, at which point calling
-     * {@link Chain.sendJsonRpc} will throw an exception.
+     * pulls one element from the buffer. If this function is called at a slower rate than
+     * responses are generated, then the buffer will eventually become full, at which point calling
+     * {@link Chain.sendJsonRpc} will throw an exception. The size of this buffer can be configured
+     * through {@link AddChainOptions.jsonRpcMaxPendingRequests}.
      *
      * If this function is called multiple times "simultaneously" (generating multiple different
      * `Promise`s), each `Promise` will return a different JSON-RPC response or notification. In
@@ -179,11 +180,11 @@ export interface Chain {
     /**
      * Disconnects from the blockchain.
      *
-     * The JSON-RPC callback will no longer be called. This is the case immediately after this
-     * function is called. Any on-going JSON-RPC request is instantaneously aborted.
+     * Any on-going call to {@link Chain.nextJsonRpcResponse} is instantaneously aborted and will
+     * throw a {@link AlreadyDestroyedError}.
      *
-     * Trying to use the chain again will lead to a {@link AlreadyDestroyedError} exception
-     * being thrown.
+     * Trying to use the chain again after this function has returned will lead to a
+     * {@link AlreadyDestroyedError} exception being thrown.
      *
      * While the chain instantaneously disappears from the public API as soon as this function is
      * called, its shutdown process actually happens asynchronously in the background. This means
@@ -425,7 +426,7 @@ export interface AddChainOptions {
      *
      * This field is ignored if {@link AddChainOptions.disableJsonRpc} is `true`.
      *
-     * A zero, negative or NaN value is invalid.
+     * A zero, negative or NaN value is invalid and will generate a {@link AddChainError}.
      *
      * If this value is not set, it means that there is no maximum.
      */
@@ -436,7 +437,7 @@ export interface AddChainOptions {
      *
      * This field is ignored if {@link AddChainOptions.disableJsonRpc} is `true`.
      *
-     * A negative or NaN value is invalid.
+     * A negative or NaN value is invalid and will generate a {@link AddChainError}.
      *
      * If this value is not set, it means that there is no maximum.
      */
