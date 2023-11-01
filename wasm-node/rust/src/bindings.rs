@@ -522,7 +522,7 @@ pub extern "C" fn connection_multi_stream_set_handshake_info(
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
-/// See also [`connection_open_single_stream`] and [`connection_open_multi_stream`].
+/// See also [`connection_new`].
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
@@ -585,7 +585,7 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 ///
 /// It is illegal to call this function on a single-stream connections.
 ///
-/// See also [`connection_open_multi_stream`].
+/// See also [`connection_new`].
 #[no_mangle]
 pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
     crate::platform::stream_reset(connection_id, stream_id);
