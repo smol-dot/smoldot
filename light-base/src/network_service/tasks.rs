@@ -210,8 +210,9 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         pin::Pin<Box<dyn future::Future<Output = (pin::Pin<Box<TPlat::Stream>>, usize)> + Send>>,
     >::new();
     // Identifier to assign to the next substream.
-    let mut next_substream_id = 0; // TODO: weird API
-                                   // We need to pin the receiver, as the type doesn't implement `Unpin`.
+    // TODO: weird API
+    let mut next_substream_id = 0;
+    // We need to pin the receiver, as the type doesn't implement `Unpin`.
     let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
 
     loop {
