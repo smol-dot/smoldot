@@ -855,17 +855,23 @@ async fn background_task(mut inner: Inner) {
                             inner
                                 .peering_strategy
                                 .remove_address(expected_peer_id, remote_addr.as_ref());
-                            match inner
-                                .peering_strategy
-                                .insert_or_set_connected_address(&peer_id, remote_addr.clone().into_vec(), 10) // TODO: constant
+                            if let basic_peering_strategy::InsertAddressResult::Inserted {
+                                address_removed: Some(addr_rm),
+                            } = inner.peering_strategy.insert_or_set_connected_address(
+                                &peer_id,
+                                remote_addr.clone().into_vec(),
+                                10,
+                            )
+                            // TODO: constant
                             {
-                                basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
-                                    let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
-                                    inner
-                                        .log_callback
-                                        .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
-                                }
-                                _ => {}
+                                let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
+                                inner.log_callback.log(
+                                    LogLevel::Debug,
+                                    format!(
+                                        "address-purged; peer_id={}; address={}",
+                                        peer_id, addr_rm
+                                    ),
+                                );
                             }
                         } else {
                             inner
@@ -1172,16 +1178,22 @@ async fn background_task(mut inner: Inner) {
                             if !valid_addrs.is_empty() {
                                 // Note that we must call this function before `insert_address`,
                                 // as documented in `basic_peering_strategy`.
-                                match inner
-                                    .peering_strategy
-                                    .insert_chain_peer(chain_id, peer_id.clone(), 100) // TODO: constant
+                                if let basic_peering_strategy::InsertChainPeerResult::Inserted {
+                                    peer_removed: Some(peer_removed),
+                                } = inner.peering_strategy.insert_chain_peer(
+                                    chain_id,
+                                    peer_id.clone(),
+                                    100,
+                                )
+                                // TODO: constant
                                 {
-                                    basic_peering_strategy::InsertChainPeerResult::Inserted { peer_removed: Some(peer_removed) } => {
-                                        inner
-                                            .log_callback
-                                            .log(LogLevel::Debug, format!("peer-forgotten; peer_id={}; chain={}", peer_removed, inner.network[chain_id].log_name));
-                                    }
-                                    _ => {}
+                                    inner.log_callback.log(
+                                        LogLevel::Debug,
+                                        format!(
+                                            "peer-forgotten; peer_id={}; chain={}",
+                                            peer_removed, inner.network[chain_id].log_name
+                                        ),
+                                    );
                                 }
                             }
 

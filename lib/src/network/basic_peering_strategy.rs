@@ -480,11 +480,11 @@ where
             let PeerChainState::Banned { expires } = state else {
                 unreachable!()
             };
-            return AssignablePeer::AllPeersBanned {
+            AssignablePeer::AllPeersBanned {
                 next_unban: expires,
-            };
+            }
         } else {
-            return AssignablePeer::NoPeer;
+            AssignablePeer::NoPeer
         }
     }
 
