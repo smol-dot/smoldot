@@ -136,7 +136,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub async fn new(
+    pub fn new(
         config: Config<TPlat>,
     ) -> (
         Arc<Self>,

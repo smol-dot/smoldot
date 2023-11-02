@@ -756,7 +756,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                                 config,
                                 network_identify_agent_version,
                             )
-                            .await
                         };
 
                         // Note that the chain name is printed through the `Debug` trait (rather
@@ -1150,7 +1149,7 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
-async fn start_services<TPlat: platform::PlatformRef>(
+fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
     runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
@@ -1219,8 +1218,7 @@ async fn start_services<TPlat: platform::PlatformRef>(
                 fork_id,
                 block_number_bytes: usize::from(block_number_bytes),
             }],
-        })
-        .await;
+        });
 
     let network_service_chain_id = network_service_chain_ids.into_iter().next().unwrap();
 
@@ -1236,38 +1234,34 @@ async fn start_services<TPlat: platform::PlatformRef>(
             // The sync service is leveraging the network service, downloads block headers,
             // and verifies them, to determine what are the best and finalized blocks of the
             // chain.
-            let sync_service = Arc::new(
-                sync_service::SyncService::new(sync_service::Config {
-                    platform: platform.clone(),
-                    log_name: log_name.clone(),
-                    block_number_bytes,
-                    network_service: (network_service.clone(), network_service_chain_id),
-                    network_events_receiver: network_event_receivers.pop().unwrap(),
-                    chain_type: sync_service::ConfigChainType::Parachain(
-                        sync_service::ConfigParachain {
-                            finalized_block_header,
-                            para_id,
-                            relay_chain_sync: relay_chain.runtime_service.clone(),
-                            relay_chain_block_number_bytes: relay_chain
-                                .sync_service
-                                .block_number_bytes(),
-                        },
-                    ),
-                })
-                .await,
-            );
+            let sync_service = Arc::new(sync_service::SyncService::new(sync_service::Config {
+                platform: platform.clone(),
+                log_name: log_name.clone(),
+                block_number_bytes,
+                network_service: (network_service.clone(), network_service_chain_id),
+                network_events_receiver: network_event_receivers.pop().unwrap(),
+                chain_type: sync_service::ConfigChainType::Parachain(
+                    sync_service::ConfigParachain {
+                        finalized_block_header,
+                        para_id,
+                        relay_chain_sync: relay_chain.runtime_service.clone(),
+                        relay_chain_block_number_bytes: relay_chain
+                            .sync_service
+                            .block_number_bytes(),
+                    },
+                ),
+            }));
 
             // The runtime service follows the runtime of the best block of the chain,
             // and allows performing runtime calls.
-            let runtime_service = Arc::new(
-                runtime_service::RuntimeService::new(runtime_service::Config {
+            let runtime_service = Arc::new(runtime_service::RuntimeService::new(
+                runtime_service::Config {
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
                     genesis_block_scale_encoded_header,
-                })
-                .await,
-            );
+                },
+            ));
 
             (sync_service, runtime_service)
         }
@@ -1277,40 +1271,36 @@ async fn start_services<TPlat: platform::PlatformRef>(
             // The sync service is leveraging the network service, downloads block headers,
             // and verifies them, to determine what are the best and finalized blocks of the
             // chain.
-            let sync_service = Arc::new(
-                sync_service::SyncService::new(sync_service::Config {
-                    log_name: log_name.clone(),
-                    block_number_bytes,
-                    platform: platform.clone(),
-                    network_service: (network_service.clone(), network_service_chain_id),
-                    network_events_receiver: network_event_receivers.pop().unwrap(),
-                    chain_type: sync_service::ConfigChainType::RelayChain(
-                        sync_service::ConfigRelayChain {
-                            chain_information: chain_information.clone(),
-                            runtime_code_hint: runtime_code_hint.map(|hint| {
-                                sync_service::ConfigRelayChainRuntimeCodeHint {
-                                    storage_value: hint.code,
-                                    merkle_value: hint.code_merkle_value,
-                                    closest_ancestor_excluding: hint.closest_ancestor_excluding,
-                                }
-                            }),
-                        },
-                    ),
-                })
-                .await,
-            );
+            let sync_service = Arc::new(sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
+                block_number_bytes,
+                platform: platform.clone(),
+                network_service: (network_service.clone(), network_service_chain_id),
+                network_events_receiver: network_event_receivers.pop().unwrap(),
+                chain_type: sync_service::ConfigChainType::RelayChain(
+                    sync_service::ConfigRelayChain {
+                        chain_information: chain_information.clone(),
+                        runtime_code_hint: runtime_code_hint.map(|hint| {
+                            sync_service::ConfigRelayChainRuntimeCodeHint {
+                                storage_value: hint.code,
+                                merkle_value: hint.code_merkle_value,
+                                closest_ancestor_excluding: hint.closest_ancestor_excluding,
+                            }
+                        }),
+                    },
+                ),
+            }));
 
             // The runtime service follows the runtime of the best block of the chain,
             // and allows performing runtime calls.
-            let runtime_service = Arc::new(
-                runtime_service::RuntimeService::new(runtime_service::Config {
+            let runtime_service = Arc::new(runtime_service::RuntimeService::new(
+                runtime_service::Config {
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
                     genesis_block_scale_encoded_header,
-                })
-                .await,
-            );
+                },
+            ));
 
             (sync_service, runtime_service)
         }
@@ -1320,8 +1310,8 @@ async fn start_services<TPlat: platform::PlatformRef>(
     // them being included in the chain.
     // While this service is in principle not needed if it is known ahead of time that no
     // transaction will be submitted, the service itself is pretty low cost.
-    let transactions_service = Arc::new(
-        transactions_service::TransactionsService::new(transactions_service::Config {
+    let transactions_service = Arc::new(transactions_service::TransactionsService::new(
+        transactions_service::Config {
             log_name,
             platform: platform.clone(),
             sync_service: sync_service.clone(),
@@ -1330,9 +1320,8 @@ async fn start_services<TPlat: platform::PlatformRef>(
             max_pending_transactions: NonZeroU32::new(64).unwrap(),
             max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
             max_concurrent_validations: NonZeroU32::new(2).unwrap(),
-        })
-        .await,
-    );
+        },
+    ));
 
     ChainServices {
         network_service,

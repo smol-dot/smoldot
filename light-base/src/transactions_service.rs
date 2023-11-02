@@ -145,7 +145,7 @@ pub struct TransactionsService<TPlat> {
 
 impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = async_channel::bounded(8);
 
