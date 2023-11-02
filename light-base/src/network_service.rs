@@ -889,6 +889,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
+    // TODO: could be user_data in ChainNetwork?
     active_connections: HashMap<
         service::ConnectionId,
         async_channel::Sender<service::CoordinatorToConnection>,
@@ -931,9 +932,6 @@ struct Chain {
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
-        // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
-        task.active_connections.retain(|_, tx| !tx.is_closed());
-
         enum WhatHappened {
             Message(ToBackground),
             NetworkEvent(service::Event),
@@ -1379,10 +1377,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                id,
                 address,
                 expected_peer_id,
                 ..
             }) => {
+                let _was_in = task.active_connections.remove(&id);
+                debug_assert!(_was_in.is_some());
+
                 if let Some(expected_peer_id) = expected_peer_id {
                     task.peering_strategy
                         .disconnect_addr(&expected_peer_id, &address)
@@ -1390,16 +1392,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let address = Multiaddr::try_from(address).unwrap();
                     log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
                 }
+
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::Disconnected {
-                address, peer_id, ..
+                id,
+                address,
+                peer_id,
+                ..
             }) => {
+                let _was_in = task.active_connections.remove(&id);
+                debug_assert!(_was_in.is_some());
+
                 task.peering_strategy
                     .disconnect_addr(&peer_id, &address)
                     .unwrap();
+
                 let address = Multiaddr::try_from(address).unwrap();
                 log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
+
                 continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
@@ -1993,12 +2004,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // a message on the connection-to-coordinator channel, this will result in a deadlock.
                 // For this reason, the connection task is always ready to immediately accept a message
                 // on the coordinator-to-connection channel.
-                task.active_connections
+                let _send_success = task
+                    .active_connections
                     .get_mut(&connection_id)
                     .unwrap()
                     .send(message)
-                    .await
-                    .unwrap();
+                    .await;
+                // debug_assert!(_send_success.is_ok()); // TODO: panics right now /!\
                 continue;
             }
         };
