@@ -93,7 +93,6 @@ mod util;
 pub mod platform;
 
 pub use json_rpc_service::HandleRpcError;
-pub use peer_id::PeerId;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
