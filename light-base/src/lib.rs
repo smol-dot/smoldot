@@ -73,7 +73,7 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, ops, pin};
-use futures_util::{future, FutureExt as _};
+use futures_util::FutureExt as _;
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -253,7 +253,7 @@ struct ChainKey {
 struct RunningChain<TPlat: platform::PlatformRef> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
-    services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices<TPlat>>>>,
+    services: ChainServices<TPlat>,
 
     /// Name of this chain in the logs. This is not necessarily the same as the identifier of the
     /// chain in its chain specification.
@@ -601,25 +601,17 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
 
         // If the chain we are adding is a parachain, grab the services of the relay chain.
         //
-        // Since the initialization process of a chain is done asynchronously, it is possible that
-        // the relay chain is still initializing. For this reason, we don't don't simply grab
-        // the relay chain services, but instead a `future::MaybeDone` of a future that yelds the
-        // relay chain services.
-        //
         // This could in principle be done later on, but doing so raises borrow checker errors.
-        let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, u32, String)> =
+        let relay_chain: Option<(ChainServices<_>, u32, String)> =
             relay_chain_id.map(|(relay_chain, para_id)| {
                 let relay_chain = &chains_by_key
                     .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
-
-                let future = match &relay_chain.services {
-                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                    future::MaybeDone::Gone => unreachable!(),
-                };
-
-                (future, para_id, relay_chain.log_name.clone())
+                (
+                    relay_chain.services.clone(),
+                    para_id,
+                    relay_chain.log_name.clone(),
+                )
             });
 
         // Determinate the name under which the chain will be identified in the logs.
@@ -633,7 +625,8 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         //
         // This value is ignored if we enter the `Entry::Occupied` block below. Because the
         // calculation requires accessing the list of existing chains, this block can't be put in
-        // the `Entry::Vacant` block below, even though it would make sense for it to be there.
+        // the `Entry::Vacant` block below, even though it would make more sense for it to be
+        // there.
         let log_name = {
             let base = chain_spec
                 .id()
@@ -661,7 +654,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         };
 
         // Start the services of the chain to add, or grab the services if they already exist.
-        let (services_init, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
+        let (services, log_name) = match chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // The chain to add always has a corresponding chain running. Simply grab the
                 // existing services and existing log name.
@@ -671,184 +664,148 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 (&mut entry.services, &entry.log_name)
             }
             Entry::Vacant(entry) => {
-                // Version of the client when requested through the networking.
-                let network_identify_agent_version = format!(
-                    "{} {}",
-                    self.platform.client_name(),
-                    self.platform.client_version()
-                );
+                if let (None, None) = (&relay_chain, &chain_information) {
+                    return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
+                }
 
-                // Spawn a background task that initializes the services of the new chain and
-                // yields a `ChainServices`.
-                let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
-                    let platform = self.platform.clone();
-                    let fork_id = chain_spec.fork_id().map(|f| f.to_owned());
-                    let chain_name = chain_spec.name().to_owned();
-                    let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
-                    let has_protocol_id = chain_spec.protocol_id().is_some();
-                    let has_telemetry_endpoints = chain_spec.telemetry_endpoints().count() != 0;
-                    let log_name = log_name.clone();
-                    let block_number_bytes = usize::from(chain_spec.block_number_bytes());
-                    let starting_block_number = chain_information
-                        .as_ref()
-                        .map(|ci| ci.as_ref().finalized_block_header.number)
-                        .unwrap_or(0);
-                    let starting_block_hash = chain_information
-                        .as_ref()
-                        .map(|ci| ci.as_ref().finalized_block_header.hash(block_number_bytes))
-                        .unwrap_or(genesis_block_hash);
-                    if let (None, None) = (&relay_chain_ready_future, &chain_information) {
-                        return Err(AddChainError::ChainSpecNeitherGenesisStorageNorCheckpoint);
-                    }
+                // Start the services of the new chain.
+                let services = {
+                    // Version of the client when requested through the networking.
+                    let network_identify_agent_version = format!(
+                        "{} {}",
+                        self.platform.client_name(),
+                        self.platform.client_version()
+                    );
 
-                    let future = async move {
-                        // Wait until the relay chain has finished initializing, if necessary.
-                        let relay_chain = if let Some((
-                            mut relay_chain_ready_future,
-                            para_id,
-                            relay_chain_log_name,
-                        )) = relay_chain_ready_future
-                        {
-                            (&mut relay_chain_ready_future).await;
-                            let running_relay_chain = pin::Pin::new(&mut relay_chain_ready_future)
-                                .take_output()
-                                .unwrap();
-                            Some((running_relay_chain, para_id, relay_chain_log_name))
-                        } else {
-                            None
-                        };
-
-                        let running_chain = {
-                            let config = match (&relay_chain, chain_information) {
-                                (Some((relay_chain, para_id, _)), Some(chain_information)) => {
-                                    StartServicesChainTy::Parachain {
-                                        relay_chain,
-                                        finalized_block_header: chain_information
-                                            .as_ref()
-                                            .finalized_block_header
-                                            .scale_encoding_vec(block_number_bytes),
-                                        para_id: *para_id,
-                                    }
-                                }
-                                (Some((relay_chain, para_id, _)), None) => {
-                                    StartServicesChainTy::Parachain {
-                                        relay_chain,
-                                        finalized_block_header: genesis_block_header.clone(),
-                                        para_id: *para_id,
-                                    }
-                                }
-                                (None, Some(chain_information)) => {
-                                    StartServicesChainTy::RelayChain { chain_information }
-                                }
-                                (None, None) => {
-                                    // Checked above.
-                                    unreachable!()
-                                }
-                            };
-
-                            start_services(
-                                log_name.clone(),
-                                &platform,
-                                runtime_code_hint,
-                                genesis_block_header,
-                                block_number_bytes,
-                                fork_id,
-                                config,
-                                network_identify_agent_version,
-                            )
-                        };
-
-                        // Note that the chain name is printed through the `Debug` trait (rather
-                        // than `Display`) because it is an untrusted user input.
-                        if let Some((_, para_id, relay_chain_log_name)) = relay_chain.as_ref() {
-                            log::info!(
-                                target: "smoldot",
-                                "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. Relay chain: {} (id: {})",
-                                log_name,
-                                chain_name,
-                                HashDisplay(&genesis_block_hash),
-                                relay_chain_log_name,
-                                para_id,
-                            );
-                        } else {
-                            log::info!(
-                                target: "smoldot",
-                                "Chain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. {} starting at: {} (#{})",
-                                log_name,
-                                chain_name,
-                                HashDisplay(&genesis_block_hash),
-                                if used_database_chain_information { "Database" } else { "Chain specification" },
-                                HashDisplay(&starting_block_hash),
-                                starting_block_number
-                            );
+                    let config = match (&relay_chain, &chain_information) {
+                        (Some((relay_chain, para_id, _)), Some(chain_information)) => {
+                            StartServicesChainTy::Parachain {
+                                relay_chain,
+                                finalized_block_header: chain_information
+                                    .as_ref()
+                                    .finalized_block_header
+                                    .scale_encoding_vec(usize::from(
+                                        chain_spec.block_number_bytes(),
+                                    )),
+                                para_id: *para_id,
+                            }
                         }
-
-                        if print_warning_genesis_root_chainspec {
-                            log::info!(
-                                target: "smoldot",
-                                "Chain specification of {} contains a `genesis.raw` item. It is \
-                                possible to significantly improve the initialization time by \
-                                replacing the `\"raw\": ...` field with \
-                                `\"stateRootHash\": \"0x{}\"`",
-                                log_name, hex::encode(genesis_block_state_root)
-                            )
+                        (Some((relay_chain, para_id, _)), None) => {
+                            StartServicesChainTy::Parachain {
+                                relay_chain,
+                                finalized_block_header: genesis_block_header.clone(),
+                                para_id: *para_id,
+                            }
                         }
-
-                        if has_protocol_id {
-                            log::warn!(
-                                target: "smoldot",
-                                "Chain specification of {} contains a `protocolId` field. This \
-                                field is deprecated and its value is no longer used. It can be \
-                                safely removed from the JSON document.", log_name
-                            );
+                        (None, Some(chain_information)) => {
+                            StartServicesChainTy::RelayChain { chain_information }
                         }
-
-                        if has_telemetry_endpoints {
-                            log::warn!(
-                                target: "smoldot",
-                                "Chain specification of {} contains a non-empty \
-                                `telemetryEndpoints` field. Smoldot doesn't support telemetry \
-                                endpoints and as such this field is unused.", log_name
-                            );
+                        (None, None) => {
+                            // Checked above.
+                            unreachable!()
                         }
-
-                        // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
-                        if has_bad_blocks {
-                            log::warn!(
-                                target: "smoldot",
-                                "Chain specification of {} contains a list of bad blocks. Bad \
-                                blocks are not implemented in the light client. An appropriate \
-                                way to silence this warning is to remove the bad blocks from the \
-                                chain specification, which can safely be done:\n\
-                                - For relay chains: if the chain specification contains a \
-                                checkpoint and that the bad blocks have a block number inferior \
-                                to this checkpoint.\n\
-                                - For parachains: if the bad blocks have a block number inferior \
-                                to the current parachain finalized block.", log_name
-                            );
-                        }
-
-                        if database_was_wrong_chain {
-                            log::warn!(
-                                target: "smoldot",
-                                "Ignore database of {} because its genesis hash didn't match the \
-                                genesis hash of the chain.", log_name
-                            )
-                        }
-
-                        running_chain
                     };
 
-                    let (background_future, output_future) = future.remote_handle();
-                    self.platform
-                        .spawn_task("services-initialization".into(), background_future.boxed());
-                    output_future
+                    start_services(
+                        log_name.clone(),
+                        &self.platform,
+                        runtime_code_hint,
+                        genesis_block_header,
+                        usize::from(chain_spec.block_number_bytes()),
+                        chain_spec.fork_id().map(|f| f.to_owned()),
+                        config,
+                        network_identify_agent_version,
+                    )
                 };
 
+                // Note that the chain name is printed through the `Debug` trait (rather
+                // than `Display`) because it is an untrusted user input.
+                if let Some((_, para_id, relay_chain_log_name)) = relay_chain.as_ref() {
+                    log::info!(
+                        target: "smoldot",
+                        "Parachain initialization complete for {}. Name: {:?}. Genesis \
+                        hash: {}. Relay chain: {} (id: {})",
+                        log_name,
+                        chain_spec.name(),
+                        HashDisplay(&genesis_block_hash),
+                        relay_chain_log_name,
+                        para_id,
+                    );
+                } else {
+                    log::info!(
+                        target: "smoldot",
+                        "Chain initialization complete for {}. Name: {:?}. Genesis \
+                        hash: {}. {} starting at: {} (#{})",
+                        log_name,
+                        chain_spec.name(),
+                        HashDisplay(&genesis_block_hash),
+                        if used_database_chain_information { "Database" } else { "Chain specification" },
+                        HashDisplay(&chain_information
+                            .as_ref()
+                            .map(|ci| ci.as_ref().finalized_block_header.hash(usize::from(chain_spec.block_number_bytes())))
+                            .unwrap_or(genesis_block_hash)),
+                        chain_information
+                            .as_ref()
+                            .map(|ci| ci.as_ref().finalized_block_header.number)
+                            .unwrap_or(0)
+                    );
+                }
+
+                if print_warning_genesis_root_chainspec {
+                    log::info!(
+                        target: "smoldot",
+                        "Chain specification of {} contains a `genesis.raw` item. It is \
+                        possible to significantly improve the initialization time by \
+                        replacing the `\"raw\": ...` field with \
+                        `\"stateRootHash\": \"0x{}\"`",
+                        log_name, hex::encode(genesis_block_state_root)
+                    )
+                }
+
+                if chain_spec.protocol_id().is_some() {
+                    log::warn!(
+                        target: "smoldot",
+                        "Chain specification of {} contains a `protocolId` field. This \
+                        field is deprecated and its value is no longer used. It can be \
+                        safely removed from the JSON document.", log_name
+                    );
+                }
+
+                if chain_spec.telemetry_endpoints().count() != 0 {
+                    log::warn!(
+                        target: "smoldot",
+                        "Chain specification of {} contains a non-empty \
+                        `telemetryEndpoints` field. Smoldot doesn't support telemetry \
+                        endpoints and as such this field is unused.", log_name
+                    );
+                }
+
+                // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
+                if chain_spec.bad_blocks_hashes().count() != 0 {
+                    log::warn!(
+                        target: "smoldot",
+                        "Chain specification of {} contains a list of bad blocks. Bad \
+                        blocks are not implemented in the light client. An appropriate \
+                        way to silence this warning is to remove the bad blocks from the \
+                        chain specification, which can safely be done:\n\
+                        - For relay chains: if the chain specification contains a \
+                        checkpoint and that the bad blocks have a block number inferior \
+                        to this checkpoint.\n\
+                        - For parachains: if the bad blocks have a block number inferior \
+                        to the current parachain finalized block.", log_name
+                    );
+                }
+
+                if database_was_wrong_chain {
+                    log::warn!(
+                        target: "smoldot",
+                        "Ignore database of {} because its genesis hash didn't match the \
+                        genesis hash of the chain.", log_name
+                    )
+                }
+
                 let entry = entry.insert(RunningChain {
-                    services: future::maybe_done(running_chain_init_future.shared()),
+                    services,
                     log_name,
                     num_references: NonZeroU32::new(1).unwrap(),
                 });
@@ -890,30 +847,14 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         // then adds the nodes.
         self.platform
             .spawn_task("network-service-add-initial-topology".into(), {
-                // Clone `running_chain_init`.
-                let mut running_chain_init = match services_init {
-                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                    future::MaybeDone::Gone => unreachable!(),
-                };
-
+                let network_service = services.network_service.clone();
+                let network_service_chain_id = services.network_service_chain_id;
                 async move {
-                    // Wait for the chain to finish initializing to proceed.
-                    (&mut running_chain_init).await;
-                    let running_chain = pin::Pin::new(&mut running_chain_init)
-                        .take_output()
-                        .unwrap();
-                    running_chain
-                        .network_service
-                        .discover(running_chain.network_service_chain_id, known_nodes, false)
+                    network_service
+                        .discover(network_service_chain_id, known_nodes, false)
                         .await;
-                    running_chain
-                        .network_service
-                        .discover(
-                            running_chain.network_service_chain_id,
-                            bootstrap_nodes,
-                            true,
-                        )
+                    network_service
+                        .discover(network_service_chain_id, bootstrap_nodes, true)
                         .await;
                 }
                 .boxed()
@@ -926,13 +867,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             max_subscriptions,
         } = config.json_rpc
         {
-            // Clone `running_chain_init`.
-            let mut running_chain_init = match services_init {
-                future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                future::MaybeDone::Gone => unreachable!(),
-            };
-
+            // TODO: the JSON-RPC service splits between first creation and actual services starting because starting the service couldn't be done immediately, since this is now the case considering merging the two together again
             let (frontend, service_starter) = json_rpc_service::service(json_rpc_service::Config {
                 log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                 max_pending_requests,
@@ -946,36 +881,21 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                 max_parallel_requests: NonZeroU32::new(24).unwrap(),
             });
 
-            let system_name = self.platform.client_name().into_owned();
-            let system_version = self.platform.client_version().into_owned();
-            let platform = self.platform.clone();
-
-            let init_future = async move {
-                // Wait for the chain to finish initializing before starting the JSON-RPC service.
-                (&mut running_chain_init).await;
-                let running_chain = pin::Pin::new(&mut running_chain_init)
-                    .take_output()
-                    .unwrap();
-
-                service_starter.start(json_rpc_service::StartConfig {
-                    platform,
-                    sync_service: running_chain.sync_service,
-                    network_service: (
-                        running_chain.network_service,
-                        running_chain.network_service_chain_id,
-                    ),
-                    transactions_service: running_chain.transactions_service,
-                    runtime_service: running_chain.runtime_service,
-                    chain_spec: &chain_spec,
-                    system_name,
-                    system_version,
-                    genesis_block_hash,
-                    genesis_block_state_root,
-                })
-            };
-
-            self.platform
-                .spawn_task("json-rpc-service-init".into(), init_future.boxed());
+            service_starter.start(json_rpc_service::StartConfig {
+                platform: self.platform.clone(),
+                sync_service: services.sync_service.clone(),
+                network_service: (
+                    services.network_service.clone(),
+                    services.network_service_chain_id,
+                ),
+                transactions_service: services.transactions_service.clone(),
+                runtime_service: services.runtime_service.clone(),
+                chain_spec: &chain_spec,
+                system_name: self.platform.client_name().into_owned(),
+                system_version: self.platform.client_version().into_owned(),
+                genesis_block_hash,
+                genesis_block_state_root,
+            });
 
             Some(frontend)
         } else {
@@ -1136,7 +1056,7 @@ pub enum AddChainError {
 
 enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
     RelayChain {
-        chain_information: chain::chain_information::ValidChainInformation,
+        chain_information: &'a chain::chain_information::ValidChainInformation,
     },
     Parachain {
         relay_chain: &'a ChainServices<TPlat>,
