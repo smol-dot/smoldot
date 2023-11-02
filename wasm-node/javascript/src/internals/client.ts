@@ -148,7 +148,6 @@ export interface ConnectionConfig {
         {
             handshake: 'webrtc',
             localTlsCertificateSha256: Uint8Array,
-            remoteTlsCertificateSha256: Uint8Array,
         }
     ) => void;
 

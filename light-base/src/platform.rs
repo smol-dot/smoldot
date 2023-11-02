@@ -214,9 +214,6 @@ pub struct MultiStreamWebRtcConnection<TConnection> {
     pub connection: TConnection,
     /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
     pub local_tls_certificate_sha256: [u8; 32],
-    /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
-    // TODO: consider caching the information that was passed in the address instead of passing it back
-    pub remote_tls_certificate_sha256: [u8; 32],
 }
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
