@@ -1218,27 +1218,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 transaction,
                 result,
             }) => {
-                let mut sent_peers = Vec::with_capacity(16); // TODO: capacity?
-
                 // TODO: keep track of which peer knows about which transaction, and don't send it again
 
-                // TODO: collecting in a Vec :-/
-                for peer in task
+                let peers_to_send = task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
                     .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    if task
+                    .collect::<Vec<_>>();
+
+                let mut peers_sent = Vec::with_capacity(peers_to_send.len());
+                let mut peers_queue_full = Vec::with_capacity(peers_to_send.len());
+                for peer in &peers_to_send {
+                    match task
                         .network
                         .gossip_send_transaction(&peer, chain_id, &transaction)
-                        .is_ok()
                     {
-                        sent_peers.push(peer);
-                    };
+                        Ok(()) => peers_sent.push(peer.to_base58()),
+                        Err(QueueNotificationError::QueueFull) => {
+                            peers_queue_full.push(peer.to_base58())
+                        }
+                        Err(QueueNotificationError::NoConnection) => unreachable!(),
+                    }
                 }
 
-                let _ = result.send(sent_peers);
+                log::debug!(
+                    target: "network",
+                    "Chain({}) <= AnnounceTransaction(hash={}, len={}, peers_sent={}, peers_queue_full={})",
+                    task.network[chain_id].log_name,
+                    hex::encode(blake2_rfc::blake2b::blake2b(32, &[], &transaction).as_bytes()),
+                    transaction.len(),
+                    peers_sent.join(", "),
+                    peers_queue_full.join(", "),
+                );
+
+                let _ = result.send(peers_to_send);
                 continue;
             }
             WhatHappened::Message(ToBackground::SendBlockAnnounce {
