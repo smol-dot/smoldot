@@ -136,7 +136,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub async fn new(
+    pub fn new(
         config: Config<TPlat>,
     ) -> (
         Arc<Self>,
@@ -975,27 +975,47 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         connection_id,
                         message,
                     }
-                } else if let Some((peer_id, chain_id)) = task.network.chains().collect::<Vec<_>>().into_iter().find_map(|chain_id| {
-                    // TODO: 4 is an arbitrary constant, make configurable
-                    if task
-                        .network
-                        .gossip_desired_num(chain_id, service::GossipKind::ConsensusTransactions)
-                        >= 4
-                    {
-                        return None;
-                    }
-
-                    match task.peering_strategy.pick_assignable_peer(&chain_id, &task.platform.now()) {
-                        basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
-                            Some((peer_id.clone(), chain_id))
-                        }
-                        basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                        | basic_peering_strategy::AssignablePeer::NoPeer => None,
-                    }
-                }) {
-                    WhatHappened::CanAssignSlot(peer_id, chain_id)
                 } else {
-                    future::pending().await
+                    'search: loop {
+                        let mut earlier_unban = None;
+
+                        for chain_id in task.network.chains().collect::<Vec<_>>() {
+                            // TODO: 4 is an arbitrary constant, make configurable
+                            if task.network.gossip_desired_num(
+                                chain_id,
+                                service::GossipKind::ConsensusTransactions,
+                            ) >= 4
+                            {
+                                continue;
+                            }
+
+                            match task
+                                .peering_strategy
+                                .pick_assignable_peer(&chain_id, &task.platform.now())
+                            {
+                                basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                                    break 'search WhatHappened::CanAssignSlot(
+                                        peer_id.clone(),
+                                        chain_id,
+                                    )
+                                }
+                                basic_peering_strategy::AssignablePeer::AllPeersBanned {
+                                    next_unban,
+                                } => {
+                                    if earlier_unban.as_ref().map_or(true, |b| b > next_unban) {
+                                        earlier_unban = Some(next_unban.clone());
+                                    }
+                                }
+                                basic_peering_strategy::AssignablePeer::NoPeer => continue,
+                            }
+                        }
+
+                        if let Some(earlier_unban) = earlier_unban {
+                            task.platform.sleep_until(earlier_unban).await;
+                        } else {
+                            future::pending::<()>().await;
+                        }
+                    }
                 }
             };
             let finished_sending_event = async {

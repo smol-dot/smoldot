@@ -84,6 +84,7 @@ use core::{
     pin,
     time::Duration,
 };
+use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt as _, StreamExt as _};
@@ -145,7 +146,7 @@ pub struct TransactionsService<TPlat> {
 
 impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = async_channel::bounded(8);
 
@@ -516,13 +517,16 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     }
                 };
 
-                // The future that will yield the validation result is stored in the
+                // The future that will receive the validation result is stored in the
                 // `PendingTransaction`, while the future that executes the validation (and
                 // yields `()`) is stored in `validations_in_progress`.
-                let (to_execute, result_rx) = validation_future.remote_handle();
+                let (result_tx, result_rx) = oneshot::channel();
                 worker
                     .validations_in_progress
-                    .push(Box::pin(to_execute.map(move |()| to_start_validate)));
+                    .push(Box::pin(validation_future.map(move |result| {
+                        let _ = result_tx.send(result);
+                        to_start_validate
+                    })));
                 let tx = worker
                     .pending_transactions
                     .transaction_user_data_mut(to_start_validate)
@@ -916,8 +920,9 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                             .as_mut()
                             .and_then(|f| f.now_or_never())
                         {
-                            None => continue, // Normal. `maybe_validated_tx_id` is just a hint.
-                            Some(result) => {
+                            None => continue,               // Normal. `maybe_validated_tx_id` is just a hint.
+                            Some(Err(_)) => unreachable!(), // Validations are never interrupted.
+                            Some(Ok(result)) => {
                                 tx.validation_in_progress = None;
                                 result
                             }
@@ -1229,7 +1234,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
 
     /// If `Some`, will receive the result of the validation of the transaction.
     validation_in_progress: Option<
-        future::RemoteHandle<(
+        oneshot::Receiver<(
             [u8; 32],
             Result<validate::ValidTransaction, ValidationError>,
         )>,

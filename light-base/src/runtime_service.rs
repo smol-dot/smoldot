@@ -72,7 +72,6 @@ use core::{
     pin::Pin,
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
@@ -120,14 +119,9 @@ pub struct RuntimeService<TPlat: PlatformRef> {
 
 impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// Initializes a new runtime service.
-    ///
-    /// The future returned by this function is expected to finish relatively quickly and is
-    /// necessary only for locking purposes.
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
-
-        let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
         let tree = {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
@@ -156,7 +150,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         let guarded = Arc::new(Mutex::new(Guarded {
             next_subscription_id: 0,
-            best_near_head_of_chain,
+            best_near_head_of_chain: false,
             tree,
             runtimes: slab::Slab::with_capacity(2),
         }));
@@ -253,7 +247,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 _ => unreachable!(),
             };
 
-        let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
+        let (tx, new_blocks_channel) = async_channel::bounded(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         debug_assert_eq!(
             pinned_blocks
@@ -366,7 +360,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             non_finalized_blocks_ancestry_order,
             new_blocks: Subscription {
                 subscription_id,
-                channel: new_blocks_channel,
+                channel: Box::pin(new_blocks_channel),
                 guarded: self.guarded.clone(),
             },
         }
@@ -625,7 +619,7 @@ pub struct SubscriptionId(u64);
 
 pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,
-    channel: mpsc::Receiver<Notification>,
+    channel: Pin<Box<async_channel::Receiver<Notification>>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 }
 
@@ -1115,7 +1109,7 @@ enum GuardedInner<TPlat: PlatformRef> {
         /// Keys are assigned from [`Guarded::next_subscription_id`].
         all_blocks_subscriptions: hashbrown::HashMap<
             u64,
-            (&'static str, mpsc::Sender<Notification>, usize),
+            (&'static str, async_channel::Sender<Notification>, usize),
             fnv::FnvBuildHasher,
         >,
 
@@ -1185,6 +1179,12 @@ async fn run_background<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
+    // TODO: pretty hacky
+    {
+        let best_near_head_of_chain = sync_service.is_near_head_of_chain_heuristic().await;
+        guarded.lock().await.best_near_head_of_chain = best_near_head_of_chain;
+    }
+
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
