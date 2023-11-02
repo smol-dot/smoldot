@@ -860,10 +860,8 @@ async fn background_task(mut inner: Inner) {
                             } = inner.peering_strategy.insert_or_set_connected_address(
                                 &peer_id,
                                 remote_addr.clone().into_vec(),
-                                10,
-                            )
-                            // TODO: constant
-                            {
+                                10, // TODO: constant
+                            ) {
                                 let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
                                 inner.log_callback.log(
                                     LogLevel::Debug,
@@ -1183,10 +1181,8 @@ async fn background_task(mut inner: Inner) {
                                 } = inner.peering_strategy.insert_chain_peer(
                                     chain_id,
                                     peer_id.clone(),
-                                    100,
-                                )
-                                // TODO: constant
-                                {
+                                    100, // TODO: constant
+                                ) {
                                     inner.log_callback.log(
                                         LogLevel::Debug,
                                         format!(
