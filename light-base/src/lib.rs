@@ -93,7 +93,6 @@ mod util;
 pub mod platform;
 
 pub use json_rpc_service::HandleRpcError;
-pub use peer_id::PeerId;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -291,8 +290,8 @@ pub struct AddChainSuccess {
 
     /// Stream of JSON-RPC responses or notifications.
     ///
-    /// Is always `Some` if [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Disabled`],
-    /// and `None` if it was [`AddChainConfigJsonRpc::Enabled`]. In other words, you can unwrap
+    /// Is always `Some` if [`AddChainConfig::json_rpc`] was [`AddChainConfigJsonRpc::Enabled`],
+    /// and `None` if it was [`AddChainConfigJsonRpc::Disabled`]. In other words, you can unwrap
     /// this `Option` if you passed `Enabled`.
     pub json_rpc_responses: Option<JsonRpcResponses>,
 }

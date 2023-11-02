@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::{iter, num::NonZeroU32};
+use futures_lite::FutureExt as _;
 
 fn main() {
     // The `smoldot_light` library uses the `log` crate to emit logs.
@@ -34,11 +35,8 @@ fn main() {
             env!("CARGO_PKG_VERSION").into(),
         ));
 
-    // Ask the client to connect to a chain.
-    let smoldot_light::AddChainSuccess {
-        chain_id,
-        json_rpc_responses,
-    } = client
+    // Ask the client to connect to Polkadot.
+    let polkadot_connection = client
         .add_chain(smoldot_light::AddChainConfig {
             // The most important field of the configuration is the chain specification. This is a
             // JSON document containing all the information necessary for the client to connect to said
@@ -81,23 +79,53 @@ fn main() {
             user_data: (),
         })
         .unwrap();
-
-    // The chain is now properly initialized.
+    // The Polkadot chain is now properly initialized.
 
     // `json_rpc_responses` can only be `None` if we had passed `json_rpc: Disabled` in the
     // configuration.
-    let mut json_rpc_responses = json_rpc_responses.unwrap();
+    let mut polkadot_json_rpc_responses = polkadot_connection.json_rpc_responses.unwrap();
 
-    // Send a JSON-RPC request to the chain.
-    // The example here asks the client to send us notifications whenever the new best block has
-    // changed.
-    // Calling this function only queues the request. It is not processed immediately.
+    // Ask the client to connect to Polkadot's Assethub, which is one of its parachains.
+    let assethub_connection = client
+        .add_chain(smoldot_light::AddChainConfig {
+            specification: include_str!("../../demo-chain-specs/polkadot-asset-hub.json"),
+            json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
+                max_pending_requests: NonZeroU32::new(128).unwrap(),
+                max_subscriptions: 1024,
+            },
+            // The chain specification of the asset hub parachain mentions that the identifier
+            // of its relay chain is `polkadot`. Because the `Client` might contain multiple different
+            // chains whose identifier is `polkadot`, we need to provide a list of all the chains
+            // that the `Client` should consider when searching for the relay chain. The `add_chain`
+            // function returns an error if there is no match or if there are multiple matches when
+            // searching for an appropriate relay chain within this list.
+            potential_relay_chains: [polkadot_connection.chain_id].into_iter(),
+            database_content: "",
+            user_data: (),
+        })
+        .unwrap();
+    // The Assethub chain is now properly initialized.
+
+    // Just like above, we are guaranteed that `json_rpc_responses` is `Some` thanks to the
+    // options that we have passed.
+    let mut assethub_json_rpc_responses = assethub_connection.json_rpc_responses.unwrap();
+
+    // The example here asks the client to send us notifications whenever the new best block of
+    // Polkadot and the Assethub has changed.
+    // Calling the `json_rpc_request` function only queues the request. It is not processed immediately.
     // An `Err` is returned immediately if and only if the request isn't a proper JSON-RPC request
     // or if the channel of JSON-RPC responses is clogged.
     client
         .json_rpc_request(
             r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
-            chain_id,
+            polkadot_connection.chain_id,
+        )
+        .unwrap();
+
+    client
+        .json_rpc_request(
+            r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
+            assethub_connection.chain_id,
         )
         .unwrap();
 
@@ -105,8 +133,21 @@ fn main() {
     // JSON-RPC responses.
     smol::block_on(async move {
         loop {
-            let response = json_rpc_responses.next().await.unwrap();
-            println!("JSON-RPC response: {response}");
+            let (chain_name, response) = async {
+                (
+                    "Polkadot",
+                    polkadot_json_rpc_responses.next().await.unwrap(),
+                )
+            }
+            .or(async {
+                (
+                    "Assethub",
+                    assethub_json_rpc_responses.next().await.unwrap(),
+                )
+            })
+            .await;
+
+            println!("{chain_name} JSON-RPC response: {response}");
         }
-    })
+    });
 }

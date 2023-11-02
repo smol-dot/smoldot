@@ -1346,6 +1346,10 @@ async fn parahead<TPlat: PlatformRef>(
                     .unlock(runtime_host::RuntimeHostVm::Offchain(req).into_prototype());
                 return Err(ParaheadError::OffchainWorkerHostFunction);
             }
+            runtime_host::RuntimeHostVm::LogEmit(log) => {
+                // Logs are ignored.
+                runtime_call = log.resume();
+            }
         }
     };
 

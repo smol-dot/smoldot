@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "0.12.0"
+version = "0.13.0"
 description = "Primitives to build a client for Substrate-based blockchains"
 documentation = "https://docs.rs/smoldot"
 keywords = ["blockchain", "peer-to-peer"]
@@ -49,7 +49,7 @@ ed25519-zebra = { version = "4.0.1", default-features = false }
 either = { version = "1.9.0", default-features = false }
 event-listener = { version = "3.0.0", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
-futures-lite = { version = "1.13.0", default-features = false, features = ["alloc"] }
+futures-lite = { version = "2.0.0", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
@@ -67,7 +67,7 @@ pbkdf2 = { version = "0.12.1", default-features = false }
 poly1305 = { version = "0.8.0", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
-ruzstd = { version = "0.4.0" }  # TODO: uses `#![feature(error_in_core)]` when the `std` feature is disabled, see https://github.com/rust-lang/rust/issues/103765
+ruzstd = { version = "0.5.0", default-features = false }
 schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc"] }
 serde = { version = "1.0.183", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc", "raw_value"] }

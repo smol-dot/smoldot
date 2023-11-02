@@ -75,7 +75,7 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
  * Tries to open a new connection using the given configuration.
  *
  * @see Connection
- * @throws {@link ConnectionError} If the multiaddress couldn't be parsed or contains an invalid protocol.
+ * @throws any If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
 function connect(config: ConnectionConfig): Connection {
     if (config.address.ty === "websocket") {
@@ -88,7 +88,7 @@ function connect(config: ConnectionConfig): Connection {
         let connection: WebSocket | string | null;
         try {
             connection = new WebSocket(config.address.url);
-        } catch(error) {
+        } catch (error) {
             connection = error instanceof Error ? error.toString() : "Exception thrown by new WebSocket";
         }
 
@@ -121,10 +121,7 @@ function connect(config: ConnectionConfig): Connection {
             connection.binaryType = 'arraybuffer';
 
             connection.onopen = () => {
-                config.onOpen({
-                    type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-                    initialWritableBytes: 1024 * 1024
-                });
+                config.onWritableBytes(1024 * 1024);
             };
             connection.onclose = (event) => {
                 const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -191,10 +188,6 @@ function connect(config: ConnectionConfig): Connection {
         let pc: RTCPeerConnection | null | undefined = undefined;
         // Contains the data channels that are open and have been reported to smoldot.
         const dataChannels = new Map<number, { channel: RTCDataChannel, bufferedBytes: number }>();
-        // For various reasons explained below, we open a data channel in advance without reporting it
-        // to smoldot. This data channel is stored in this variable. Once it is reported to smoldot,
-        // it is inserted in `dataChannels`.
-        let handshakeDataChannel: RTCDataChannel | undefined;
         // SHA256 hash of the DTLS certificate of the local node. Unknown as long as it hasn't been
         // generated.
         // TODO: could be merged with `pc` in one variable, and maybe even the other fields as well
@@ -207,7 +200,7 @@ function connect(config: ConnectionConfig): Connection {
             // The `RTCPeerConnection` is created pretty quickly. It is however still possible for
             // smoldot to cancel the opening, in which case `pc` will still be undefined.
             if (!pc) {
-                console.assert(dataChannels.size === 0 && !handshakeDataChannel, "substreams exist while pc is undef")
+                console.assert(dataChannels.size === 0, "substreams exist while pc is undef")
                 pc = null;
                 return
             }
@@ -224,72 +217,31 @@ function connect(config: ConnectionConfig): Connection {
                 channel.channel.onmessage = null;
             }
             dataChannels.clear();
-            if (handshakeDataChannel) {
-                handshakeDataChannel.onopen = null;
-                handshakeDataChannel.onerror = null;
-                handshakeDataChannel.onclose = null;
-                handshakeDataChannel.onbufferedamountlow = null;
-                handshakeDataChannel.onmessage = null;
-            }
-            handshakeDataChannel = undefined;
 
             pc!.close();  // Not necessarily necessary, but it doesn't hurt to do so.
         };
 
         // Function that configures a newly-opened channel and adds it to the map. Used for both
         // inbound and outbound substreams.
-        const addChannel = (dataChannel: RTCDataChannel, direction: 'first-outbound' | 'inbound' | 'outbound') => {
+        const addChannel = (dataChannel: RTCDataChannel, direction: 'inbound' | 'outbound') => {
             const dataChannelId = dataChannel.id!;
             dataChannel.binaryType = 'arraybuffer';
 
-            let isOpen = false;
+            let isOpen = { value: false };
 
             dataChannel.onopen = () => {
-                console.assert(!isOpen, "substream opened twice")
-                isOpen = true;
-
-                if (direction === 'first-outbound') {
-                    console.assert(dataChannels.size === 0, "dataChannels not empty when opening");
-                    console.assert(handshakeDataChannel === dataChannel, "handshake substream mismatch");
-                    config.onOpen({
-                        type: 'multi-stream',
-                        handshake: 'webrtc',
-                        // `addChannel` can never be called before the local certificate is generated, so this
-                        // value is always defined.
-                        localTlsCertificateSha256: localTlsCertificateSha256!,
-                        remoteTlsCertificateSha256,
-                    });
-                } else {
-                    console.assert(direction !== 'outbound' || !handshakeDataChannel, "handshakeDataChannel still defined");
-                    config.onStreamOpened(dataChannelId, direction, 65536);
-                }
+                console.assert(!isOpen.value, "substream opened twice")
+                isOpen.value = true;
+                config.onStreamOpened(dataChannelId, direction);
+                config.onWritableBytes(65536, dataChannelId);
             };
 
             dataChannel.onerror = dataChannel.onclose = (_error) => {
-                // A couple of different things could be happening here.
-                if (handshakeDataChannel === dataChannel && !isOpen) {
-                    // The handshake data channel that we have opened ahead of time failed to open. As this
-                    // happens before we have reported the WebRTC connection as a whole as being open, we
-                    // need to report that the connection has failed to open.
-                    killAllJs();
-                    // Note that the event doesn't give any additional reason for the failure.
-                    config.onConnectionReset("handshake data channel failed to open");
-                } else if (handshakeDataChannel === dataChannel) {
-                    // The handshake data channel has been closed before we reported it to smoldot. This
-                    // isn't really a problem. We just update the state and continue running. If smoldot
-                    // requests a substream, another one will be opened. It could be a valid implementation
-                    // to also just kill the entire connection, however doing so is a bit too intrusive and
-                    // punches through abstraction layers.
-                    handshakeDataChannel.onopen = null;
-                    handshakeDataChannel.onerror = null;
-                    handshakeDataChannel.onclose = null;
-                    handshakeDataChannel.onbufferedamountlow = null;
-                    handshakeDataChannel.onmessage = null;
-                    handshakeDataChannel = undefined;
-                } else if (!isOpen) {
-                    // Substream wasn't opened yet and thus has failed to open. The API has no mechanism to
-                    // report substream openings failures. We could try opening it again, but given that
-                    // it's unlikely to succeed, we simply opt to kill the entire connection.
+                if (!isOpen.value) {
+                    // Substream wasn't opened yet and thus has failed to open. The API has no
+                    // mechanism to report substream openings failures. We could try opening it
+                    // again, but given that it's unlikely to succeed, we simply opt to kill the
+                    // entire connection.
                     killAllJs();
                     // Note that the event doesn't give any additional reason for the failure.
                     config.onConnectionReset("data channel failed to open");
@@ -311,10 +263,7 @@ function connect(config: ConnectionConfig): Connection {
                 config.onMessage(new Uint8Array(m.data), dataChannelId);
             }
 
-            if (direction !== 'first-outbound')
-                dataChannels.set(dataChannelId, { channel: dataChannel, bufferedBytes: 0 });
-            else
-                handshakeDataChannel = dataChannel
+            dataChannels.set(dataChannelId, { channel: dataChannel, bufferedBytes: 0 });
         }
 
         // It is possible for the browser to use multiple different certificates.
@@ -472,16 +421,11 @@ function connect(config: ConnectionConfig): Connection {
                 addChannel(channel, 'inbound')
             };
 
-            // Creating a `RTCPeerConnection` doesn't actually do anything before `createDataChannel` is
-            // called. Smoldot's API, however, requires you to treat entire connections as open or
-            // closed. We know, according to the libp2p WebRTC specification, that every connection
-            // always starts with a substream where a handshake is performed. After we've reported that
-            // the connection is open, smoldot will open a substream in order to perform the handshake.
-            // Instead of following this API, we open this substream in advance, and will notify smoldot
-            // that the connection is open when the substream is open.
-            // Note that the label passed to `createDataChannel` is required to be empty as per the
-            // libp2p WebRTC specification.
-            addChannel(pc!.createDataChannel("", { id: 0, negotiated: true }), 'first-outbound')
+            config.onMultistreamHandshakeInfo({
+                handshake: 'webrtc',
+                localTlsCertificateSha256,
+                remoteTlsCertificateSha256,
+            });
         });
 
         return {
@@ -511,26 +455,11 @@ function connect(config: ConnectionConfig): Connection {
             closeSend: (): void => { throw new Error('Wrong connection type') },
 
             openOutSubstream: () => {
-                // `openOutSubstream` can only be called after we have called `config.onOpen`, therefore
-                // `pc` is guaranteed to be non-null.
-                // As explained above, we open a data channel ahead of time. If this data channel is still
-                // there, we report it.
-                if (handshakeDataChannel) {
-                    // Do this asynchronously because calling callbacks within callbacks is error-prone.
-                    (async () => {
-                        // We need to check again if `handshakeDataChannel` is still defined, as the
-                        // connection might have been closed.
-                        if (handshakeDataChannel) {
-                            config.onStreamOpened(handshakeDataChannel.id!, 'outbound', 1024 * 1024)
-                            dataChannels.set(handshakeDataChannel.id!, { channel: handshakeDataChannel, bufferedBytes: 0 })
-                            handshakeDataChannel = undefined
-                        }
-                    })()
-                } else {
-                    // Note that the label passed to `createDataChannel` is required to be empty as per the
-                    // libp2p WebRTC specification.
-                    addChannel(pc!.createDataChannel(""), 'outbound')
-                }
+                // `openOutSubstream` can only be called after we have called `config.onOpen`,
+                // therefore `pc` is guaranteed to be non-null.
+                // Note that the label passed to `createDataChannel` is required to be empty as
+                // per the libp2p WebRTC specification.
+                addChannel(pc!.createDataChannel(""), 'outbound')
             }
         };
 

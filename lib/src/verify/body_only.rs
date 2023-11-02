@@ -26,7 +26,8 @@ use alloc::{string::String, vec::Vec};
 use core::{iter, num::NonZeroU64, time::Duration};
 
 pub use runtime_host::{
-    Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
+    LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr, Nibble, StorageChanges, TrieChange,
+    TrieChangeStorageValue, TrieEntryVersion,
 };
 
 /// Configuration for a block verification.
@@ -309,6 +310,8 @@ pub enum Verify {
     StorageNextKey(StorageNextKey),
     /// Setting the value of an offchain storage value is required.
     OffchainStorageSet(OffchainStorageSet),
+    /// Runtime would like to emit some log.
+    LogEmit(LogEmit),
 }
 
 struct VerifyInner {
@@ -486,6 +489,13 @@ impl VerifyInner {
                 }
                 (runtime_host::RuntimeHostVm::OffchainStorageSet(inner), phase) => {
                     break Verify::OffchainStorageSet(OffchainStorageSet {
+                        inner,
+                        phase,
+                        calculate_trie_changes: self.calculate_trie_changes,
+                    })
+                }
+                (runtime_host::RuntimeHostVm::LogEmit(inner), phase) => {
+                    break Verify::LogEmit(LogEmit {
                         inner,
                         phase,
                         calculate_trie_changes: self.calculate_trie_changes,
@@ -700,6 +710,34 @@ impl OffchainStorageSet {
     }
 
     /// Resumes execution after having set the value.
+    pub fn resume(self) -> Verify {
+        VerifyInner {
+            inner: self.inner.resume(),
+            phase: self.phase,
+            calculate_trie_changes: self.calculate_trie_changes,
+        }
+        .run()
+    }
+}
+
+/// Report about a log entry being emitted.
+///
+/// Use [`LogEmit::info`] to obtain what must be printed.
+#[must_use]
+pub struct LogEmit {
+    inner: runtime_host::LogEmit,
+    /// See [`VerifyInner::phase`].
+    phase: VerifyInnerPhase,
+    calculate_trie_changes: bool,
+}
+
+impl LogEmit {
+    /// Returns the data that the runtime would like to print.
+    pub fn info(&self) -> LogEmitInfo {
+        self.inner.info()
+    }
+
+    /// Resume execution.
     pub fn resume(self) -> Verify {
         VerifyInner {
             inner: self.inner.resume(),
