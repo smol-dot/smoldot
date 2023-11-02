@@ -72,7 +72,6 @@ use core::{
     pin::Pin,
     time::Duration,
 };
-use futures_channel::mpsc;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
@@ -248,7 +247,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 _ => unreachable!(),
             };
 
-        let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
+        let (tx, new_blocks_channel) = async_channel::bounded(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         debug_assert_eq!(
             pinned_blocks
@@ -361,7 +360,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             non_finalized_blocks_ancestry_order,
             new_blocks: Subscription {
                 subscription_id,
-                channel: new_blocks_channel,
+                channel: Box::pin(new_blocks_channel),
                 guarded: self.guarded.clone(),
             },
         }
@@ -620,7 +619,7 @@ pub struct SubscriptionId(u64);
 
 pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,
-    channel: mpsc::Receiver<Notification>,
+    channel: Pin<Box<async_channel::Receiver<Notification>>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 }
 
@@ -1110,7 +1109,7 @@ enum GuardedInner<TPlat: PlatformRef> {
         /// Keys are assigned from [`Guarded::next_subscription_id`].
         all_blocks_subscriptions: hashbrown::HashMap<
             u64,
-            (&'static str, mpsc::Sender<Notification>, usize),
+            (&'static str, async_channel::Sender<Notification>, usize),
             fnv::FnvBuildHasher,
         >,
 
