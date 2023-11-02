@@ -933,8 +933,7 @@ where
                                 )
                                 .next()
                                 .is_some()
-                            {
-                                if !self
+                                && !self
                                     .connections_by_peer_id
                                     .range(
                                         (expected_peer_id.clone(), ConnectionId::min_value())
@@ -947,11 +946,10 @@ where
                                         let state = self.inner.connection_state(*connection_id);
                                         !state.shutting_down
                                     })
-                                {
-                                    let _was_inserted =
-                                        self.unconnected_desired.insert(expected_peer_id.clone());
-                                    debug_assert!(_was_inserted);
-                                }
+                            {
+                                let _was_inserted =
+                                    self.unconnected_desired.insert(expected_peer_id.clone());
+                                debug_assert!(_was_inserted);
                             }
                             let _was_inserted = self
                                 .connections_by_peer_id
@@ -1047,8 +1045,7 @@ where
                             )
                             .count()
                             != 0
-                        {
-                            if !self
+                            && !self
                                 .connections_by_peer_id
                                 .range(
                                     (peer_id.clone(), ConnectionId::min_value())
@@ -1058,26 +1055,25 @@ where
                                     let state = self.inner.connection_state(*connection_id);
                                     !state.shutting_down
                                 })
-                            {
-                                self.unconnected_desired.insert(peer_id.clone());
-                                for (_, _, chain_index) in self.gossip_desired_peers.range(
-                                    (
+                        {
+                            self.unconnected_desired.insert(peer_id.clone());
+                            for (_, _, chain_index) in self.gossip_desired_peers.range(
+                                (
+                                    peer_id.clone(),
+                                    GossipKind::ConsensusTransactions,
+                                    usize::min_value(),
+                                )
+                                    ..=(
                                         peer_id.clone(),
                                         GossipKind::ConsensusTransactions,
-                                        usize::min_value(),
-                                    )
-                                        ..=(
-                                            peer_id.clone(),
-                                            GossipKind::ConsensusTransactions,
-                                            usize::max_value(),
-                                        ),
-                                ) {
-                                    self.connected_unopened_gossip_desired.remove(&(
-                                        peer_id.clone(),
-                                        ChainId(*chain_index),
-                                        GossipKind::ConsensusTransactions,
-                                    ));
-                                }
+                                        usize::max_value(),
+                                    ),
+                            ) {
+                                self.connected_unopened_gossip_desired.remove(&(
+                                    peer_id.clone(),
+                                    ChainId(*chain_index),
+                                    GossipKind::ConsensusTransactions,
+                                ));
                             }
                         }
                     }
@@ -1440,7 +1436,7 @@ where
                                 Ok(handshake) => {
                                     match protocol::decode_block_announces_handshake(
                                         self.chains[chain_index].block_number_bytes,
-                                        &handshake,
+                                        handshake,
                                     ) {
                                         Ok(decoded_handshake)
                                             if *decoded_handshake.genesis_hash
@@ -1804,7 +1800,7 @@ where
                                     new_substream_id,
                                     SubstreamInfo {
                                         connection_id,
-                                        protocol: substream_info.protocol.clone(),
+                                        protocol: substream_info.protocol,
                                     },
                                 );
                                 debug_assert!(_prev_value.is_none());
@@ -2622,14 +2618,14 @@ where
         // call data.
         // TODO: check limit
 
-        Ok(self.start_request(
+        self.start_request(
             target,
             request_data,
             Protocol::Kad {
                 chain_index: chain_id.0,
             },
             timeout,
-        )?)
+        )
     }
 
     /// Underlying implementation of all the functions that start requests.
@@ -2780,7 +2776,7 @@ where
             let supported_protocols = [protocol::ProtocolName::Ping].into_iter();
 
             let supported_protocols_names = supported_protocols
-                .map(|proto| protocol::encode_protocol_name_string(proto))
+                .map(protocol::encode_protocol_name_string)
                 .collect::<Vec<_>>();
 
             protocol::build_identify_response(protocol::IdentifyResponse {

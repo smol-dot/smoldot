@@ -565,10 +565,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 if keys.insert(Vec::new()) {
                                     max_reponse_nodes += 1;
                                 }
-                            } else {
-                                if keys.insert(key[..key.len() - 1].to_owned()) {
-                                    max_reponse_nodes += key.len() * 2 - 1;
-                                }
+                            } else if keys.insert(key[..key.len() - 1].to_owned()) {
+                                max_reponse_nodes += key.len() * 2 - 1;
                             }
                         }
                     }

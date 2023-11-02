@@ -733,7 +733,7 @@ pub fn spawn_requests_handler(mut config: Config) {
 
                                 let json_rpc_header =
                                     match methods::Header::from_scale_encoded_header(
-                                        &scale_encoded_header,
+                                        scale_encoded_header,
                                         block_number_bytes,
                                     ) {
                                         Ok(h) => h,

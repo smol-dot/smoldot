@@ -275,7 +275,7 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
-            network_service_chain_id: self.network_service_chain_id.clone(),
+            network_service_chain_id: self.network_service_chain_id,
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
@@ -1118,11 +1118,11 @@ fn start_services<TPlat: platform::PlatformRef>(
                         ..
                     } => {
                         if let Ok(decoded) =
-                            header::decode(finalized_block_header, usize::from(block_number_bytes))
+                            header::decode(finalized_block_header, block_number_bytes)
                         {
                             (
                                 decoded.number,
-                                header::hash_from_scale_encoded_header(&finalized_block_header),
+                                header::hash_from_scale_encoded_header(finalized_block_header),
                             )
                         } else {
                             (
@@ -1135,7 +1135,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     }
                 },
                 fork_id,
-                block_number_bytes: usize::from(block_number_bytes),
+                block_number_bytes,
             }],
         });
 

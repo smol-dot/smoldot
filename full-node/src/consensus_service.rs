@@ -1797,11 +1797,9 @@ impl SyncBackground {
                             // Notify the subscribers.
                             // Elements in `blocks_notifications` are removed one by one and
                             // inserted back if the channel is still open.
-                            let runtime_to_notify = if let Some(new_runtime) = &new_runtime {
-                                Some(Arc::new(new_runtime.clone()))
-                            } else {
-                                None
-                            };
+                            let runtime_to_notify = new_runtime
+                                .as_ref()
+                                .map(|new_runtime| Arc::new(new_runtime.clone()));
                             for index in (0..self.blocks_notifications.len()).rev() {
                                 let subscription = self.blocks_notifications.swap_remove(index);
                                 if subscription

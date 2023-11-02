@@ -622,7 +622,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
         self.stream.when_wake_up = self
             .read_write
             .wake_up_after
-            .map(|when| Delay::new_at_monotonic_clock(when));
+            .map(Delay::new_at_monotonic_clock);
 
         self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
 

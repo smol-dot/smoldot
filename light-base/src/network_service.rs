@@ -166,18 +166,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             // TODO: can panic in case of duplicate chain, how do we handle that?
             let chain_id = network
                 .add_chain(service::ChainConfig {
-                    grandpa_protocol_config: if let Some(commit_finalized_height) =
-                        chain.grandpa_protocol_finalized_block_height
-                    {
-                        // TODO: dummy values
-                        Some(service::GrandpaState {
+                    grandpa_protocol_config: chain.grandpa_protocol_finalized_block_height.map(
+                        |commit_finalized_height| service::GrandpaState {
                             commit_finalized_height,
                             round_number: 1,
                             set_id: 0,
-                        })
-                    } else {
-                        None
-                    },
+                        },
+                    ),
                     fork_id: chain.fork_id.clone(),
                     block_number_bytes: chain.block_number_bytes,
                     best_hash: chain.best_block.1,
@@ -1328,7 +1323,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             service::GossipKind::ConsensusTransactions,
                         )
                         .next()
-                        .map(|p| p.clone());
+                        .cloned();
 
                     if let Some(target) = target {
                         let substream_id = match task.network.start_kademlia_find_node_request(

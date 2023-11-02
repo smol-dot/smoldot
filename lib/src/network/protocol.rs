@@ -144,7 +144,7 @@ pub fn encode_protocol_name(
         } => (genesis_hash, fork_id, "state/2"),
     };
 
-    let genesis_hash = hex::encode(&genesis_hash);
+    let genesis_hash = hex::encode(genesis_hash);
 
     if let Some(fork_id) = fork_id {
         either::Right(either::Right(
@@ -221,7 +221,7 @@ pub fn decode_protocol_name(name: &str) -> Result<ProtocolName, ()> {
 
 fn genesis_hash(name: &str) -> nom::IResult<&str, [u8; 32]> {
     nom::combinator::map_opt(nom::bytes::complete::take(64u32), |hash| {
-        hex::decode(&hash)
+        hex::decode(hash)
             .ok()
             .map(|hash| <[u8; 32]>::try_from(hash).unwrap_or_else(|_| unreachable!()))
     })(name)
