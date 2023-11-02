@@ -18,6 +18,19 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
+//! Implementation of the [`PlatformRef`] trait that leverages the operating system.
+//!
+//! This module contains the [`DefaultPlatform`] struct, which implements [`PlatformRef`].
+//! 
+//! # Example
+//! 
+//! ```rust
+//! use smoldot_light::{Client, platform::DefaultPlatform};
+//! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
+//! # let _: Client<_, ()> = client;  // Used in this example to infer the generic parameters of the Client
+//! ```
+//!
+
 use super::{
     with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
     PlatformRef, SubstreamDirection,
@@ -43,11 +56,18 @@ pub struct DefaultPlatform {
 }
 
 impl DefaultPlatform {
-    /// Creates a new [`DefaultPlatform`]. Spawns threads to executor background tasks.
+    /// Creates a new [`DefaultPlatform`].
+    ///
+    /// This function spawns threads in order to execute the background tasks that will later be
+    /// spawned.
+    ///
+    /// Must be passed as "client name" and "client version" that are used in various places
+    /// such as to answer some JSON-RPC requests. Passing `env!("CARGO_PKG_NAME")` and
+    /// `env!("CARGO_PKG_VERSION")` is typically very reasonable.
     ///
     /// # Panic
     ///
-    /// Panics if it wasn't possible to spawn background threads to execute background tasks.
+    /// Panics if it wasn't possible to spawn background threads.
     ///
     pub fn new(client_name: String, client_version: String) -> Arc<Self> {
         let tasks_executor = Arc::new(smol::Executor::new());
@@ -63,7 +83,7 @@ impl DefaultPlatform {
             let tasks_executor = tasks_executor.clone();
 
             let spawn_result = thread::Builder::new()
-                .name(format!("tasks-pool-{}", n))
+                .name(format!("smoldot-light-{}", n))
                 .spawn(move || smol::block_on(tasks_executor.run(on_shutdown)));
 
             if let Err(err) = spawn_result {
