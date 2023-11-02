@@ -47,7 +47,7 @@
 //! ```
 //!
 //! If the `std` feature of this library is disabled, then you need to implement the
-//! [`platform::DefaultPlatform`] manually.
+//! [`platform::PlatformRef`] trait manually.
 //!
 //! ## Adding a chain
 //!
