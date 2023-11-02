@@ -92,6 +92,10 @@ pub struct ConfigChain {
     /// Name of the chain, for logging purposes.
     pub log_name: String,
 
+    /// Number of "out slots" of this chain. We establish simultaneously gossip substreams up to
+    /// this number of peers.
+    pub num_out_slots: usize,
+
     /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
     /// the chains match.
     ///
@@ -182,6 +186,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     allow_inbound_block_requests: false,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
+                        num_out_slots: chain.num_out_slots,
                     },
                 })
                 .unwrap();
@@ -919,6 +924,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
 struct Chain {
     log_name: String,
+
+    /// See [`ConfigChain::num_out_slots`].
+    num_out_slots: usize,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
@@ -975,11 +983,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let mut earlier_unban = None;
 
                         for chain_id in task.network.chains().collect::<Vec<_>>() {
-                            // TODO: 4 is an arbitrary constant, make configurable
                             if task.network.gossip_desired_num(
                                 chain_id,
                                 service::GossipKind::ConsensusTransactions,
-                            ) >= 4
+                            ) >= task.network[chain_id].num_out_slots
                             {
                                 continue;
                             }

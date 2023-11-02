@@ -1100,6 +1100,7 @@ fn start_services<TPlat: platform::PlatformRef>(
             identify_agent_version: network_identify_agent_version,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),
+                num_out_slots: 4,
                 grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
                     chain_information,
                 } = &config
