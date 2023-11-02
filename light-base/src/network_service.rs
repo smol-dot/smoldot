@@ -1261,6 +1261,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 is_best,
                 result,
             }) => {
+                // TODO: log who the announce was sent to
                 let _ = result.send(task.network.gossip_send_block_announce(
                     &target,
                     chain_id,
