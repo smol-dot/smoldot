@@ -91,7 +91,7 @@ export interface Instance {
      * all connections.
      */
     shutdownExecutor: () => void,
-    connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => void,
+    connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
@@ -546,14 +546,13 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             cb();
         },
 
-        connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => {
+        connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => {
             if (!state.instance)
                 return;
 
-            const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length + info.remoteTlsCertificateSha256.length);
+            const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length);
             buffer.writeUInt8(handshakeTy, 0, 0);
             handshakeTy.set(info.localTlsCertificateSha256, 1)
-            handshakeTy.set(info.remoteTlsCertificateSha256, 1 + info.localTlsCertificateSha256.length)
             state.bufferIndices[0] = handshakeTy;
             state.instance.exports.connection_multi_stream_set_handshake_info(connectionId, 0);
             delete state.bufferIndices[0]

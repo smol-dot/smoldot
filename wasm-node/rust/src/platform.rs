@@ -365,12 +365,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 }
                 ConnectionInner::MultiStreamWebRtc {
                     local_tls_certificate_sha256,
-                    remote_tls_certificate_sha256,
                     ..
                 } => smoldot_light::platform::MultiStreamWebRtcConnection {
                     connection: MultiStreamWrapper(connection_id),
                     local_tls_certificate_sha256: *local_tls_certificate_sha256,
-                    remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
                 },
                 ConnectionInner::Reset { .. } => {
                     // If the connection was already reset, we proceed anyway but provide a fake
@@ -378,7 +376,6 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     smoldot_light::platform::MultiStreamWebRtcConnection {
                         connection: MultiStreamWrapper(connection_id),
                         local_tls_certificate_sha256: [0; 32],
-                        remote_tls_certificate_sha256: [0; 32], // TODO: this is very bad, but this field is getting removed asap
                     }
                 }
             }
@@ -833,8 +830,6 @@ enum ConnectionInner {
         connection_handles_alive: u32,
         /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
         local_tls_certificate_sha256: [u8; 32],
-        /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_sha256: [u8; 32],
     },
     /// [`bindings::connection_reset`] has been called
     Reset {
@@ -867,19 +862,13 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
     connection_id: u32,
     handshake_ty: Vec<u8>,
 ) {
-    let (_, (local_tls_certificate_sha256, remote_tls_certificate_sha256)) =
-        nom::sequence::preceded(
-            nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
-            nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-                    <&[u8; 32]>::try_from(b).unwrap()
-                }),
-                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
-                    <&[u8; 32]>::try_from(b).unwrap()
-                }),
-            )),
-        )(&handshake_ty[..])
-        .expect("invalid handshake type provided to connection_multi_stream_set_handshake_info");
+    let (_, local_tls_certificate_sha256) = nom::sequence::preceded(
+        nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
+        nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
+            <&[u8; 32]>::try_from(b).unwrap()
+        }),
+    )(&handshake_ty[..])
+    .expect("invalid handshake type provided to connection_multi_stream_set_handshake_info");
 
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -893,7 +882,6 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
         opened_substreams_to_pick_up: VecDeque::with_capacity(8),
         connection_handles_alive: 0,
         local_tls_certificate_sha256: *local_tls_certificate_sha256,
-        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
     };
     connection.something_happened.notify(usize::max_value());
 }

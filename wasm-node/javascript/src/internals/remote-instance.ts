@@ -449,7 +449,7 @@ type ClientToServer =
     { ty: "accept-more-json-rpc-answers", chainId: number } |
     { ty: "shutdown" } |
     { ty: "connection-reset", connectionId: number, message: string } |
-    { ty: "connection-multistream-set-info", connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array } } |
+    { ty: "connection-multistream-set-info", connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array } } |
     { ty: "stream-message", connectionId: number, streamId?: number, message: Uint8Array } |
     { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound" } |
     { ty: "stream-writable-bytes", connectionId: number, streamId?: number, numExtra: number } |

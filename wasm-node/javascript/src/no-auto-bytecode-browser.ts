@@ -424,7 +424,6 @@ function connect(config: ConnectionConfig): Connection {
             config.onMultistreamHandshakeInfo({
                 handshake: 'webrtc',
                 localTlsCertificateSha256,
-                remoteTlsCertificateSha256,
             });
         });
 

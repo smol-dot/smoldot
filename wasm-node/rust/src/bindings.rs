@@ -497,8 +497,7 @@ pub extern "C" fn timer_finished() {
 /// de-assigned and buffer destroyed once this function returns.
 ///
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the SHA-256 hash of
-/// the local node's TLS certificate, followed with the SHA-256 hash of the remote node's TLS
-/// certificate.
+/// the local node's TLS certificate.
 #[no_mangle]
 pub extern "C" fn connection_multi_stream_set_handshake_info(
     connection_id: u32,

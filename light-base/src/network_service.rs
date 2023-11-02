@@ -1916,11 +1916,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .into_iter()
                             .chain(connection.local_tls_certificate_sha256.into_iter())
                             .collect();
-                        debug_assert_eq!(
-                            // TODO: check is a bit stupid given that the remote certificate is just passed through
-                            remote_certificate_sha256,
-                            connection.remote_tls_certificate_sha256
-                        );
                         let remote_tls_certificate_multihash = [12u8, 32]
                             .into_iter()
                             .chain(remote_certificate_sha256.into_iter())
