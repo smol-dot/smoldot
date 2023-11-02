@@ -120,14 +120,9 @@ pub struct RuntimeService<TPlat: PlatformRef> {
 
 impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// Initializes a new runtime service.
-    ///
-    /// The future returned by this function is expected to finish relatively quickly and is
-    /// necessary only for locking purposes.
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
-
-        let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
         let tree = {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
@@ -156,7 +151,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         let guarded = Arc::new(Mutex::new(Guarded {
             next_subscription_id: 0,
-            best_near_head_of_chain,
+            best_near_head_of_chain: false,
             tree,
             runtimes: slab::Slab::with_capacity(2),
         }));
@@ -1185,6 +1180,12 @@ async fn run_background<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
+    // TODO: pretty hacky
+    {
+        let best_near_head_of_chain = sync_service.is_near_head_of_chain_heuristic().await;
+        guarded.lock().await.best_near_head_of_chain = best_near_head_of_chain;
+    }
+
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.

@@ -150,7 +150,7 @@ pub struct SyncService<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> SyncService<TPlat> {
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = async_channel::bounded(16);
         let from_foreground = Box::pin(from_foreground);
 
