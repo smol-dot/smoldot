@@ -48,6 +48,7 @@ use alloc::{
 use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    ops,
 };
 use rand::seq::IteratorRandom as _;
 use rand_chacha::{
@@ -422,36 +423,6 @@ impl<TNow, TSub> Yamux<TNow, TSub> {
     /// Also returns `true` if the substream is in a dead state.
     pub fn has_substream(&self, substream_id: SubstreamId) -> bool {
         self.inner.substreams.contains_key(&substream_id.0)
-    }
-
-    /// Returns the user data associated to a substream.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SubstreamId`] is invalid.
-    ///
-    pub fn user_data(&self, substream_id: SubstreamId) -> &TSub {
-        &self
-            .inner
-            .substreams
-            .get(&substream_id.0)
-            .unwrap()
-            .user_data
-    }
-
-    /// Returns the user data associated to a substream.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SubstreamId`] is invalid.
-    ///
-    pub fn user_data_mut(&mut self, substream_id: SubstreamId) -> &mut TSub {
-        &mut self
-            .inner
-            .substreams
-            .get_mut(&substream_id.0)
-            .unwrap_or_else(|| panic!())
-            .user_data
     }
 
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past.
@@ -1747,6 +1718,30 @@ where
             remaining_bytes: data_frame_size,
         };
         Ok(())
+    }
+}
+
+impl<TNow, TSub> ops::Index<SubstreamId> for Yamux<TNow, TSub> {
+    type Output = TSub;
+
+    fn index(&self, substream_id: SubstreamId) -> &TSub {
+        &self
+            .inner
+            .substreams
+            .get(&substream_id.0)
+            .unwrap()
+            .user_data
+    }
+}
+
+impl<TNow, TSub> ops::IndexMut<SubstreamId> for Yamux<TNow, TSub> {
+    fn index_mut(&mut self, substream_id: SubstreamId) -> &mut TSub {
+        &mut self
+            .inner
+            .substreams
+            .get_mut(&substream_id.0)
+            .unwrap_or_else(|| panic!())
+            .user_data
     }
 }
 
