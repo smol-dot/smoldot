@@ -138,9 +138,7 @@ where
             if self.inner.yamux.has_substream(self.inner.outgoing_pings) {
                 let mut payload = [0u8; 32];
                 self.inner.ping_payload_randomness.fill_bytes(&mut payload);
-                self.inner
-                    .yamux
-                    .user_data_mut(self.inner.outgoing_pings)
+                self.inner.yamux[self.inner.outgoing_pings]
                     .as_mut()
                     .unwrap()
                     .0
@@ -536,12 +534,7 @@ where
             _ => panic!(),
         };
 
-        let (substream, ud) = self
-            .inner
-            .yamux
-            .user_data_mut(substream_id)
-            .as_mut()
-            .unwrap();
+        let (substream, ud) = self.inner.yamux[substream_id].as_mut().unwrap();
         substream.accept_inbound(ty);
         debug_assert!(ud.is_none());
         *ud = Some(user_data);
@@ -561,12 +554,7 @@ where
             _ => panic!(),
         };
 
-        let (substream, ud) = self
-            .inner
-            .yamux
-            .user_data_mut(substream_id)
-            .as_mut()
-            .unwrap();
+        let (substream, ud) = self.inner.yamux[substream_id].as_mut().unwrap();
         substream.reject_inbound();
         debug_assert!(ud.is_none());
         self.inner.yamux.mark_substream_write_ready(substream_id);
@@ -590,9 +578,7 @@ where
             _ => panic!(),
         };
 
-        self.inner
-            .yamux
-            .user_data_mut(substream_id)
+        self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
             .0
@@ -613,9 +599,7 @@ where
             _ => panic!(),
         };
 
-        self.inner
-            .yamux
-            .user_data_mut(substream_id)
+        self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
             .0
@@ -650,9 +634,7 @@ where
             _ => panic!(),
         };
 
-        self.inner
-            .yamux
-            .user_data_mut(substream_id)
+        self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
             .0
@@ -681,9 +663,7 @@ where
         // data that Noise and Yamux have extracted is always bounded anyway. It's not worth the
         // effort of reporting a 100% accurate information when a 100% accurate information isn't
         // needed.
-        self.inner
-            .yamux
-            .user_data(substream_id)
+        self.inner.yamux[substream_id]
             .as_ref()
             .unwrap()
             .0
@@ -712,9 +692,7 @@ where
             panic!()
         }
 
-        self.inner
-            .yamux
-            .user_data_mut(substream_id)
+        self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
             .0
@@ -742,9 +720,7 @@ where
             return Err(RespondInRequestError::SubstreamClosed);
         }
 
-        self.inner
-            .yamux
-            .user_data_mut(substream_id)
+        self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
             .0
@@ -763,9 +739,7 @@ impl<TNow, TSubUd> Index<SubstreamId> for SingleStream<TNow, TSubUd> {
             _ => panic!(),
         };
 
-        self.inner
-            .yamux
-            .user_data(substream_id)
+        self.inner.yamux[substream_id]
             .as_ref()
             .unwrap()
             .1
@@ -781,9 +755,7 @@ impl<TNow, TSubUd> IndexMut<SubstreamId> for SingleStream<TNow, TSubUd> {
             _ => panic!(),
         };
 
-        self.inner
-            .yamux
-            .user_data_mut(substream_id)
+        self.inner.yamux[substream_id]
             .as_mut()
             .unwrap()
             .1
