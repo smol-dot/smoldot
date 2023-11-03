@@ -15,10 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-/*********************************************************
-**   Prototype for a rewrite of the networking code     **
-**   Not ready yet                                      **
-*********************************************************/
+//! High-level Polkadot/Substrate-specific networking.
 
 pub mod basic_peering_strategy;
 pub mod kademlia;

@@ -15,12 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Substrate/Polkadot-specific protocols on top of libp2p.
-//!
-//! Libp2p provides a framework on top of which higher-level, domain-specific protocols can be
-//! used. This module contains the domain-specific protocols specific to Substrate and Polkadot.
-//!
-//! This module only provides the tools to encode/decode messages.
+//! Encoding and decoding of messages of the protocols used by Polkadot/Substrate.
 
 // TODO: expand docs
 
