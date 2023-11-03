@@ -21,9 +21,9 @@
 //! Implementation of the [`PlatformRef`] trait that leverages the operating system.
 //!
 //! This module contains the [`DefaultPlatform`] struct, which implements [`PlatformRef`].
-//! 
+//!
 //! # Example
-//! 
+//!
 //! ```rust
 //! use smoldot_light::{Client, platform::DefaultPlatform};
 //! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
