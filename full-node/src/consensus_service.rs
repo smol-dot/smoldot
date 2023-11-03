@@ -40,7 +40,7 @@ use smoldot::{
     identity::keystore,
     informant::HashDisplay,
     libp2p,
-    network::{self, protocol::BlockData},
+    network::{self, codec::BlockData},
     sync::all,
     trie,
     verify::body_only::{self, StorageChanges, TrieEntryVersion},
@@ -1538,24 +1538,22 @@ impl SyncBackground {
                     let request = self.network_service.clone().blocks_request(
                         peer_id,
                         self.network_chain_id,
-                        network::protocol::BlocksRequestConfig {
+                        network::codec::BlocksRequestConfig {
                             start: if let Some(first_block_hash) = first_block_hash {
-                                network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
+                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
                             } else {
-                                network::protocol::BlocksRequestConfigStart::Number(
-                                    first_block_height,
-                                )
+                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
                             },
                             desired_count: NonZeroU32::new(
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                             )
                             .unwrap(),
                             direction: if ascending {
-                                network::protocol::BlocksRequestDirection::Ascending
+                                network::codec::BlocksRequestDirection::Ascending
                             } else {
-                                network::protocol::BlocksRequestDirection::Descending
+                                network::codec::BlocksRequestDirection::Descending
                             },
-                            fields: network::protocol::BlocksRequestFields {
+                            fields: network::codec::BlocksRequestFields {
                                 header: request_headers,
                                 body: request_bodies,
                                 justifications: request_justification,

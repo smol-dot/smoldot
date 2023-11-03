@@ -24,7 +24,7 @@ use core::num::NonZeroUsize;
 use smoldot::{
     header,
     json_rpc::{methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -145,9 +145,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
                         peer_id: peer_id.to_string(),
                         roles: match role {
-                            protocol::Role::Authority => methods::SystemPeerRole::Authority,
-                            protocol::Role::Full => methods::SystemPeerRole::Full,
-                            protocol::Role::Light => methods::SystemPeerRole::Light,
+                            codec::Role::Authority => methods::SystemPeerRole::Authority,
+                            codec::Role::Full => methods::SystemPeerRole::Full,
+                            codec::Role::Light => methods::SystemPeerRole::Light,
                         },
                         best_hash: methods::HashHexString(best_hash),
                         best_number,

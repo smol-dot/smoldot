@@ -79,7 +79,7 @@ use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
-    network::protocol,
+    network::codec,
     trie::{self, proof_decode, Nibble, TrieEntryVersion},
 };
 
@@ -809,7 +809,7 @@ impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
             .clone()
             .call_proof_query(
                 self.block_number,
-                protocol::CallProofRequestConfig {
+                codec::CallProofRequestConfig {
                     block_hash: self.hash,
                     method: method.into(),
                     parameter_vectored: parameter_vectored.clone(),

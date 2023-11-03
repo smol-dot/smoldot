@@ -48,7 +48,7 @@ use smoldot::{
         multiaddr::{self, Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
     },
-    network::{basic_peering_strategy, protocol, service},
+    network::{basic_peering_strategy, codec, service},
 };
 use std::{
     io,
@@ -191,8 +191,8 @@ enum ToBackground {
     ForegroundBlocksRequest {
         target: PeerId,
         chain_id: ChainId,
-        config: protocol::BlocksRequestConfig,
-        result_tx: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+        config: codec::BlocksRequestConfig,
+        result_tx: oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
     },
     ForegroundGetNumConnections {
         result_tx: oneshot::Sender<usize>,
@@ -263,7 +263,7 @@ struct Inner {
     /// List of all block requests that have been started but not finished yet.
     blocks_requests: HashMap<
         service::SubstreamId,
-        oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+        oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -321,7 +321,7 @@ impl NetworkService {
                     best_hash: chain.best_block.1,
                     best_number: chain.best_block.0,
                     genesis_hash: chain.genesis_block_hash,
-                    role: protocol::Role::Full,
+                    role: codec::Role::Full,
                     grandpa_protocol_config: chain.grandpa_protocol_finalized_block_height.map(
                         // TODO: dummy values
                         |commit_finalized_height| service::GrandpaState {
@@ -669,8 +669,8 @@ impl NetworkService {
         self: Arc<Self>,
         target: PeerId, // TODO: by value?
         chain_id: ChainId,
-        config: protocol::BlocksRequestConfig,
-    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
+        config: codec::BlocksRequestConfig,
+    ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
         let chain_name = self.chain_names[&chain_id].clone();
 
         self.log_callback.log(
@@ -680,13 +680,13 @@ impl NetworkService {
                 target,
                 chain_name,
                 match &config.start {
-                    protocol::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
-                    protocol::BlocksRequestConfigStart::Number(n) => either::Right(n),
+                    codec::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
+                    codec::BlocksRequestConfigStart::Number(n) => either::Right(n),
                 },
                 config.desired_count,
                 match config.direction {
-                    protocol::BlocksRequestDirection::Ascending => "ascending",
-                    protocol::BlocksRequestDirection::Descending => "descending",
+                    codec::BlocksRequestDirection::Ascending => "ascending",
+                    codec::BlocksRequestDirection::Descending => "descending",
                 },
             ),
         );
@@ -715,7 +715,7 @@ impl NetworkService {
             &self.local_peer_id,
             &target,
             config.desired_count.get(),
-            if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
+            if let (1, codec::BlocksRequestConfigStart::Hash(block_hash)) =
                 (config.desired_count.get(), &config.start)
             {
                 Some(block_hash)
@@ -1263,7 +1263,7 @@ async fn background_task(mut inner: Inner) {
                             &inner.local_peer_id,
                             &peer_id,
                             config.desired_count.get(),
-                            if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
+                            if let (1, codec::BlocksRequestConfigStart::Hash(block_hash)) =
                                 (config.desired_count.get(), &config.start)
                             {
                                 Some(block_hash)
@@ -1741,8 +1741,8 @@ async fn background_task(mut inner: Inner) {
 async fn blocks_request_response(
     database: &database_thread::DatabaseThread,
     block_number_bytes: usize,
-    config: protocol::BlocksRequestConfig,
-) -> Result<Vec<protocol::BlockData>, full_sqlite::CorruptedError> {
+    config: codec::BlocksRequestConfig,
+) -> Result<Vec<codec::BlockData>, full_sqlite::CorruptedError> {
     database
         .with_database(move |database| {
             let num_blocks = cmp::min(
@@ -1759,8 +1759,8 @@ async fn blocks_request_response(
                 }
 
                 let hash = match next_block {
-                    protocol::BlocksRequestConfigStart::Hash(hash) => hash,
-                    protocol::BlocksRequestConfigStart::Number(number) => {
+                    codec::BlocksRequestConfigStart::Hash(hash) => hash,
+                    codec::BlocksRequestConfigStart::Number(number) => {
                         // TODO: naive block selection ; should choose the best chain instead
                         match database.block_hash_by_number(number)?.next() {
                             Some(h) => h,
@@ -1777,17 +1777,17 @@ async fn blocks_request_response(
                 next_block = {
                     let decoded = header::decode(&header, block_number_bytes).unwrap();
                     match config.direction {
-                        protocol::BlocksRequestDirection::Ascending => {
+                        codec::BlocksRequestDirection::Ascending => {
                             // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
-                            protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
+                            codec::BlocksRequestConfigStart::Number(decoded.number + 1)
                         }
-                        protocol::BlocksRequestDirection::Descending => {
-                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
+                        codec::BlocksRequestDirection::Descending => {
+                            codec::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
                         }
                     }
                 };
 
-                output.push(protocol::BlockData {
+                output.push(codec::BlockData {
                     hash,
                     header: if config.fields.header {
                         Some(header)

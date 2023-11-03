@@ -43,7 +43,7 @@ use smoldot::{
     executor::{self, runtime_host},
     header,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -939,7 +939,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     let future = sync_service.clone().block_query(
                         block_number,
                         hash.0,
-                        protocol::BlocksRequestFields {
+                        codec::BlocksRequestFields {
                             header: true,
                             body: true,
                             justifications: false,

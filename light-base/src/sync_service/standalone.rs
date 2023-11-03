@@ -41,7 +41,7 @@ use smoldot::{
     chain, header,
     informant::HashDisplay,
     libp2p,
-    network::{self, protocol},
+    network::{self, codec},
     sync::all,
 };
 
@@ -419,7 +419,7 @@ struct Task<TPlat: PlatformRef> {
     ///
     /// For each request, we store a [`future::AbortHandle`] that can be used to abort the
     /// request if desired.
-    sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, protocol::Role), ()>,
+    sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
 
     /// If `Some`, contains the runtime of the current finalized block.
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
@@ -456,7 +456,7 @@ struct Task<TPlat: PlatformRef> {
 }
 
 enum RequestOutcome {
-    Block(Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>),
+    Block(Result<Vec<codec::BlockData>, network_service::BlocksRequestError>),
     WarpSync(
         Result<
             network::service::EncodedGrandpaWarpSyncResponse,
@@ -507,22 +507,22 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let block_request = self.network_service.clone().blocks_request(
                     peer_id,
                     self.network_chain_id,
-                    network::protocol::BlocksRequestConfig {
+                    network::codec::BlocksRequestConfig {
                         start: if let Some(first_block_hash) = first_block_hash {
-                            network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
+                            network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
                         } else {
-                            network::protocol::BlocksRequestConfigStart::Number(first_block_height)
+                            network::codec::BlocksRequestConfigStart::Number(first_block_height)
                         },
                         desired_count: NonZeroU32::new(
                             u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                         )
                         .unwrap(),
                         direction: if ascending {
-                            network::protocol::BlocksRequestDirection::Ascending
+                            network::codec::BlocksRequestDirection::Ascending
                         } else {
-                            network::protocol::BlocksRequestDirection::Descending
+                            network::codec::BlocksRequestDirection::Descending
                         },
-                        fields: network::protocol::BlocksRequestFields {
+                        fields: network::codec::BlocksRequestFields {
                             header: request_headers,
                             body: request_bodies,
                             justifications: request_justification,
@@ -580,7 +580,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let storage_request = self.network_service.clone().storage_proof_request(
                     self.network_chain_id,
                     peer_id,
-                    network::protocol::StorageProofRequestConfig {
+                    network::codec::StorageProofRequestConfig {
                         block_hash,
                         keys: keys.clone().into_iter(),
                     },
@@ -625,7 +625,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     let rq = network_service.call_proof_request(
                         network_chain_id,
                         peer_id,
-                        network::protocol::CallProofRequestConfig {
+                        network::codec::CallProofRequestConfig {
                             block_hash,
                             method: function_name,
                             parameter_vectored: iter::once(parameter_vectored),
@@ -855,7 +855,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             let mut all_sources = self
                                 .sync
                                 .sources()
-                                .filter(|s| matches!(self.sync[*s].1, protocol::Role::Light))
+                                .filter(|s| matches!(self.sync[*s].1, codec::Role::Light))
                                 .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                             for knows in self
                                 .sync
@@ -871,7 +871,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             // stay borrowed accross an `await`, which isn't possible because it
                             // doesn't implement `Sync`.
                             let (source_peer_id, _source_role) = &self.sync[source_id].clone();
-                            debug_assert!(matches!(_source_role, protocol::Role::Light));
+                            debug_assert!(matches!(_source_role, codec::Role::Light));
 
                             if self
                                 .network_service

@@ -35,7 +35,7 @@ use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::PeerId,
-    network::protocol,
+    network::codec,
     sync::{all_forks::sources, para},
 };
 
@@ -140,7 +140,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     obsolete_finalized_parahead: Vec<u8>,
 
     /// State machine that tracks the list of parachain network sources and their known blocks.
-    sync_sources: sources::AllForksSources<(PeerId, protocol::Role)>,
+    sync_sources: sources::AllForksSources<(PeerId, codec::Role)>,
 
     /// Maps `PeerId`s to their indices within `sync_sources`.
     sync_sources_map: HashMap<PeerId, sources::SourceId, util::SipHasherBuild>,
