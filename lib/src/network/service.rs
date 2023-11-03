@@ -2031,12 +2031,10 @@ where
                         Protocol::Grandpa { chain_index } => {
                             let new_substream_id = self.inner.open_out_notifications(
                                 connection_id,
-                                codec::encode_protocol_name_string(
-                                    codec::ProtocolName::Grandpa {
-                                        genesis_hash: self.chains[chain_index].genesis_hash,
-                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                    },
-                                ),
+                                codec::encode_protocol_name_string(codec::ProtocolName::Grandpa {
+                                    genesis_hash: self.chains[chain_index].genesis_hash,
+                                    fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                }),
                                 Duration::from_secs(10), // TODO: arbitrary
                                 self.chains[chain_index].role.scale_encoding().to_vec(),
                                 1024 * 1024, // TODO: arbitrary
@@ -2426,12 +2424,14 @@ where
         config: codec::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestError> {
-        let request_data =
-            codec::build_block_request(self.chains[chain_id.0].block_number_bytes, &config)
-                .fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                });
+        let request_data = codec::build_block_request(
+            self.chains[chain_id.0].block_number_bytes,
+            &config,
+        )
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
 
         self.start_request(
             target,
@@ -2576,11 +2576,10 @@ where
         config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
-        let request_data =
-            codec::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
+        let request_data = codec::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
 
         // The request data can possibly by higher than the protocol limit, especially due to the
         // call data.
@@ -3888,8 +3887,7 @@ pub struct EncodedBlockAnnounceHandshake {
 impl EncodedBlockAnnounceHandshake {
     /// Returns the decoded version of the handshake.
     pub fn decode(&self) -> codec::BlockAnnouncesHandshakeRef {
-        codec::decode_block_announces_handshake(self.block_number_bytes, &self.handshake)
-            .unwrap()
+        codec::decode_block_announces_handshake(self.block_number_bytes, &self.handshake).unwrap()
     }
 }
 

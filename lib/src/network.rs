@@ -18,6 +18,6 @@
 //! High-level Polkadot/Substrate-specific networking.
 
 pub mod basic_peering_strategy;
-pub mod kademlia;
 pub mod codec;
+pub mod kademlia;
 pub mod service;

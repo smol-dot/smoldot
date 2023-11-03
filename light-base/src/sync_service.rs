@@ -805,10 +805,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn call_proof_query(
         self: Arc<Self>,
         block_number: u64,
-        config: codec::CallProofRequestConfig<
-            '_,
-            impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-        >,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
