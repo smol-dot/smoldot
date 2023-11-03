@@ -77,7 +77,7 @@
 // TODO: expand explanations once the API is finalized
 
 use crate::libp2p::collection;
-use crate::network::protocol;
+use crate::network::codec;
 use crate::util::{self, SipHasherBuild};
 
 use alloc::{borrow::ToOwned as _, collections::BTreeSet, string::String, vec::Vec};
@@ -101,7 +101,7 @@ pub use crate::libp2p::{
     peer_id::{self, PeerId},
 };
 
-pub use crate::network::protocol::{BlockAnnouncesHandshakeDecodeError, Role};
+pub use crate::network::codec::{BlockAnnouncesHandshakeDecodeError, Role};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
@@ -1233,7 +1233,7 @@ where
                             response
                                 .map_err(BlocksRequestError::Request)
                                 .and_then(|response| {
-                                    protocol::decode_block_response(&response)
+                                    codec::decode_block_response(&response)
                                         .map_err(BlocksRequestError::Decode)
                                 }),
                         ),
@@ -1242,8 +1242,8 @@ where
                             response
                                 .map_err(StorageProofRequestError::Request)
                                 .and_then(|payload| {
-                                    match protocol::decode_storage_or_call_proof_response(
-                                        protocol::StorageOrCallProof::StorageProof,
+                                    match codec::decode_storage_or_call_proof_response(
+                                        codec::StorageOrCallProof::StorageProof,
                                         &payload,
                                     ) {
                                         Err(err) => Err(StorageProofRequestError::Decode(err)),
@@ -1252,7 +1252,7 @@ where
                                         }
                                         Ok(Some(_)) => Ok(EncodedMerkleProof(
                                             payload,
-                                            protocol::StorageOrCallProof::StorageProof,
+                                            codec::StorageOrCallProof::StorageProof,
                                         )),
                                     }
                                 }),
@@ -1260,15 +1260,15 @@ where
                         Protocol::LightCall { .. } => {
                             RequestResult::CallProof(
                                 response.map_err(CallProofRequestError::Request).and_then(
-                                    |payload| match protocol::decode_storage_or_call_proof_response(
-                                        protocol::StorageOrCallProof::CallProof,
+                                    |payload| match codec::decode_storage_or_call_proof_response(
+                                        codec::StorageOrCallProof::CallProof,
                                         &payload,
                                     ) {
                                         Err(err) => Err(CallProofRequestError::Decode(err)),
                                         Ok(None) => Err(CallProofRequestError::RemoteCouldntAnswer),
                                         Ok(Some(_)) => Ok(EncodedMerkleProof(
                                             payload,
-                                            protocol::StorageOrCallProof::CallProof,
+                                            codec::StorageOrCallProof::CallProof,
                                         )),
                                     },
                                 ),
@@ -1278,7 +1278,7 @@ where
                             response
                                 .map_err(KademliaFindNodeError::RequestFailed)
                                 .and_then(|payload| {
-                                    match protocol::decode_find_node_response(&payload) {
+                                    match codec::decode_find_node_response(&payload) {
                                         Err(err) => Err(KademliaFindNodeError::DecodeError(err)),
                                         Ok(nodes) => Ok(nodes),
                                     }
@@ -1288,7 +1288,7 @@ where
                             response
                                 .map_err(GrandpaWarpSyncRequestError::Request)
                                 .and_then(|message| {
-                                    if let Err(err) = protocol::decode_grandpa_warp_sync_response(
+                                    if let Err(err) = codec::decode_grandpa_warp_sync_response(
                                         &message,
                                         self.chains[chain_index].block_number_bytes,
                                     ) {
@@ -1306,7 +1306,7 @@ where
                             response
                                 .map_err(StateRequestError::Request)
                                 .and_then(|payload| {
-                                    if let Err(err) = protocol::decode_state_response(&payload) {
+                                    if let Err(err) = codec::decode_state_response(&payload) {
                                         Err(StateRequestError::Decode(err))
                                     } else {
                                         Ok(EncodedStateResponse(payload))
@@ -1363,7 +1363,7 @@ where
                             }
                         }
                         Protocol::Sync { chain_index } => {
-                            match protocol::decode_block_request(
+                            match codec::decode_block_request(
                                 self.chains[chain_index].block_number_bytes,
                                 &request_payload,
                             ) {
@@ -1434,7 +1434,7 @@ where
                         Protocol::BlockAnnounces { chain_index } => {
                             let result = match &result {
                                 Ok(handshake) => {
-                                    match protocol::decode_block_announces_handshake(
+                                    match codec::decode_block_announces_handshake(
                                         self.chains[chain_index].block_number_bytes,
                                         handshake,
                                     ) {
@@ -1494,8 +1494,8 @@ where
                                     {
                                         let new_substream_id = self.inner.open_out_notifications(
                                             connection_id,
-                                            protocol::encode_protocol_name_string(
-                                                protocol::ProtocolName::Transactions {
+                                            codec::encode_protocol_name_string(
+                                                codec::ProtocolName::Transactions {
                                                     genesis_hash: self.chains[chain_index]
                                                         .genesis_hash,
                                                     fork_id: self.chains[chain_index]
@@ -1551,8 +1551,8 @@ where
                                     {
                                         let new_substream_id = self.inner.open_out_notifications(
                                             connection_id,
-                                            protocol::encode_protocol_name_string(
-                                                protocol::ProtocolName::Grandpa {
+                                            codec::encode_protocol_name_string(
+                                                codec::ProtocolName::Grandpa {
                                                     genesis_hash: self.chains[chain_index]
                                                         .genesis_hash,
                                                     fork_id: self.chains[chain_index]
@@ -1751,10 +1751,10 @@ where
                             {
                                 let new_substream_id = self.inner.open_out_notifications(
                                     connection_id,
-                                    protocol::encode_protocol_name_string(
+                                    codec::encode_protocol_name_string(
                                         match substream_info.protocol {
                                             Protocol::Transactions { .. } => {
-                                                protocol::ProtocolName::Transactions {
+                                                codec::ProtocolName::Transactions {
                                                     genesis_hash: self.chains[chain_index]
                                                         .genesis_hash,
                                                     fork_id: self.chains[chain_index]
@@ -1763,7 +1763,7 @@ where
                                                 }
                                             }
                                             Protocol::Grandpa { .. } => {
-                                                protocol::ProtocolName::Grandpa {
+                                                codec::ProtocolName::Grandpa {
                                                     genesis_hash: self.chains[chain_index]
                                                         .genesis_hash,
                                                     fork_id: self.chains[chain_index]
@@ -1824,8 +1824,8 @@ where
                                     .grandpa_protocol_config
                                     .as_ref()
                                     .unwrap();
-                                let packet = protocol::GrandpaNotificationRef::Neighbor(
-                                    protocol::NeighborPacket {
+                                let packet = codec::GrandpaNotificationRef::Neighbor(
+                                    codec::NeighborPacket {
                                         round_number: grandpa_state.round_number,
                                         set_id: grandpa_state.set_id,
                                         commit_finalized_height: grandpa_state
@@ -2003,8 +2003,8 @@ where
                         Protocol::Transactions { chain_index } => {
                             let new_substream_id = self.inner.open_out_notifications(
                                 connection_id,
-                                protocol::encode_protocol_name_string(
-                                    protocol::ProtocolName::Transactions {
+                                codec::encode_protocol_name_string(
+                                    codec::ProtocolName::Transactions {
                                         genesis_hash: self.chains[chain_index].genesis_hash,
                                         fork_id: self.chains[chain_index].fork_id.as_deref(),
                                     },
@@ -2031,8 +2031,8 @@ where
                         Protocol::Grandpa { chain_index } => {
                             let new_substream_id = self.inner.open_out_notifications(
                                 connection_id,
-                                protocol::encode_protocol_name_string(
-                                    protocol::ProtocolName::Grandpa {
+                                codec::encode_protocol_name_string(
+                                    codec::ProtocolName::Grandpa {
                                         genesis_hash: self.chains[chain_index].genesis_hash,
                                         fork_id: self.chains[chain_index].fork_id.as_deref(),
                                     },
@@ -2157,8 +2157,8 @@ where
                         ));
                         let handshake = match substream_info.protocol {
                             Protocol::BlockAnnounces { .. } => {
-                                protocol::encode_block_announces_handshake(
-                                    protocol::BlockAnnouncesHandshakeRef {
+                                codec::encode_block_announces_handshake(
+                                    codec::BlockAnnouncesHandshakeRef {
                                         best_hash: &self.chains[chain_index].best_hash,
                                         best_number: self.chains[chain_index].best_number,
                                         role: self.chains[chain_index].role,
@@ -2311,7 +2311,7 @@ where
                     // Decode the notification and return an event.
                     match substream_info.protocol {
                         Protocol::BlockAnnounces { .. } => {
-                            if let Err(err) = protocol::decode_block_announce(
+                            if let Err(err) = codec::decode_block_announce(
                                 &notification,
                                 self.chains[chain_index].block_number_bytes,
                             ) {
@@ -2334,7 +2334,7 @@ where
                             // TODO: not implemented
                         }
                         Protocol::Grandpa { .. } => {
-                            let decoded_notif = match protocol::decode_grandpa_notification(
+                            let decoded_notif = match codec::decode_grandpa_notification(
                                 &notification,
                                 self.chains[chain_index].block_number_bytes,
                             ) {
@@ -2348,7 +2348,7 @@ where
                             };
 
                             match decoded_notif {
-                                protocol::GrandpaNotificationRef::Commit(_) => {
+                                codec::GrandpaNotificationRef::Commit(_) => {
                                     return Some(Event::GrandpaCommitMessage {
                                         chain_id: ChainId(chain_index),
                                         peer_id: peer_id.clone(),
@@ -2359,7 +2359,7 @@ where
                                         },
                                     })
                                 }
-                                protocol::GrandpaNotificationRef::Neighbor(n) => {
+                                codec::GrandpaNotificationRef::Neighbor(n) => {
                                     return Some(Event::GrandpaNeighborPacket {
                                         chain_id: ChainId(chain_index),
                                         peer_id: peer_id.clone(),
@@ -2423,11 +2423,11 @@ where
         &mut self,
         target: &PeerId,
         chain_id: ChainId,
-        config: protocol::BlocksRequestConfig,
+        config: codec::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestError> {
         let request_data =
-            protocol::build_block_request(self.chains[chain_id.0].block_number_bytes, &config)
+            codec::build_block_request(self.chains[chain_id.0].block_number_bytes, &config)
                 .fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
@@ -2492,10 +2492,10 @@ where
         target: &PeerId,
         chain_id: ChainId,
         block_hash: &[u8; 32],
-        start_key: protocol::StateRequestStart,
+        start_key: codec::StateRequestStart,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestError> {
-        let request_data = protocol::build_state_request(protocol::StateRequest {
+        let request_data = codec::build_state_request(codec::StateRequest {
             block_hash,
             start_key,
         })
@@ -2528,11 +2528,11 @@ where
         &mut self,
         target: &PeerId,
         chain_id: ChainId,
-        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
+        config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
         let request_data =
-            protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
+            codec::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
@@ -2573,11 +2573,11 @@ where
         &mut self,
         target: &PeerId,
         chain_id: ChainId,
-        config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestMaybeTooLargeError> {
         let request_data =
-            protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
+            codec::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
@@ -2612,7 +2612,7 @@ where
         peer_id_to_find: &PeerId,
         timeout: Duration,
     ) -> Result<SubstreamId, StartRequestError> {
-        let request_data = protocol::build_find_node_request(peer_id_to_find.as_bytes());
+        let request_data = codec::build_find_node_request(peer_id_to_find.as_bytes());
 
         // The request data can possibly by higher than the protocol limit, especially due to the
         // call data.
@@ -2653,81 +2653,81 @@ where
 
         let protocol_name = {
             let protocol_name = match protocol {
-                Protocol::Identify => protocol::ProtocolName::Identify,
-                Protocol::Ping => protocol::ProtocolName::Ping,
+                Protocol::Identify => codec::ProtocolName::Identify,
+                Protocol::Ping => codec::ProtocolName::Ping,
                 Protocol::BlockAnnounces { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::BlockAnnounces {
+                    codec::ProtocolName::BlockAnnounces {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::Transactions { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Transactions {
+                    codec::ProtocolName::Transactions {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::Grandpa { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Grandpa {
+                    codec::ProtocolName::Grandpa {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::Sync { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Sync {
+                    codec::ProtocolName::Sync {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::LightUnknown { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Light {
+                    codec::ProtocolName::Light {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::LightStorage { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Light {
+                    codec::ProtocolName::Light {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::LightCall { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Light {
+                    codec::ProtocolName::Light {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::Kad { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::Kad {
+                    codec::ProtocolName::Kad {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::SyncWarp { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::SyncWarp {
+                    codec::ProtocolName::SyncWarp {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
                 Protocol::State { chain_index } => {
                     let chain_info = &self.chains[chain_index];
-                    protocol::ProtocolName::State {
+                    codec::ProtocolName::State {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
             };
 
-            protocol::encode_protocol_name_string(protocol_name)
+            codec::encode_protocol_name_string(protocol_name)
         };
 
         let substream_id = self.inner.start_request(
@@ -2773,13 +2773,13 @@ where
             let ed25519_public_key = &self.inner[substream_info.connection_id].ed25519_public_key;
 
             // TODO: all protocols
-            let supported_protocols = [protocol::ProtocolName::Ping].into_iter();
+            let supported_protocols = [codec::ProtocolName::Ping].into_iter();
 
             let supported_protocols_names = supported_protocols
-                .map(protocol::encode_protocol_name_string)
+                .map(codec::encode_protocol_name_string)
                 .collect::<Vec<_>>();
 
-            protocol::build_identify_response(protocol::IdentifyResponse {
+            codec::build_identify_response(codec::IdentifyResponse {
                 protocol_version: "/substrate/1.0", // TODO: same value as in Substrate, see also https://github.com/paritytech/substrate/issues/14331
                 agent_version,
                 ed25519_public_key: *ed25519_public_key,
@@ -2813,14 +2813,14 @@ where
     pub fn respond_blocks(
         &mut self,
         substream_id: SubstreamId,
-        response: Option<Vec<protocol::BlockData>>,
+        response: Option<Vec<codec::BlockData>>,
     ) {
         let substream_info = self.substreams.remove(&substream_id).unwrap();
         assert!(matches!(substream_info.protocol, Protocol::Sync { .. }));
 
         let response = if let Some(response) = response {
             Ok(
-                protocol::build_block_response(response).fold(Vec::new(), |mut a, b| {
+                codec::build_block_response(response).fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
                 }),
@@ -2910,7 +2910,7 @@ where
         }
 
         let protocol_name =
-            protocol::encode_protocol_name_string(protocol::ProtocolName::BlockAnnounces {
+            codec::encode_protocol_name_string(codec::ProtocolName::BlockAnnounces {
                 genesis_hash: chain_info.genesis_hash,
                 fork_id: chain_info.fork_id.as_deref(),
             });
@@ -2930,8 +2930,8 @@ where
             })
             .ok_or(())?;
 
-        let handshake = protocol::encode_block_announces_handshake(
-            protocol::BlockAnnouncesHandshakeRef {
+        let handshake = codec::encode_block_announces_handshake(
+            codec::BlockAnnouncesHandshakeRef {
                 best_hash: &chain_info.best_hash,
                 best_number: chain_info.best_number,
                 role: chain_info.role,
@@ -3153,7 +3153,7 @@ where
         grandpa_state: GrandpaState,
     ) {
         // Bytes of the neighbor packet to send out.
-        let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
+        let packet = codec::GrandpaNotificationRef::Neighbor(codec::NeighborPacket {
             round_number: grandpa_state.round_number,
             set_id: grandpa_state.set_id,
             commit_finalized_height: grandpa_state.commit_finalized_height,
@@ -3210,7 +3210,7 @@ where
         scale_encoded_header: &[u8],
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
-        let notification = protocol::encode_block_announce(protocol::BlockAnnounceRef {
+        let notification = codec::encode_block_announce(codec::BlockAnnounceRef {
             scale_encoded_header,
             is_best,
         })
@@ -3325,10 +3325,10 @@ where
     }
 
     fn recognize_protocol(&self, protocol_name: &str) -> Result<Protocol, ()> {
-        Ok(match protocol::decode_protocol_name(protocol_name)? {
-            protocol::ProtocolName::Identify => Protocol::Identify,
-            protocol::ProtocolName::Ping => Protocol::Ping,
-            protocol::ProtocolName::BlockAnnounces {
+        Ok(match codec::decode_protocol_name(protocol_name)? {
+            codec::ProtocolName::Identify => Protocol::Identify,
+            codec::ProtocolName::Ping => Protocol::Ping,
+            codec::ProtocolName::BlockAnnounces {
                 genesis_hash,
                 fork_id,
             } => Protocol::BlockAnnounces {
@@ -3337,7 +3337,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::Transactions {
+            codec::ProtocolName::Transactions {
                 genesis_hash,
                 fork_id,
             } => Protocol::Transactions {
@@ -3346,7 +3346,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::Grandpa {
+            codec::ProtocolName::Grandpa {
                 genesis_hash,
                 fork_id,
             } => Protocol::Grandpa {
@@ -3355,7 +3355,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::Sync {
+            codec::ProtocolName::Sync {
                 genesis_hash,
                 fork_id,
             } => Protocol::Sync {
@@ -3364,7 +3364,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::Light {
+            codec::ProtocolName::Light {
                 genesis_hash,
                 fork_id,
             } => Protocol::LightUnknown {
@@ -3373,7 +3373,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::Kad {
+            codec::ProtocolName::Kad {
                 genesis_hash,
                 fork_id,
             } => Protocol::Kad {
@@ -3382,7 +3382,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::SyncWarp {
+            codec::ProtocolName::SyncWarp {
                 genesis_hash,
                 fork_id,
             } => Protocol::SyncWarp {
@@ -3391,7 +3391,7 @@ where
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
             },
-            protocol::ProtocolName::State {
+            codec::ProtocolName::State {
                 genesis_hash,
                 fork_id,
             } => Protocol::State {
@@ -3616,7 +3616,7 @@ pub enum Event {
         /// Index of the chain concerned by the request.
         chain_id: ChainId,
         /// Information about the request.
-        config: protocol::BlocksRequestConfig,
+        config: codec::BlocksRequestConfig,
         /// Identifier of the request. Necessary to send back the answer.
         substream_id: SubstreamId,
     },
@@ -3649,15 +3649,15 @@ pub enum ProtocolError {
     BadBlockAnnouncesHandshake(BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
     #[display(fmt = "Error while decoding a received block announce: {_0}")]
-    BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
+    BadBlockAnnounce(codec::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
     #[display(fmt = "Error while decoding a received Grandpa notification: {_0}")]
-    BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
+    BadGrandpaNotification(codec::DecodeGrandpaNotificationError),
     /// Received an invalid identify request.
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
     #[display(fmt = "Error while decoding a received blocks request: {_0}")]
-    BadBlocksRequest(protocol::DecodeBlockRequestError),
+    BadBlocksRequest(codec::DecodeBlockRequestError),
 }
 
 /// Error potentially returned when starting a request.
@@ -3689,7 +3689,7 @@ impl From<StartRequestError> for StartRequestMaybeTooLargeError {
 /// See [`Event::RequestResult`̀].
 #[derive(Debug)]
 pub enum RequestResult {
-    Blocks(Result<Vec<protocol::BlockData>, BlocksRequestError>),
+    Blocks(Result<Vec<codec::BlockData>, BlocksRequestError>),
     GrandpaWarpSync(Result<EncodedGrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>),
     State(Result<EncodedStateResponse, StateRequestError>),
     StorageProof(Result<EncodedMerkleProof, StorageProofRequestError>),
@@ -3705,7 +3705,7 @@ pub enum BlocksRequestError {
     Request(RequestError),
     /// Error while decoding the response returned by the peer.
     #[display(fmt = "Response decoding error: {_0}")]
-    Decode(protocol::DecodeBlockResponseError),
+    Decode(codec::DecodeBlockResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_storage_proof_request`].
@@ -3714,7 +3714,7 @@ pub enum StorageProofRequestError {
     #[display(fmt = "{_0}")]
     Request(RequestError),
     #[display(fmt = "Response decoding error: {_0}")]
-    Decode(protocol::DecodeStorageCallProofResponseError),
+    Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
 }
@@ -3725,7 +3725,7 @@ pub enum CallProofRequestError {
     #[display(fmt = "{_0}")]
     Request(RequestError),
     #[display(fmt = "Response decoding error: {_0}")]
-    Decode(protocol::DecodeStorageCallProofResponseError),
+    Decode(codec::DecodeStorageCallProofResponseError),
     /// The remote is incapable of answering this specific request.
     RemoteCouldntAnswer,
 }
@@ -3748,7 +3748,7 @@ pub enum GrandpaWarpSyncRequestError {
     #[display(fmt = "{_0}")]
     Request(RequestError),
     #[display(fmt = "Response decoding error: {_0}")]
-    Decode(protocol::DecodeGrandpaWarpSyncResponseError),
+    Decode(codec::DecodeGrandpaWarpSyncResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_state_request`].
@@ -3757,7 +3757,7 @@ pub enum StateRequestError {
     #[display(fmt = "{_0}")]
     Request(RequestError),
     #[display(fmt = "Response decoding error: {_0}")]
-    Decode(protocol::DecodeStateResponseError),
+    Decode(codec::DecodeStateResponseError),
 }
 
 /// Error during [`ChainNetwork::start_kademlia_find_node_request`].
@@ -3768,7 +3768,7 @@ pub enum KademliaFindNodeError {
     RequestFailed(RequestError),
     /// Failed to decode the response.
     #[display(fmt = "Response decoding error: {_0}")]
-    DecodeError(protocol::DecodeFindNodeResponseError),
+    DecodeError(codec::DecodeFindNodeResponseError),
 }
 
 /// Error potentially returned when queueing a notification.
@@ -3789,8 +3789,8 @@ pub struct EncodedBlockAnnounce {
 
 impl EncodedBlockAnnounce {
     /// Returns the decoded version of the announcement.
-    pub fn decode(&self) -> protocol::BlockAnnounceRef {
-        protocol::decode_block_announce(&self.message, self.block_number_bytes).unwrap()
+    pub fn decode(&self) -> codec::BlockAnnounceRef {
+        codec::decode_block_announce(&self.message, self.block_number_bytes).unwrap()
     }
 }
 
@@ -3802,12 +3802,12 @@ impl fmt::Debug for EncodedBlockAnnounce {
 
 /// Undecoded but valid Merkle proof.
 #[derive(Clone)]
-pub struct EncodedMerkleProof(Vec<u8>, protocol::StorageOrCallProof);
+pub struct EncodedMerkleProof(Vec<u8>, codec::StorageOrCallProof);
 
 impl EncodedMerkleProof {
     /// Returns the SCALE-encoded Merkle proof.
     pub fn decode(&self) -> &[u8] {
-        protocol::decode_storage_or_call_proof_response(self.1, &self.0)
+        codec::decode_storage_or_call_proof_response(self.1, &self.0)
             .unwrap()
             .unwrap()
     }
@@ -3833,8 +3833,8 @@ impl EncodedGrandpaWarpSyncResponse {
     }
 
     /// Returns the decoded version of the warp sync message.
-    pub fn decode(&self) -> protocol::GrandpaWarpSyncResponse {
-        match protocol::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
+    pub fn decode(&self) -> codec::GrandpaWarpSyncResponse {
+        match codec::decode_grandpa_warp_sync_response(&self.message, self.block_number_bytes) {
             Ok(msg) => msg,
             _ => unreachable!(),
         }
@@ -3855,7 +3855,7 @@ pub struct EncodedStateResponse(Vec<u8>);
 impl EncodedStateResponse {
     /// Returns the Merkle proof of the state response.
     pub fn decode(&self) -> &[u8] {
-        match protocol::decode_state_response(&self.0) {
+        match codec::decode_state_response(&self.0) {
             Ok(r) => r,
             Err(_) => unreachable!(),
         }
@@ -3887,8 +3887,8 @@ pub struct EncodedBlockAnnounceHandshake {
 
 impl EncodedBlockAnnounceHandshake {
     /// Returns the decoded version of the handshake.
-    pub fn decode(&self) -> protocol::BlockAnnouncesHandshakeRef {
-        protocol::decode_block_announces_handshake(self.block_number_bytes, &self.handshake)
+    pub fn decode(&self) -> codec::BlockAnnouncesHandshakeRef {
+        codec::decode_block_announces_handshake(self.block_number_bytes, &self.handshake)
             .unwrap()
     }
 }
@@ -3939,9 +3939,9 @@ impl EncodedGrandpaCommitMessage {
     }
 
     /// Returns the decoded version of the commit message.
-    pub fn decode(&self) -> protocol::CommitMessageRef {
-        match protocol::decode_grandpa_notification(&self.message, self.block_number_bytes) {
-            Ok(protocol::GrandpaNotificationRef::Commit(msg)) => msg,
+    pub fn decode(&self) -> codec::CommitMessageRef {
+        match codec::decode_grandpa_notification(&self.message, self.block_number_bytes) {
+            Ok(codec::GrandpaNotificationRef::Commit(msg)) => msg,
             _ => unreachable!(),
         }
     }

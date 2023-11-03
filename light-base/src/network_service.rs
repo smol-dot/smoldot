@@ -61,7 +61,7 @@ use smoldot::{
         multiaddr::{self, Multiaddr},
         peer_id::{self, PeerId},
     },
-    network::{basic_peering_strategy, protocol, service},
+    network::{basic_peering_strategy, codec, service},
 };
 
 pub use service::{ChainId, EncodedMerkleProof, QueueNotificationError};
@@ -178,7 +178,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     best_hash: chain.best_block.1,
                     best_number: chain.best_block.0,
                     genesis_hash: chain.genesis_block_hash,
-                    role: protocol::Role::Light,
+                    role: codec::Role::Light,
                     allow_inbound_block_requests: false,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
@@ -300,9 +300,9 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self: Arc<Self>,
         target: PeerId,
         chain_id: ChainId,
-        config: protocol::BlocksRequestConfig,
+        config: codec::BlocksRequestConfig,
         timeout: Duration,
-    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
+    ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
@@ -451,7 +451,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self: Arc<Self>,
         chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
-        config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
+        config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
     ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let (tx, rx) = oneshot::channel();
@@ -460,7 +460,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .send(ToBackground::StartStorageProofRequest {
                 target: target.clone(),
                 chain_id,
-                config: protocol::StorageProofRequestConfig {
+                config: codec::StorageProofRequestConfig {
                     block_hash: config.block_hash,
                     keys: config
                         .keys
@@ -509,7 +509,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self: Arc<Self>,
         chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
-        config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
     ) -> Result<EncodedMerkleProof, CallProofRequestError> {
         let (tx, rx) = oneshot::channel();
@@ -518,7 +518,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .send(ToBackground::StartCallProofRequest {
                 target: target.clone(),
                 chain_id,
-                config: protocol::CallProofRequestConfig {
+                config: codec::CallProofRequestConfig {
                     block_hash: config.block_hash,
                     method: config.method.into_owned().into(),
                     parameter_vectored: config
@@ -693,7 +693,7 @@ pub enum Event {
     Connected {
         peer_id: PeerId,
         chain_id: ChainId,
-        role: protocol::Role,
+        role: codec::Role,
         best_block_number: u64,
         best_block_hash: [u8; 32],
     },
@@ -784,9 +784,9 @@ enum ToBackground {
     StartBlocksRequest {
         target: PeerId, // TODO: takes by value because of future longevity issue
         chain_id: ChainId,
-        config: protocol::BlocksRequestConfig,
+        config: codec::BlocksRequestConfig,
         timeout: Duration,
-        result: oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+        result: oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
     },
     // TODO: serialize the request before sending over channel
     StartWarpSyncRequest {
@@ -801,7 +801,7 @@ enum ToBackground {
     StartStorageProofRequest {
         chain_id: ChainId,
         target: PeerId,
-        config: protocol::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
+        config: codec::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
         result: oneshot::Sender<Result<service::EncodedMerkleProof, StorageProofRequestError>>,
     },
@@ -809,7 +809,7 @@ enum ToBackground {
     StartCallProofRequest {
         chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
-        config: protocol::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
+        config: codec::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
         result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
     },
@@ -892,7 +892,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     blocks_requests: HashMap<
         service::SubstreamId,
-        oneshot::Sender<Result<Vec<protocol::BlockData>, BlocksRequestError>>,
+        oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -1055,23 +1055,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 {
                     Ok(substream_id) => {
                         match &config.start {
-                            protocol::BlocksRequestConfigStart::Hash(hash) => {
+                            codec::BlocksRequestConfigStart::Hash(hash) => {
                                 log::debug!(
                                     target: "network",
                                     "Connections({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
                                     target, task.network[chain_id].log_name, HashDisplay(hash),
                                     config.desired_count.get(),
-                                    matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                                    matches!(config.direction, codec::BlocksRequestDirection::Descending),
                                     config.fields.header, config.fields.body, config.fields.justifications
                                 );
                             }
-                            protocol::BlocksRequestConfigStart::Number(number) => {
+                            codec::BlocksRequestConfigStart::Number(number) => {
                                 log::debug!(
                                     target: "network",
                                     "Connections({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
                                     target, task.network[chain_id].log_name, number,
                                     config.desired_count.get(),
-                                    matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                                    matches!(config.direction, codec::BlocksRequestDirection::Descending),
                                     config.fields.header, config.fields.body, config.fields.justifications
                                 );
                             }

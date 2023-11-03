@@ -27,7 +27,7 @@ use futures_channel::oneshot;
 use smoldot::{
     header,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -130,7 +130,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .block_query(
                     block_number,
                     hash,
-                    protocol::BlocksRequestFields {
+                    codec::BlocksRequestFields {
                         header: true,
                         body: true,
                         justifications: false,
@@ -145,7 +145,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .clone()
                 .block_query_unknown_number(
                     hash,
-                    protocol::BlocksRequestFields {
+                    codec::BlocksRequestFields {
                         header: true,
                         body: true,
                         justifications: false,
@@ -309,7 +309,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .block_query(
                             block_number,
                             hash,
-                            protocol::BlocksRequestFields {
+                            codec::BlocksRequestFields {
                                 header: true,
                                 body: false,
                                 justifications: false,
@@ -324,7 +324,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .clone()
                         .block_query_unknown_number(
                             hash,
-                            protocol::BlocksRequestFields {
+                            codec::BlocksRequestFields {
                                 header: true,
                                 body: false,
                                 justifications: false,

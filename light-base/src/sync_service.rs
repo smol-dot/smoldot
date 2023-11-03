@@ -38,7 +38,7 @@ use smoldot::{
     chain,
     executor::host,
     libp2p::PeerId,
-    network::{protocol, service},
+    network::{codec, service},
     trie::{self, prefix_proof, proof_decode, Nibble},
 };
 
@@ -281,7 +281,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     /// meaningful logic
     pub async fn syncing_peers(
         &self,
-    ) -> impl ExactSizeIterator<Item = (PeerId, protocol::Role, u64, [u8; 32])> {
+    ) -> impl ExactSizeIterator<Item = (PeerId, codec::Role, u64, [u8; 32])> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -327,16 +327,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         self: Arc<Self>,
         block_number: u64,
         hash: [u8; 32],
-        fields: protocol::BlocksRequestFields,
+        fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<protocol::BlockData, ()> {
+    ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
-        let request_config = protocol::BlocksRequestConfig {
-            start: protocol::BlocksRequestConfigStart::Hash(hash),
+        let request_config = codec::BlocksRequestConfig {
+            start: codec::BlocksRequestConfigStart::Hash(hash),
             desired_count: NonZeroU32::new(1).unwrap(),
-            direction: protocol::BlocksRequestDirection::Ascending,
+            direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
 
@@ -372,16 +372,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn block_query_unknown_number(
         self: Arc<Self>,
         hash: [u8; 32],
-        fields: protocol::BlocksRequestFields,
+        fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<protocol::BlockData, ()> {
+    ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
-        let request_config = protocol::BlocksRequestConfig {
-            start: protocol::BlocksRequestConfigStart::Hash(hash),
+        let request_config = codec::BlocksRequestConfig {
+            start: codec::BlocksRequestConfigStart::Hash(hash),
             desired_count: NonZeroU32::new(1).unwrap(),
-            direction: protocol::BlocksRequestDirection::Ascending,
+            direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
 
@@ -581,7 +581,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .storage_proof_request(
                     self.network_chain_id,
                     target,
-                    protocol::StorageProofRequestConfig {
+                    codec::StorageProofRequestConfig {
                         block_hash: *block_hash,
                         keys: keys_to_request.into_iter(),
                     },
@@ -805,7 +805,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn call_proof_query(
         self: Arc<Self>,
         block_number: u64,
-        config: protocol::CallProofRequestConfig<
+        config: codec::CallProofRequestConfig<
             '_,
             impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         >,
@@ -1178,7 +1178,7 @@ enum ToBackground {
     },
     /// See [`SyncService::syncing_peers`].
     SyncingPeers {
-        send_back: oneshot::Sender<Vec<(PeerId, protocol::Role, u64, [u8; 32])>>,
+        send_back: oneshot::Sender<Vec<(PeerId, codec::Role, u64, [u8; 32])>>,
     },
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {

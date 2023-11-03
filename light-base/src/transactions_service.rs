@@ -93,7 +93,7 @@ use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
-    network::protocol,
+    network::codec,
     transactions::{light_pool, validate},
 };
 
@@ -607,7 +607,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     let download_future = worker.sync_service.clone().block_query(
                         block_number,
                         block_hash,
-                        protocol::BlocksRequestFields {
+                        codec::BlocksRequestFields {
                             body: true,
                             header: true, // TODO: must be true in order to avoid an error being generated, fix this in sync service
                             justifications: false,

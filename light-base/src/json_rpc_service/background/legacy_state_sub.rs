@@ -30,7 +30,7 @@ use smoldot::{
     executor, header,
     informant::HashDisplay,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 use crate::{platform::PlatformRef, runtime_service, sync_service};
@@ -1121,7 +1121,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                 .clone()
                                 .block_query_unknown_number(
                                     block_hash,
-                                    protocol::BlocksRequestFields {
+                                    codec::BlocksRequestFields {
                                         header: true,
                                         body: false,
                                         justifications: false,

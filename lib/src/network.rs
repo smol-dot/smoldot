@@ -19,5 +19,5 @@
 
 pub mod basic_peering_strategy;
 pub mod kademlia;
-pub mod protocol;
+pub mod codec;
 pub mod service;
