@@ -35,6 +35,20 @@
 //! - An implementation of the [`platform::PlatformRef`] trait.
 //! - An opaque user data. If you do not use this, you can simply use `()`.
 //!
+//! When the `std` feature of this library is enabled, the [`platform::DefaultPlatform`] struct
+//! can be used as an implementation of [`platform::PlatformRef`].
+//!
+//! For example:
+//!
+//! ```rust
+//! use smoldot_light::{Client, platform::DefaultPlatform};
+//! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
+//! # let _: Client<_, ()> = client;  // Used in this example to infer the generic parameters of the Client
+//! ```
+//!
+//! If the `std` feature of this library is disabled, then you need to implement the
+//! [`platform::PlatformRef`] trait manually.
+//!
 //! ## Adding a chain
 //!
 //! After the client has been initialized, use [`Client::add_chain`] to ask the client to connect
