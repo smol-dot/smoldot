@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic when requesting a block with a specific hash from the peer-to-peer network and none of the peers has the block. ([#1303](https://github.com/smol-dot/smoldot/pull/1303))
+
 ## 2.0.7 - 2023-11-02
 
 ### Changed

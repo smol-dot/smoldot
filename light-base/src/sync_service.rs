@@ -358,8 +358,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 )
                 .await
             {
-                Ok(b) => b,
-                Err(_) => continue,
+                Ok(b) if !b.is_empty() => b,
+                Ok(_) | Err(_) => continue,
             };
 
             return Ok(result.remove(0));
@@ -404,8 +404,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 )
                 .await
             {
-                Ok(b) => b,
-                Err(_) => continue,
+                Ok(b) if !b.is_empty() => b,
+                Ok(_) | Err(_) => continue,
             };
 
             return Ok(result.remove(0));
