@@ -1441,9 +1441,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
-                    peer_id,
+                    "Gossip({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                     &task.network[chain_id].log_name,
+                    peer_id,
                     HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                     announce.decode().is_best
                 );
@@ -1466,8 +1466,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => Opened(best_height={}, best_hash={})",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                     best_number,
                     HashDisplay(&best_hash)
                 );
@@ -1494,7 +1494,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id, error,
                 );
                 log::debug!(
-                    target: "connections",
+                    target: "network",
                     "{}Slots ∌ {}", // TODO:
                     &task.network[chain_id].log_name,
                     peer_id
@@ -1524,12 +1524,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => GossipDisconnected",
-                    peer_id,
+                    "Gossip({}, {}) => Closed",
                     &task.network[chain_id].log_name,
+                    peer_id,
                 );
                 log::debug!(
-                    target: "connections",
+                    target: "network",
                     "{}Slots ∌ {}", // TODO:
                     &task.network[chain_id].log_name,
                     peer_id
@@ -1600,7 +1600,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap();
 
                 log::debug!(
-                    target: "connections", "On chain {}, discovered: {}",
+                    target: "network", "On chain {}, discovered: {}",
                     &task.network[chain_id].log_name,
                     nodes.iter().map(|(p, _)| p.to_string()).join(", ")
                 );
@@ -1612,7 +1612,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             Ok(a) => valid_addrs.push(a),
                             Err(err) => {
                                 log::debug!(
-                                    target: "connections",
+                                    target: "network",
                                     "Discovery => InvalidAddress({})",
                                     hex::encode(&err.addr)
                                 );
@@ -1649,7 +1649,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap();
 
                 log::debug!(
-                    target: "connections",
+                    target: "network",
                     "Discovery({}) => {:?}",
                     &task.network[chain_id].log_name,
                     error
@@ -1668,7 +1668,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ) => {
                         // TODO: remove this warning in a long time
                         log::warn!(
-                            target: "connections",
+                            target: "network",
                             "Problem during discovery on {}: protocol not available. \
                             This might indicate that the version of Substrate used by \
                             the chain doesn't include \
@@ -1678,7 +1678,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                     _ => {
                         log::warn!(
-                            target: "connections",
+                            target: "network",
                             "Problem during discovery on {}: {}",
                             &task.network[chain_id].log_name,
                             error
@@ -1706,10 +1706,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     < 4
                 {
                     log::debug!(
-                        target: "connections",
-                        "InSlots({}) ∋ {}",
+                        target: "network",
+                        "Gossip({}, {}) => GossipInDesired(outcome=accepted)",
                         &task.network[chain_id].log_name,
-                        peer_id
+                        peer_id,
                     );
                     task.network
                         .gossip_open(
@@ -1720,10 +1720,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .unwrap();
                 } else {
                     log::debug!(
-                        target: "connections",
-                        "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
-                        peer_id,
+                        target: "network",
+                        "Gossip({}, {}) => GossipInDesired(outcome=rejected)",
                         &task.network[chain_id].log_name,
+                        peer_id,
                     );
                     task.network
                         .gossip_close(
@@ -1763,8 +1763,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                     state.round_number,
                     state.set_id,
                     state.commit_finalized_height,
@@ -1785,8 +1785,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => GrandpaCommitMessage(target_block_hash={})",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                     HashDisplay(message.decode().message.target_hash),
                 );
 
@@ -1812,7 +1812,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.peering_strategy.assign_slot(&chain_id, &peer_id);
 
                 log::debug!(
-                    target: "connections",
+                    target: "network",
                     "OutSlots({}) ∋ {}",
                     &task.network[chain_id].log_name,
                     peer_id
@@ -1882,7 +1882,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 log::debug!(
-                    target: "connections",
+                    target: "network",
                     "Connections({}) <= StartConnecting(remote_addr={}, local_peer_id={})",
                     peer_id,
                     multiaddr,
@@ -2002,8 +2002,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) <= Open",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                 );
             }
             WhatHappened::MessageToConnection {
