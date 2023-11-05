@@ -250,6 +250,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 ),
                 network,
                 platform: config.platform.clone(),
+                event_pending_send: None,
                 event_senders: either::Left(event_senders),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
@@ -878,6 +879,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
 
+    /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
+    event_pending_send: Option<Event>,
+
     /// Sending events through the public API.
     ///
     /// Contains either senders, or a `Future` that is currently sending an event and will yield
@@ -948,9 +952,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         let what_happened = {
             let message_received =
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
-            let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                if let Some(event) = can_generate_event
+                if let Some(event) = task
+                    .event_pending_send
+                    .is_none()
                     .then(|| task.network.next_event())
                     .flatten()
                 {
@@ -1023,6 +1028,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
                     WhatHappened::EventSendersReady
+                } else if task.event_pending_send.is_some() {
+                    WhatHappened::EventSendersReady
                 } else {
                     future::pending().await
                 }
@@ -1034,10 +1041,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .await
         };
 
-        let event_to_dispatch: Event = match what_happened {
+        match what_happened {
             WhatHappened::EventSendersReady => {
-                // Nothing to do. Just loop again, as we can now generate events.
-                continue;
+                // Dispatch the pending event, if any to the various senders.
+
+                // We made sure that the senders were ready before generating an event.
+                let either::Left(event_senders) = &mut task.event_senders else {
+                    unreachable!()
+                };
+
+                if let Some(event_to_dispatch) = task.event_pending_send.take() {
+                    let mut event_senders = mem::take(event_senders);
+                    task.event_senders = either::Right(Box::pin(async move {
+                        // This little `if` avoids having to do `event.clone()` if we don't have to.
+                        if event_senders.len() == 1 {
+                            let _ = event_senders[0].send(event_to_dispatch).await;
+                        } else {
+                            for sender in event_senders.iter_mut() {
+                                // For simplicity we don't get rid of closed senders because senders
+                                // aren't supposed to close, and that leaving closed senders in the
+                                // list doesn't have any consequence other than one extra iteration
+                                // every time.
+                                let _ = sender.send(event_to_dispatch.clone()).await;
+                            }
+                        }
+
+                        event_senders
+                    }));
+                }
             }
             WhatHappened::Message(ToBackground::ConnectionMessage {
                 connection_id,
@@ -1045,7 +1076,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 task.network
                     .inject_connection_message(connection_id, message);
-                continue;
             }
             WhatHappened::Message(ToBackground::StartBlocksRequest {
                 target,
@@ -1088,8 +1118,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(BlocksRequestError::NoConnection));
                     }
                 }
-
-                continue;
             }
             WhatHappened::Message(ToBackground::StartWarpSyncRequest {
                 target,
@@ -1114,8 +1142,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(WarpSyncRequestError::NoConnection));
                     }
                 }
-
-                continue;
             }
             WhatHappened::Message(ToBackground::StartStorageProofRequest {
                 chain_id,
@@ -1148,8 +1174,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(StorageProofRequestError::RequestTooLarge));
                     }
                 };
-
-                continue;
             }
             WhatHappened::Message(ToBackground::StartCallProofRequest {
                 chain_id,
@@ -1183,8 +1207,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(CallProofRequestError::RequestTooLarge));
                     }
                 };
-
-                continue;
             }
             WhatHappened::Message(ToBackground::SetLocalBestBlock {
                 chain_id,
@@ -1193,7 +1215,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 task.network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
-                continue;
             }
             WhatHappened::Message(ToBackground::SetLocalGrandpaState {
                 chain_id,
@@ -1211,7 +1232,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 task.network
                     .gossip_broadcast_grandpa_state_and_update(chain_id, grandpa_state);
-                continue;
             }
             WhatHappened::Message(ToBackground::AnnounceTransaction {
                 chain_id,
@@ -1252,7 +1272,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 let _ = result.send(peers_to_send);
-                continue;
             }
             WhatHappened::Message(ToBackground::SendBlockAnnounce {
                 target,
@@ -1268,7 +1287,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &scale_encoded_header,
                     is_best,
                 ));
-                continue;
             }
             WhatHappened::Message(ToBackground::Discover {
                 chain_id,
@@ -1291,8 +1309,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
                     }
                 }
-
-                continue;
             }
             WhatHappened::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
                 // TODO: consider returning Vec<u8>s for the addresses?
@@ -1309,7 +1325,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         })
                         .collect::<Vec<_>>(),
                 );
-                continue;
             }
             WhatHappened::Message(ToBackground::PeersList { chain_id, result }) => {
                 let _ = result.send(
@@ -1321,7 +1336,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .cloned()
                         .collect(),
                 );
-                continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
@@ -1363,8 +1377,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         // TODO: log message
                     }
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::HandshakeFinished {
                 peer_id,
@@ -1388,7 +1400,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 } else {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakeFinished", peer_id, remote_addr);
                 }
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::PreHandshakeDisconnected {
                 id,
@@ -1406,8 +1417,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let address = Multiaddr::try_from(address).unwrap();
                     log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::Disconnected {
                 id,
@@ -1424,8 +1433,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 let address = Multiaddr::try_from(address).unwrap();
                 log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
@@ -1440,11 +1447,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                     announce.decode().is_best
                 );
-                Event::BlockAnnounce {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::BlockAnnounce {
                     chain_id,
                     peer_id,
                     announce,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
@@ -1462,13 +1471,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     best_number,
                     HashDisplay(&best_hash)
                 );
-                Event::Connected {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::Connected {
                     peer_id,
                     chain_id,
                     role,
                     best_block_number: best_number,
                     best_block_hash: best_hash,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::GossipOpenFailed {
                 peer_id,
@@ -1505,7 +1516,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         task.platform.now() + Duration::from_secs(15),
                     );
                 }
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::GossipDisconnected {
                 peer_id,
@@ -1536,7 +1546,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
-                Event::Disconnected { peer_id, chain_id }
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::Disconnected { peer_id, chain_id });
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1547,7 +1559,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(BlocksRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1558,7 +1569,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(WarpSyncRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1569,7 +1579,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(StorageProofRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1580,7 +1589,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(CallProofRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1630,8 +1638,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         ));
                     }
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1679,8 +1685,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         );
                     }
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult { .. }) => {
                 // We never start any other kind of requests.
@@ -1729,8 +1733,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         )
                         .unwrap();
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
@@ -1747,7 +1749,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 task.network
                     .respond_identify(substream_id, &task.identify_agent_version);
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
             WhatHappened::NetworkEvent(service::Event::RequestInCancel { .. }) => {
@@ -1768,11 +1769,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     state.set_id,
                     state.commit_finalized_height,
                 );
-                Event::GrandpaNeighborPacket {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::GrandpaNeighborPacket {
                     chain_id,
                     peer_id,
                     finalized_block_height: state.commit_finalized_height,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::GrandpaCommitMessage {
                 chain_id,
@@ -1786,11 +1789,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &task.network[chain_id].log_name,
                     HashDisplay(message.decode().message.target_hash),
                 );
-                Event::GrandpaCommitMessage {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::GrandpaCommitMessage {
                     chain_id,
                     peer_id,
                     message,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
@@ -1802,7 +1807,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // TODO: disconnect peer
-                continue;
             }
             WhatHappened::CanAssignSlot(peer_id, chain_id) => {
                 task.peering_strategy.assign_slot(&chain_id, &peer_id);
@@ -1819,8 +1823,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
-
-                continue;
             }
             WhatHappened::CanStartConnect(peer_id) => {
                 // TODO: restore rate limiting
@@ -1987,8 +1989,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
-
-                continue;
             }
             WhatHappened::CanOpenGossip(peer_id, chain_id) => {
                 task.network
@@ -2005,8 +2005,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     &task.network[chain_id].log_name,
                 );
-
-                continue;
             }
             WhatHappened::MessageToConnection {
                 connection_id,
@@ -2025,33 +2023,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(message)
                     .await;
                 // debug_assert!(_send_success.is_ok()); // TODO: panics right now /!\
-                continue;
             }
-        };
-
-        // Dispatch the event to the various senders.
-
-        // We made sure that the senders were ready before generating an event.
-        let either::Left(event_senders) = &mut task.event_senders else {
-            unreachable!()
-        };
-
-        let mut event_senders = mem::take(event_senders);
-        task.event_senders = either::Right(Box::pin(async move {
-            // This little `if` avoids having to do `event.clone()` if we don't have to.
-            if event_senders.len() == 1 {
-                let _ = event_senders[0].send(event_to_dispatch).await;
-            } else {
-                for sender in event_senders.iter_mut() {
-                    // For simplicity we don't get rid of closed senders because senders
-                    // aren't supposed to close, and that leaving closed senders in the
-                    // list doesn't have any consequence other than one extra iteration
-                    // every time.
-                    let _ = sender.send(event_to_dispatch.clone()).await;
-                }
-            }
-
-            event_senders
-        }));
+        }
     }
 }
