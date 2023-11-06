@@ -1619,13 +1619,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap();
 
-                log::debug!(
-                    target: "network", "On chain {}, discovered: {}",
-                    &task.network[chain_id].log_name,
-                    nodes.iter().map(|(p, _)| p.to_string()).join(", ")
-                );
+                for (peer_id, mut addrs) in nodes {
+                    // Make sure to not insert too many address for a single peer.
+                    // While the .
+                    if addrs.len() >= 10 {
+                        addrs.truncate(10);
+                    }
 
-                for (peer_id, addrs) in nodes {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
                         match Multiaddr::try_from(addr) {
@@ -1633,8 +1633,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             Err(err) => {
                                 log::debug!(
                                     target: "network",
-                                    "Discovery({}) => InvalidAddress({})",
+                                    "Discovery({}) => InvalidAddress(peer_id={}, addr={})",
                                     &task.network[chain_id].log_name,
+                                    peer_id,
                                     hex::encode(&err.addr)
                                 );
                                 continue;
@@ -1645,8 +1646,29 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     if !valid_addrs.is_empty() {
                         // Note that we must call this function before `insert_address`,
                         // as documented in `basic_peering_strategy`.
-                        task.peering_strategy
-                            .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+                        let insert_outcome =
+                            task.peering_strategy
+                                .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+
+                        if let basic_peering_strategy::InsertChainPeerResult::Inserted {
+                            peer_removed,
+                        } = insert_outcome
+                        {
+                            if let Some(peer_removed) = peer_removed {
+                                log::debug!(
+                                    target: "network", "Discovery({}) => PeerPurged(peer_id={})",
+                                    &task.network[chain_id].log_name,
+                                    peer_removed,
+                                );
+                            }
+
+                            log::debug!(
+                                target: "network", "Discovery({}) => NewPeer(peer_id={}, addr={})",
+                                &task.network[chain_id].log_name,
+                                peer_id,
+                                valid_addrs.iter().map(|a| a.to_string()).join(", addr=")
+                            );
+                        }
                     }
 
                     for addr in valid_addrs {
@@ -1671,7 +1693,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 log::debug!(
                     target: "network",
-                    "Discovery({}) => {:?}",
+                    "Discovery({}) => FindNodeError(error={:?})",
                     &task.network[chain_id].log_name,
                     error
                 );
