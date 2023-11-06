@@ -1507,11 +1507,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &task.network[chain_id].log_name,
                     peer_id, error,
                 );
+                let ban_duration = Duration::from_secs(15);
+                // TODO: adjust log message if there was no slot assigned?
                 log::debug!(
                     target: "network",
-                    "{}Slots ∌ {}", // TODO:
+                    "Slots({}) ∌ {} (ban_duration={:?})",
                     &task.network[chain_id].log_name,
-                    peer_id
+                    peer_id,
+                    ban_duration
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -1527,7 +1530,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.peering_strategy.unassign_slot_and_ban(
                         &chain_id,
                         &peer_id,
-                        task.platform.now() + Duration::from_secs(15),
+                        task.platform.now() + ban_duration,
                     );
                 }
             }
@@ -1542,18 +1545,21 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &task.network[chain_id].log_name,
                     peer_id,
                 );
+                let ban_duration = Duration::from_secs(10);
+                // TODO: adjust log message if there was no slot assigned?
                 log::debug!(
                     target: "network",
-                    "{}Slots ∌ {}", // TODO:
+                    "Slots({}) ∌ {} (ban_duration={:?})",
                     &task.network[chain_id].log_name,
-                    peer_id
+                    peer_id,
+                    ban_duration
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
                 task.peering_strategy.unassign_slot_and_ban(
                     &chain_id,
                     &peer_id,
-                    task.platform.now() + Duration::from_secs(10),
+                    task.platform.now() + ban_duration,
                 );
                 task.network.gossip_remove_desired(
                     chain_id,
@@ -1828,7 +1834,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 log::debug!(
                     target: "network",
-                    "OutSlots({}) ∋ {}",
+                    "Slots({}) ∋ {}",
                     &task.network[chain_id].log_name,
                     peer_id
                 );
