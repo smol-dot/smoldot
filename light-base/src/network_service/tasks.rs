@@ -30,7 +30,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     address_string: String,
     platform: TPlat,
     connection_id: service::ConnectionId,
-    mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
+    connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
     connection_to_coordinator: async_channel::Sender<ToBackground>,
 ) {
@@ -43,41 +43,49 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     // at a time. `None` if no message is being sent.
     let mut message_sending = pin::pin!(None);
 
+    // Wrap `connection_task` within an `Option`. It will become `None` if the connection task
+    // wants to self-destruct.
+    let mut connection_task = Some(connection_task);
+
     loop {
         // Because only one message should be sent to the coordinator at a time, and that
         // processing the socket might generate a message, we only process the socket if no
         // message is currently being sent.
-        if message_sending.is_none() {
-            if let Ok(mut socket_read_write) = platform.read_write_access(socket.as_mut()) {
-                let read_bytes_before = socket_read_write.read_bytes;
-                let written_bytes_before = socket_read_write.write_bytes_queued;
-                let write_closed = socket_read_write.write_bytes_queueable.is_none();
+        if let (false, Some(mut task)) = (message_sending.is_some(), connection_task.take()) {
+            match platform.read_write_access(socket.as_mut()) {
+                Ok(mut socket_read_write) => {
+                    // The code in this block is a bit cumbersome due to the logging.
+                    let read_bytes_before = socket_read_write.read_bytes;
+                    let written_bytes_before = socket_read_write.write_bytes_queued;
+                    let write_closed = socket_read_write.write_bytes_queueable.is_none();
 
-                connection_task.read_write(&mut *socket_read_write);
+                    task.read_write(&mut *socket_read_write);
 
-                if socket_read_write.read_bytes != read_bytes_before
-                    || socket_read_write.write_bytes_queued != written_bytes_before
-                    || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
-                {
-                    log::trace!(target: "connections",
-                        "Connection({address_string}) <=> read={}; written={}; wake_up_after={:?}; write_close={:?}",
-                        socket_read_write.read_bytes - read_bytes_before,
-                        socket_read_write.write_bytes_queued - written_bytes_before,
-                        socket_read_write.wake_up_after.as_ref().map(|w| {
-                            if *w > socket_read_write.now {
-                                w.clone() - socket_read_write.now.clone()
-                            } else {
-                                Duration::new(0, 0)
-                            }
-                        }),
-                        socket_read_write.write_bytes_queueable.is_none(),
-                    );
+                    if socket_read_write.read_bytes != read_bytes_before
+                        || socket_read_write.write_bytes_queued != written_bytes_before
+                        || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
+                    {
+                        log::trace!(target: "connections",
+                            "Connection({address_string}) <=> read={}; written={}; wake_up_after={:?}; write_close={:?}",
+                            socket_read_write.read_bytes - read_bytes_before,
+                            socket_read_write.write_bytes_queued - written_bytes_before,
+                            socket_read_write.wake_up_after.as_ref().map(|w| {
+                                if *w > socket_read_write.now {
+                                    w.clone() - socket_read_write.now.clone()
+                                } else {
+                                    Duration::new(0, 0)
+                                }
+                            }),
+                            socket_read_write.write_bytes_queueable.is_none(),
+                        );
+                    }
                 }
-            } else {
-                // Error on the socket.
-                if !connection_task.is_reset_called() {
-                    log::trace!(target: "connections", "Connection({address_string}) => Reset");
-                    connection_task.reset();
+                Err(err) => {
+                    // Error on the socket.
+                    if !task.is_reset_called() {
+                        log::trace!(target: "connections", "Connection({address_string}) => Reset(reason={err:?})");
+                        task.reset();
+                    }
                 }
             }
 
@@ -87,20 +95,17 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // more work to do. If `None` is returned, then the entire task is gone and the
             // connection must be abruptly closed, which is what happens when we return from
             // this function.
-            let (task_update, message) = connection_task.pull_message_to_coordinator();
-            if let Some(task_update) = task_update {
-                connection_task = task_update;
-                debug_assert!(message_sending.is_none());
-                if let Some(message) = message {
-                    message_sending.set(Some(connection_to_coordinator.send(
-                        super::ToBackground::ConnectionMessage {
-                            connection_id,
-                            message,
-                        },
-                    )));
-                }
-            } else {
-                return;
+            let (task_update, message) = task.pull_message_to_coordinator();
+            connection_task = task_update;
+
+            debug_assert!(message_sending.is_none());
+            if let Some(message) = message {
+                message_sending.set(Some(connection_to_coordinator.send(
+                    super::ToBackground::ConnectionMessage {
+                        connection_id,
+                        message,
+                    },
+                )));
             }
         }
 
@@ -114,6 +119,12 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         }
 
         let what_happened: WhatHappened = {
+            // If the connection task has self-destructed and that no message is being sent, stop
+            // the task altogether as nothing will happen.
+            if connection_task.is_none() && message_sending.is_none() {
+                return;
+            }
+
             let coordinator_message = async {
                 match coordinator_to_connection.next().await {
                     Some(msg) => WhatHappened::CoordinatorMessage(msg),
@@ -160,6 +171,9 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
         match what_happened {
             WhatHappened::CoordinatorMessage(message) => {
+                // The coordinator normally guarantees that no message is sent after the task
+                // is destroyed.
+                let connection_task = connection_task.as_mut().unwrap_or_else(|| unreachable!());
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
             WhatHappened::CoordinatorDead => return,
@@ -196,8 +210,9 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
         pin::Pin<Box<dyn future::Future<Output = (pin::Pin<Box<TPlat::Stream>>, usize)> + Send>>,
     >::new();
     // Identifier to assign to the next substream.
-    let mut next_substream_id = 0; // TODO: weird API
-                                   // We need to pin the receiver, as the type doesn't implement `Unpin`.
+    // TODO: weird API
+    let mut next_substream_id = 0;
+    // We need to pin the receiver, as the type doesn't implement `Unpin`.
     let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
 
     loop {
@@ -291,43 +306,43 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             WhatHappened::SocketEvent(mut socket, substream_id) => {
                 debug_assert!(message_sending.is_none());
 
-                let substream_fate = if let Ok(mut socket_read_write) =
-                    platform.read_write_access(socket.as_mut())
-                {
-                    let read_bytes_before = socket_read_write.read_bytes;
-                    let written_bytes_before = socket_read_write.write_bytes_queued;
-                    let write_closed = socket_read_write.write_bytes_queueable.is_none();
+                let substream_fate = match platform.read_write_access(socket.as_mut()) {
+                    Ok(mut socket_read_write) => {
+                        // The code in this block is a bit cumbersome due to the logging.
+                        let read_bytes_before = socket_read_write.read_bytes;
+                        let written_bytes_before = socket_read_write.write_bytes_queued;
+                        let write_closed = socket_read_write.write_bytes_queueable.is_none();
 
-                    let substream_fate = connection_task
-                        .substream_read_write(&substream_id, &mut *socket_read_write);
+                        let substream_fate = connection_task
+                            .substream_read_write(&substream_id, &mut *socket_read_write);
 
-                    if socket_read_write.read_bytes != read_bytes_before
-                        || socket_read_write.write_bytes_queued != written_bytes_before
-                        || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
-                    {
-                        log::trace!(target: "connections",
-                            "Connection({address_string}) <=> substream_id={substream_id}; read={}; written={}; wake_up_after={:?}; write_close={:?}; fate={substream_fate:?}",
-                            socket_read_write.read_bytes - read_bytes_before,
-                            socket_read_write.write_bytes_queued - written_bytes_before,
-                            socket_read_write.wake_up_after.as_ref().map(|w| {
-                                if *w > socket_read_write.now {
-                                    w.clone() - socket_read_write.now.clone()
-                                } else {
-                                    Duration::new(0, 0)
-                                }
-                            }),
-                            socket_read_write.write_bytes_queueable.is_none(),
-                        );
+                        if socket_read_write.read_bytes != read_bytes_before
+                            || socket_read_write.write_bytes_queued != written_bytes_before
+                            || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
+                        {
+                            log::trace!(target: "connections",
+                                "Connection({address_string}) <=> substream_id={substream_id}; read={}; written={}; wake_up_after={:?}; write_close={:?}; fate={substream_fate:?}",
+                                socket_read_write.read_bytes - read_bytes_before,
+                                socket_read_write.write_bytes_queued - written_bytes_before,
+                                socket_read_write.wake_up_after.as_ref().map(|w| {
+                                    if *w > socket_read_write.now {
+                                        w.clone() - socket_read_write.now.clone()
+                                    } else {
+                                        Duration::new(0, 0)
+                                    }
+                                }),
+                                socket_read_write.write_bytes_queueable.is_none(),
+                            );
+                        }
+
+                        substream_fate
                     }
-
-                    substream_fate
-                } else {
-                    // Error on the socket.
-                    if !connection_task.is_reset_called() {
-                        log::trace!(target: "connections", "Connection({address_string}) => SubstreamReset(substream_id={substream_id})");
-                        connection_task.reset();
+                    Err(err) => {
+                        // Error on the substream.
+                        log::trace!(target: "connections", "Connection({address_string}) => SubstreamReset(substream_id={substream_id}, error={err:?})");
+                        connection_task.reset_substream(&substream_id);
+                        SubstreamFate::Reset
                     }
-                    SubstreamFate::Reset
                 };
 
                 // Try pull message to send to the coordinator.

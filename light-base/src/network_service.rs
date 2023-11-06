@@ -92,6 +92,10 @@ pub struct ConfigChain {
     /// Name of the chain, for logging purposes.
     pub log_name: String,
 
+    /// Number of "out slots" of this chain. We establish simultaneously gossip substreams up to
+    /// this number of peers.
+    pub num_out_slots: usize,
+
     /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
     /// the chains match.
     ///
@@ -182,6 +186,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     allow_inbound_block_requests: false,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
+                        num_out_slots: chain.num_out_slots,
                     },
                 })
                 .unwrap();
@@ -208,6 +213,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     loop {
                         platform.sleep(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+
+                        log::trace!(target: "network", "Discovery <= Tick");
 
                         if messages_tx
                             .send(ToBackground::StartDiscovery)
@@ -245,6 +252,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 ),
                 network,
                 platform: config.platform.clone(),
+                event_pending_send: None,
                 event_senders: either::Left(event_senders),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
@@ -873,6 +881,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
 
+    /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
+    event_pending_send: Option<Event>,
+
     /// Sending events through the public API.
     ///
     /// Contains either senders, or a `Future` that is currently sending an event and will yield
@@ -884,6 +895,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
+    // TODO: could be user_data in ChainNetwork?
     active_connections: HashMap<
         service::ConnectionId,
         async_channel::Sender<service::CoordinatorToConnection>,
@@ -919,13 +931,13 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
 struct Chain {
     log_name: String,
+
+    /// See [`ConfigChain::num_out_slots`].
+    num_out_slots: usize,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
-        // TODO: this is hacky; instead, should be cleaned up as a response to an event from the service; no such event exists yet
-        task.active_connections.retain(|_, tx| !tx.is_closed());
-
         enum WhatHappened {
             Message(ToBackground),
             NetworkEvent(service::Event),
@@ -942,9 +954,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         let what_happened = {
             let message_received =
                 async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
-            let can_generate_event = matches!(task.event_senders, either::Left(_));
             let service_event = async {
-                if let Some(event) = can_generate_event
+                if let Some(event) = task
+                    .event_pending_send
+                    .is_none()
                     .then(|| task.network.next_event())
                     .flatten()
                 {
@@ -975,11 +988,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let mut earlier_unban = None;
 
                         for chain_id in task.network.chains().collect::<Vec<_>>() {
-                            // TODO: 4 is an arbitrary constant, make configurable
                             if task.network.gossip_desired_num(
                                 chain_id,
                                 service::GossipKind::ConsensusTransactions,
-                            ) >= 4
+                            ) >= task.network[chain_id].num_out_slots
                             {
                                 continue;
                             }
@@ -1018,6 +1030,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
                     WhatHappened::EventSendersReady
+                } else if task.event_pending_send.is_some() {
+                    WhatHappened::EventSendersReady
                 } else {
                     future::pending().await
                 }
@@ -1029,10 +1043,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .await
         };
 
-        let event_to_dispatch: Event = match what_happened {
+        match what_happened {
             WhatHappened::EventSendersReady => {
-                // Nothing to do. Just loop again, as we can now generate events.
-                continue;
+                // Dispatch the pending event, if any to the various senders.
+
+                // We made sure that the senders were ready before generating an event.
+                let either::Left(event_senders) = &mut task.event_senders else {
+                    unreachable!()
+                };
+
+                if let Some(event_to_dispatch) = task.event_pending_send.take() {
+                    let mut event_senders = mem::take(event_senders);
+                    task.event_senders = either::Right(Box::pin(async move {
+                        // This little `if` avoids having to do `event.clone()` if we don't have to.
+                        if event_senders.len() == 1 {
+                            let _ = event_senders[0].send(event_to_dispatch).await;
+                        } else {
+                            for sender in event_senders.iter_mut() {
+                                // For simplicity we don't get rid of closed senders because senders
+                                // aren't supposed to close, and that leaving closed senders in the
+                                // list doesn't have any consequence other than one extra iteration
+                                // every time.
+                                let _ = sender.send(event_to_dispatch.clone()).await;
+                            }
+                        }
+
+                        event_senders
+                    }));
+                }
             }
             WhatHappened::Message(ToBackground::ConnectionMessage {
                 connection_id,
@@ -1040,7 +1078,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 task.network
                     .inject_connection_message(connection_id, message);
-                continue;
             }
             WhatHappened::Message(ToBackground::StartBlocksRequest {
                 target,
@@ -1083,8 +1120,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(BlocksRequestError::NoConnection));
                     }
                 }
-
-                continue;
             }
             WhatHappened::Message(ToBackground::StartWarpSyncRequest {
                 target,
@@ -1109,8 +1144,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(WarpSyncRequestError::NoConnection));
                     }
                 }
-
-                continue;
             }
             WhatHappened::Message(ToBackground::StartStorageProofRequest {
                 chain_id,
@@ -1143,8 +1176,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(StorageProofRequestError::RequestTooLarge));
                     }
                 };
-
-                continue;
             }
             WhatHappened::Message(ToBackground::StartCallProofRequest {
                 chain_id,
@@ -1178,8 +1209,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         let _ = result.send(Err(CallProofRequestError::RequestTooLarge));
                     }
                 };
-
-                continue;
             }
             WhatHappened::Message(ToBackground::SetLocalBestBlock {
                 chain_id,
@@ -1188,7 +1217,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 task.network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
-                continue;
             }
             WhatHappened::Message(ToBackground::SetLocalGrandpaState {
                 chain_id,
@@ -1206,35 +1234,46 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 task.network
                     .gossip_broadcast_grandpa_state_and_update(chain_id, grandpa_state);
-                continue;
             }
             WhatHappened::Message(ToBackground::AnnounceTransaction {
                 chain_id,
                 transaction,
                 result,
             }) => {
-                let mut sent_peers = Vec::with_capacity(16); // TODO: capacity?
-
                 // TODO: keep track of which peer knows about which transaction, and don't send it again
 
-                // TODO: collecting in a Vec :-/
-                for peer in task
+                let peers_to_send = task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
                     .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    if task
+                    .collect::<Vec<_>>();
+
+                let mut peers_sent = Vec::with_capacity(peers_to_send.len());
+                let mut peers_queue_full = Vec::with_capacity(peers_to_send.len());
+                for peer in &peers_to_send {
+                    match task
                         .network
                         .gossip_send_transaction(&peer, chain_id, &transaction)
-                        .is_ok()
                     {
-                        sent_peers.push(peer);
-                    };
+                        Ok(()) => peers_sent.push(peer.to_base58()),
+                        Err(QueueNotificationError::QueueFull) => {
+                            peers_queue_full.push(peer.to_base58())
+                        }
+                        Err(QueueNotificationError::NoConnection) => unreachable!(),
+                    }
                 }
 
-                let _ = result.send(sent_peers);
-                continue;
+                log::debug!(
+                    target: "network",
+                    "Chain({}) <= AnnounceTransaction(hash={}, len={}, peers_sent={}, peers_queue_full={})",
+                    task.network[chain_id].log_name,
+                    hex::encode(blake2_rfc::blake2b::blake2b(32, &[], &transaction).as_bytes()),
+                    transaction.len(),
+                    peers_sent.join(", "),
+                    peers_queue_full.join(", "),
+                );
+
+                let _ = result.send(peers_to_send);
             }
             WhatHappened::Message(ToBackground::SendBlockAnnounce {
                 target,
@@ -1243,13 +1282,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 is_best,
                 result,
             }) => {
+                // TODO: log who the announce was sent to
                 let _ = result.send(task.network.gossip_send_block_announce(
                     &target,
                     chain_id,
                     &scale_encoded_header,
                     is_best,
                 ));
-                continue;
             }
             WhatHappened::Message(ToBackground::Discover {
                 chain_id,
@@ -1272,8 +1311,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
                     }
                 }
-
-                continue;
             }
             WhatHappened::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
                 // TODO: consider returning Vec<u8>s for the addresses?
@@ -1290,7 +1327,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         })
                         .collect::<Vec<_>>(),
                 );
-                continue;
             }
             WhatHappened::Message(ToBackground::PeersList { chain_id, result }) => {
                 let _ = result.send(
@@ -1302,7 +1338,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .cloned()
                         .collect(),
                 );
-                continue;
             }
             WhatHappened::Message(ToBackground::StartDiscovery) => {
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
@@ -1336,16 +1371,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             Err(service::StartRequestError::NoConnection) => unreachable!(),
                         };
 
+                        log::debug!(
+                            target: "network",
+                            "Discovery({}) => FindNode(request_target={}, requested_peer_id={})",
+                            &task.network[chain_id].log_name,
+                            target,
+                            random_peer_id
+                        );
+
                         let _prev_value = task
                             .kademlia_find_node_requests
                             .insert(substream_id, chain_id);
                         debug_assert!(_prev_value.is_none());
                     } else {
-                        // TODO: log message
+                        log::debug!(
+                            target: "network",
+                            "Discovery({}) => NoPeer",
+                            &task.network[chain_id].log_name
+                        );
                     }
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::HandshakeFinished {
                 peer_id,
@@ -1369,13 +1414,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 } else {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakeFinished", peer_id, remote_addr);
                 }
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                id,
                 address,
                 expected_peer_id,
                 ..
             }) => {
+                let _was_in = task.active_connections.remove(&id);
+                debug_assert!(_was_in.is_some());
+
                 if let Some(expected_peer_id) = expected_peer_id {
                     task.peering_strategy
                         .disconnect_addr(&expected_peer_id, &address)
@@ -1383,17 +1431,22 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let address = Multiaddr::try_from(address).unwrap();
                     log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
                 }
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::Disconnected {
-                address, peer_id, ..
+                id,
+                address,
+                peer_id,
+                ..
             }) => {
+                let _was_in = task.active_connections.remove(&id);
+                debug_assert!(_was_in.is_some());
+
                 task.peering_strategy
                     .disconnect_addr(&peer_id, &address)
                     .unwrap();
+
                 let address = Multiaddr::try_from(address).unwrap();
                 log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
@@ -1402,17 +1455,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
-                    peer_id,
+                    "Gossip({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                     &task.network[chain_id].log_name,
+                    peer_id,
                     HashDisplay(&header::hash_from_scale_encoded_header(announce.decode().scale_encoded_header)),
                     announce.decode().is_best
                 );
-                Event::BlockAnnounce {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::BlockAnnounce {
                     chain_id,
                     peer_id,
                     announce,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
@@ -1425,18 +1480,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => Opened(best_height={}, best_hash={})",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                     best_number,
                     HashDisplay(&best_hash)
                 );
-                Event::Connected {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::Connected {
                     peer_id,
                     chain_id,
                     role,
                     best_block_number: best_number,
                     best_block_hash: best_hash,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::GossipOpenFailed {
                 peer_id,
@@ -1450,11 +1507,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     &task.network[chain_id].log_name,
                     peer_id, error,
                 );
+                let ban_duration = Duration::from_secs(15);
+                // TODO: adjust log message if there was no slot assigned?
                 log::debug!(
-                    target: "connections",
-                    "{}Slots ∌ {}", // TODO:
+                    target: "network",
+                    "Slots({}) ∌ {} (ban_duration={:?})",
                     &task.network[chain_id].log_name,
-                    peer_id
+                    peer_id,
+                    ban_duration
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
@@ -1470,10 +1530,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.peering_strategy.unassign_slot_and_ban(
                         &chain_id,
                         &peer_id,
-                        task.platform.now() + Duration::from_secs(15),
+                        task.platform.now() + ban_duration,
                     );
                 }
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::GossipDisconnected {
                 peer_id,
@@ -1482,29 +1541,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}, {}) => GossipDisconnected",
+                    "Gossip({}, {}) => Closed",
+                    &task.network[chain_id].log_name,
                     peer_id,
-                    &task.network[chain_id].log_name,
                 );
+                let ban_duration = Duration::from_secs(10);
+                // TODO: adjust log message if there was no slot assigned?
                 log::debug!(
-                    target: "connections",
-                    "{}Slots ∌ {}", // TODO:
+                    target: "network",
+                    "Slots({}) ∌ {} (ban_duration={:?})",
                     &task.network[chain_id].log_name,
-                    peer_id
+                    peer_id,
+                    ban_duration
                 );
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
                 task.peering_strategy.unassign_slot_and_ban(
                     &chain_id,
                     &peer_id,
-                    task.platform.now() + Duration::from_secs(10),
+                    task.platform.now() + ban_duration,
                 );
                 task.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
-                Event::Disconnected { peer_id, chain_id }
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::Disconnected { peer_id, chain_id });
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1515,7 +1579,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(BlocksRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1526,7 +1589,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(WarpSyncRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1537,7 +1599,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(StorageProofRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1548,7 +1609,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(CallProofRequestError::Request));
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1559,21 +1619,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .remove(&substream_id)
                     .unwrap();
 
-                log::debug!(
-                    target: "connections", "On chain {}, discovered: {}",
-                    &task.network[chain_id].log_name,
-                    nodes.iter().map(|(p, _)| p.to_string()).join(", ")
-                );
+                for (peer_id, mut addrs) in nodes {
+                    // Make sure to not insert too many address for a single peer.
+                    // While the .
+                    if addrs.len() >= 10 {
+                        addrs.truncate(10);
+                    }
 
-                for (peer_id, addrs) in nodes {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
                         match Multiaddr::try_from(addr) {
                             Ok(a) => valid_addrs.push(a),
                             Err(err) => {
                                 log::debug!(
-                                    target: "connections",
-                                    "Discovery => InvalidAddress({})",
+                                    target: "network",
+                                    "Discovery({}) => InvalidAddress(peer_id={}, addr={})",
+                                    &task.network[chain_id].log_name,
+                                    peer_id,
                                     hex::encode(&err.addr)
                                 );
                                 continue;
@@ -1584,8 +1646,29 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     if !valid_addrs.is_empty() {
                         // Note that we must call this function before `insert_address`,
                         // as documented in `basic_peering_strategy`.
-                        task.peering_strategy
-                            .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+                        let insert_outcome =
+                            task.peering_strategy
+                                .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
+
+                        if let basic_peering_strategy::InsertChainPeerResult::Inserted {
+                            peer_removed,
+                        } = insert_outcome
+                        {
+                            if let Some(peer_removed) = peer_removed {
+                                log::debug!(
+                                    target: "network", "Discovery({}) => PeerPurged(peer_id={})",
+                                    &task.network[chain_id].log_name,
+                                    peer_removed,
+                                );
+                            }
+
+                            log::debug!(
+                                target: "network", "Discovery({}) => NewPeer(peer_id={}, addr={})",
+                                &task.network[chain_id].log_name,
+                                peer_id,
+                                valid_addrs.iter().map(|a| a.to_string()).join(", addr=")
+                            );
+                        }
                     }
 
                     for addr in valid_addrs {
@@ -1598,8 +1681,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         ));
                     }
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -1611,8 +1692,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap();
 
                 log::debug!(
-                    target: "connections",
-                    "Discovery({}) => {:?}",
+                    target: "network",
+                    "Discovery({}) => FindNodeError(error={:?})",
                     &task.network[chain_id].log_name,
                     error
                 );
@@ -1630,7 +1711,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     ) => {
                         // TODO: remove this warning in a long time
                         log::warn!(
-                            target: "connections",
+                            target: "network",
                             "Problem during discovery on {}: protocol not available. \
                             This might indicate that the version of Substrate used by \
                             the chain doesn't include \
@@ -1640,15 +1721,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                     _ => {
                         log::warn!(
-                            target: "connections",
+                            target: "network",
                             "Problem during discovery on {}: {}",
                             &task.network[chain_id].log_name,
                             error
                         );
                     }
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::RequestResult { .. }) => {
                 // We never start any other kind of requests.
@@ -1670,10 +1749,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     < 4
                 {
                     log::debug!(
-                        target: "connections",
-                        "InSlots({}) ∋ {}",
+                        target: "network",
+                        "Gossip({}, {}) => GossipInDesired(outcome=accepted)",
                         &task.network[chain_id].log_name,
-                        peer_id
+                        peer_id,
                     );
                     task.network
                         .gossip_open(
@@ -1684,10 +1763,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .unwrap();
                 } else {
                     log::debug!(
-                        target: "connections",
-                        "Connections({}) => GossipInDesiredRejected(chain={}, error=full)",
-                        peer_id,
+                        target: "network",
+                        "Gossip({}, {}) => GossipInDesired(outcome=rejected)",
                         &task.network[chain_id].log_name,
+                        peer_id,
                     );
                     task.network
                         .gossip_close(
@@ -1697,8 +1776,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         )
                         .unwrap();
                 }
-
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
@@ -1715,7 +1792,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 task.network
                     .respond_identify(substream_id, &task.identify_agent_version);
-                continue;
             }
             WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
             WhatHappened::NetworkEvent(service::Event::RequestInCancel { .. }) => {
@@ -1730,17 +1806,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => GrandpaNeighborPacket(round_number={}, set_id={}, commit_finalized_height={})",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                     state.round_number,
                     state.set_id,
                     state.commit_finalized_height,
                 );
-                Event::GrandpaNeighborPacket {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::GrandpaNeighborPacket {
                     chain_id,
                     peer_id,
                     finalized_block_height: state.commit_finalized_height,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::GrandpaCommitMessage {
                 chain_id,
@@ -1750,15 +1828,17 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) => GrandpaCommitMessage(target_block_hash={})",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                     HashDisplay(message.decode().message.target_hash),
                 );
-                Event::GrandpaCommitMessage {
+
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some(Event::GrandpaCommitMessage {
                     chain_id,
                     peer_id,
                     message,
-                }
+                });
             }
             WhatHappened::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
@@ -1770,14 +1850,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 // TODO: disconnect peer
-                continue;
             }
             WhatHappened::CanAssignSlot(peer_id, chain_id) => {
                 task.peering_strategy.assign_slot(&chain_id, &peer_id);
 
                 log::debug!(
-                    target: "connections",
-                    "OutSlots({}) ∋ {}",
+                    target: "network",
+                    "Slots({}) ∋ {}",
                     &task.network[chain_id].log_name,
                     peer_id
                 );
@@ -1787,8 +1866,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     service::GossipKind::ConsensusTransactions,
                 );
-
-                continue;
             }
             WhatHappened::CanStartConnect(peer_id) => {
                 // TODO: restore rate limiting
@@ -1848,7 +1925,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 log::debug!(
-                    target: "connections",
+                    target: "network",
                     "Connections({}) <= StartConnecting(remote_addr={}, local_peer_id={})",
                     peer_id,
                     multiaddr,
@@ -1955,8 +2032,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .active_connections
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
-
-                continue;
             }
             WhatHappened::CanOpenGossip(peer_id, chain_id) => {
                 task.network
@@ -1970,11 +2045,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Gossip({}, {}) <= Open",
-                    peer_id,
                     &task.network[chain_id].log_name,
+                    peer_id,
                 );
-
-                continue;
             }
             WhatHappened::MessageToConnection {
                 connection_id,
@@ -1986,39 +2059,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // a message on the connection-to-coordinator channel, this will result in a deadlock.
                 // For this reason, the connection task is always ready to immediately accept a message
                 // on the coordinator-to-connection channel.
-                task.active_connections
+                let _send_success = task
+                    .active_connections
                     .get_mut(&connection_id)
                     .unwrap()
                     .send(message)
-                    .await
-                    .unwrap();
-                continue;
+                    .await;
+                // debug_assert!(_send_success.is_ok()); // TODO: panics right now /!\
             }
-        };
-
-        // Dispatch the event to the various senders.
-
-        // We made sure that the senders were ready before generating an event.
-        let either::Left(event_senders) = &mut task.event_senders else {
-            unreachable!()
-        };
-
-        let mut event_senders = mem::take(event_senders);
-        task.event_senders = either::Right(Box::pin(async move {
-            // This little `if` avoids having to do `event.clone()` if we don't have to.
-            if event_senders.len() == 1 {
-                let _ = event_senders[0].send(event_to_dispatch).await;
-            } else {
-                for sender in event_senders.iter_mut() {
-                    // For simplicity we don't get rid of closed senders because senders
-                    // aren't supposed to close, and that leaving closed senders in the
-                    // list doesn't have any consequence other than one extra iteration
-                    // every time.
-                    let _ = sender.send(event_to_dispatch.clone()).await;
-                }
-            }
-
-            event_senders
-        }));
+        }
     }
 }
