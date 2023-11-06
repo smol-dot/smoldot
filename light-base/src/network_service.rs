@@ -214,6 +214,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         platform.sleep(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
+                        log::trace!(target: "network", "Discovery <= Tick");
+
                         if messages_tx
                             .send(ToBackground::StartDiscovery)
                             .await
@@ -1369,12 +1371,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             Err(service::StartRequestError::NoConnection) => unreachable!(),
                         };
 
+                        log::debug!(
+                            target: "network",
+                            "Discovery({}) => FindNode(request_target={}, requested_peer_id={})",
+                            &task.network[chain_id].log_name,
+                            target,
+                            random_peer_id
+                        );
+
                         let _prev_value = task
                             .kademlia_find_node_requests
                             .insert(substream_id, chain_id);
                         debug_assert!(_prev_value.is_none());
                     } else {
-                        // TODO: log message
+                        log::debug!(
+                            target: "network",
+                            "Discovery({}) => NoPeer",
+                            &task.network[chain_id].log_name
+                        );
                     }
                 }
             }
@@ -1613,7 +1627,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             Err(err) => {
                                 log::debug!(
                                     target: "network",
-                                    "Discovery => InvalidAddress({})",
+                                    "Discovery({}) => InvalidAddress({})",
+                                    &task.network[chain_id].log_name,
                                     hex::encode(&err.addr)
                                 );
                                 continue;
