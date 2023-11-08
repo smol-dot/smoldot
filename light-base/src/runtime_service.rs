@@ -67,7 +67,9 @@ use alloc::{
 };
 use async_lock::{Mutex, MutexGuard};
 use core::{
-    iter, mem,
+    iter,
+    marker::PhantomData,
+    mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
@@ -370,7 +372,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             new_blocks: Subscription {
                 subscription_id,
                 channel: Box::pin(new_blocks_channel),
-                guarded: self.guarded.clone(),
+                to_background: self.to_background.clone(),
+                marker: PhantomData,
             },
         }
     }
@@ -385,48 +388,17 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// Panics if the block hash has not been reported or has already been unpinned.
     ///
     // TODO: add #[track_caller] once possible, see https://github.com/rust-lang/rust/issues/87417
-    pub async fn unpin_block(&self, subscription_id: SubscriptionId, block_hash: &[u8; 32]) {
-        Self::unpin_block_inner(&self.guarded, subscription_id, block_hash).await
-    }
-
-    // TODO: add #[track_caller] once possible, see https://github.com/rust-lang/rust/issues/87417
-    async fn unpin_block_inner(
-        guarded: &Arc<Mutex<Guarded<TPlat>>>,
-        subscription_id: SubscriptionId,
-        block_hash: &[u8; 32],
-    ) {
-        let mut guarded_lock = guarded.lock().await;
-        let guarded_lock = &mut *guarded_lock;
-
-        if let GuardedInner::FinalizedBlockRuntimeKnown {
-            all_blocks_subscriptions,
-            pinned_blocks,
-            ..
-        } = &mut guarded_lock.tree
-        {
-            let block_ignores_limit = match pinned_blocks.remove(&(subscription_id.0, *block_hash))
-            {
-                Some(b) => b.block_ignores_limit,
-                None => {
-                    // Cold path.
-                    if let Some((sub_name, _, _)) = all_blocks_subscriptions.get(&subscription_id.0)
-                    {
-                        panic!("block already unpinned for {sub_name} subscription");
-                    } else {
-                        return;
-                    }
-                }
-            };
-
-            guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
-
-            if !block_ignores_limit {
-                let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
-                    .get_mut(&subscription_id.0)
-                    .unwrap();
-                *finalized_pinned_remaining += 1;
-            }
-        }
+    pub async fn unpin_block(&self, subscription_id: SubscriptionId, block_hash: [u8; 32]) {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background
+            .send(ToBackground::UnpinBlock {
+                result_tx,
+                subscription_id,
+                block_hash,
+            })
+            .await;
+        result_rx.await.unwrap().unwrap()
     }
 
     /// Returns the storage value and Merkle value of the `:code` key of the finalized block.
@@ -612,7 +584,8 @@ pub struct SubscriptionId(u64);
 pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,
     channel: Pin<Box<async_channel::Receiver<Notification>>>,
-    guarded: Arc<Mutex<Guarded<TPlat>>>,
+    to_background: async_channel::Sender<ToBackground>,
+    marker: PhantomData<TPlat>,
 }
 
 impl<TPlat: PlatformRef> Subscription<TPlat> {
@@ -631,13 +604,17 @@ impl<TPlat: PlatformRef> Subscription<TPlat> {
     ///
     /// Panics if the block hash has not been reported or has already been unpinned.
     ///
-    pub async fn unpin_block(&self, block_hash: &[u8; 32]) {
-        RuntimeService::unpin_block_inner(
-            &self.guarded,
-            SubscriptionId(self.subscription_id),
-            block_hash,
-        )
-        .await
+    pub async fn unpin_block(&self, block_hash: [u8; 32]) {
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background
+            .send(ToBackground::UnpinBlock {
+                result_tx,
+                subscription_id: SubscriptionId(self.subscription_id),
+                block_hash,
+            })
+            .await;
+        result_rx.await.unwrap().unwrap()
     }
 }
 
@@ -1149,6 +1126,11 @@ enum ToBackground {
         // TODO: overcomplicated
         result_tx: oneshot::Sender<Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)>>,
     },
+    UnpinBlock {
+        result_tx: oneshot::Sender<Result<(), ()>>,
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+    },
 }
 
 #[derive(Clone)]
@@ -1514,6 +1496,49 @@ async fn run_background<TPlat: PlatformRef>(
                             None
                         },
                     );
+                }
+                WhatHappened::ToBackground(Some(ToBackground::UnpinBlock {
+                    result_tx,
+                    subscription_id,
+                    block_hash,
+                })) => {
+                    let mut guarded_lock = guarded.lock().await;
+                    let guarded_lock = &mut *guarded_lock;
+
+                    if let GuardedInner::FinalizedBlockRuntimeKnown {
+                        all_blocks_subscriptions,
+                        pinned_blocks,
+                        ..
+                    } = &mut guarded_lock.tree
+                    {
+                        let block_ignores_limit =
+                            match pinned_blocks.remove(&(subscription_id.0, block_hash)) {
+                                Some(b) => b.block_ignores_limit,
+                                None => {
+                                    // Cold path.
+                                    // TODO: subscription name was used here but no longer is; get rid of this concept?
+                                    if let Some((_, _, _)) =
+                                        all_blocks_subscriptions.get(&subscription_id.0)
+                                    {
+                                        let _ = result_tx.send(Err(()));
+                                    } else {
+                                        let _ = result_tx.send(Ok(()));
+                                    }
+                                    continue;
+                                }
+                            };
+
+                        guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
+
+                        if !block_ignores_limit {
+                            let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
+                                .get_mut(&subscription_id.0)
+                                .unwrap();
+                            *finalized_pinned_remaining += 1;
+                        }
+                    }
+
+                    let _ = result_tx.send(Ok(()));
                 }
                 WhatHappened::Notification(Some(notification)) => {
                     match notification {

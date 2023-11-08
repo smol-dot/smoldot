@@ -863,7 +863,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         } = self.subscription
                         {
                             self.runtime_service
-                                .unpin_block(subscription_id, hash)
+                                .unpin_block(subscription_id, *hash)
                                 .await;
                         }
                     }

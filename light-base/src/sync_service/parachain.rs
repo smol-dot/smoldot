@@ -761,7 +761,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     let hash = runtime_subscription.async_tree.block_user_data(block);
                     runtime_subscription
                         .relay_chain_subscribe_all
-                        .unpin_block(hash)
+                        .unpin_block(*hash)
                         .await;
                 }
             }
@@ -869,7 +869,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         if pruned_block_parahead.is_none() {
                             runtime_subscription
                                 .relay_chain_subscribe_all
-                                .unpin_block(&hash)
+                                .unpin_block(hash)
                                 .await;
                         }
                     }

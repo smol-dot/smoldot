@@ -642,10 +642,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
             for block in worker.pending_transactions.prune_finalized_with_body() {
                 // All blocks in `pending_transactions` are pinned within the runtime service.
                 // Unpin them when they're removed.
-                subscribe_all
-                    .new_blocks
-                    .unpin_block(&block.block_hash)
-                    .await;
+                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
 
                 log::debug!(
                     target: &config.log_target,
@@ -742,7 +739,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     for pruned in worker.pending_transactions.set_finalized_block(&hash) {
                         // All blocks in `pending_transactions` are pinned within the
                         // runtime service. Unpin them when they're removed.
-                        subscribe_all.new_blocks.unpin_block(&pruned.0).await;
+                        subscribe_all.new_blocks.unpin_block(pruned.0).await;
 
                         // Note that we could in principle interrupt any on-going
                         // download of that block, but it is not worth the effort.

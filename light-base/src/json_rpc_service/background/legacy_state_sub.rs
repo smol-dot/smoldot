@@ -760,7 +760,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 for block_hash in pruned_blocks.into_iter().chain(iter::once(finalized_hash)) {
                     if finalized_and_pruned_lru.len() == finalized_and_pruned_lru.cap().get() {
                         let (hash_to_unpin, _) = finalized_and_pruned_lru.pop_lru().unwrap();
-                        subscription.unpin_block(&hash_to_unpin).await;
+                        subscription.unpin_block(hash_to_unpin).await;
                         pinned_blocks.remove(&hash_to_unpin).unwrap();
                     }
                     finalized_and_pruned_lru.put(block_hash, ());
