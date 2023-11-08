@@ -113,6 +113,9 @@ pub struct RuntimeService<TPlat: PlatformRef> {
     /// Fields behind a `Mutex`. Should only be locked for short-lived operations.
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 
+    /// Sender to send messages to the background task.
+    to_background: async_channel::Sender<ToBackground>,
+
     /// Handle to abort the background task.
     background_task_abort: future::AbortHandle,
 }
@@ -157,17 +160,21 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
+        let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
             let platform = config.platform.clone();
+            let (tx, rx) = async_channel::bounded(16);
             let (abortable, abort) = future::abortable(run_background(
                 log_target.clone(),
                 platform,
                 sync_service,
                 guarded,
+                rx,
             ));
             background_task_abort = abort;
+            to_background = tx;
             abortable.map(move |_| {
                 log::debug!(target: &log_target, "Shutdown");
             })
@@ -177,6 +184,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             sync_service: config.sync_service,
             guarded,
             background_task_abort,
+            to_background,
         }
     }
 
@@ -1144,6 +1152,9 @@ enum GuardedInner<TPlat: PlatformRef> {
     },
 }
 
+/// Message towards the background task.
+enum ToBackground {}
+
 #[derive(Clone)]
 struct PinnedBlock {
     /// Reference-counted runtime of the pinned block.
@@ -1178,6 +1189,7 @@ async fn run_background<TPlat: PlatformRef>(
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
+    to_background: async_channel::Receiver<ToBackground>,
 ) {
     // TODO: pretty hacky
     {
@@ -1391,6 +1403,7 @@ async fn run_background<TPlat: PlatformRef>(
             platform: platform.clone(),
             sync_service: sync_service.clone(),
             guarded: guarded.clone(),
+            to_background: Box::pin(to_background.clone()),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: Box::pin(future::pending()),
             runtime_downloads: stream::FuturesUnordered::new(),
@@ -1403,6 +1416,7 @@ async fn run_background<TPlat: PlatformRef>(
             enum WhatHappened {
                 NewNecessaryDownload,
                 Notification(Option<sync_service::Notification>),
+                ToBackground(Option<ToBackground>),
                 RuntimeDownloadFinished(
                     async_tree::AsyncOpId,
                     Result<
@@ -1425,6 +1439,7 @@ async fn run_background<TPlat: PlatformRef>(
                 };
                 new_necessary_download
                     .or(async { WhatHappened::Notification(background.blocks_stream.next().await) })
+                    .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
                     .or(async {
                         if !background.runtime_downloads.is_empty() {
                             let (async_op_id, download_result) =
@@ -1444,6 +1459,8 @@ async fn run_background<TPlat: PlatformRef>(
                 WhatHappened::Notification(None) => {
                     break; // Break out of the inner loop in order to reset the background.
                 }
+                WhatHappened::ToBackground(None) => todo!(),
+                WhatHappened::ToBackground(Some(b)) => match b {},
                 WhatHappened::Notification(Some(notification)) => {
                     match notification {
                         sync_service::Notification::Block(new_block) => {
@@ -1695,6 +1712,9 @@ struct Background<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     guarded: Arc<Mutex<Guarded<TPlat>>>,
+
+    /// Receiver for messages to the background task.
+    to_background: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
     /// Stream of notifications coming from the sync service.
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
