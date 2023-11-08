@@ -1275,7 +1275,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
     source: validate::TransactionSource,
 ) -> Result<validate::ValidTransaction, ValidationError> {
     let runtime_lock = match relay_chain_sync
-        .pinned_block_runtime_access(relay_chain_sync_subscription_id, &block_hash)
+        .pinned_block_runtime_access(relay_chain_sync_subscription_id, block_hash)
         .await
     {
         Ok(l) => l,

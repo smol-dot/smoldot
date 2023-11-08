@@ -67,9 +67,7 @@ use alloc::{
 };
 use async_lock::{Mutex, MutexGuard};
 use core::{
-    iter,
-    marker::PhantomData,
-    mem,
+    iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
@@ -117,7 +115,7 @@ pub struct RuntimeService<TPlat: PlatformRef> {
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 
     /// Sender to send messages to the background task.
-    to_background: async_channel::Sender<ToBackground>,
+    to_background: async_channel::Sender<ToBackground<TPlat>>,
 
     /// Handle to abort the background task.
     background_task_abort: future::AbortHandle,
@@ -373,7 +371,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 subscription_id,
                 channel: Box::pin(new_blocks_channel),
                 to_background: self.to_background.clone(),
-                marker: PhantomData,
             },
         }
     }
@@ -434,47 +431,20 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     pub async fn pinned_block_runtime_access(
         &self,
         subscription_id: SubscriptionId,
-        block_hash: &[u8; 32],
+        block_hash: [u8; 32],
     ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
-        // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
-        // issue.
-        let block_hash = *block_hash;
+        let (result_tx, result_rx) = oneshot::channel();
 
-        let mut guarded = self.guarded.lock().await;
-        let guarded = &mut *guarded;
+        let _ = self
+            .to_background
+            .send(ToBackground::PinnedBlockRuntimeAccess {
+                result_tx,
+                subscription_id,
+                block_hash,
+            })
+            .await;
 
-        let pinned_block = {
-            if let GuardedInner::FinalizedBlockRuntimeKnown {
-                all_blocks_subscriptions,
-                pinned_blocks,
-                ..
-            } = &mut guarded.tree
-            {
-                match pinned_blocks.get(&(subscription_id.0, block_hash)) {
-                    Some(v) => v.clone(),
-                    None => {
-                        // Cold path.
-                        if let Some((sub_name, _, _)) =
-                            all_blocks_subscriptions.get(&subscription_id.0)
-                        {
-                            panic!("block already unpinned for subscription {sub_name}");
-                        } else {
-                            return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
-                        }
-                    }
-                }
-            } else {
-                return Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription);
-            }
-        };
-
-        Ok(RuntimeAccess {
-            sync_service: self.sync_service.clone(),
-            hash: block_hash,
-            runtime: pinned_block.runtime,
-            block_number: pinned_block.block_number,
-            block_state_root_hash: pinned_block.state_trie_root_hash,
-        })
+        result_rx.await.unwrap().unwrap()
     }
 
     /// Lock the runtime service and prepare a call to a runtime entry point.
@@ -584,8 +554,7 @@ pub struct SubscriptionId(u64);
 pub struct Subscription<TPlat: PlatformRef> {
     subscription_id: u64,
     channel: Pin<Box<async_channel::Receiver<Notification>>>,
-    to_background: async_channel::Sender<ToBackground>,
-    marker: PhantomData<TPlat>,
+    to_background: async_channel::Sender<ToBackground<TPlat>>,
 }
 
 impl<TPlat: PlatformRef> Subscription<TPlat> {
@@ -1114,7 +1083,7 @@ enum GuardedInner<TPlat: PlatformRef> {
 }
 
 /// Message towards the background task.
-enum ToBackground {
+enum ToBackground<TPlat: PlatformRef> {
     CompileAndPinRuntime {
         result_tx: oneshot::Sender<Arc<Runtime>>,
         storage_code: Option<Vec<u8>>,
@@ -1128,6 +1097,13 @@ enum ToBackground {
     },
     UnpinBlock {
         result_tx: oneshot::Sender<Result<(), ()>>,
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+    },
+    PinnedBlockRuntimeAccess {
+        result_tx: oneshot::Sender<
+            Result<Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError>, ()>,
+        >,
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
     },
@@ -1167,7 +1143,7 @@ async fn run_background<TPlat: PlatformRef>(
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
-    to_background: async_channel::Receiver<ToBackground>,
+    to_background: async_channel::Receiver<ToBackground<TPlat>>,
 ) {
     // TODO: pretty hacky
     {
@@ -1391,10 +1367,10 @@ async fn run_background<TPlat: PlatformRef>(
 
         // Inner loop. Process incoming events.
         loop {
-            enum WhatHappened {
+            enum WhatHappened<TPlat: PlatformRef> {
                 NewNecessaryDownload,
                 Notification(Option<sync_service::Notification>),
-                ToBackground(Option<ToBackground>),
+                ToBackground(Option<ToBackground<TPlat>>),
                 RuntimeDownloadFinished(
                     async_tree::AsyncOpId,
                     Result<
@@ -1409,7 +1385,7 @@ async fn run_background<TPlat: PlatformRef>(
                 ),
             }
 
-            let what_happened: WhatHappened = {
+            let what_happened: WhatHappened<_> = {
                 let new_necessary_download = async {
                     (&mut background.wake_up_new_necessary_download).await;
                     background.wake_up_new_necessary_download = Box::pin(future::pending());
@@ -1539,6 +1515,53 @@ async fn run_background<TPlat: PlatformRef>(
                     }
 
                     let _ = result_tx.send(Ok(()));
+                }
+                WhatHappened::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
+                    result_tx,
+                    subscription_id,
+                    block_hash,
+                })) => {
+                    let mut guarded = background.guarded.lock().await;
+                    let guarded = &mut *guarded;
+
+                    let pinned_block = {
+                        if let GuardedInner::FinalizedBlockRuntimeKnown {
+                            all_blocks_subscriptions,
+                            pinned_blocks,
+                            ..
+                        } = &mut guarded.tree
+                        {
+                            match pinned_blocks.get(&(subscription_id.0, block_hash)) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    // Cold path.
+                                    // TODO: subscription name was used here but no longer is; remove this concept?
+                                    if let Some((_, _, _)) =
+                                        all_blocks_subscriptions.get(&subscription_id.0)
+                                    {
+                                        let _ = result_tx.send(Err(()));
+                                    } else {
+                                        let _ = result_tx.send(Ok(Err(
+                                            PinnedBlockRuntimeAccessError::ObsoleteSubscription,
+                                        )));
+                                    }
+                                    continue;
+                                }
+                            }
+                        } else {
+                            let _ = result_tx
+                                .send(Ok(Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)));
+                            continue;
+                        }
+                    };
+
+                    let _ = result_tx.send(Ok(Ok(RuntimeAccess {
+                        sync_service: background.sync_service.clone(),
+                        hash: block_hash,
+                        runtime: pinned_block.runtime,
+                        block_number: pinned_block.block_number,
+                        block_state_root_hash: pinned_block.state_trie_root_hash,
+                    })));
                 }
                 WhatHappened::Notification(Some(notification)) => {
                     match notification {
@@ -1793,7 +1816,7 @@ struct Background<TPlat: PlatformRef> {
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 
     /// Receiver for messages to the background task.
-    to_background: Pin<Box<async_channel::Receiver<ToBackground>>>,
+    to_background: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
 
     /// Stream of notifications coming from the sync service.
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,

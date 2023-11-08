@@ -994,7 +994,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
                 let access = if let Some(subscription_id) = subscription_id_with_block {
                     task.runtime_service
-                        .pinned_block_runtime_access(subscription_id, &block_hash)
+                        .pinned_block_runtime_access(subscription_id, block_hash)
                         .await
                         .ok()
                 } else {
