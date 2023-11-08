@@ -72,6 +72,7 @@ use core::{
     pin::Pin,
     time::Duration,
 };
+use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
 use itertools::Itertools as _;
@@ -546,32 +547,20 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
     ) -> PinnedRuntimeId {
-        let mut guarded = self.guarded.lock().await;
+        let (result_tx, result_rx) = oneshot::channel();
 
-        // Try to find an existing identical runtime.
-        let existing_runtime = guarded
-            .runtimes
-            .iter()
-            .filter_map(|(_, rt)| rt.upgrade())
-            .find(|rt| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages);
-
-        let runtime = if let Some(existing_runtime) = existing_runtime {
-            existing_runtime
-        } else {
-            // No identical runtime was found. Try compiling the new runtime.
-            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
-            let runtime = Arc::new(Runtime {
-                heap_pages: storage_heap_pages,
-                runtime_code: storage_code,
+        self.to_background
+            .send(ToBackground::CompileAndPinRuntime {
+                result_tx,
+                storage_code,
+                storage_heap_pages,
                 code_merkle_value,
                 closest_ancestor_excluding,
-                runtime,
-            });
-            guarded.runtimes.insert(Arc::downgrade(&runtime));
-            runtime
-        };
+            })
+            .await
+            .unwrap();
 
-        PinnedRuntimeId(runtime)
+        PinnedRuntimeId(result_rx.await.unwrap())
     }
 
     /// Un-pins a previously-pinned runtime.
@@ -1153,7 +1142,15 @@ enum GuardedInner<TPlat: PlatformRef> {
 }
 
 /// Message towards the background task.
-enum ToBackground {}
+enum ToBackground {
+    CompileAndPinRuntime {
+        result_tx: oneshot::Sender<Arc<Runtime>>,
+        storage_code: Option<Vec<u8>>,
+        storage_heap_pages: Option<Vec<u8>>,
+        code_merkle_value: Option<Vec<u8>>,
+        closest_ancestor_excluding: Option<Vec<Nibble>>,
+    },
+}
 
 #[derive(Clone)]
 struct PinnedBlock {
@@ -1460,7 +1457,45 @@ async fn run_background<TPlat: PlatformRef>(
                     break; // Break out of the inner loop in order to reset the background.
                 }
                 WhatHappened::ToBackground(None) => todo!(),
-                WhatHappened::ToBackground(Some(b)) => match b {},
+                WhatHappened::ToBackground(Some(ToBackground::CompileAndPinRuntime {
+                    result_tx,
+                    storage_code,
+                    storage_heap_pages,
+                    code_merkle_value,
+                    closest_ancestor_excluding,
+                })) => {
+                    let mut guarded = background.guarded.lock().await;
+                    let guarded = &mut *guarded;
+
+                    // Try to find an existing identical runtime.
+                    let existing_runtime = guarded
+                        .runtimes
+                        .iter()
+                        .filter_map(|(_, rt)| rt.upgrade())
+                        .find(|rt| {
+                            rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
+                        });
+
+                    let runtime = if let Some(existing_runtime) = existing_runtime {
+                        existing_runtime
+                    } else {
+                        // No identical runtime was found. Try compiling the new runtime.
+                        let runtime =
+                            SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages)
+                                .await;
+                        let runtime = Arc::new(Runtime {
+                            heap_pages: storage_heap_pages,
+                            runtime_code: storage_code,
+                            code_merkle_value,
+                            closest_ancestor_excluding,
+                            runtime,
+                        });
+                        guarded.runtimes.insert(Arc::downgrade(&runtime));
+                        runtime
+                    };
+
+                    let _ = result_tx.send(runtime);
+                }
                 WhatHappened::Notification(Some(notification)) => {
                     match notification {
                         sync_service::Notification::Block(new_block) => {
