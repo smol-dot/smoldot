@@ -517,7 +517,12 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// The way this method is implemented is opaque and cannot be relied on. The return value
     /// should only ever be shown to the user and not used for any meaningful logic.
     pub async fn is_near_head_of_chain_heuristic(&self) -> bool {
-        is_near_head_of_chain_heuristic(&self.sync_service, &self.guarded).await
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background
+            .send(ToBackground::IsNearHeadOfChainHeuristic { result_tx })
+            .await;
+        result_rx.await.unwrap()
     }
 }
 
@@ -1095,6 +1100,9 @@ enum ToBackground<TPlat: PlatformRef> {
         // TODO: overcomplicated
         result_tx: oneshot::Sender<Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)>>,
     },
+    IsNearHeadOfChainHeuristic {
+        result_tx: oneshot::Sender<bool>,
+    },
     UnpinBlock {
         result_tx: oneshot::Sender<Result<(), ()>>,
         subscription_id: SubscriptionId,
@@ -1471,6 +1479,17 @@ async fn run_background<TPlat: PlatformRef>(
                         } else {
                             None
                         },
+                    );
+                }
+                WhatHappened::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
+                    result_tx,
+                })) => {
+                    let _ = result_tx.send(
+                        is_near_head_of_chain_heuristic(
+                            &background.sync_service,
+                            &background.guarded,
+                        )
+                        .await,
                     );
                 }
                 WhatHappened::ToBackground(Some(ToBackground::UnpinBlock {
