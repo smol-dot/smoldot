@@ -436,19 +436,14 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     pub async fn finalized_runtime_storage_merkle_values(
         &self,
     ) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)> {
-        let mut guarded = self.guarded.lock().await;
-        let guarded = &mut *guarded;
+        let (result_tx, result_rx) = oneshot::channel();
 
-        if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree {
-            let runtime = &tree.output_finalized_async_user_data();
-            Some((
-                runtime.runtime_code.clone(),
-                runtime.code_merkle_value.clone(),
-                runtime.closest_ancestor_excluding.clone(),
-            ))
-        } else {
-            None
-        }
+        let _ = self
+            .to_background
+            .send(ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx })
+            .await;
+
+        result_rx.await.unwrap()
     }
 
     /// Lock the runtime service and prepare a call to a runtime entry point.
@@ -549,7 +544,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ) -> PinnedRuntimeId {
         let (result_tx, result_rx) = oneshot::channel();
 
-        self.to_background
+        let _ = self
+            .to_background
             .send(ToBackground::CompileAndPinRuntime {
                 result_tx,
                 storage_code,
@@ -557,8 +553,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 code_merkle_value,
                 closest_ancestor_excluding,
             })
-            .await
-            .unwrap();
+            .await;
 
         PinnedRuntimeId(result_rx.await.unwrap())
     }
@@ -1150,6 +1145,10 @@ enum ToBackground {
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
     },
+    FinalizedRuntimeStorageMerkleValues {
+        // TODO: overcomplicated
+        result_tx: oneshot::Sender<Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<Nibble>>)>>,
+    },
 }
 
 #[derive(Clone)]
@@ -1495,6 +1494,26 @@ async fn run_background<TPlat: PlatformRef>(
                     };
 
                     let _ = result_tx.send(runtime);
+                }
+                WhatHappened::ToBackground(Some(
+                    ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
+                )) => {
+                    let mut guarded = background.guarded.lock().await;
+                    let guarded = &mut *guarded;
+
+                    let _ = result_tx.send(
+                        if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree
+                        {
+                            let runtime = &tree.output_finalized_async_user_data();
+                            Some((
+                                runtime.runtime_code.clone(),
+                                runtime.code_merkle_value.clone(),
+                                runtime.closest_ancestor_excluding.clone(),
+                            ))
+                        } else {
+                            None
+                        },
+                    );
                 }
                 WhatHappened::Notification(Some(notification)) => {
                     match notification {
