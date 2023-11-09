@@ -904,10 +904,7 @@ async fn run_background<TPlat: PlatformRef>(
             );
             tree.input_finalize(node_index, node_index);
 
-            GuardedInner::FinalizedBlockRuntimeUnknown {
-                tree,
-                when_known: event_listener::Event::new(),
-            }
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree }
         };
 
         Background {
@@ -1083,12 +1080,6 @@ async fn run_background<TPlat: PlatformRef>(
                             HashDisplay(&finalized_block_hash)
                         );
 
-                        if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } =
-                            &background.tree
-                        {
-                            when_known.notify(usize::max_value());
-                        }
-
                         background.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                                 32,
@@ -1142,14 +1133,7 @@ async fn run_background<TPlat: PlatformRef>(
                             },
                         };
                     } else {
-                        if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } =
-                            &background.tree
-                        {
-                            when_known.notify(usize::max_value());
-                        }
-
                         background.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
-                            when_known: event_listener::Event::new(),
                             tree: {
                                 let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                                     finalized_async_user_data: None,
@@ -1876,10 +1860,6 @@ enum GuardedInner<TPlat: PlatformRef> {
         /// finalized block.
         // TODO: explain better
         tree: async_tree::AsyncTree<TPlat::Instant, Block, Option<Arc<Runtime>>>,
-
-        /// Event notified when the [`GuardedInner`] switches to
-        /// [`GuardedInner::FinalizedBlockRuntimeKnown`].
-        when_known: event_listener::Event,
     },
 }
 
@@ -2141,7 +2121,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         }
                     }
                 },
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree, when_known } => match tree
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree } => match tree
                     .try_advance_output()
                 {
                     None => break,
@@ -2181,7 +2161,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
 
                         // Change the state of `guarded` to the "finalized runtime known" state.
-                        when_known.notify(usize::max_value());
                         self.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                                 32,
