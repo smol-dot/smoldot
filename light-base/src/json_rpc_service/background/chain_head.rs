@@ -863,7 +863,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         } = self.subscription
                         {
                             self.runtime_service
-                                .unpin_block(subscription_id, hash)
+                                .unpin_block(subscription_id, *hash)
                                 .await;
                         }
                     }
@@ -1292,7 +1292,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 match self
                     .runtime_service
-                    .pinned_block_runtime_access(subscription_id, &hash.0)
+                    .pinned_block_runtime_access(subscription_id, hash.0)
                     .await
                 {
                     Ok(c) => c,

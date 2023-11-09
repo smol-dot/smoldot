@@ -761,7 +761,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     let hash = runtime_subscription.async_tree.block_user_data(block);
                     runtime_subscription
                         .relay_chain_subscribe_all
-                        .unpin_block(hash)
+                        .unpin_block(*hash)
                         .await;
                 }
             }
@@ -869,7 +869,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         if pruned_block_parahead.is_none() {
                             runtime_subscription
                                 .relay_chain_subscribe_all
-                                .unpin_block(&hash)
+                                .unpin_block(hash)
                                 .await;
                         }
                     }
@@ -1222,7 +1222,7 @@ async fn parahead<TPlat: PlatformRef>(
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
     let precall = match relay_chain_sync
-        .pinned_block_runtime_access(subscription_id, block_hash)
+        .pinned_block_runtime_access(subscription_id, *block_hash)
         .await
     {
         Ok(p) => p,
