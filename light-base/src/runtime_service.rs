@@ -1035,204 +1035,6 @@ async fn run_background<TPlat: PlatformRef>(
     let mut pending_subscriptions = Vec::<ToBackgroundSubscribeAll<_>>::with_capacity(8);
 
     loop {
-        // The buffer size should be large enough so that, if the CPU is busy, it doesn't
-        // become full before the execution of the runtime service resumes.
-        let subscription = sync_service.subscribe_all(32, true).await;
-
-        log::debug!(
-            target: &log_target,
-            "Worker <= Reset(finalized_block: {})",
-            HashDisplay(&header::hash_from_scale_encoded_header(
-                &subscription.finalized_block_scale_encoded_header
-            ))
-        );
-
-        // Update the state of `guarded` with what we just grabbed.
-        //
-        // Note that the content of `guarded` is reset unconditionally.
-        // It might seem like a good idea to only reset the content of `guarded` if the new
-        // subscription has a different finalized block than currently. However, there is
-        // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
-        // subset or superset of the non-finalized blocks in the new subscription.
-        // Using the new subscription but keeping the existing tree could therefore result in
-        // state inconsistencies.
-        //
-        // Additionally, the situation where a subscription is killed but the finalized block
-        // didn't change should be extremely rare anyway.
-        {
-            // TODO: restore
-            /*guarded.best_near_head_of_chain =
-            is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
-
-            guarded.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
-
-            // TODO: DRY below
-            if let Some(finalized_block_runtime) = subscription.finalized_block_runtime {
-                let finalized_block_hash = header::hash_from_scale_encoded_header(
-                    &subscription.finalized_block_scale_encoded_header,
-                );
-
-                let storage_code_len = u64::try_from(
-                    finalized_block_runtime
-                        .storage_code
-                        .as_ref()
-                        .map_or(0, |v| v.len()),
-                )
-                .unwrap();
-
-                let runtime = Arc::new(Runtime {
-                    runtime_code: finalized_block_runtime.storage_code,
-                    heap_pages: finalized_block_runtime.storage_heap_pages,
-                    code_merkle_value: finalized_block_runtime.code_merkle_value,
-                    closest_ancestor_excluding: finalized_block_runtime.closest_ancestor_excluding,
-                    runtime: Ok(SuccessfulRuntime {
-                        runtime_spec: finalized_block_runtime
-                            .virtual_machine
-                            .runtime_version()
-                            .clone(),
-                        virtual_machine: Mutex::new(Some(finalized_block_runtime.virtual_machine)),
-                    }),
-                });
-
-                match &runtime.runtime {
-                    Ok(runtime) => {
-                        log::info!(
-                            target: &log_target,
-                            "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
-                            runtime.runtime_spec.decode().spec_version,
-                            BytesDisplay(storage_code_len)
-                        );
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            target: &log_target,
-                            "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
-                            This indicates an incompatibility between smoldot and the chain.",
-                            BytesDisplay(storage_code_len),
-                            error
-                        );
-                    }
-                }
-
-                log::debug!(
-                    target: &log_target,
-                    "Worker => RuntimeKnown(finalized_hash={})",
-                    HashDisplay(&finalized_block_hash)
-                );
-
-                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &guarded.tree
-                {
-                    when_known.notify(usize::max_value());
-                }
-
-                guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
-                    all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                        32,
-                        Default::default(),
-                    ), // TODO: capacity?
-                    pinned_blocks: BTreeMap::new(),
-                    finalized_block: Block {
-                        hash: finalized_block_hash,
-                        scale_encoded_header: subscription.finalized_block_scale_encoded_header,
-                    },
-                    tree: {
-                        let mut tree =
-                            async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                finalized_async_user_data: runtime,
-                                retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
-                                blocks_capacity: 32,
-                            });
-
-                        for block in subscription.non_finalized_blocks_ancestry_order {
-                            let parent_index = if block.parent_hash == finalized_block_hash {
-                                None
-                            } else {
-                                Some(
-                                    tree.input_output_iter_unordered()
-                                        .find(|b| b.user_data.hash == block.parent_hash)
-                                        .unwrap()
-                                        .id,
-                                )
-                            };
-
-                            let same_runtime_as_parent = same_runtime_as_parent(
-                                &block.scale_encoded_header,
-                                sync_service.block_number_bytes(),
-                            );
-                            let _ = tree.input_insert_block(
-                                Block {
-                                    hash: header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    ),
-                                    scale_encoded_header: block.scale_encoded_header,
-                                },
-                                parent_index,
-                                same_runtime_as_parent,
-                                block.is_new_best,
-                            );
-                        }
-
-                        tree
-                    },
-                };
-            } else {
-                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &guarded.tree
-                {
-                    when_known.notify(usize::max_value());
-                }
-
-                guarded.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
-                    when_known: event_listener::Event::new(),
-                    tree: {
-                        let mut tree = async_tree::AsyncTree::new(async_tree::Config {
-                            finalized_async_user_data: None,
-                            retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
-                            blocks_capacity: 32,
-                        });
-                        let node_index = tree.input_insert_block(
-                            Block {
-                                hash: header::hash_from_scale_encoded_header(
-                                    &subscription.finalized_block_scale_encoded_header,
-                                ),
-                                scale_encoded_header: subscription
-                                    .finalized_block_scale_encoded_header,
-                            },
-                            None,
-                            false,
-                            true,
-                        );
-                        tree.input_finalize(node_index, node_index);
-
-                        for block in subscription.non_finalized_blocks_ancestry_order {
-                            let parent_index = tree
-                                .input_output_iter_unordered()
-                                .find(|b| b.user_data.hash == block.parent_hash)
-                                .unwrap()
-                                .id;
-
-                            let same_runtime_as_parent = same_runtime_as_parent(
-                                &block.scale_encoded_header,
-                                sync_service.block_number_bytes(),
-                            );
-                            let _ = tree.input_insert_block(
-                                Block {
-                                    hash: header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    ),
-                                    scale_encoded_header: block.scale_encoded_header,
-                                },
-                                Some(parent_index),
-                                same_runtime_as_parent,
-                                block.is_new_best,
-                            );
-                        }
-
-                        tree
-                    },
-                };
-            }
-        }
-
         // State machine containing all the state that will be manipulated below.
         let mut background = Background {
             log_target: log_target.clone(),
@@ -1240,7 +1042,7 @@ async fn run_background<TPlat: PlatformRef>(
             sync_service: sync_service.clone(),
             to_background: Box::pin(to_background.clone()),
             to_background_tx: to_background_tx.clone(),
-            blocks_stream: subscription.new_blocks.boxed(),
+            blocks_stream: None,
             wake_up_new_necessary_download: Box::pin(future::pending()),
             runtime_downloads: stream::FuturesUnordered::new(),
         };
@@ -1250,6 +1052,7 @@ async fn run_background<TPlat: PlatformRef>(
         // Inner loop. Process incoming events.
         loop {
             enum WhatHappened<TPlat: PlatformRef> {
+                MustSubscribe,
                 NewNecessaryDownload,
                 StartPendingSubscribeAll,
                 Notification(Option<sync_service::Notification>),
@@ -1286,7 +1089,13 @@ async fn run_background<TPlat: PlatformRef>(
                         future::pending().await
                     }
                 })
-                .or(async { WhatHappened::Notification(background.blocks_stream.next().await) })
+                .or(async {
+                    if let Some(blocks_stream) = background.blocks_stream.as_mut() {
+                        WhatHappened::Notification(blocks_stream.next().await)
+                    } else {
+                        WhatHappened::MustSubscribe
+                    }
+                })
                 .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
                 .or(async {
                     if !background.runtime_downloads.is_empty() {
@@ -1303,6 +1112,222 @@ async fn run_background<TPlat: PlatformRef>(
             match what_happened {
                 WhatHappened::NewNecessaryDownload => {
                     background.start_necessary_downloads(&mut guarded).await;
+                }
+                WhatHappened::MustSubscribe => {
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of the runtime service resumes.
+                    // Note that this `await` freezes the entire runtime service background task,
+                    // but the sync service guarantees that `subscribe_all` returns very quickly.
+                    let subscription = sync_service.subscribe_all(32, true).await;
+
+                    log::debug!(
+                        target: &log_target,
+                        "Worker <= Reset(finalized_block: {})",
+                        HashDisplay(&header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header
+                        ))
+                    );
+
+                    // Update the state of `guarded` with what we just grabbed.
+                    //
+                    // Note that the content of `guarded` is reset unconditionally.
+                    // It might seem like a good idea to only reset the content of `guarded` if the new
+                    // subscription has a different finalized block than currently. However, there is
+                    // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
+                    // subset or superset of the non-finalized blocks in the new subscription.
+                    // Using the new subscription but keeping the existing tree could therefore result in
+                    // state inconsistencies.
+                    //
+                    // Additionally, the situation where a subscription is killed but the finalized block
+                    // didn't change should be extremely rare anyway.
+                    {
+                        // TODO: restore
+                        /*guarded.best_near_head_of_chain =
+                        is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
+
+                        guarded.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
+
+                        // TODO: DRY below
+                        if let Some(finalized_block_runtime) = subscription.finalized_block_runtime
+                        {
+                            let finalized_block_hash = header::hash_from_scale_encoded_header(
+                                &subscription.finalized_block_scale_encoded_header,
+                            );
+
+                            let storage_code_len = u64::try_from(
+                                finalized_block_runtime
+                                    .storage_code
+                                    .as_ref()
+                                    .map_or(0, |v| v.len()),
+                            )
+                            .unwrap();
+
+                            let runtime = Arc::new(Runtime {
+                                runtime_code: finalized_block_runtime.storage_code,
+                                heap_pages: finalized_block_runtime.storage_heap_pages,
+                                code_merkle_value: finalized_block_runtime.code_merkle_value,
+                                closest_ancestor_excluding: finalized_block_runtime
+                                    .closest_ancestor_excluding,
+                                runtime: Ok(SuccessfulRuntime {
+                                    runtime_spec: finalized_block_runtime
+                                        .virtual_machine
+                                        .runtime_version()
+                                        .clone(),
+                                    virtual_machine: Mutex::new(Some(
+                                        finalized_block_runtime.virtual_machine,
+                                    )),
+                                }),
+                            });
+
+                            match &runtime.runtime {
+                                Ok(runtime) => {
+                                    log::info!(
+                                        target: &log_target,
+                                        "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
+                                        runtime.runtime_spec.decode().spec_version,
+                                        BytesDisplay(storage_code_len)
+                                    );
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        target: &log_target,
+                                        "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
+                                        This indicates an incompatibility between smoldot and the chain.",
+                                        BytesDisplay(storage_code_len),
+                                        error
+                                    );
+                                }
+                            }
+
+                            log::debug!(
+                                target: &log_target,
+                                "Worker => RuntimeKnown(finalized_hash={})",
+                                HashDisplay(&finalized_block_hash)
+                            );
+
+                            if let GuardedInner::FinalizedBlockRuntimeUnknown {
+                                when_known, ..
+                            } = &guarded.tree
+                            {
+                                when_known.notify(usize::max_value());
+                            }
+
+                            guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                                all_blocks_subscriptions:
+                                    hashbrown::HashMap::with_capacity_and_hasher(
+                                        32,
+                                        Default::default(),
+                                    ), // TODO: capacity?
+                                pinned_blocks: BTreeMap::new(),
+                                finalized_block: Block {
+                                    hash: finalized_block_hash,
+                                    scale_encoded_header: subscription
+                                        .finalized_block_scale_encoded_header,
+                                },
+                                tree: {
+                                    let mut tree = async_tree::AsyncTree::<_, Block, _>::new(
+                                        async_tree::Config {
+                                            finalized_async_user_data: runtime,
+                                            retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                            blocks_capacity: 32,
+                                        },
+                                    );
+
+                                    for block in subscription.non_finalized_blocks_ancestry_order {
+                                        let parent_index = if block.parent_hash
+                                            == finalized_block_hash
+                                        {
+                                            None
+                                        } else {
+                                            Some(
+                                                tree.input_output_iter_unordered()
+                                                    .find(|b| b.user_data.hash == block.parent_hash)
+                                                    .unwrap()
+                                                    .id,
+                                            )
+                                        };
+
+                                        let same_runtime_as_parent = same_runtime_as_parent(
+                                            &block.scale_encoded_header,
+                                            sync_service.block_number_bytes(),
+                                        );
+                                        let _ = tree.input_insert_block(
+                                            Block {
+                                                hash: header::hash_from_scale_encoded_header(
+                                                    &block.scale_encoded_header,
+                                                ),
+                                                scale_encoded_header: block.scale_encoded_header,
+                                            },
+                                            parent_index,
+                                            same_runtime_as_parent,
+                                            block.is_new_best,
+                                        );
+                                    }
+
+                                    tree
+                                },
+                            };
+                        } else {
+                            if let GuardedInner::FinalizedBlockRuntimeUnknown {
+                                when_known, ..
+                            } = &guarded.tree
+                            {
+                                when_known.notify(usize::max_value());
+                            }
+
+                            guarded.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
+                                when_known: event_listener::Event::new(),
+                                tree: {
+                                    let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                                        finalized_async_user_data: None,
+                                        retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                        blocks_capacity: 32,
+                                    });
+                                    let node_index = tree.input_insert_block(
+                                        Block {
+                                            hash: header::hash_from_scale_encoded_header(
+                                                &subscription.finalized_block_scale_encoded_header,
+                                            ),
+                                            scale_encoded_header: subscription
+                                                .finalized_block_scale_encoded_header,
+                                        },
+                                        None,
+                                        false,
+                                        true,
+                                    );
+                                    tree.input_finalize(node_index, node_index);
+
+                                    for block in subscription.non_finalized_blocks_ancestry_order {
+                                        let parent_index = tree
+                                            .input_output_iter_unordered()
+                                            .find(|b| b.user_data.hash == block.parent_hash)
+                                            .unwrap()
+                                            .id;
+
+                                        let same_runtime_as_parent = same_runtime_as_parent(
+                                            &block.scale_encoded_header,
+                                            sync_service.block_number_bytes(),
+                                        );
+                                        let _ = tree.input_insert_block(
+                                            Block {
+                                                hash: header::hash_from_scale_encoded_header(
+                                                    &block.scale_encoded_header,
+                                                ),
+                                                scale_encoded_header: block.scale_encoded_header,
+                                            },
+                                            Some(parent_index),
+                                            same_runtime_as_parent,
+                                            block.is_new_best,
+                                        );
+                                    }
+
+                                    tree
+                                },
+                            };
+                        }
+                    }
+
+                    background.blocks_stream = Some(Box::pin(subscription.new_blocks));
                 }
                 WhatHappened::StartPendingSubscribeAll => {
                     // Extract the components of the `FinalizedBlockRuntimeKnown`.
@@ -1857,8 +1882,8 @@ struct Background<TPlat: PlatformRef> {
     /// Sending side of [`Background::to_background`].
     to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
 
-    /// Stream of notifications coming from the sync service.
-    blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
+    /// Stream of notifications coming from the sync service. `None` if not subscribed yet.
+    blocks_stream: Option<Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>>,
 
     /// List of runtimes currently being downloaded from the network.
     /// For each item, the download id, storage value of `:code`, storage value of `:heappages`,
