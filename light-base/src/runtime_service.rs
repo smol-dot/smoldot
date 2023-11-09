@@ -1034,816 +1034,806 @@ async fn run_background<TPlat: PlatformRef>(
     // TODO: move in Background struct
     let mut pending_subscriptions = Vec::<ToBackgroundSubscribeAll<_>>::with_capacity(8);
 
+    // State machine containing all the state that will be manipulated below.
+    let mut background = Background {
+        log_target: log_target.clone(),
+        platform: platform.clone(),
+        sync_service: sync_service.clone(),
+        to_background: Box::pin(to_background.clone()),
+        to_background_tx: to_background_tx.clone(),
+        blocks_stream: None,
+        wake_up_new_necessary_download: Box::pin(future::pending()),
+        runtime_downloads: stream::FuturesUnordered::new(),
+    };
+
+    background.start_necessary_downloads(&mut guarded).await;
+
+    // Inner loop. Process incoming events.
     loop {
-        // State machine containing all the state that will be manipulated below.
-        let mut background = Background {
-            log_target: log_target.clone(),
-            platform: platform.clone(),
-            sync_service: sync_service.clone(),
-            to_background: Box::pin(to_background.clone()),
-            to_background_tx: to_background_tx.clone(),
-            blocks_stream: None,
-            wake_up_new_necessary_download: Box::pin(future::pending()),
-            runtime_downloads: stream::FuturesUnordered::new(),
+        enum WhatHappened<TPlat: PlatformRef> {
+            MustSubscribe,
+            NewNecessaryDownload,
+            StartPendingSubscribeAll,
+            Notification(Option<sync_service::Notification>),
+            ToBackground(Option<ToBackground<TPlat>>),
+            RuntimeDownloadFinished(
+                async_tree::AsyncOpId,
+                Result<
+                    (
+                        Option<Vec<u8>>,
+                        Option<Vec<u8>>,
+                        Option<Vec<u8>>,
+                        Option<Vec<Nibble>>,
+                    ),
+                    RuntimeDownloadError,
+                >,
+            ),
+        }
+
+        let what_happened: WhatHappened<_> = {
+            async {
+                (&mut background.wake_up_new_necessary_download).await;
+                background.wake_up_new_necessary_download = Box::pin(future::pending());
+                WhatHappened::NewNecessaryDownload
+            }
+            .or(async {
+                if !pending_subscriptions.is_empty()
+                    && matches!(
+                        guarded.tree,
+                        GuardedInner::FinalizedBlockRuntimeKnown { .. }
+                    )
+                {
+                    WhatHappened::StartPendingSubscribeAll
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if let Some(blocks_stream) = background.blocks_stream.as_mut() {
+                    WhatHappened::Notification(blocks_stream.next().await)
+                } else {
+                    WhatHappened::MustSubscribe
+                }
+            })
+            .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
+            .or(async {
+                if !background.runtime_downloads.is_empty() {
+                    let (async_op_id, download_result) =
+                        background.runtime_downloads.select_next_some().await;
+                    WhatHappened::RuntimeDownloadFinished(async_op_id, download_result)
+                } else {
+                    future::pending().await
+                }
+            })
+            .await
         };
 
-        background.start_necessary_downloads(&mut guarded).await;
-
-        // Inner loop. Process incoming events.
-        loop {
-            enum WhatHappened<TPlat: PlatformRef> {
-                MustSubscribe,
-                NewNecessaryDownload,
-                StartPendingSubscribeAll,
-                Notification(Option<sync_service::Notification>),
-                ToBackground(Option<ToBackground<TPlat>>),
-                RuntimeDownloadFinished(
-                    async_tree::AsyncOpId,
-                    Result<
-                        (
-                            Option<Vec<u8>>,
-                            Option<Vec<u8>>,
-                            Option<Vec<u8>>,
-                            Option<Vec<Nibble>>,
-                        ),
-                        RuntimeDownloadError,
-                    >,
-                ),
+        match what_happened {
+            WhatHappened::NewNecessaryDownload => {
+                background.start_necessary_downloads(&mut guarded).await;
             }
+            WhatHappened::MustSubscribe => {
+                // The buffer size should be large enough so that, if the CPU is busy, it
+                // doesn't become full before the execution of the runtime service resumes.
+                // Note that this `await` freezes the entire runtime service background task,
+                // but the sync service guarantees that `subscribe_all` returns very quickly.
+                let subscription = sync_service.subscribe_all(32, true).await;
 
-            let what_happened: WhatHappened<_> = {
-                async {
-                    (&mut background.wake_up_new_necessary_download).await;
-                    background.wake_up_new_necessary_download = Box::pin(future::pending());
-                    WhatHappened::NewNecessaryDownload
-                }
-                .or(async {
-                    if !pending_subscriptions.is_empty()
-                        && matches!(
-                            guarded.tree,
-                            GuardedInner::FinalizedBlockRuntimeKnown { .. }
+                log::debug!(
+                    target: &log_target,
+                    "Worker <= Reset(finalized_block: {})",
+                    HashDisplay(&header::hash_from_scale_encoded_header(
+                        &subscription.finalized_block_scale_encoded_header
+                    ))
+                );
+
+                // Update the state of `guarded` with what we just grabbed.
+                //
+                // Note that the content of `guarded` is reset unconditionally.
+                // It might seem like a good idea to only reset the content of `guarded` if the new
+                // subscription has a different finalized block than currently. However, there is
+                // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
+                // subset or superset of the non-finalized blocks in the new subscription.
+                // Using the new subscription but keeping the existing tree could therefore result in
+                // state inconsistencies.
+                //
+                // Additionally, the situation where a subscription is killed but the finalized block
+                // didn't change should be extremely rare anyway.
+                {
+                    // TODO: restore
+                    /*guarded.best_near_head_of_chain =
+                    is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
+
+                    guarded.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
+
+                    // TODO: DRY below
+                    if let Some(finalized_block_runtime) = subscription.finalized_block_runtime {
+                        let finalized_block_hash = header::hash_from_scale_encoded_header(
+                            &subscription.finalized_block_scale_encoded_header,
+                        );
+
+                        let storage_code_len = u64::try_from(
+                            finalized_block_runtime
+                                .storage_code
+                                .as_ref()
+                                .map_or(0, |v| v.len()),
                         )
-                    {
-                        WhatHappened::StartPendingSubscribeAll
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .or(async {
-                    if let Some(blocks_stream) = background.blocks_stream.as_mut() {
-                        WhatHappened::Notification(blocks_stream.next().await)
-                    } else {
-                        WhatHappened::MustSubscribe
-                    }
-                })
-                .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
-                .or(async {
-                    if !background.runtime_downloads.is_empty() {
-                        let (async_op_id, download_result) =
-                            background.runtime_downloads.select_next_some().await;
-                        WhatHappened::RuntimeDownloadFinished(async_op_id, download_result)
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .await
-            };
+                        .unwrap();
 
-            match what_happened {
-                WhatHappened::NewNecessaryDownload => {
-                    background.start_necessary_downloads(&mut guarded).await;
-                }
-                WhatHappened::MustSubscribe => {
-                    // The buffer size should be large enough so that, if the CPU is busy, it
-                    // doesn't become full before the execution of the runtime service resumes.
-                    // Note that this `await` freezes the entire runtime service background task,
-                    // but the sync service guarantees that `subscribe_all` returns very quickly.
-                    let subscription = sync_service.subscribe_all(32, true).await;
+                        let runtime = Arc::new(Runtime {
+                            runtime_code: finalized_block_runtime.storage_code,
+                            heap_pages: finalized_block_runtime.storage_heap_pages,
+                            code_merkle_value: finalized_block_runtime.code_merkle_value,
+                            closest_ancestor_excluding: finalized_block_runtime
+                                .closest_ancestor_excluding,
+                            runtime: Ok(SuccessfulRuntime {
+                                runtime_spec: finalized_block_runtime
+                                    .virtual_machine
+                                    .runtime_version()
+                                    .clone(),
+                                virtual_machine: Mutex::new(Some(
+                                    finalized_block_runtime.virtual_machine,
+                                )),
+                            }),
+                        });
 
-                    log::debug!(
-                        target: &log_target,
-                        "Worker <= Reset(finalized_block: {})",
-                        HashDisplay(&header::hash_from_scale_encoded_header(
-                            &subscription.finalized_block_scale_encoded_header
-                        ))
-                    );
+                        match &runtime.runtime {
+                            Ok(runtime) => {
+                                log::info!(
+                                    target: &log_target,
+                                    "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
+                                    runtime.runtime_spec.decode().spec_version,
+                                    BytesDisplay(storage_code_len)
+                                );
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    target: &log_target,
+                                    "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
+                                    This indicates an incompatibility between smoldot and the chain.",
+                                    BytesDisplay(storage_code_len),
+                                    error
+                                );
+                            }
+                        }
 
-                    // Update the state of `guarded` with what we just grabbed.
-                    //
-                    // Note that the content of `guarded` is reset unconditionally.
-                    // It might seem like a good idea to only reset the content of `guarded` if the new
-                    // subscription has a different finalized block than currently. However, there is
-                    // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
-                    // subset or superset of the non-finalized blocks in the new subscription.
-                    // Using the new subscription but keeping the existing tree could therefore result in
-                    // state inconsistencies.
-                    //
-                    // Additionally, the situation where a subscription is killed but the finalized block
-                    // didn't change should be extremely rare anyway.
-                    {
-                        // TODO: restore
-                        /*guarded.best_near_head_of_chain =
-                        is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
+                        log::debug!(
+                            target: &log_target,
+                            "Worker => RuntimeKnown(finalized_hash={})",
+                            HashDisplay(&finalized_block_hash)
+                        );
 
-                        guarded.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
-
-                        // TODO: DRY below
-                        if let Some(finalized_block_runtime) = subscription.finalized_block_runtime
+                        if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } =
+                            &guarded.tree
                         {
-                            let finalized_block_hash = header::hash_from_scale_encoded_header(
-                                &subscription.finalized_block_scale_encoded_header,
-                            );
+                            when_known.notify(usize::max_value());
+                        }
 
-                            let storage_code_len = u64::try_from(
-                                finalized_block_runtime
-                                    .storage_code
-                                    .as_ref()
-                                    .map_or(0, |v| v.len()),
-                            )
-                            .unwrap();
-
-                            let runtime = Arc::new(Runtime {
-                                runtime_code: finalized_block_runtime.storage_code,
-                                heap_pages: finalized_block_runtime.storage_heap_pages,
-                                code_merkle_value: finalized_block_runtime.code_merkle_value,
-                                closest_ancestor_excluding: finalized_block_runtime
-                                    .closest_ancestor_excluding,
-                                runtime: Ok(SuccessfulRuntime {
-                                    runtime_spec: finalized_block_runtime
-                                        .virtual_machine
-                                        .runtime_version()
-                                        .clone(),
-                                    virtual_machine: Mutex::new(Some(
-                                        finalized_block_runtime.virtual_machine,
-                                    )),
-                                }),
-                            });
-
-                            match &runtime.runtime {
-                                Ok(runtime) => {
-                                    log::info!(
-                                        target: &log_target,
-                                        "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
-                                        runtime.runtime_spec.decode().spec_version,
-                                        BytesDisplay(storage_code_len)
-                                    );
-                                }
-                                Err(error) => {
-                                    log::warn!(
-                                        target: &log_target,
-                                        "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
-                                        This indicates an incompatibility between smoldot and the chain.",
-                                        BytesDisplay(storage_code_len),
-                                        error
-                                    );
-                                }
-                            }
-
-                            log::debug!(
-                                target: &log_target,
-                                "Worker => RuntimeKnown(finalized_hash={})",
-                                HashDisplay(&finalized_block_hash)
-                            );
-
-                            if let GuardedInner::FinalizedBlockRuntimeUnknown {
-                                when_known, ..
-                            } = &guarded.tree
-                            {
-                                when_known.notify(usize::max_value());
-                            }
-
-                            guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
-                                all_blocks_subscriptions:
-                                    hashbrown::HashMap::with_capacity_and_hasher(
-                                        32,
-                                        Default::default(),
-                                    ), // TODO: capacity?
-                                pinned_blocks: BTreeMap::new(),
-                                finalized_block: Block {
-                                    hash: finalized_block_hash,
-                                    scale_encoded_header: subscription
-                                        .finalized_block_scale_encoded_header,
-                                },
-                                tree: {
-                                    let mut tree = async_tree::AsyncTree::<_, Block, _>::new(
-                                        async_tree::Config {
-                                            finalized_async_user_data: runtime,
-                                            retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
-                                            blocks_capacity: 32,
-                                        },
-                                    );
-
-                                    for block in subscription.non_finalized_blocks_ancestry_order {
-                                        let parent_index = if block.parent_hash
-                                            == finalized_block_hash
-                                        {
-                                            None
-                                        } else {
-                                            Some(
-                                                tree.input_output_iter_unordered()
-                                                    .find(|b| b.user_data.hash == block.parent_hash)
-                                                    .unwrap()
-                                                    .id,
-                                            )
-                                        };
-
-                                        let same_runtime_as_parent = same_runtime_as_parent(
-                                            &block.scale_encoded_header,
-                                            sync_service.block_number_bytes(),
-                                        );
-                                        let _ = tree.input_insert_block(
-                                            Block {
-                                                hash: header::hash_from_scale_encoded_header(
-                                                    &block.scale_encoded_header,
-                                                ),
-                                                scale_encoded_header: block.scale_encoded_header,
-                                            },
-                                            parent_index,
-                                            same_runtime_as_parent,
-                                            block.is_new_best,
-                                        );
-                                    }
-
-                                    tree
-                                },
-                            };
-                        } else {
-                            if let GuardedInner::FinalizedBlockRuntimeUnknown {
-                                when_known, ..
-                            } = &guarded.tree
-                            {
-                                when_known.notify(usize::max_value());
-                            }
-
-                            guarded.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
-                                when_known: event_listener::Event::new(),
-                                tree: {
-                                    let mut tree = async_tree::AsyncTree::new(async_tree::Config {
-                                        finalized_async_user_data: None,
+                        guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                            all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                                32,
+                                Default::default(),
+                            ), // TODO: capacity?
+                            pinned_blocks: BTreeMap::new(),
+                            finalized_block: Block {
+                                hash: finalized_block_hash,
+                                scale_encoded_header: subscription
+                                    .finalized_block_scale_encoded_header,
+                            },
+                            tree: {
+                                let mut tree =
+                                    async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
+                                        finalized_async_user_data: runtime,
                                         retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
                                         blocks_capacity: 32,
                                     });
-                                    let node_index = tree.input_insert_block(
+
+                                for block in subscription.non_finalized_blocks_ancestry_order {
+                                    let parent_index = if block.parent_hash == finalized_block_hash
+                                    {
+                                        None
+                                    } else {
+                                        Some(
+                                            tree.input_output_iter_unordered()
+                                                .find(|b| b.user_data.hash == block.parent_hash)
+                                                .unwrap()
+                                                .id,
+                                        )
+                                    };
+
+                                    let same_runtime_as_parent = same_runtime_as_parent(
+                                        &block.scale_encoded_header,
+                                        sync_service.block_number_bytes(),
+                                    );
+                                    let _ = tree.input_insert_block(
                                         Block {
                                             hash: header::hash_from_scale_encoded_header(
-                                                &subscription.finalized_block_scale_encoded_header,
+                                                &block.scale_encoded_header,
                                             ),
-                                            scale_encoded_header: subscription
-                                                .finalized_block_scale_encoded_header,
+                                            scale_encoded_header: block.scale_encoded_header,
                                         },
-                                        None,
-                                        false,
-                                        true,
+                                        parent_index,
+                                        same_runtime_as_parent,
+                                        block.is_new_best,
                                     );
-                                    tree.input_finalize(node_index, node_index);
+                                }
 
-                                    for block in subscription.non_finalized_blocks_ancestry_order {
-                                        let parent_index = tree
-                                            .input_output_iter_unordered()
-                                            .find(|b| b.user_data.hash == block.parent_hash)
-                                            .unwrap()
-                                            .id;
-
-                                        let same_runtime_as_parent = same_runtime_as_parent(
-                                            &block.scale_encoded_header,
-                                            sync_service.block_number_bytes(),
-                                        );
-                                        let _ = tree.input_insert_block(
-                                            Block {
-                                                hash: header::hash_from_scale_encoded_header(
-                                                    &block.scale_encoded_header,
-                                                ),
-                                                scale_encoded_header: block.scale_encoded_header,
-                                            },
-                                            Some(parent_index),
-                                            same_runtime_as_parent,
-                                            block.is_new_best,
-                                        );
-                                    }
-
-                                    tree
-                                },
-                            };
+                                tree
+                            },
+                        };
+                    } else {
+                        if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } =
+                            &guarded.tree
+                        {
+                            when_known.notify(usize::max_value());
                         }
-                    }
 
-                    background.blocks_stream = Some(Box::pin(subscription.new_blocks));
+                        guarded.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
+                            when_known: event_listener::Event::new(),
+                            tree: {
+                                let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                                    finalized_async_user_data: None,
+                                    retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                    blocks_capacity: 32,
+                                });
+                                let node_index = tree.input_insert_block(
+                                    Block {
+                                        hash: header::hash_from_scale_encoded_header(
+                                            &subscription.finalized_block_scale_encoded_header,
+                                        ),
+                                        scale_encoded_header: subscription
+                                            .finalized_block_scale_encoded_header,
+                                    },
+                                    None,
+                                    false,
+                                    true,
+                                );
+                                tree.input_finalize(node_index, node_index);
+
+                                for block in subscription.non_finalized_blocks_ancestry_order {
+                                    let parent_index = tree
+                                        .input_output_iter_unordered()
+                                        .find(|b| b.user_data.hash == block.parent_hash)
+                                        .unwrap()
+                                        .id;
+
+                                    let same_runtime_as_parent = same_runtime_as_parent(
+                                        &block.scale_encoded_header,
+                                        sync_service.block_number_bytes(),
+                                    );
+                                    let _ = tree.input_insert_block(
+                                        Block {
+                                            hash: header::hash_from_scale_encoded_header(
+                                                &block.scale_encoded_header,
+                                            ),
+                                            scale_encoded_header: block.scale_encoded_header,
+                                        },
+                                        Some(parent_index),
+                                        same_runtime_as_parent,
+                                        block.is_new_best,
+                                    );
+                                }
+
+                                tree
+                            },
+                        };
+                    }
                 }
-                WhatHappened::StartPendingSubscribeAll => {
-                    // Extract the components of the `FinalizedBlockRuntimeKnown`.
-                    let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
-                        match &mut guarded.tree {
-                            GuardedInner::FinalizedBlockRuntimeKnown {
-                                tree,
-                                finalized_block,
-                                pinned_blocks,
-                                all_blocks_subscriptions,
-                            } => (
-                                tree,
-                                finalized_block,
-                                pinned_blocks,
-                                all_blocks_subscriptions,
-                            ),
-                            _ => continue,
+
+                background.blocks_stream = Some(Box::pin(subscription.new_blocks));
+                background.wake_up_new_necessary_download = Box::pin(future::pending());
+                background.runtime_downloads = stream::FuturesUnordered::new();
+            }
+            WhatHappened::StartPendingSubscribeAll => {
+                // Extract the components of the `FinalizedBlockRuntimeKnown`.
+                let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
+                    match &mut guarded.tree {
+                        GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree,
+                            finalized_block,
+                            pinned_blocks,
+                            all_blocks_subscriptions,
+                        } => (
+                            tree,
+                            finalized_block,
+                            pinned_blocks,
+                            all_blocks_subscriptions,
+                        ),
+                        _ => continue,
+                    };
+
+                for pending_subscription in pending_subscriptions.drain(..) {
+                    let (tx, new_blocks_channel) =
+                        async_channel::bounded(pending_subscription.buffer_size);
+                    let subscription_id = guarded.next_subscription_id;
+                    debug_assert_eq!(
+                        pinned_blocks
+                            .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
+                            .count(),
+                        0
+                    );
+                    guarded.next_subscription_id += 1;
+
+                    let decoded_finalized_block = header::decode(
+                        &finalized_block.scale_encoded_header,
+                        background.sync_service.block_number_bytes(),
+                    )
+                    .unwrap();
+
+                    let _prev_value = pinned_blocks.insert(
+                        (subscription_id, finalized_block.hash),
+                        PinnedBlock {
+                            runtime: tree.output_finalized_async_user_data().clone(),
+                            state_trie_root_hash: *decoded_finalized_block.state_root,
+                            block_number: decoded_finalized_block.number,
+                            block_ignores_limit: false,
+                        },
+                    );
+                    debug_assert!(_prev_value.is_none());
+
+                    let mut non_finalized_blocks_ancestry_order =
+                        Vec::with_capacity(tree.num_input_non_finalized_blocks());
+                    for block in tree.input_output_iter_ancestry_order() {
+                        let runtime = match block.async_op_user_data {
+                            Some(rt) => rt.clone(),
+                            None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
                         };
 
-                    for pending_subscription in pending_subscriptions.drain(..) {
-                        let (tx, new_blocks_channel) =
-                            async_channel::bounded(pending_subscription.buffer_size);
-                        let subscription_id = guarded.next_subscription_id;
-                        debug_assert_eq!(
-                            pinned_blocks
-                                .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
-                                .count(),
-                            0
+                        let block_hash = block.user_data.hash;
+                        let parent_runtime = tree.parent(block.id).map_or(
+                            tree.output_finalized_async_user_data().clone(),
+                            |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
                         );
-                        guarded.next_subscription_id += 1;
 
-                        let decoded_finalized_block = header::decode(
-                            &finalized_block.scale_encoded_header,
+                        let parent_hash = *header::decode(
+                            &block.user_data.scale_encoded_header,
+                            background.sync_service.block_number_bytes(),
+                        )
+                        .unwrap()
+                        .parent_hash; // TODO: correct? if yes, document
+                        debug_assert!(
+                            parent_hash == finalized_block.hash
+                                || tree
+                                    .input_output_iter_ancestry_order()
+                                    .any(|b| parent_hash == b.user_data.hash
+                                        && b.async_op_user_data.is_some())
+                        );
+
+                        let decoded_header = header::decode(
+                            &block.user_data.scale_encoded_header,
                             background.sync_service.block_number_bytes(),
                         )
                         .unwrap();
 
                         let _prev_value = pinned_blocks.insert(
-                            (subscription_id, finalized_block.hash),
+                            (subscription_id, block_hash),
                             PinnedBlock {
-                                runtime: tree.output_finalized_async_user_data().clone(),
-                                state_trie_root_hash: *decoded_finalized_block.state_root,
-                                block_number: decoded_finalized_block.number,
-                                block_ignores_limit: false,
+                                runtime: runtime.clone(),
+                                state_trie_root_hash: *decoded_header.state_root,
+                                block_number: decoded_header.number,
+                                block_ignores_limit: true,
                             },
                         );
                         debug_assert!(_prev_value.is_none());
 
-                        let mut non_finalized_blocks_ancestry_order =
-                            Vec::with_capacity(tree.num_input_non_finalized_blocks());
-                        for block in tree.input_output_iter_ancestry_order() {
-                            let runtime = match block.async_op_user_data {
-                                Some(rt) => rt.clone(),
-                                None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
-                            };
-
-                            let block_hash = block.user_data.hash;
-                            let parent_runtime = tree.parent(block.id).map_or(
-                                tree.output_finalized_async_user_data().clone(),
-                                |parent_idx| {
-                                    tree.block_async_user_data(parent_idx).unwrap().clone()
-                                },
-                            );
-
-                            let parent_hash = *header::decode(
-                                &block.user_data.scale_encoded_header,
-                                background.sync_service.block_number_bytes(),
-                            )
-                            .unwrap()
-                            .parent_hash; // TODO: correct? if yes, document
-                            debug_assert!(
-                                parent_hash == finalized_block.hash
-                                    || tree
-                                        .input_output_iter_ancestry_order()
-                                        .any(|b| parent_hash == b.user_data.hash
-                                            && b.async_op_user_data.is_some())
-                            );
-
-                            let decoded_header = header::decode(
-                                &block.user_data.scale_encoded_header,
-                                background.sync_service.block_number_bytes(),
-                            )
-                            .unwrap();
-
-                            let _prev_value = pinned_blocks.insert(
-                                (subscription_id, block_hash),
-                                PinnedBlock {
-                                    runtime: runtime.clone(),
-                                    state_trie_root_hash: *decoded_header.state_root,
-                                    block_number: decoded_header.number,
-                                    block_ignores_limit: true,
-                                },
-                            );
-                            debug_assert!(_prev_value.is_none());
-
-                            non_finalized_blocks_ancestry_order.push(BlockNotification {
-                                is_new_best: block.is_output_best,
-                                parent_hash,
-                                scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                                new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
-                                    Some(
-                                        runtime
-                                            .runtime
-                                            .as_ref()
-                                            .map(|rt| rt.runtime_spec.clone())
-                                            .map_err(|err| err.clone()),
-                                    )
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-
-                        debug_assert!(matches!(
-                            non_finalized_blocks_ancestry_order
-                                .iter()
-                                .filter(|b| b.is_new_best)
-                                .count(),
-                            0 | 1
-                        ));
-
-                        all_blocks_subscriptions.insert(
-                            subscription_id,
-                            (
-                                pending_subscription.subscription_name,
-                                tx,
-                                pending_subscription.max_pinned_blocks.get() - 1,
-                            ),
-                        );
-
-                        let _ = pending_subscription.result_tx.send(SubscribeAll {
-                            finalized_block_scale_encoded_header: finalized_block
-                                .scale_encoded_header
-                                .clone(),
-                            finalized_block_runtime: tree
-                                .output_finalized_async_user_data()
-                                .runtime
-                                .as_ref()
-                                .map(|rt| rt.runtime_spec.clone())
-                                .map_err(|err| err.clone()),
-                            non_finalized_blocks_ancestry_order,
-                            new_blocks: Subscription {
-                                subscription_id,
-                                channel: Box::pin(new_blocks_channel),
-                                to_background: background.to_background_tx.upgrade().unwrap(),
+                        non_finalized_blocks_ancestry_order.push(BlockNotification {
+                            is_new_best: block.is_output_best,
+                            parent_hash,
+                            scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                            new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
+                                Some(
+                                    runtime
+                                        .runtime
+                                        .as_ref()
+                                        .map(|rt| rt.runtime_spec.clone())
+                                        .map_err(|err| err.clone()),
+                                )
+                            } else {
+                                None
                             },
                         });
                     }
-                }
-                WhatHappened::Notification(None) => {
-                    break; // Break out of the inner loop in order to reset the background.
-                }
-                WhatHappened::ToBackground(None) => todo!(),
-                WhatHappened::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
-                    // In order to avoid potentially growing `pending_subscriptions` forever, we
-                    // remove senders that are closed. This is `O(n)`, but we expect this list to
-                    // be rather small.
-                    pending_subscriptions.retain(|s| !s.result_tx.is_canceled());
-                    pending_subscriptions.push(msg);
-                }
-                WhatHappened::ToBackground(Some(ToBackground::CompileAndPinRuntime {
-                    result_tx,
-                    storage_code,
-                    storage_heap_pages,
-                    code_merkle_value,
-                    closest_ancestor_excluding,
-                })) => {
-                    // Try to find an existing identical runtime.
-                    let existing_runtime = guarded
-                        .runtimes
-                        .iter()
-                        .filter_map(|(_, rt)| rt.upgrade())
-                        .find(|rt| {
-                            rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
-                        });
 
-                    let runtime = if let Some(existing_runtime) = existing_runtime {
-                        existing_runtime
-                    } else {
-                        // No identical runtime was found. Try compiling the new runtime.
-                        let runtime =
-                            SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages)
-                                .await;
-                        let runtime = Arc::new(Runtime {
-                            heap_pages: storage_heap_pages,
-                            runtime_code: storage_code,
-                            code_merkle_value,
-                            closest_ancestor_excluding,
-                            runtime,
-                        });
-                        guarded.runtimes.insert(Arc::downgrade(&runtime));
-                        runtime
-                    };
+                    debug_assert!(matches!(
+                        non_finalized_blocks_ancestry_order
+                            .iter()
+                            .filter(|b| b.is_new_best)
+                            .count(),
+                        0 | 1
+                    ));
 
-                    let _ = result_tx.send(runtime);
-                }
-                WhatHappened::ToBackground(Some(
-                    ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
-                )) => {
-                    let _ = result_tx.send(
-                        if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree
-                        {
-                            let runtime = &tree.output_finalized_async_user_data();
-                            Some((
-                                runtime.runtime_code.clone(),
-                                runtime.code_merkle_value.clone(),
-                                runtime.closest_ancestor_excluding.clone(),
-                            ))
-                        } else {
-                            None
+                    all_blocks_subscriptions.insert(
+                        subscription_id,
+                        (
+                            pending_subscription.subscription_name,
+                            tx,
+                            pending_subscription.max_pinned_blocks.get() - 1,
+                        ),
+                    );
+
+                    let _ = pending_subscription.result_tx.send(SubscribeAll {
+                        finalized_block_scale_encoded_header: finalized_block
+                            .scale_encoded_header
+                            .clone(),
+                        finalized_block_runtime: tree
+                            .output_finalized_async_user_data()
+                            .runtime
+                            .as_ref()
+                            .map(|rt| rt.runtime_spec.clone())
+                            .map_err(|err| err.clone()),
+                        non_finalized_blocks_ancestry_order,
+                        new_blocks: Subscription {
+                            subscription_id,
+                            channel: Box::pin(new_blocks_channel),
+                            to_background: background.to_background_tx.upgrade().unwrap(),
                         },
-                    );
+                    });
                 }
-                WhatHappened::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
-                    result_tx,
-                })) => {
-                    let _ = result_tx.send(
-                        is_near_head_of_chain_heuristic(&background.sync_service, &guarded).await,
-                    );
+            }
+            WhatHappened::Notification(None) => {
+                // The sync service has reset the subscription.
+                background.blocks_stream = None;
+            }
+            WhatHappened::ToBackground(None) => todo!(),
+            WhatHappened::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
+                // In order to avoid potentially growing `pending_subscriptions` forever, we
+                // remove senders that are closed. This is `O(n)`, but we expect this list to
+                // be rather small.
+                pending_subscriptions.retain(|s| !s.result_tx.is_canceled());
+                pending_subscriptions.push(msg);
+            }
+            WhatHappened::ToBackground(Some(ToBackground::CompileAndPinRuntime {
+                result_tx,
+                storage_code,
+                storage_heap_pages,
+                code_merkle_value,
+                closest_ancestor_excluding,
+            })) => {
+                // Try to find an existing identical runtime.
+                let existing_runtime = guarded
+                    .runtimes
+                    .iter()
+                    .filter_map(|(_, rt)| rt.upgrade())
+                    .find(|rt| {
+                        rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
+                    });
+
+                let runtime = if let Some(existing_runtime) = existing_runtime {
+                    existing_runtime
+                } else {
+                    // No identical runtime was found. Try compiling the new runtime.
+                    let runtime =
+                        SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+                    let runtime = Arc::new(Runtime {
+                        heap_pages: storage_heap_pages,
+                        runtime_code: storage_code,
+                        code_merkle_value,
+                        closest_ancestor_excluding,
+                        runtime,
+                    });
+                    guarded.runtimes.insert(Arc::downgrade(&runtime));
+                    runtime
+                };
+
+                let _ = result_tx.send(runtime);
+            }
+            WhatHappened::ToBackground(Some(
+                ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
+            )) => {
+                let _ = result_tx.send(
+                    if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree {
+                        let runtime = &tree.output_finalized_async_user_data();
+                        Some((
+                            runtime.runtime_code.clone(),
+                            runtime.code_merkle_value.clone(),
+                            runtime.closest_ancestor_excluding.clone(),
+                        ))
+                    } else {
+                        None
+                    },
+                );
+            }
+            WhatHappened::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
+                result_tx,
+            })) => {
+                let _ = result_tx.send(
+                    is_near_head_of_chain_heuristic(&background.sync_service, &guarded).await,
+                );
+            }
+            WhatHappened::ToBackground(Some(ToBackground::UnpinBlock {
+                result_tx,
+                subscription_id,
+                block_hash,
+            })) => {
+                if let GuardedInner::FinalizedBlockRuntimeKnown {
+                    all_blocks_subscriptions,
+                    pinned_blocks,
+                    ..
+                } = &mut guarded.tree
+                {
+                    let block_ignores_limit =
+                        match pinned_blocks.remove(&(subscription_id.0, block_hash)) {
+                            Some(b) => b.block_ignores_limit,
+                            None => {
+                                // Cold path.
+                                // TODO: subscription name was used here but no longer is; get rid of this concept?
+                                if let Some((_, _, _)) =
+                                    all_blocks_subscriptions.get(&subscription_id.0)
+                                {
+                                    let _ = result_tx.send(Err(()));
+                                } else {
+                                    let _ = result_tx.send(Ok(()));
+                                }
+                                continue;
+                            }
+                        };
+
+                    guarded.runtimes.retain(|_, rt| rt.strong_count() > 0);
+
+                    if !block_ignores_limit {
+                        let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
+                            .get_mut(&subscription_id.0)
+                            .unwrap();
+                        *finalized_pinned_remaining += 1;
+                    }
                 }
-                WhatHappened::ToBackground(Some(ToBackground::UnpinBlock {
-                    result_tx,
-                    subscription_id,
-                    block_hash,
-                })) => {
+
+                let _ = result_tx.send(Ok(()));
+            }
+            WhatHappened::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
+                result_tx,
+                subscription_id,
+                block_hash,
+            })) => {
+                let pinned_block = {
                     if let GuardedInner::FinalizedBlockRuntimeKnown {
                         all_blocks_subscriptions,
                         pinned_blocks,
                         ..
                     } = &mut guarded.tree
                     {
-                        let block_ignores_limit =
-                            match pinned_blocks.remove(&(subscription_id.0, block_hash)) {
-                                Some(b) => b.block_ignores_limit,
-                                None => {
-                                    // Cold path.
-                                    // TODO: subscription name was used here but no longer is; get rid of this concept?
-                                    if let Some((_, _, _)) =
-                                        all_blocks_subscriptions.get(&subscription_id.0)
-                                    {
-                                        let _ = result_tx.send(Err(()));
-                                    } else {
-                                        let _ = result_tx.send(Ok(()));
-                                    }
-                                    continue;
+                        match pinned_blocks.get(&(subscription_id.0, block_hash)) {
+                            Some(v) => v.clone(),
+                            None => {
+                                // Cold path.
+                                // TODO: subscription name was used here but no longer is; remove this concept?
+                                if let Some((_, _, _)) =
+                                    all_blocks_subscriptions.get(&subscription_id.0)
+                                {
+                                    let _ = result_tx.send(Err(()));
+                                } else {
+                                    let _ = result_tx.send(Ok(Err(
+                                        PinnedBlockRuntimeAccessError::ObsoleteSubscription,
+                                    )));
                                 }
-                            };
-
-                        guarded.runtimes.retain(|_, rt| rt.strong_count() > 0);
-
-                        if !block_ignores_limit {
-                            let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
-                                .get_mut(&subscription_id.0)
-                                .unwrap();
-                            *finalized_pinned_remaining += 1;
+                                continue;
+                            }
                         }
+                    } else {
+                        let _ = result_tx
+                            .send(Ok(Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)));
+                        continue;
                     }
+                };
 
-                    let _ = result_tx.send(Ok(()));
-                }
-                WhatHappened::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
-                    result_tx,
-                    subscription_id,
-                    block_hash,
-                })) => {
-                    let pinned_block = {
-                        if let GuardedInner::FinalizedBlockRuntimeKnown {
-                            all_blocks_subscriptions,
-                            pinned_blocks,
-                            ..
-                        } = &mut guarded.tree
-                        {
-                            match pinned_blocks.get(&(subscription_id.0, block_hash)) {
-                                Some(v) => v.clone(),
-                                None => {
-                                    // Cold path.
-                                    // TODO: subscription name was used here but no longer is; remove this concept?
-                                    if let Some((_, _, _)) =
-                                        all_blocks_subscriptions.get(&subscription_id.0)
-                                    {
-                                        let _ = result_tx.send(Err(()));
-                                    } else {
-                                        let _ = result_tx.send(Ok(Err(
-                                            PinnedBlockRuntimeAccessError::ObsoleteSubscription,
-                                        )));
-                                    }
-                                    continue;
-                                }
-                            }
-                        } else {
-                            let _ = result_tx
-                                .send(Ok(Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)));
-                            continue;
-                        }
-                    };
+                let _ = result_tx.send(Ok(Ok(RuntimeAccess {
+                    sync_service: background.sync_service.clone(),
+                    hash: block_hash,
+                    runtime: pinned_block.runtime,
+                    block_number: pinned_block.block_number,
+                    block_state_root_hash: pinned_block.state_trie_root_hash,
+                })));
+            }
+            WhatHappened::Notification(Some(notification)) => {
+                match notification {
+                    sync_service::Notification::Block(new_block) => {
+                        log::debug!(
+                            target: &log_target,
+                            "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
+                            HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
+                            HashDisplay(&new_block.parent_hash),
+                            new_block.is_new_best
+                        );
 
-                    let _ = result_tx.send(Ok(Ok(RuntimeAccess {
-                        sync_service: background.sync_service.clone(),
-                        hash: block_hash,
-                        runtime: pinned_block.runtime,
-                        block_number: pinned_block.block_number,
-                        block_state_root_hash: pinned_block.state_trie_root_hash,
-                    })));
-                }
-                WhatHappened::Notification(Some(notification)) => {
-                    match notification {
-                        sync_service::Notification::Block(new_block) => {
-                            log::debug!(
-                                target: &log_target,
-                                "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
-                                HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
-                                HashDisplay(&new_block.parent_hash),
-                                new_block.is_new_best
-                            );
+                        let near_head_of_chain = background
+                            .sync_service
+                            .is_near_head_of_chain_heuristic()
+                            .await;
 
-                            let near_head_of_chain = background
-                                .sync_service
-                                .is_near_head_of_chain_heuristic()
-                                .await;
-
-                            // TODO: note that this code is never reached for parachains
-                            if new_block.is_new_best {
-                                guarded.best_near_head_of_chain = near_head_of_chain;
-                            }
-
-                            let same_runtime_as_parent = same_runtime_as_parent(
-                                &new_block.scale_encoded_header,
-                                sync_service.block_number_bytes(),
-                            );
-
-                            match &mut guarded.tree {
-                                GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree,
-                                    finalized_block,
-                                    ..
-                                } => {
-                                    let parent_index = if new_block.parent_hash
-                                        == finalized_block.hash
-                                    {
-                                        None
-                                    } else {
-                                        Some(
-                                            tree.input_output_iter_unordered()
-                                                .find(|block| {
-                                                    block.user_data.hash == new_block.parent_hash
-                                                })
-                                                .unwrap()
-                                                .id,
-                                        )
-                                    };
-
-                                    tree.input_insert_block(
-                                        Block {
-                                            hash: header::hash_from_scale_encoded_header(
-                                                &new_block.scale_encoded_header,
-                                            ),
-                                            scale_encoded_header: new_block.scale_encoded_header,
-                                        },
-                                        parent_index,
-                                        same_runtime_as_parent,
-                                        new_block.is_new_best,
-                                    );
-                                }
-                                GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let parent_index = tree
-                                        .input_output_iter_unordered()
-                                        .find(|block| block.user_data.hash == new_block.parent_hash)
-                                        .unwrap()
-                                        .id;
-                                    tree.input_insert_block(
-                                        Block {
-                                            hash: header::hash_from_scale_encoded_header(
-                                                &new_block.scale_encoded_header,
-                                            ),
-                                            scale_encoded_header: new_block.scale_encoded_header,
-                                        },
-                                        Some(parent_index),
-                                        same_runtime_as_parent,
-                                        new_block.is_new_best,
-                                    );
-                                }
-                            }
-
-                            background.advance_and_notify_subscribers(&mut guarded);
-                        }
-                        sync_service::Notification::Finalized {
-                            hash,
-                            best_block_hash,
-                        } => {
-                            log::debug!(
-                                target: &log_target,
-                                "Worker <= InputFinalized(hash={}, best={})",
-                                HashDisplay(&hash), HashDisplay(&best_block_hash)
-                            );
-
-                            background
-                                .finalize(&mut guarded, hash, best_block_hash)
-                                .await;
-                        }
-                        sync_service::Notification::BestBlockChanged { hash } => {
-                            log::debug!(
-                                target: &log_target,
-                                "Worker <= BestBlockChanged(hash={})",
-                                HashDisplay(&hash)
-                            );
-
-                            let near_head_of_chain = background
-                                .sync_service
-                                .is_near_head_of_chain_heuristic()
-                                .await;
-
+                        // TODO: note that this code is never reached for parachains
+                        if new_block.is_new_best {
                             guarded.best_near_head_of_chain = near_head_of_chain;
+                        }
 
-                            match &mut guarded.tree {
-                                GuardedInner::FinalizedBlockRuntimeKnown {
-                                    finalized_block,
-                                    tree,
-                                    ..
-                                } => {
-                                    let idx = if hash == finalized_block.hash {
-                                        None
-                                    } else {
-                                        Some(
-                                            tree.input_output_iter_unordered()
-                                                .find(|block| block.user_data.hash == hash)
-                                                .unwrap()
-                                                .id,
-                                        )
-                                    };
-                                    tree.input_set_best_block(idx);
-                                }
-                                GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    let idx = tree
-                                        .input_output_iter_unordered()
-                                        .find(|block| block.user_data.hash == hash)
-                                        .unwrap()
-                                        .id;
-                                    tree.input_set_best_block(Some(idx));
-                                }
+                        let same_runtime_as_parent = same_runtime_as_parent(
+                            &new_block.scale_encoded_header,
+                            sync_service.block_number_bytes(),
+                        );
+
+                        match &mut guarded.tree {
+                            GuardedInner::FinalizedBlockRuntimeKnown {
+                                tree,
+                                finalized_block,
+                                ..
+                            } => {
+                                let parent_index = if new_block.parent_hash == finalized_block.hash
+                                {
+                                    None
+                                } else {
+                                    Some(
+                                        tree.input_output_iter_unordered()
+                                            .find(|block| {
+                                                block.user_data.hash == new_block.parent_hash
+                                            })
+                                            .unwrap()
+                                            .id,
+                                    )
+                                };
+
+                                tree.input_insert_block(
+                                    Block {
+                                        hash: header::hash_from_scale_encoded_header(
+                                            &new_block.scale_encoded_header,
+                                        ),
+                                        scale_encoded_header: new_block.scale_encoded_header,
+                                    },
+                                    parent_index,
+                                    same_runtime_as_parent,
+                                    new_block.is_new_best,
+                                );
                             }
+                            GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                let parent_index = tree
+                                    .input_output_iter_unordered()
+                                    .find(|block| block.user_data.hash == new_block.parent_hash)
+                                    .unwrap()
+                                    .id;
+                                tree.input_insert_block(
+                                    Block {
+                                        hash: header::hash_from_scale_encoded_header(
+                                            &new_block.scale_encoded_header,
+                                        ),
+                                        scale_encoded_header: new_block.scale_encoded_header,
+                                    },
+                                    Some(parent_index),
+                                    same_runtime_as_parent,
+                                    new_block.is_new_best,
+                                );
+                            }
+                        }
 
-                            background.advance_and_notify_subscribers(&mut guarded);
-                        }
-                    };
-
-                    // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
-                    background.start_necessary_downloads(&mut guarded).await;
-                }
-                WhatHappened::RuntimeDownloadFinished(async_op_id, download_result) => {
-                    let concerned_blocks = match &guarded.tree {
-                        GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                            either::Left(tree.async_op_blocks(async_op_id))
-                        }
-                        GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                            either::Right(tree.async_op_blocks(async_op_id))
-                        }
+                        background.advance_and_notify_subscribers(&mut guarded);
                     }
-                    .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
-                    .to_string();
+                    sync_service::Notification::Finalized {
+                        hash,
+                        best_block_hash,
+                    } => {
+                        log::debug!(
+                            target: &log_target,
+                            "Worker <= InputFinalized(hash={}, best={})",
+                            HashDisplay(&hash), HashDisplay(&best_block_hash)
+                        );
 
-                    match download_result {
-                        Ok((
-                            storage_code,
-                            storage_heap_pages,
-                            code_merkle_value,
-                            closest_ancestor_excluding,
-                        )) => {
-                            log::debug!(
-                                target: &log_target,
-                                "Worker <= SuccessfulDownload(blocks=[{}])",
-                                concerned_blocks
-                            );
+                        background
+                            .finalize(&mut guarded, hash, best_block_hash)
+                            .await;
+                    }
+                    sync_service::Notification::BestBlockChanged { hash } => {
+                        log::debug!(
+                            target: &log_target,
+                            "Worker <= BestBlockChanged(hash={})",
+                            HashDisplay(&hash)
+                        );
 
-                            // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
-                            guarded.best_near_head_of_chain = true;
+                        let near_head_of_chain = background
+                            .sync_service
+                            .is_near_head_of_chain_heuristic()
+                            .await;
 
-                            background
-                                .runtime_download_finished(
-                                    &mut guarded,
-                                    async_op_id,
-                                    storage_code,
-                                    storage_heap_pages,
-                                    code_merkle_value,
-                                    closest_ancestor_excluding,
-                                )
-                                .await;
+                        guarded.best_near_head_of_chain = near_head_of_chain;
+
+                        match &mut guarded.tree {
+                            GuardedInner::FinalizedBlockRuntimeKnown {
+                                finalized_block,
+                                tree,
+                                ..
+                            } => {
+                                let idx = if hash == finalized_block.hash {
+                                    None
+                                } else {
+                                    Some(
+                                        tree.input_output_iter_unordered()
+                                            .find(|block| block.user_data.hash == hash)
+                                            .unwrap()
+                                            .id,
+                                    )
+                                };
+                                tree.input_set_best_block(idx);
+                            }
+                            GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                let idx = tree
+                                    .input_output_iter_unordered()
+                                    .find(|block| block.user_data.hash == hash)
+                                    .unwrap()
+                                    .id;
+                                tree.input_set_best_block(Some(idx));
+                            }
                         }
-                        Err(error) => {
-                            log::debug!(
+
+                        background.advance_and_notify_subscribers(&mut guarded);
+                    }
+                };
+
+                // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
+                background.start_necessary_downloads(&mut guarded).await;
+            }
+            WhatHappened::RuntimeDownloadFinished(async_op_id, download_result) => {
+                let concerned_blocks = match &guarded.tree {
+                    GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        either::Left(tree.async_op_blocks(async_op_id))
+                    }
+                    GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        either::Right(tree.async_op_blocks(async_op_id))
+                    }
+                }
+                .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
+                .to_string();
+
+                match download_result {
+                    Ok((
+                        storage_code,
+                        storage_heap_pages,
+                        code_merkle_value,
+                        closest_ancestor_excluding,
+                    )) => {
+                        log::debug!(
+                            target: &log_target,
+                            "Worker <= SuccessfulDownload(blocks=[{}])",
+                            concerned_blocks
+                        );
+
+                        // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
+                        guarded.best_near_head_of_chain = true;
+
+                        background
+                            .runtime_download_finished(
+                                &mut guarded,
+                                async_op_id,
+                                storage_code,
+                                storage_heap_pages,
+                                code_merkle_value,
+                                closest_ancestor_excluding,
+                            )
+                            .await;
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            target: &log_target,
+                            "Worker <= FailedDownload(blocks=[{}], error={:?})",
+                            concerned_blocks,
+                            error
+                        );
+                        if !error.is_network_problem() {
+                            log::warn!(
                                 target: &log_target,
-                                "Worker <= FailedDownload(blocks=[{}], error={:?})",
+                                "Failed to download :code and :heappages of blocks {}: {}",
                                 concerned_blocks,
                                 error
                             );
-                            if !error.is_network_problem() {
-                                log::warn!(
-                                    target: &log_target,
-                                    "Failed to download :code and :heappages of blocks {}: {}",
-                                    concerned_blocks,
-                                    error
-                                );
-                            }
+                        }
 
-                            match &mut guarded.tree {
-                                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                                    tree.async_op_failure(async_op_id, &background.platform.now());
-                                }
-                                GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    tree.async_op_failure(async_op_id, &background.platform.now());
-                                }
+                        match &mut guarded.tree {
+                            GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                                tree.async_op_failure(async_op_id, &background.platform.now());
+                            }
+                            GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                tree.async_op_failure(async_op_id, &background.platform.now());
                             }
                         }
                     }
-
-                    background.start_necessary_downloads(&mut guarded).await;
                 }
+
+                background.start_necessary_downloads(&mut guarded).await;
             }
         }
     }
