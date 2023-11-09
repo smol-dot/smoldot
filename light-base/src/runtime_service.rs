@@ -1024,16 +1024,6 @@ async fn run_background<TPlat: PlatformRef>(
         guarded.best_near_head_of_chain = best_near_head_of_chain;
     }
 
-    /// List of subscription attempts started with
-    /// [`GuardedInner::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
-    ///
-    /// When in the [`GuardedInner::FinalizedBlockRuntimeKnown`] state, a [`SubscribeAll`] is
-    /// constructed and sent back for each of these senders.
-    /// When in the [`GuardedInner::FinalizedBlockRuntimeUnknown`] state, the senders patiently
-    /// wait.
-    // TODO: move in Background struct
-    let mut pending_subscriptions = Vec::<ToBackgroundSubscribeAll<_>>::with_capacity(8);
-
     // State machine containing all the state that will be manipulated below.
     let mut background = Background {
         log_target: log_target.clone(),
@@ -1041,6 +1031,7 @@ async fn run_background<TPlat: PlatformRef>(
         sync_service: sync_service.clone(),
         to_background: Box::pin(to_background.clone()),
         to_background_tx: to_background_tx.clone(),
+        pending_subscriptions: Vec::with_capacity(8),
         blocks_stream: None,
         // Initialized to `ready` so that the downloads immediately start.
         wake_up_new_necessary_download: Box::pin(future::ready(())),
@@ -1076,7 +1067,7 @@ async fn run_background<TPlat: PlatformRef>(
                 WhatHappened::NewNecessaryDownload
             }
             .or(async {
-                if !pending_subscriptions.is_empty()
+                if !background.pending_subscriptions.is_empty()
                     && matches!(
                         guarded.tree,
                         GuardedInner::FinalizedBlockRuntimeKnown { .. }
@@ -1341,7 +1332,7 @@ async fn run_background<TPlat: PlatformRef>(
                         _ => continue,
                     };
 
-                for pending_subscription in pending_subscriptions.drain(..) {
+                for pending_subscription in background.pending_subscriptions.drain(..) {
                     let (tx, new_blocks_channel) =
                         async_channel::bounded(pending_subscription.buffer_size);
                     let subscription_id = guarded.next_subscription_id;
@@ -1478,8 +1469,10 @@ async fn run_background<TPlat: PlatformRef>(
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
                 // remove senders that are closed. This is `O(n)`, but we expect this list to
                 // be rather small.
-                pending_subscriptions.retain(|s| !s.result_tx.is_canceled());
-                pending_subscriptions.push(msg);
+                background
+                    .pending_subscriptions
+                    .retain(|s| !s.result_tx.is_canceled());
+                background.pending_subscriptions.push(msg);
             }
             WhatHappened::ToBackground(Some(ToBackground::CompileAndPinRuntime {
                 result_tx,
@@ -1870,6 +1863,15 @@ struct Background<TPlat: PlatformRef> {
 
     /// Sending side of [`Background::to_background`].
     to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
+
+    /// List of subscription attempts started with
+    /// [`GuardedInner::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
+    ///
+    /// When in the [`GuardedInner::FinalizedBlockRuntimeKnown`] state, a [`SubscribeAll`] is
+    /// constructed and sent back for each of these senders.
+    /// When in the [`GuardedInner::FinalizedBlockRuntimeUnknown`] state, the senders patiently
+    /// wait.
+    pending_subscriptions: Vec<ToBackgroundSubscribeAll<TPlat>>,
 
     /// Stream of notifications coming from the sync service. `None` if not subscribed yet.
     blocks_stream: Option<Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>>,
