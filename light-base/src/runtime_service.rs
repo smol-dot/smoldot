@@ -546,7 +546,7 @@ impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
-        // Note that `guarded` is not locked.
+        // Note that `Background` is not locked.
         // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
         // TODO: also, an empty proof will be reported as an error right now, which is weird
         let call_proof = self
@@ -1001,10 +1001,10 @@ async fn run_background<TPlat: PlatformRef>(
                     ))
                 );
 
-                // Update the state of `guarded` with what we just grabbed.
+                // Update the state of `Background` with what we just grabbed.
                 //
-                // Note that the content of `guarded` is reset unconditionally.
-                // It might seem like a good idea to only reset the content of `guarded` if the new
+                // Note that the content of `Background` is reset unconditionally.
+                // It might seem like a good idea to only reset the content of `Background` if the new
                 // subscription has a different finalized block than currently. However, there is
                 // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
                 // subset or superset of the non-finalized blocks in the new subscription.
@@ -1813,7 +1813,7 @@ enum Tree<TPlat: PlatformRef> {
         /// `Mutex` is being locked. Temporarily switched to `None` during some operations.
         ///
         /// The asynchronous operation user data is a `usize` corresponding to the index within
-        /// [`Guarded::runtimes`].
+        /// [`Background::runtimes`].
         tree: async_tree::AsyncTree<TPlat::Instant, Block, Arc<Runtime>>,
 
         /// Finalized block. Outside of the tree.
@@ -1823,7 +1823,7 @@ enum Tree<TPlat: PlatformRef> {
         /// See [`RuntimeService::subscribe_all`]. Alongside with each sender, the number of pinned
         /// finalized or non-canonical blocks remaining for this subscription.
         ///
-        /// Keys are assigned from [`Guarded::next_subscription_id`].
+        /// Keys are assigned from [`Background::next_subscription_id`].
         all_blocks_subscriptions: hashbrown::HashMap<
             u64,
             (&'static str, async_channel::Sender<Notification>, usize),
@@ -1838,7 +1838,7 @@ enum Tree<TPlat: PlatformRef> {
         /// blocks from this container that are no longer relevant.
         ///
         /// Keys are `(subscription_id, block_hash)`. Values are indices within
-        /// [`Guarded::runtimes`], state trie root hashes, block numbers, and whether the block
+        /// [`Background::runtimes`], state trie root hashes, block numbers, and whether the block
         /// is non-finalized and part of the canonical chain.
         pinned_blocks: BTreeMap<(u64, [u8; 32]), PinnedBlock>,
     },
@@ -1850,7 +1850,7 @@ enum Tree<TPlat: PlatformRef> {
         /// The "real" finalized block is a non-finalized block within this tree.
         ///
         /// The asynchronous operation user data is a `usize` corresponding to the index within
-        /// [`Guarded::runtimes`]. The asynchronous operation user data is `None` for the dummy
+        /// [`Background::runtimes`]. The asynchronous operation user data is `None` for the dummy
         /// finalized block.
         // TODO: explain better
         tree: async_tree::AsyncTree<TPlat::Instant, Block, Option<Arc<Runtime>>>,
@@ -2152,7 +2152,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         )
                         .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
 
-                        // Change the state of `guarded` to the "finalized runtime known" state.
+                        // Change the state of `Background` to the "finalized runtime known" state.
                         self.tree = Tree::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                                 32,
