@@ -1042,11 +1042,10 @@ async fn run_background<TPlat: PlatformRef>(
         to_background: Box::pin(to_background.clone()),
         to_background_tx: to_background_tx.clone(),
         blocks_stream: None,
-        wake_up_new_necessary_download: Box::pin(future::pending()),
+        // Initialized to `ready` so that the downloads immediately start.
+        wake_up_new_necessary_download: Box::pin(future::ready(())),
         runtime_downloads: stream::FuturesUnordered::new(),
     };
-
-    background.start_necessary_downloads(&mut guarded).await;
 
     // Inner loop. Process incoming events.
     loop {
