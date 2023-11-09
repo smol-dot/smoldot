@@ -173,6 +173,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 sync_service,
                 guarded,
                 rx,
+                tx.downgrade(),
             ));
             background_task_abort = abort;
             to_background = tx;
@@ -222,157 +223,17 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         buffer_size: usize,
         max_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll<TPlat> {
-        // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
-        // This can take a long time.
-        let mut guarded_lock = loop {
-            let guarded_lock = self.guarded.lock().await;
-
-            match &guarded_lock.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded_lock,
-                GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } => {
-                    let wait_fut = when_known.listen();
-                    drop(guarded_lock);
-                    wait_fut.await;
-                }
-            }
-        };
-        let guarded_lock = &mut *guarded_lock;
-
-        // Extract the components of the `FinalizedBlockRuntimeKnown`. We are guaranteed by the
-        // block above to be in this state.
-        let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
-            match &mut guarded_lock.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree,
-                    finalized_block,
-                    pinned_blocks,
-                    all_blocks_subscriptions,
-                } => (
-                    tree,
-                    finalized_block,
-                    pinned_blocks,
-                    all_blocks_subscriptions,
-                ),
-                _ => unreachable!(),
-            };
-
-        let (tx, new_blocks_channel) = async_channel::bounded(buffer_size);
-        let subscription_id = guarded_lock.next_subscription_id;
-        debug_assert_eq!(
-            pinned_blocks
-                .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
-                .count(),
-            0
-        );
-        guarded_lock.next_subscription_id += 1;
-
-        let decoded_finalized_block = header::decode(
-            &finalized_block.scale_encoded_header,
-            self.sync_service.block_number_bytes(),
-        )
-        .unwrap();
-
-        let _prev_value = pinned_blocks.insert(
-            (subscription_id, finalized_block.hash),
-            PinnedBlock {
-                runtime: tree.output_finalized_async_user_data().clone(),
-                state_trie_root_hash: *decoded_finalized_block.state_root,
-                block_number: decoded_finalized_block.number,
-                block_ignores_limit: false,
-            },
-        );
-        debug_assert!(_prev_value.is_none());
-
-        let mut non_finalized_blocks_ancestry_order =
-            Vec::with_capacity(tree.num_input_non_finalized_blocks());
-        for block in tree.input_output_iter_ancestry_order() {
-            let runtime = match block.async_op_user_data {
-                Some(rt) => rt.clone(),
-                None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
-            };
-
-            let block_hash = block.user_data.hash;
-            let parent_runtime = tree.parent(block.id).map_or(
-                tree.output_finalized_async_user_data().clone(),
-                |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
-            );
-
-            let parent_hash = *header::decode(
-                &block.user_data.scale_encoded_header,
-                self.sync_service.block_number_bytes(),
-            )
-            .unwrap()
-            .parent_hash; // TODO: correct? if yes, document
-            debug_assert!(
-                parent_hash == finalized_block.hash
-                    || tree
-                        .input_output_iter_ancestry_order()
-                        .any(|b| parent_hash == b.user_data.hash && b.async_op_user_data.is_some())
-            );
-
-            let decoded_header = header::decode(
-                &block.user_data.scale_encoded_header,
-                self.sync_service.block_number_bytes(),
-            )
-            .unwrap();
-
-            let _prev_value = pinned_blocks.insert(
-                (subscription_id, block_hash),
-                PinnedBlock {
-                    runtime: runtime.clone(),
-                    state_trie_root_hash: *decoded_header.state_root,
-                    block_number: decoded_header.number,
-                    block_ignores_limit: true,
-                },
-            );
-            debug_assert!(_prev_value.is_none());
-
-            non_finalized_blocks_ancestry_order.push(BlockNotification {
-                is_new_best: block.is_output_best,
-                parent_hash,
-                scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
-                    Some(
-                        runtime
-                            .runtime
-                            .as_ref()
-                            .map(|rt| rt.runtime_spec.clone())
-                            .map_err(|err| err.clone()),
-                    )
-                } else {
-                    None
-                },
-            });
-        }
-
-        debug_assert!(matches!(
-            non_finalized_blocks_ancestry_order
-                .iter()
-                .filter(|b| b.is_new_best)
-                .count(),
-            0 | 1
-        ));
-
-        all_blocks_subscriptions.insert(
-            subscription_id,
-            (subscription_name, tx, max_pinned_blocks.get() - 1),
-        );
-
-        SubscribeAll {
-            finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
-            finalized_block_runtime: tree
-                .output_finalized_async_user_data()
-                .runtime
-                .as_ref()
-                .map(|rt| rt.runtime_spec.clone())
-                .map_err(|err| err.clone()),
-            non_finalized_blocks_ancestry_order,
-            new_blocks: Subscription {
-                subscription_id,
-                channel: Box::pin(new_blocks_channel),
-                to_background: self.to_background.clone(),
-            },
-        }
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = self
+            .to_background
+            .send(ToBackground::SubscribeAll(ToBackgroundSubscribeAll {
+                result_tx,
+                subscription_name,
+                buffer_size,
+                max_pinned_blocks,
+            }))
+            .await;
+        result_rx.await.unwrap()
     }
 
     /// Unpins a block after it has been reported by a subscription.
@@ -1089,6 +950,7 @@ enum GuardedInner<TPlat: PlatformRef> {
 
 /// Message towards the background task.
 enum ToBackground<TPlat: PlatformRef> {
+    SubscribeAll(ToBackgroundSubscribeAll<TPlat>),
     CompileAndPinRuntime {
         result_tx: oneshot::Sender<Arc<Runtime>>,
         storage_code: Option<Vec<u8>>,
@@ -1115,6 +977,13 @@ enum ToBackground<TPlat: PlatformRef> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
     },
+}
+
+struct ToBackgroundSubscribeAll<TPlat: PlatformRef> {
+    result_tx: oneshot::Sender<SubscribeAll<TPlat>>,
+    subscription_name: &'static str,
+    buffer_size: usize,
+    max_pinned_blocks: NonZeroUsize,
 }
 
 #[derive(Clone)]
@@ -1152,12 +1021,23 @@ async fn run_background<TPlat: PlatformRef>(
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     guarded: Arc<Mutex<Guarded<TPlat>>>,
     to_background: async_channel::Receiver<ToBackground<TPlat>>,
+    to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
 ) {
     // TODO: pretty hacky
     {
         let best_near_head_of_chain = sync_service.is_near_head_of_chain_heuristic().await;
         guarded.lock().await.best_near_head_of_chain = best_near_head_of_chain;
     }
+
+    /// List of subscription attempts started with
+    /// [`GuardedInner::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
+    ///
+    /// When in the [`GuardedInner::FinalizedBlockRuntimeKnown`] state, a [`SubscribeAll`] is
+    /// constructed and sent back for each of these senders.
+    /// When in the [`GuardedInner::FinalizedBlockRuntimeUnknown`] state, the senders patiently
+    /// wait.
+    // TODO: move in Background struct
+    let mut pending_subscriptions = Vec::<ToBackgroundSubscribeAll<_>>::with_capacity(8);
 
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
@@ -1366,6 +1246,7 @@ async fn run_background<TPlat: PlatformRef>(
             sync_service: sync_service.clone(),
             guarded: guarded.clone(),
             to_background: Box::pin(to_background.clone()),
+            to_background_tx: to_background_tx.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: Box::pin(future::pending()),
             runtime_downloads: stream::FuturesUnordered::new(),
@@ -1377,6 +1258,7 @@ async fn run_background<TPlat: PlatformRef>(
         loop {
             enum WhatHappened<TPlat: PlatformRef> {
                 NewNecessaryDownload,
+                StartPendingSubscribeAll,
                 Notification(Option<sync_service::Notification>),
                 ToBackground(Option<ToBackground<TPlat>>),
                 RuntimeDownloadFinished(
@@ -1394,34 +1276,203 @@ async fn run_background<TPlat: PlatformRef>(
             }
 
             let what_happened: WhatHappened<_> = {
-                let new_necessary_download = async {
+                async {
                     (&mut background.wake_up_new_necessary_download).await;
                     background.wake_up_new_necessary_download = Box::pin(future::pending());
                     WhatHappened::NewNecessaryDownload
-                };
-                new_necessary_download
-                    .or(async { WhatHappened::Notification(background.blocks_stream.next().await) })
-                    .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
-                    .or(async {
-                        if !background.runtime_downloads.is_empty() {
-                            let (async_op_id, download_result) =
-                                background.runtime_downloads.select_next_some().await;
-                            WhatHappened::RuntimeDownloadFinished(async_op_id, download_result)
-                        } else {
-                            future::pending().await
-                        }
-                    })
-                    .await
+                }
+                .or(async {
+                    if !pending_subscriptions.is_empty()
+                        && matches!(
+                            background.guarded.lock().await.tree,
+                            GuardedInner::FinalizedBlockRuntimeKnown { .. }
+                        )
+                    {
+                        WhatHappened::StartPendingSubscribeAll
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async { WhatHappened::Notification(background.blocks_stream.next().await) })
+                .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
+                .or(async {
+                    if !background.runtime_downloads.is_empty() {
+                        let (async_op_id, download_result) =
+                            background.runtime_downloads.select_next_some().await;
+                        WhatHappened::RuntimeDownloadFinished(async_op_id, download_result)
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .await
             };
 
             match what_happened {
                 WhatHappened::NewNecessaryDownload => {
                     background.start_necessary_downloads().await;
                 }
+                WhatHappened::StartPendingSubscribeAll => {
+                    let mut guarded = background.guarded.lock().await;
+                    let guarded = &mut *guarded;
+
+                    // Extract the components of the `FinalizedBlockRuntimeKnown`.
+                    let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
+                        match &mut guarded.tree {
+                            GuardedInner::FinalizedBlockRuntimeKnown {
+                                tree,
+                                finalized_block,
+                                pinned_blocks,
+                                all_blocks_subscriptions,
+                            } => (
+                                tree,
+                                finalized_block,
+                                pinned_blocks,
+                                all_blocks_subscriptions,
+                            ),
+                            _ => continue,
+                        };
+
+                    for pending_subscription in pending_subscriptions.drain(..) {
+                        let (tx, new_blocks_channel) =
+                            async_channel::bounded(pending_subscription.buffer_size);
+                        let subscription_id = guarded.next_subscription_id;
+                        debug_assert_eq!(
+                            pinned_blocks
+                                .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
+                                .count(),
+                            0
+                        );
+                        guarded.next_subscription_id += 1;
+
+                        let decoded_finalized_block = header::decode(
+                            &finalized_block.scale_encoded_header,
+                            background.sync_service.block_number_bytes(),
+                        )
+                        .unwrap();
+
+                        let _prev_value = pinned_blocks.insert(
+                            (subscription_id, finalized_block.hash),
+                            PinnedBlock {
+                                runtime: tree.output_finalized_async_user_data().clone(),
+                                state_trie_root_hash: *decoded_finalized_block.state_root,
+                                block_number: decoded_finalized_block.number,
+                                block_ignores_limit: false,
+                            },
+                        );
+                        debug_assert!(_prev_value.is_none());
+
+                        let mut non_finalized_blocks_ancestry_order =
+                            Vec::with_capacity(tree.num_input_non_finalized_blocks());
+                        for block in tree.input_output_iter_ancestry_order() {
+                            let runtime = match block.async_op_user_data {
+                                Some(rt) => rt.clone(),
+                                None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
+                            };
+
+                            let block_hash = block.user_data.hash;
+                            let parent_runtime = tree.parent(block.id).map_or(
+                                tree.output_finalized_async_user_data().clone(),
+                                |parent_idx| {
+                                    tree.block_async_user_data(parent_idx).unwrap().clone()
+                                },
+                            );
+
+                            let parent_hash = *header::decode(
+                                &block.user_data.scale_encoded_header,
+                                background.sync_service.block_number_bytes(),
+                            )
+                            .unwrap()
+                            .parent_hash; // TODO: correct? if yes, document
+                            debug_assert!(
+                                parent_hash == finalized_block.hash
+                                    || tree
+                                        .input_output_iter_ancestry_order()
+                                        .any(|b| parent_hash == b.user_data.hash
+                                            && b.async_op_user_data.is_some())
+                            );
+
+                            let decoded_header = header::decode(
+                                &block.user_data.scale_encoded_header,
+                                background.sync_service.block_number_bytes(),
+                            )
+                            .unwrap();
+
+                            let _prev_value = pinned_blocks.insert(
+                                (subscription_id, block_hash),
+                                PinnedBlock {
+                                    runtime: runtime.clone(),
+                                    state_trie_root_hash: *decoded_header.state_root,
+                                    block_number: decoded_header.number,
+                                    block_ignores_limit: true,
+                                },
+                            );
+                            debug_assert!(_prev_value.is_none());
+
+                            non_finalized_blocks_ancestry_order.push(BlockNotification {
+                                is_new_best: block.is_output_best,
+                                parent_hash,
+                                scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                                new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
+                                    Some(
+                                        runtime
+                                            .runtime
+                                            .as_ref()
+                                            .map(|rt| rt.runtime_spec.clone())
+                                            .map_err(|err| err.clone()),
+                                    )
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+
+                        debug_assert!(matches!(
+                            non_finalized_blocks_ancestry_order
+                                .iter()
+                                .filter(|b| b.is_new_best)
+                                .count(),
+                            0 | 1
+                        ));
+
+                        all_blocks_subscriptions.insert(
+                            subscription_id,
+                            (
+                                pending_subscription.subscription_name,
+                                tx,
+                                pending_subscription.max_pinned_blocks.get() - 1,
+                            ),
+                        );
+
+                        let _ = pending_subscription.result_tx.send(SubscribeAll {
+                            finalized_block_scale_encoded_header: finalized_block
+                                .scale_encoded_header
+                                .clone(),
+                            finalized_block_runtime: tree
+                                .output_finalized_async_user_data()
+                                .runtime
+                                .as_ref()
+                                .map(|rt| rt.runtime_spec.clone())
+                                .map_err(|err| err.clone()),
+                            non_finalized_blocks_ancestry_order,
+                            new_blocks: Subscription {
+                                subscription_id,
+                                channel: Box::pin(new_blocks_channel),
+                                to_background: background.to_background_tx.upgrade().unwrap(),
+                            },
+                        });
+                    }
+                }
                 WhatHappened::Notification(None) => {
                     break; // Break out of the inner loop in order to reset the background.
                 }
                 WhatHappened::ToBackground(None) => todo!(),
+                WhatHappened::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
+                    // In order to avoid potentially growing `pending_subscriptions` forever, we
+                    // remove senders that are closed. This is `O(n)`, but we expect this list to
+                    // be rather small.
+                    pending_subscriptions.retain(|s| !s.result_tx.is_canceled());
+                    pending_subscriptions.push(msg);
+                }
                 WhatHappened::ToBackground(Some(ToBackground::CompileAndPinRuntime {
                     result_tx,
                     storage_code,
@@ -1836,6 +1887,9 @@ struct Background<TPlat: PlatformRef> {
 
     /// Receiver for messages to the background task.
     to_background: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
+
+    /// Sending side of [`Background::to_background`].
+    to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
 
     /// Stream of notifications coming from the sync service.
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
