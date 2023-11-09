@@ -111,9 +111,6 @@ pub struct RuntimeService<TPlat: PlatformRef> {
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
 
-    /// Fields behind a `Mutex`. Should only be locked for short-lived operations.
-    guarded: Arc<Mutex<Guarded<TPlat>>>,
-
     /// Sender to send messages to the background task.
     to_background: async_channel::Sender<ToBackground<TPlat>>,
 
@@ -152,19 +149,18 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             }
         };
 
-        let guarded = Arc::new(Mutex::new(Guarded {
+        let guarded = Guarded {
             next_subscription_id: 0,
             best_near_head_of_chain: false,
             tree,
             runtimes: slab::Slab::with_capacity(2),
-        }));
+        };
 
         // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
         let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
             let sync_service = config.sync_service.clone();
-            let guarded = guarded.clone();
             let platform = config.platform.clone();
             let (tx, rx) = async_channel::bounded(16);
             let (abortable, abort) = future::abortable(run_background(
@@ -184,7 +180,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         RuntimeService {
             sync_service: config.sync_service,
-            guarded,
             background_task_abort,
             to_background,
         }
@@ -542,7 +537,7 @@ pub struct BlockNotification {
 
 async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     sync_service: &sync_service::SyncService<TPlat>,
-    guarded: &Mutex<Guarded<TPlat>>,
+    guarded: &Guarded<TPlat>,
 ) -> bool {
     // The runtime service adds a delay between the moment a best block is reported by the
     // sync service and the moment it is reported by the runtime service.
@@ -559,7 +554,7 @@ async fn is_near_head_of_chain_heuristic<TPlat: PlatformRef>(
     // when called at the latest best block that the runtime service reported through its API,
     // to make sure that we don't report "near" while having reported only blocks that were
     // far.
-    guarded.lock().await.best_near_head_of_chain
+    guarded.best_near_head_of_chain
 }
 
 /// See [`RuntimeService::pinned_block_runtime_access`].
@@ -1019,14 +1014,14 @@ async fn run_background<TPlat: PlatformRef>(
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    guarded: Arc<Mutex<Guarded<TPlat>>>,
+    mut guarded: Guarded<TPlat>,
     to_background: async_channel::Receiver<ToBackground<TPlat>>,
     to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
 ) {
     // TODO: pretty hacky
     {
         let best_near_head_of_chain = sync_service.is_near_head_of_chain_heuristic().await;
-        guarded.lock().await.best_near_head_of_chain = best_near_head_of_chain;
+        guarded.best_near_head_of_chain = best_near_head_of_chain;
     }
 
     /// List of subscription attempts started with
@@ -1065,14 +1060,11 @@ async fn run_background<TPlat: PlatformRef>(
         // Additionally, the situation where a subscription is killed but the finalized block
         // didn't change should be extremely rare anyway.
         {
-            let mut lock = guarded.lock().await;
-            let lock = &mut *lock; // Solves borrow checking issues.
-
             // TODO: restore
-            /*lock.best_near_head_of_chain =
+            /*guarded.best_near_head_of_chain =
             is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
 
-            lock.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
+            guarded.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
 
             // TODO: DRY below
             if let Some(finalized_block_runtime) = subscription.finalized_block_runtime {
@@ -1128,11 +1120,12 @@ async fn run_background<TPlat: PlatformRef>(
                     HashDisplay(&finalized_block_hash)
                 );
 
-                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &guarded.tree
+                {
                     when_known.notify(usize::max_value());
                 }
 
-                lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                         32,
                         Default::default(),
@@ -1183,11 +1176,12 @@ async fn run_background<TPlat: PlatformRef>(
                     },
                 };
             } else {
-                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &guarded.tree
+                {
                     when_known.notify(usize::max_value());
                 }
 
-                lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
+                guarded.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
                     when_known: event_listener::Event::new(),
                     tree: {
                         let mut tree = async_tree::AsyncTree::new(async_tree::Config {
@@ -1244,7 +1238,6 @@ async fn run_background<TPlat: PlatformRef>(
             log_target: log_target.clone(),
             platform: platform.clone(),
             sync_service: sync_service.clone(),
-            guarded: guarded.clone(),
             to_background: Box::pin(to_background.clone()),
             to_background_tx: to_background_tx.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
@@ -1252,7 +1245,7 @@ async fn run_background<TPlat: PlatformRef>(
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
-        background.start_necessary_downloads().await;
+        background.start_necessary_downloads(&mut guarded).await;
 
         // Inner loop. Process incoming events.
         loop {
@@ -1284,7 +1277,7 @@ async fn run_background<TPlat: PlatformRef>(
                 .or(async {
                     if !pending_subscriptions.is_empty()
                         && matches!(
-                            background.guarded.lock().await.tree,
+                            guarded.tree,
                             GuardedInner::FinalizedBlockRuntimeKnown { .. }
                         )
                     {
@@ -1309,12 +1302,9 @@ async fn run_background<TPlat: PlatformRef>(
 
             match what_happened {
                 WhatHappened::NewNecessaryDownload => {
-                    background.start_necessary_downloads().await;
+                    background.start_necessary_downloads(&mut guarded).await;
                 }
                 WhatHappened::StartPendingSubscribeAll => {
-                    let mut guarded = background.guarded.lock().await;
-                    let guarded = &mut *guarded;
-
                     // Extract the components of the `FinalizedBlockRuntimeKnown`.
                     let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
                         match &mut guarded.tree {
@@ -1480,9 +1470,6 @@ async fn run_background<TPlat: PlatformRef>(
                     code_merkle_value,
                     closest_ancestor_excluding,
                 })) => {
-                    let mut guarded = background.guarded.lock().await;
-                    let guarded = &mut *guarded;
-
                     // Try to find an existing identical runtime.
                     let existing_runtime = guarded
                         .runtimes
@@ -1515,9 +1502,6 @@ async fn run_background<TPlat: PlatformRef>(
                 WhatHappened::ToBackground(Some(
                     ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
                 )) => {
-                    let mut guarded = background.guarded.lock().await;
-                    let guarded = &mut *guarded;
-
                     let _ = result_tx.send(
                         if let GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } = &guarded.tree
                         {
@@ -1536,11 +1520,7 @@ async fn run_background<TPlat: PlatformRef>(
                     result_tx,
                 })) => {
                     let _ = result_tx.send(
-                        is_near_head_of_chain_heuristic(
-                            &background.sync_service,
-                            &background.guarded,
-                        )
-                        .await,
+                        is_near_head_of_chain_heuristic(&background.sync_service, &guarded).await,
                     );
                 }
                 WhatHappened::ToBackground(Some(ToBackground::UnpinBlock {
@@ -1548,14 +1528,11 @@ async fn run_background<TPlat: PlatformRef>(
                     subscription_id,
                     block_hash,
                 })) => {
-                    let mut guarded_lock = guarded.lock().await;
-                    let guarded_lock = &mut *guarded_lock;
-
                     if let GuardedInner::FinalizedBlockRuntimeKnown {
                         all_blocks_subscriptions,
                         pinned_blocks,
                         ..
-                    } = &mut guarded_lock.tree
+                    } = &mut guarded.tree
                     {
                         let block_ignores_limit =
                             match pinned_blocks.remove(&(subscription_id.0, block_hash)) {
@@ -1574,7 +1551,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 }
                             };
 
-                        guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
+                        guarded.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
                         if !block_ignores_limit {
                             let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
@@ -1591,9 +1568,6 @@ async fn run_background<TPlat: PlatformRef>(
                     subscription_id,
                     block_hash,
                 })) => {
-                    let mut guarded = background.guarded.lock().await;
-                    let guarded = &mut *guarded;
-
                     let pinned_block = {
                         if let GuardedInner::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions,
@@ -1649,8 +1623,6 @@ async fn run_background<TPlat: PlatformRef>(
                                 .is_near_head_of_chain_heuristic()
                                 .await;
 
-                            let mut guarded = background.guarded.lock().await;
-                            let guarded = &mut *guarded;
                             // TODO: note that this code is never reached for parachains
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
@@ -1714,7 +1686,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 }
                             }
 
-                            background.advance_and_notify_subscribers(guarded);
+                            background.advance_and_notify_subscribers(&mut guarded);
                         }
                         sync_service::Notification::Finalized {
                             hash,
@@ -1726,7 +1698,9 @@ async fn run_background<TPlat: PlatformRef>(
                                 HashDisplay(&hash), HashDisplay(&best_block_hash)
                             );
 
-                            background.finalize(hash, best_block_hash).await;
+                            background
+                                .finalize(&mut guarded, hash, best_block_hash)
+                                .await;
                         }
                         sync_service::Notification::BestBlockChanged { hash } => {
                             log::debug!(
@@ -1740,8 +1714,6 @@ async fn run_background<TPlat: PlatformRef>(
                                 .is_near_head_of_chain_heuristic()
                                 .await;
 
-                            let mut guarded = background.guarded.lock().await;
-                            let guarded = &mut *guarded;
                             guarded.best_near_head_of_chain = near_head_of_chain;
 
                             match &mut guarded.tree {
@@ -1772,16 +1744,14 @@ async fn run_background<TPlat: PlatformRef>(
                                 }
                             }
 
-                            background.advance_and_notify_subscribers(guarded);
+                            background.advance_and_notify_subscribers(&mut guarded);
                         }
                     };
 
                     // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
-                    background.start_necessary_downloads().await;
+                    background.start_necessary_downloads(&mut guarded).await;
                 }
                 WhatHappened::RuntimeDownloadFinished(async_op_id, download_result) => {
-                    let mut guarded = background.guarded.lock().await;
-
                     let concerned_blocks = match &guarded.tree {
                         GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                             either::Left(tree.async_op_blocks(async_op_id))
@@ -1808,10 +1778,10 @@ async fn run_background<TPlat: PlatformRef>(
 
                             // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
                             guarded.best_near_head_of_chain = true;
-                            drop(guarded);
 
                             background
                                 .runtime_download_finished(
+                                    &mut guarded,
                                     async_op_id,
                                     storage_code,
                                     storage_heap_pages,
@@ -1844,12 +1814,10 @@ async fn run_background<TPlat: PlatformRef>(
                                     tree.async_op_failure(async_op_id, &background.platform.now());
                                 }
                             }
-
-                            drop(guarded);
                         }
                     }
 
-                    background.start_necessary_downloads().await;
+                    background.start_necessary_downloads(&mut guarded).await;
                 }
             }
         }
@@ -1882,8 +1850,6 @@ struct Background<TPlat: PlatformRef> {
     platform: TPlat,
 
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-
-    guarded: Arc<Mutex<Guarded<TPlat>>>,
 
     /// Receiver for messages to the background task.
     to_background: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
@@ -1923,14 +1889,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     /// Injects into the state of `self` a completed runtime download.
     async fn runtime_download_finished(
         &mut self,
+        guarded: &mut Guarded<TPlat>,
         async_op_id: async_tree::AsyncOpId,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
     ) {
-        let mut guarded = self.guarded.lock().await;
-
         // Try to find an existing runtime identical to the one that has just been downloaded.
         // This loop is `O(n)`, but given that we expect this list to very small (at most 1 or
         // 2 elements), this is not a problem.
@@ -1987,7 +1952,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         }
 
-        self.advance_and_notify_subscribers(&mut guarded);
+        self.advance_and_notify_subscribers(guarded);
     }
 
     fn advance_and_notify_subscribers(&self, guarded: &mut Guarded<TPlat>) {
@@ -2237,10 +2202,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
-    async fn start_necessary_downloads(&mut self) {
-        let mut guarded = self.guarded.lock().await;
-        let guarded = &mut *guarded;
-
+    async fn start_necessary_downloads(&mut self, guarded: &mut Guarded<TPlat>) {
         loop {
             // Don't download more than 2 runtimes at a time.
             if self.runtime_downloads.len() >= 2 {
@@ -2389,9 +2351,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     }
 
     /// Updates `self` to take into account that the sync service has finalized the given block.
-    async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
-        let mut guarded = self.guarded.lock().await;
-
+    async fn finalize(
+        &mut self,
+        guarded: &mut Guarded<TPlat>,
+        hash_to_finalize: [u8; 32],
+        new_best_block_hash: [u8; 32],
+    ) {
         match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
                 tree,
@@ -2426,7 +2391,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         }
 
-        self.advance_and_notify_subscribers(&mut guarded);
+        self.advance_and_notify_subscribers(guarded);
 
         // Clean up unused runtimes to free up resources.
         guarded
