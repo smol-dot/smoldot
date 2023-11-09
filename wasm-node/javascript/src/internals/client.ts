@@ -281,6 +281,8 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                     error: new CrashError(event.message),
                 }
 
+                options.crashCallback?.(state.instance.error)
+
                 state.connections.forEach((connec) => connec.reset());
                 state.connections.clear();
 

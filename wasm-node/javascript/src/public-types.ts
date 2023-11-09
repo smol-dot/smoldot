@@ -321,6 +321,13 @@ export interface ClientOptions {
      * supported anyway.
      */
     forbidWebRtc?: boolean;
+
+    /**
+     * Callback that the client will invoke when the client crashes.
+     * 
+     * @param error the crash error
+     */
+    crashCallback?: (error: CrashError) => void
 }
 
 /**
