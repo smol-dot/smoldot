@@ -2053,19 +2053,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 connection_id,
                 message,
             } => {
-                // Note that it is critical for the sending to not take too long here, in order to not
-                // block the process of the network service.
-                // In particular, if sending the message to the connection is blocked due to sending
-                // a message on the connection-to-coordinator channel, this will result in a deadlock.
-                // For this reason, the connection task is always ready to immediately accept a message
-                // on the coordinator-to-connection channel.
-                let _send_success = task
+                // Note that it is critical for the sending to not take too long here, in order to
+                // not block the process of the network service.
+                // In particular, if sending the message to the connection is blocked due to
+                // sending a message on the connection-to-coordinator channel, this will result
+                // in a deadlock.
+                // For this reason, the connection task is always ready to immediately accept a
+                // message on the coordinator-to-connection channel.
+                let _send_result = task
                     .active_connections
                     .get_mut(&connection_id)
                     .unwrap()
                     .send(message)
                     .await;
-                // debug_assert!(_send_success.is_ok()); // TODO: panics right now /!\
+                debug_assert!(_send_result.is_ok());
             }
         }
     }
