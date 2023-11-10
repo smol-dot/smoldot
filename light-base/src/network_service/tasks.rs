@@ -177,7 +177,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 let connection_task = connection_task.as_mut().unwrap_or_else(|| unreachable!());
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
-            WhatHappened::CoordinatorDead => return,
+            WhatHappened::CoordinatorDead => {
+                log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
+                return;
+            }
             WhatHappened::SocketEvent => {}
             WhatHappened::MessageSent => {}
         }
@@ -368,6 +371,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                         )));
                     }
                 } else {
+                    log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
                     return;
                 }
 
