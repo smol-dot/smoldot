@@ -383,10 +383,11 @@ impl<'a> ChainInformationRef<'a> {
                         if babe_preruntime.slot_number() < epoch_start_slot_number {
                             return Err(ValidityError::HeaderBabeSlotInferiorToEpochStartSlot);
                         }
-                    } else {
+                    } else if self.finalized_block_header.number != 0 {
                         return Err(ValidityError::ConsensusAlgorithmMismatch);
                     }
-                    if self.finalized_block_header.digest.babe_seal().is_none()
+                    if (self.finalized_block_header.digest.babe_seal().is_none()
+                        && self.finalized_block_header.number != 0)
                         || self.finalized_block_header.digest.has_any_aura()
                     {
                         return Err(ValidityError::ConsensusAlgorithmMismatch);
@@ -418,12 +419,13 @@ impl<'a> ChainInformationRef<'a> {
         }
 
         if let ChainInformationConsensusRef::Aura { .. } = &self.consensus {
-            if self
+            if ((self
                 .finalized_block_header
                 .digest
                 .aura_pre_runtime()
                 .is_none()
-                || self.finalized_block_header.digest.aura_seal().is_none()
+                || self.finalized_block_header.digest.aura_seal().is_none())
+                && self.finalized_block_header.number != 0)
                 || self.finalized_block_header.digest.has_any_babe()
             {
                 return Err(ValidityError::ConsensusAlgorithmMismatch);
