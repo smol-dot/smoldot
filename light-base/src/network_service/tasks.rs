@@ -122,6 +122,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // If the connection task has self-destructed and that no message is being sent, stop
             // the task altogether as nothing will happen.
             if connection_task.is_none() && message_sending.is_none() {
+                log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
                 return;
             }
 
@@ -302,7 +303,10 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             WhatHappened::CoordinatorMessage(message) => {
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
-            WhatHappened::CoordinatorDead => return,
+            WhatHappened::CoordinatorDead => {
+                log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
+                return;
+            }
             WhatHappened::SocketEvent(mut socket, substream_id) => {
                 debug_assert!(message_sending.is_none());
 
