@@ -51,7 +51,9 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
         // Because only one message should be sent to the coordinator at a time, and that
         // processing the socket might generate a message, we only process the socket if no
         // message is currently being sent.
-        if let (false, Some(mut task)) = (message_sending.is_some(), connection_task.take()) {
+        if message_sending.is_none() && connection_task.is_some() {
+            let mut task = connection_task.take().unwrap();
+
             match platform.read_write_access(socket.as_mut()) {
                 Ok(mut socket_read_write) => {
                     // The code in this block is a bit cumbersome due to the logging.
