@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::borrow::Cow;
-use core::{fmt, future::Future, ops, pin::Pin, str, time::Duration};
+use core::{fmt, future::Future, ops, panic::UnwindSafe, pin::Pin, str, time::Duration};
 use futures_util::future;
 
 pub use smoldot::libp2p::read_write;
@@ -38,7 +38,7 @@ pub use default::DefaultPlatform;
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
-pub trait PlatformRef: Clone + Send + Sync + 'static {
+pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// `Future` that resolves once a certain amount of time has passed or a certain point in time
     /// is reached. See [`PlatformRef::sleep`] and [`PlatformRef::sleep_until`].
     type Delay: Future<Output = ()> + Send + 'static;
