@@ -166,7 +166,6 @@ enum ToBackground {
     FromConnectionTask {
         connection_id: service::ConnectionId,
         opaque_message: Option<service::ConnectionToCoordinator>,
-        connection_now_dead: bool,
     },
     IncomingConnection {
         socket: TcpStream,
@@ -229,7 +228,8 @@ struct Inner {
     jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<Chain, Instant>,
+    network:
+        service::ChainNetwork<Chain, channel::Sender<service::CoordinatorToConnection>, Instant>,
 
     /// Data structure holding the addresses and assigned slots.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, Instant>,
@@ -245,12 +245,6 @@ struct Inner {
 
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
-
-    active_connections: HashMap<
-        service::ConnectionId,
-        channel::Sender<service::CoordinatorToConnection>,
-        fnv::FnvBuildHasher,
-    >,
 
     process_network_service_events: bool,
 
@@ -369,10 +363,6 @@ impl NetworkService {
             network,
             noise_key: config.noise_key,
             peering_strategy,
-            active_connections: hashbrown::HashMap::with_capacity_and_hasher(
-                100, // TODO: ?
-                Default::default(),
-            ),
             blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
                 50, // TODO: ?
                 Default::default(),
@@ -816,13 +806,7 @@ async fn background_task(mut inner: Inner) {
             // a message on the connection-to-coordinator channel, this will result in a deadlock.
             // For this reason, the connection task is always ready to immediately accept a message
             // on the coordinator-to-connection channel.
-            inner
-                .active_connections
-                .get_mut(&connection_id)
-                .unwrap()
-                .send(message)
-                .await
-                .unwrap();
+            inner.network[connection_id].send(message).await.unwrap();
         }
 
         if inner.process_network_service_events && matches!(inner.event_senders, either::Left(_)) {
@@ -1482,6 +1466,8 @@ async fn background_task(mut inner: Inner) {
                     }
                 };
 
+                let (tx, rx) = channel::bounded(16); // TODO: ?!
+
                 let (connection_id, connection_task) = inner.network.add_single_stream_connection(
                     Instant::now(),
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
@@ -1490,10 +1476,8 @@ async fn background_task(mut inner: Inner) {
                     },
                     multiaddr.clone().into_vec(),
                     Some(peer_id.clone()),
+                    tx,
                 );
-
-                let (tx, rx) = channel::bounded(16); // TODO: ?!
-                inner.active_connections.insert(connection_id, tx);
 
                 // Handle the connection in a separate task.
                 (inner.tasks_executor)(Box::pin(tasks::connection_task(
@@ -1561,18 +1545,12 @@ async fn background_task(mut inner: Inner) {
             ToBackground::FromConnectionTask {
                 connection_id,
                 opaque_message,
-                connection_now_dead,
+                ..
             } => {
                 if let Some(opaque_message) = opaque_message {
                     inner
                         .network
                         .inject_connection_message(connection_id, opaque_message);
-                }
-
-                // TODO: it should be indicated by the coordinator when a connection dies
-                if connection_now_dead {
-                    let _was_in = inner.active_connections.remove(&connection_id);
-                    debug_assert!(_was_in.is_some());
                 }
 
                 inner.process_network_service_events = true;
@@ -1583,6 +1561,8 @@ async fn background_task(mut inner: Inner) {
                 multiaddr,
                 when_accepted,
             } => {
+                let (tx, rx) = channel::bounded(16); // TODO: ?!
+
                 let (connection_id, connection_task) = inner.network.add_single_stream_connection(
                     when_accepted,
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
@@ -1591,10 +1571,8 @@ async fn background_task(mut inner: Inner) {
                     },
                     multiaddr.clone().into_vec(),
                     None,
+                    tx,
                 );
-
-                let (tx, rx) = channel::bounded(16); // TODO: ?!
-                inner.active_connections.insert(connection_id, tx);
 
                 (inner.tasks_executor)(Box::pin(tasks::connection_task(
                     inner.log_callback.clone(),

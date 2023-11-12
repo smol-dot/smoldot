@@ -255,7 +255,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 event_pending_send: None,
                 event_senders: either::Left(event_senders),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
-                active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_rx,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
@@ -872,7 +871,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
     messages_tx: async_channel::Sender<ToBackground>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<Chain, TPlat::Instant>,
+    network: service::ChainNetwork<
+        Chain,
+        async_channel::Sender<service::CoordinatorToConnection>,
+        TPlat::Instant,
+    >,
 
     /// All known peers and their addresses.
     peering_strategy: basic_peering_strategy::BasicPeeringStrategy<ChainId, TPlat::Instant>,
@@ -894,13 +897,6 @@ struct BackgroundTask<TPlat: PlatformRef> {
     >,
 
     messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
-
-    // TODO: could be user_data in ChainNetwork?
-    active_connections: HashMap<
-        service::ConnectionId,
-        async_channel::Sender<service::CoordinatorToConnection>,
-        fnv::FnvBuildHasher,
-    >,
 
     blocks_requests: HashMap<
         service::SubstreamId,
@@ -940,7 +936,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         enum WakeUpReason {
             Message(ToBackground),
-            NetworkEvent(service::Event),
+            NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
@@ -1416,14 +1412,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
-                id,
                 address,
                 expected_peer_id,
                 ..
             }) => {
-                let _was_in = task.active_connections.remove(&id);
-                debug_assert!(_was_in.is_some());
-
                 if let Some(expected_peer_id) = expected_peer_id {
                     task.peering_strategy
                         .disconnect_addr(&expected_peer_id, &address)
@@ -1433,14 +1425,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::Disconnected {
-                id,
-                address,
-                peer_id,
-                ..
+                address, peer_id, ..
             }) => {
-                let _was_in = task.active_connections.remove(&id);
-                debug_assert!(_was_in.is_some());
-
                 task.peering_strategy
                     .disconnect_addr(&peer_id, &address)
                     .unwrap();
@@ -1936,7 +1922,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     async_channel::bounded(8);
                 let task_name = format!("connection-{}-{}", peer_id, multiaddr);
 
-                let connection_id = match address {
+                match address {
                     address_parse::AddressOrMultiStreamAddress::Address(address) => {
                         // As documented in the `PlatformRef` trait, `connect_stream` must
                         // return as soon as possible.
@@ -1951,6 +1937,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 },
                                 multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
+                                coordinator_to_connection_tx,
                             );
 
                         task.platform.spawn_task(
@@ -1965,8 +1952,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.messages_tx.clone(),
                             ),
                         );
-
-                        connection_id
                     }
                     address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
                         platform::MultiStreamAddress::WebRtc {
@@ -2009,6 +1994,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 },
                                 multiaddr.clone().into_vec(),
                                 Some(peer_id.clone()),
+                                coordinator_to_connection_tx,
                             );
 
                         task.platform.spawn_task(
@@ -2023,15 +2009,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.messages_tx.clone(),
                             ),
                         );
-
-                        connection_id
                     }
-                };
-
-                let _prev_value = task
-                    .active_connections
-                    .insert(connection_id, coordinator_to_connection_tx);
-                debug_assert!(_prev_value.is_none());
+                }
             }
             WakeUpReason::CanOpenGossip(peer_id, chain_id) => {
                 task.network
@@ -2060,12 +2039,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // in a deadlock.
                 // For this reason, the connection task is always ready to immediately accept a
                 // message on the coordinator-to-connection channel.
-                let _send_result = task
-                    .active_connections
-                    .get_mut(&connection_id)
-                    .unwrap()
-                    .send(message)
-                    .await;
+                let _send_result = task.network[connection_id].send(message).await;
                 debug_assert!(_send_result.is_ok());
             }
         }

@@ -115,7 +115,6 @@ pub(super) async fn connection_task(
                         super::ToBackground::FromConnectionTask {
                             connection_id,
                             opaque_message: Some(opaque_message),
-                            connection_now_dead: false,
                         },
                     ));
                 }
@@ -124,7 +123,6 @@ pub(super) async fn connection_task(
                     .send(super::ToBackground::FromConnectionTask {
                         connection_id,
                         opaque_message,
-                        connection_now_dead: true,
                     })
                     .await;
                 return;
