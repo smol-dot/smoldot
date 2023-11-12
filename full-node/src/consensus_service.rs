@@ -718,7 +718,7 @@ impl SyncBackground {
         loop {
             self.start_network_requests().await;
 
-            enum WhatHappened {
+            enum WakeUpReason {
                 ReadyToAuthor,
                 FrontendEvent(ToBackground),
                 FrontendClosed,
@@ -731,7 +731,7 @@ impl SyncBackground {
                 SyncProcess,
             }
 
-            let what_happened: WhatHappened = {
+            let wake_up_reason: WakeUpReason = {
                 // Creating the block authoring state and prepare a future that is ready when something
                 // related to the block authoring is ready.
                 // TODO: refactor as a separate task?
@@ -826,33 +826,33 @@ impl SyncBackground {
 
                 async move {
                     authoring_ready_future.await;
-                    WhatHappened::ReadyToAuthor
+                    WakeUpReason::ReadyToAuthor
                 }
                 .or(async {
                     self.to_background_rx
                         .next()
                         .await
-                        .map_or(WhatHappened::FrontendClosed, WhatHappened::FrontendEvent)
+                        .map_or(WakeUpReason::FrontendClosed, WakeUpReason::FrontendEvent)
                 })
                 .or(async {
-                    WhatHappened::NetworkEvent(self.from_network_service.next().await.unwrap())
+                    WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
                 })
                 .or(async {
                     let (request_id, source_id, result) =
                         self.block_requests_finished_rx.select_next_some().await;
-                    WhatHappened::RequestFinished(request_id, source_id, result)
+                    WakeUpReason::RequestFinished(request_id, source_id, result)
                 })
                 .or(async {
                     if !process_sync {
                         future::pending().await
                     }
-                    WhatHappened::SyncProcess
+                    WakeUpReason::SyncProcess
                 })
                 .await
             };
 
-            match what_happened {
-                WhatHappened::ReadyToAuthor => {
+            match wake_up_reason {
+                WakeUpReason::ReadyToAuthor => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is
                     // deliberately frozen.
@@ -878,12 +878,12 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WhatHappened::FrontendClosed => {
+                WakeUpReason::FrontendClosed => {
                     // Shutdown.
                     return;
                 }
 
-                WhatHappened::FrontendEvent(ToBackground::SubscribeAll {
+                WakeUpReason::FrontendEvent(ToBackground::SubscribeAll {
                     buffer_size,
                     _max_finalized_pinned_blocks: _,
                     result_tx,
@@ -949,7 +949,7 @@ impl SyncBackground {
                         new_blocks,
                     });
                 }
-                WhatHappened::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
+                WakeUpReason::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
                     let _ = result_tx.send(SyncState {
                         best_block_hash: self.sync.best_block_hash(),
                         best_block_number: self.sync.best_block_number(),
@@ -960,11 +960,11 @@ impl SyncBackground {
                         finalized_block_number: self.sync.finalized_block_header().number,
                     });
                 }
-                WhatHappened::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
+                WakeUpReason::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
                     // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
                     let _ = result_tx.send(());
                 }
-                WhatHappened::FrontendEvent(ToBackground::IsMajorSyncingHint { result_tx }) => {
+                WakeUpReason::FrontendEvent(ToBackground::IsMajorSyncingHint { result_tx }) => {
                     // As documented, the value returned doesn't need to be precise.
                     let result = match self.sync.status() {
                         all::Status::Sync => false,
@@ -975,7 +975,7 @@ impl SyncBackground {
                     let _ = result_tx.send(result);
                 }
 
-                WhatHappened::NetworkEvent(network_service::Event::Connected {
+                WakeUpReason::NetworkEvent(network_service::Event::Connected {
                     peer_id,
                     chain_id,
                     best_block_number,
@@ -1006,7 +1006,7 @@ impl SyncBackground {
                         }
                     }
                 }
-                WhatHappened::NetworkEvent(network_service::Event::Disconnected {
+                WakeUpReason::NetworkEvent(network_service::Event::Disconnected {
                     peer_id,
                     chain_id,
                 }) if chain_id == self.network_chain_id => {
@@ -1024,7 +1024,7 @@ impl SyncBackground {
                         *is_disconnected = true;
                     }
                 }
-                WhatHappened::NetworkEvent(network_service::Event::BlockAnnounce {
+                WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
                     chain_id,
                     peer_id,
                     scale_encoded_header,
@@ -1046,11 +1046,11 @@ impl SyncBackground {
                         all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                     }
                 }
-                WhatHappened::NetworkEvent(_) => {
+                WakeUpReason::NetworkEvent(_) => {
                     // Different chain index.
                 }
 
-                WhatHappened::RequestFinished(request_id, source_id, result) => {
+                WakeUpReason::RequestFinished(request_id, source_id, result) => {
                     // TODO: clarify this piece of code
                     let result = result.map_err(|_| ());
                     let (_, response_outcome) = self.sync.blocks_request_response(
@@ -1097,7 +1097,7 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WhatHappened::SyncProcess => {
+                WakeUpReason::SyncProcess => {
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
                     self = new_self;

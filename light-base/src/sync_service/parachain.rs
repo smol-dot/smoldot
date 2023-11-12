@@ -228,7 +228,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             self.advance_and_report_notifications().await;
 
             // Now wait until something interesting happens.
-            enum WhatHappened<TPlat: PlatformRef> {
+            enum WakeUpReason<TPlat: PlatformRef> {
                 ForegroundClosed,
                 ForegroundMessage(ToBackground),
                 NewSubscription(runtime_service::SubscribeAll<TPlat>),
@@ -242,7 +242,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 NetworkEvent(network_service::Event),
             }
 
-            let what_happened: WhatHappened<_> = {
+            let wake_up_reason: WakeUpReason<_> = {
                 let (
                     subscribe_future,
                     next_start_parahead_fetch,
@@ -264,7 +264,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 let new_subscription = async {
                     if let Some(subscribe_future) = subscribe_future {
-                        WhatHappened::NewSubscription(subscribe_future.await)
+                        WakeUpReason::NewSubscription(subscribe_future.await)
                     } else {
                         future::pending().await
                     }
@@ -273,7 +273,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 let start_parahead_fetch = async {
                     if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
                         next_start_parahead_fetch.await;
-                        WhatHappened::StartParaheadFetch
+                        WakeUpReason::StartParaheadFetch
                     } else {
                         future::pending().await
                     }
@@ -284,7 +284,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         if !in_progress_paraheads.is_empty() {
                             let (async_op_id, parahead_result) =
                                 in_progress_paraheads.next().await.unwrap();
-                            WhatHappened::ParaheadFetchFinished {
+                            WakeUpReason::ParaheadFetchFinished {
                                 async_op_id,
                                 parahead_result,
                             }
@@ -299,8 +299,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 let subscription_notification = async {
                     if let Some(relay_chain_subscribe_all) = relay_chain_subscribe_all {
                         match relay_chain_subscribe_all.next().await {
-                            Some(notif) => WhatHappened::Notification(notif),
-                            None => WhatHappened::SubscriptionDead,
+                            Some(notif) => WakeUpReason::Notification(notif),
+                            None => WakeUpReason::SubscriptionDead,
                         }
                     } else {
                         future::pending().await
@@ -309,8 +309,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 let on_foreground_message = async {
                     match self.from_foreground.next().await {
-                        Some(msg) => WhatHappened::ForegroundMessage(msg),
-                        None => WhatHappened::ForegroundClosed,
+                        Some(msg) => WakeUpReason::ForegroundMessage(msg),
+                        None => WakeUpReason::ForegroundClosed,
                     }
                 };
 
@@ -318,7 +318,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     if is_subscribed {
                         // We expect the networking channel to never close, so the event is
                         // unwrapped.
-                        WhatHappened::NetworkEvent(self.from_network_service.next().await.unwrap())
+                        WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
                     } else {
                         future::pending().await
                     }
@@ -333,27 +333,27 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     .await
             };
 
-            match what_happened {
-                WhatHappened::ForegroundClosed => {
+            match wake_up_reason {
+                WakeUpReason::ForegroundClosed => {
                     // Terminate the parachain syncing.
                     return;
                 }
 
-                WhatHappened::NewSubscription(subscription) => {
+                WakeUpReason::NewSubscription(subscription) => {
                     self.set_new_subscription(subscription);
                 }
 
-                WhatHappened::StartParaheadFetch => {
+                WakeUpReason::StartParaheadFetch => {
                     // Do nothing. This is simply to wake up and loop again.
                 }
 
-                WhatHappened::Notification(relay_chain_notif) => {
+                WakeUpReason::Notification(relay_chain_notif) => {
                     // Update the local tree of blocks to match the update sent by the
                     // relay chain syncing service.
                     self.process_relay_chain_notification(relay_chain_notif);
                 }
 
-                WhatHappened::SubscriptionDead => {
+                WakeUpReason::SubscriptionDead => {
                     // Recreate the channel.
                     log::debug!(target: &self.log_target, "Subscriptions <= Reset");
                     self.subscription_state = ParachainBackgroundState::NotSubscribed {
@@ -374,7 +374,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     continue;
                 }
 
-                WhatHappened::ParaheadFetchFinished {
+                WakeUpReason::ParaheadFetchFinished {
                     async_op_id,
                     parahead_result,
                 } => {
@@ -383,12 +383,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .await;
                 }
 
-                WhatHappened::ForegroundMessage(foreground_message) => {
+                WakeUpReason::ForegroundMessage(foreground_message) => {
                     // Message from the public API of the syncing service.
                     self.process_foreground_message(foreground_message).await;
                 }
 
-                WhatHappened::NetworkEvent(event) => {
+                WakeUpReason::NetworkEvent(event) => {
                     // Something happened on the networking.
                     self.process_network_event(event)
                 }

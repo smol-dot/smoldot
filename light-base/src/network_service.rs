@@ -938,7 +938,7 @@ struct Chain {
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
-        enum WhatHappened {
+        enum WakeUpReason {
             Message(ToBackground),
             NetworkEvent(service::Event),
             CanAssignSlot(PeerId, ChainId),
@@ -951,9 +951,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             EventSendersReady,
         }
 
-        let what_happened = {
+        let wake_up_reason = {
             let message_received =
-                async { WhatHappened::Message(task.messages_rx.next().await.unwrap()) };
+                async { WakeUpReason::Message(task.messages_rx.next().await.unwrap()) };
             let service_event = async {
                 if let Some(event) = task
                     .event_pending_send
@@ -961,12 +961,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .then(|| task.network.next_event())
                     .flatten()
                 {
-                    WhatHappened::NetworkEvent(event)
+                    WakeUpReason::NetworkEvent(event)
                 } else if let Some(start_connect) = {
                     let x = task.network.unconnected_desired().next().cloned();
                     x
                 } {
-                    WhatHappened::CanStartConnect(start_connect)
+                    WakeUpReason::CanStartConnect(start_connect)
                 } else if let Some((peer_id, chain_id)) = {
                     let x = task
                         .network
@@ -975,11 +975,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
                     x
                 } {
-                    WhatHappened::CanOpenGossip(peer_id, chain_id)
+                    WakeUpReason::CanOpenGossip(peer_id, chain_id)
                 } else if let Some((connection_id, message)) =
                     task.network.pull_message_to_connection()
                 {
-                    WhatHappened::MessageToConnection {
+                    WakeUpReason::MessageToConnection {
                         connection_id,
                         message,
                     }
@@ -1001,7 +1001,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 .pick_assignable_peer(&chain_id, &task.platform.now())
                             {
                                 basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
-                                    break 'search WhatHappened::CanAssignSlot(
+                                    break 'search WakeUpReason::CanAssignSlot(
                                         peer_id.clone(),
                                         chain_id,
                                     )
@@ -1029,9 +1029,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 if let either::Right(event_sending_future) = &mut task.event_senders {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
-                    WhatHappened::EventSendersReady
+                    WakeUpReason::EventSendersReady
                 } else if task.event_pending_send.is_some() {
-                    WhatHappened::EventSendersReady
+                    WakeUpReason::EventSendersReady
                 } else {
                     future::pending().await
                 }
@@ -1043,8 +1043,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 .await
         };
 
-        match what_happened {
-            WhatHappened::EventSendersReady => {
+        match wake_up_reason {
+            WakeUpReason::EventSendersReady => {
                 // Dispatch the pending event, if any to the various senders.
 
                 // We made sure that the senders were ready before generating an event.
@@ -1072,14 +1072,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }));
                 }
             }
-            WhatHappened::Message(ToBackground::ConnectionMessage {
+            WakeUpReason::Message(ToBackground::ConnectionMessage {
                 connection_id,
                 message,
             }) => {
                 task.network
                     .inject_connection_message(connection_id, message);
             }
-            WhatHappened::Message(ToBackground::StartBlocksRequest {
+            WakeUpReason::Message(ToBackground::StartBlocksRequest {
                 target,
                 chain_id,
                 config,
@@ -1121,7 +1121,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WhatHappened::Message(ToBackground::StartWarpSyncRequest {
+            WakeUpReason::Message(ToBackground::StartWarpSyncRequest {
                 target,
                 chain_id,
                 begin_hash,
@@ -1145,7 +1145,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WhatHappened::Message(ToBackground::StartStorageProofRequest {
+            WakeUpReason::Message(ToBackground::StartStorageProofRequest {
                 chain_id,
                 target,
                 config,
@@ -1177,7 +1177,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 };
             }
-            WhatHappened::Message(ToBackground::StartCallProofRequest {
+            WakeUpReason::Message(ToBackground::StartCallProofRequest {
                 chain_id,
                 target,
                 config,
@@ -1210,7 +1210,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 };
             }
-            WhatHappened::Message(ToBackground::SetLocalBestBlock {
+            WakeUpReason::Message(ToBackground::SetLocalBestBlock {
                 chain_id,
                 best_hash,
                 best_number,
@@ -1218,7 +1218,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
             }
-            WhatHappened::Message(ToBackground::SetLocalGrandpaState {
+            WakeUpReason::Message(ToBackground::SetLocalGrandpaState {
                 chain_id,
                 grandpa_state,
             }) => {
@@ -1235,7 +1235,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .gossip_broadcast_grandpa_state_and_update(chain_id, grandpa_state);
             }
-            WhatHappened::Message(ToBackground::AnnounceTransaction {
+            WakeUpReason::Message(ToBackground::AnnounceTransaction {
                 chain_id,
                 transaction,
                 result,
@@ -1275,7 +1275,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 let _ = result.send(peers_to_send);
             }
-            WhatHappened::Message(ToBackground::SendBlockAnnounce {
+            WakeUpReason::Message(ToBackground::SendBlockAnnounce {
                 target,
                 chain_id,
                 scale_encoded_header,
@@ -1290,7 +1290,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     is_best,
                 ));
             }
-            WhatHappened::Message(ToBackground::Discover {
+            WakeUpReason::Message(ToBackground::Discover {
                 chain_id,
                 list,
                 important_nodes,
@@ -1312,7 +1312,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WhatHappened::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
+            WakeUpReason::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
                 // TODO: consider returning Vec<u8>s for the addresses?
                 let _ = result.send(
                     task.peering_strategy
@@ -1328,7 +1328,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect::<Vec<_>>(),
                 );
             }
-            WhatHappened::Message(ToBackground::PeersList { chain_id, result }) => {
+            WakeUpReason::Message(ToBackground::PeersList { chain_id, result }) => {
                 let _ = result.send(
                     task.network
                         .gossip_connected_peers(
@@ -1339,7 +1339,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect(),
                 );
             }
-            WhatHappened::Message(ToBackground::StartDiscovery) => {
+            WakeUpReason::Message(ToBackground::StartDiscovery) => {
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
                     let random_peer_id = {
                         let mut pub_key = [0; 32];
@@ -1392,7 +1392,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::HandshakeFinished {
+            WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
                 peer_id,
                 expected_peer_id,
                 id,
@@ -1415,7 +1415,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakeFinished", peer_id, remote_addr);
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::PreHandshakeDisconnected {
+            WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
                 id,
                 address,
                 expected_peer_id,
@@ -1432,7 +1432,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::Disconnected {
+            WakeUpReason::NetworkEvent(service::Event::Disconnected {
                 id,
                 address,
                 peer_id,
@@ -1448,7 +1448,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 let address = Multiaddr::try_from(address).unwrap();
                 log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
             }
-            WhatHappened::NetworkEvent(service::Event::BlockAnnounce {
+            WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
                 peer_id,
                 announce,
@@ -1469,7 +1469,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     announce,
                 });
             }
-            WhatHappened::NetworkEvent(service::Event::GossipConnected {
+            WakeUpReason::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
                 chain_id,
                 role,
@@ -1495,7 +1495,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     best_block_hash: best_hash,
                 });
             }
-            WhatHappened::NetworkEvent(service::Event::GossipOpenFailed {
+            WakeUpReason::NetworkEvent(service::Event::GossipOpenFailed {
                 peer_id,
                 chain_id,
                 error,
@@ -1534,7 +1534,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::GossipDisconnected {
+            WakeUpReason::NetworkEvent(service::Event::GossipDisconnected {
                 peer_id,
                 chain_id,
                 kind: service::GossipKind::ConsensusTransactions,
@@ -1570,7 +1570,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some(Event::Disconnected { peer_id, chain_id });
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 response: service::RequestResult::Blocks(response),
             }) => {
@@ -1580,7 +1580,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .send(response.map_err(BlocksRequestError::Request));
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 response: service::RequestResult::GrandpaWarpSync(response),
             }) => {
@@ -1590,7 +1590,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .send(response.map_err(WarpSyncRequestError::Request));
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 response: service::RequestResult::StorageProof(response),
             }) => {
@@ -1600,7 +1600,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .send(response.map_err(StorageProofRequestError::Request));
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 response: service::RequestResult::CallProof(response),
             }) => {
@@ -1610,7 +1610,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .send(response.map_err(CallProofRequestError::Request));
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 response: service::RequestResult::KademliaFindNode(Ok(nodes)),
             }) => {
@@ -1682,7 +1682,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
                 response: service::RequestResult::KademliaFindNode(Err(error)),
             }) => {
@@ -1729,11 +1729,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::RequestResult { .. }) => {
+            WakeUpReason::NetworkEvent(service::Event::RequestResult { .. }) => {
                 // We never start any other kind of requests.
                 unreachable!()
             }
-            WhatHappened::NetworkEvent(service::Event::GossipInDesired {
+            WakeUpReason::NetworkEvent(service::Event::GossipInDesired {
                 peer_id,
                 chain_id,
                 kind: service::GossipKind::ConsensusTransactions,
@@ -1777,11 +1777,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .unwrap();
                 }
             }
-            WhatHappened::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
+            WakeUpReason::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
                 // Can't happen as we already instantaneously accept or reject gossip in requests.
                 unreachable!()
             }
-            WhatHappened::NetworkEvent(service::Event::IdentifyRequestIn {
+            WakeUpReason::NetworkEvent(service::Event::IdentifyRequestIn {
                 peer_id,
                 substream_id,
             }) => {
@@ -1793,12 +1793,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .respond_identify(substream_id, &task.identify_agent_version);
             }
-            WhatHappened::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
-            WhatHappened::NetworkEvent(service::Event::RequestInCancel { .. }) => {
+            WakeUpReason::NetworkEvent(service::Event::BlocksRequestIn { .. }) => unreachable!(),
+            WakeUpReason::NetworkEvent(service::Event::RequestInCancel { .. }) => {
                 // All incoming requests are immediately answered.
                 unreachable!()
             }
-            WhatHappened::NetworkEvent(service::Event::GrandpaNeighborPacket {
+            WakeUpReason::NetworkEvent(service::Event::GrandpaNeighborPacket {
                 chain_id,
                 peer_id,
                 state,
@@ -1820,7 +1820,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     finalized_block_height: state.commit_finalized_height,
                 });
             }
-            WhatHappened::NetworkEvent(service::Event::GrandpaCommitMessage {
+            WakeUpReason::NetworkEvent(service::Event::GrandpaCommitMessage {
                 chain_id,
                 peer_id,
                 message,
@@ -1840,7 +1840,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     message,
                 });
             }
-            WhatHappened::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
+            WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?
                 log::warn!(
                     target: "network",
@@ -1851,7 +1851,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 // TODO: disconnect peer
             }
-            WhatHappened::CanAssignSlot(peer_id, chain_id) => {
+            WakeUpReason::CanAssignSlot(peer_id, chain_id) => {
                 task.peering_strategy.assign_slot(&chain_id, &peer_id);
 
                 log::debug!(
@@ -1867,7 +1867,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service::GossipKind::ConsensusTransactions,
                 );
             }
-            WhatHappened::CanStartConnect(peer_id) => {
+            WakeUpReason::CanStartConnect(peer_id) => {
                 // TODO: restore rate limiting
 
                 let Some(multiaddr) = task.peering_strategy.addr_to_connected(&peer_id) else {
@@ -2033,7 +2033,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .insert(connection_id, coordinator_to_connection_tx);
                 debug_assert!(_prev_value.is_none());
             }
-            WhatHappened::CanOpenGossip(peer_id, chain_id) => {
+            WakeUpReason::CanOpenGossip(peer_id, chain_id) => {
                 task.network
                     .gossip_open(
                         chain_id,
@@ -2049,7 +2049,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                 );
             }
-            WhatHappened::MessageToConnection {
+            WakeUpReason::MessageToConnection {
                 connection_id,
                 message,
             } => {

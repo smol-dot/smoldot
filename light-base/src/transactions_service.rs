@@ -668,7 +668,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 }
             }
 
-            enum WhatHappened {
+            enum WakeUpReason {
                 Notification(Option<runtime_service::Notification>),
                 BlockDownloadFinished([u8; 32], Result<Vec<Vec<u8>>, ()>),
                 MustMaybeReannounce(light_pool::TransactionId),
@@ -676,20 +676,20 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 ForegroundMessage(Option<ToBackground>),
             }
 
-            let what_happened: WhatHappened = {
-                async { WhatHappened::Notification(subscribe_all.new_blocks.next().await) }
+            let wake_up_reason: WakeUpReason = {
+                async { WakeUpReason::Notification(subscribe_all.new_blocks.next().await) }
                     .or(async {
                         if !worker.block_downloads.is_empty() {
                             let (block_hash, result) =
                                 worker.block_downloads.select_next_some().await;
-                            WhatHappened::BlockDownloadFinished(block_hash, result)
+                            WakeUpReason::BlockDownloadFinished(block_hash, result)
                         } else {
                             future::pending().await
                         }
                     })
                     .or(async {
                         if !worker.next_reannounce.is_empty() {
-                            WhatHappened::MustMaybeReannounce(
+                            WakeUpReason::MustMaybeReannounce(
                                 worker.next_reannounce.select_next_some().await,
                             )
                         } else {
@@ -698,7 +698,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     })
                     .or(async {
                         if !worker.validations_in_progress.is_empty() {
-                            WhatHappened::MaybeValidated(
+                            WakeUpReason::MaybeValidated(
                                 worker.validations_in_progress.select_next_some().await,
                             )
                         } else {
@@ -706,13 +706,13 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         }
                     })
                     .or(async {
-                        WhatHappened::ForegroundMessage(config.from_foreground.next().await)
+                        WakeUpReason::ForegroundMessage(config.from_foreground.next().await)
                     })
                     .await
             };
 
-            match what_happened {
-                WhatHappened::Notification(Some(runtime_service::Notification::Block(
+            match wake_up_reason {
+                WakeUpReason::Notification(Some(runtime_service::Notification::Block(
                     new_block,
                 ))) => {
                     let hash =
@@ -730,7 +730,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         worker.set_best_block(&config.log_target, &hash);
                     }
                 }
-                WhatHappened::Notification(Some(runtime_service::Notification::Finalized {
+                WakeUpReason::Notification(Some(runtime_service::Notification::Finalized {
                     hash,
                     best_block_hash,
                     ..
@@ -745,14 +745,14 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         // download of that block, but it is not worth the effort.
                     }
                 }
-                WhatHappened::Notification(Some(
+                WakeUpReason::Notification(Some(
                     runtime_service::Notification::BestBlockChanged { hash },
                 )) => {
                     worker.set_best_block(&config.log_target, &hash);
                 }
-                WhatHappened::Notification(None) => continue 'channels_rebuild,
+                WakeUpReason::Notification(None) => continue 'channels_rebuild,
 
-                WhatHappened::BlockDownloadFinished(block_hash, mut block_body) => {
+                WakeUpReason::BlockDownloadFinished(block_hash, mut block_body) => {
                     // A block body download has finished, successfully or not.
                     let block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
@@ -820,7 +820,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     }
                 }
 
-                WhatHappened::MustMaybeReannounce(maybe_reannounce_tx_id) => {
+                WakeUpReason::MustMaybeReannounce(maybe_reannounce_tx_id) => {
                     // A transaction reannounce future has finished. This doesn't necessarily mean
                     // that a validation actually needs to be reannounced. The provided
                     // `maybe_reannounce_tx_id` is a hint as to which transaction might need to be
@@ -899,7 +899,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     }
                 }
 
-                WhatHappened::MaybeValidated(maybe_validated_tx_id) => {
+                WakeUpReason::MaybeValidated(maybe_validated_tx_id) => {
                     // A transaction validation future has finished. This doesn't necessarily mean
                     // that a validation has actually finished. The provided
                     // `maybe_validated_tx_id` is a hint as to which transaction might have
@@ -1034,9 +1034,9 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     );
                 }
 
-                WhatHappened::ForegroundMessage(None) => return,
+                WakeUpReason::ForegroundMessage(None) => return,
 
-                WhatHappened::ForegroundMessage(Some(ToBackground::SubmitTransaction {
+                WakeUpReason::ForegroundMessage(Some(ToBackground::SubmitTransaction {
                     transaction_bytes,
                     updates_report,
                 })) => {

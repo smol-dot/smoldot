@@ -927,7 +927,7 @@ async fn run_background<TPlat: PlatformRef>(
 
     // Inner loop. Process incoming events.
     loop {
-        enum WhatHappened<TPlat: PlatformRef> {
+        enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
             NewNecessaryDownload,
             StartPendingSubscribeAll,
@@ -947,34 +947,34 @@ async fn run_background<TPlat: PlatformRef>(
             ),
         }
 
-        let what_happened: WhatHappened<_> = {
+        let wake_up_reason: WakeUpReason<_> = {
             async {
                 (&mut background.wake_up_new_necessary_download).await;
                 background.wake_up_new_necessary_download = Box::pin(future::pending());
-                WhatHappened::NewNecessaryDownload
+                WakeUpReason::NewNecessaryDownload
             }
             .or(async {
                 if !background.pending_subscriptions.is_empty()
                     && matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. })
                 {
-                    WhatHappened::StartPendingSubscribeAll
+                    WakeUpReason::StartPendingSubscribeAll
                 } else {
                     future::pending().await
                 }
             })
             .or(async {
                 if let Some(blocks_stream) = background.blocks_stream.as_mut() {
-                    WhatHappened::Notification(blocks_stream.next().await)
+                    WakeUpReason::Notification(blocks_stream.next().await)
                 } else {
-                    WhatHappened::MustSubscribe
+                    WakeUpReason::MustSubscribe
                 }
             })
-            .or(async { WhatHappened::ToBackground(background.to_background.next().await) })
+            .or(async { WakeUpReason::ToBackground(background.to_background.next().await) })
             .or(async {
                 if !background.runtime_downloads.is_empty() {
                     let (async_op_id, download_result) =
                         background.runtime_downloads.select_next_some().await;
-                    WhatHappened::RuntimeDownloadFinished(async_op_id, download_result)
+                    WakeUpReason::RuntimeDownloadFinished(async_op_id, download_result)
                 } else {
                     future::pending().await
                 }
@@ -982,11 +982,11 @@ async fn run_background<TPlat: PlatformRef>(
             .await
         };
 
-        match what_happened {
-            WhatHappened::NewNecessaryDownload => {
+        match wake_up_reason {
+            WakeUpReason::NewNecessaryDownload => {
                 background.start_necessary_downloads().await;
             }
-            WhatHappened::MustSubscribe => {
+            WakeUpReason::MustSubscribe => {
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of the runtime service resumes.
                 // Note that this `await` freezes the entire runtime service background task,
@@ -1185,7 +1185,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background.wake_up_new_necessary_download = Box::pin(future::pending());
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
-            WhatHappened::StartPendingSubscribeAll => {
+            WakeUpReason::StartPendingSubscribeAll => {
                 // Extract the components of the `FinalizedBlockRuntimeKnown`.
                 let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
                     match &mut background.tree {
@@ -1331,12 +1331,12 @@ async fn run_background<TPlat: PlatformRef>(
                     });
                 }
             }
-            WhatHappened::Notification(None) => {
+            WakeUpReason::Notification(None) => {
                 // The sync service has reset the subscription.
                 background.blocks_stream = None;
             }
-            WhatHappened::ToBackground(None) => todo!(),
-            WhatHappened::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
+            WakeUpReason::ToBackground(None) => todo!(),
+            WakeUpReason::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
                 // remove senders that are closed. This is `O(n)`, but we expect this list to
                 // be rather small.
@@ -1345,7 +1345,7 @@ async fn run_background<TPlat: PlatformRef>(
                     .retain(|s| !s.result_tx.is_canceled());
                 background.pending_subscriptions.push(msg);
             }
-            WhatHappened::ToBackground(Some(ToBackground::CompileAndPinRuntime {
+            WakeUpReason::ToBackground(Some(ToBackground::CompileAndPinRuntime {
                 result_tx,
                 storage_code,
                 storage_heap_pages,
@@ -1380,7 +1380,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let _ = result_tx.send(runtime);
             }
-            WhatHappened::ToBackground(Some(
+            WakeUpReason::ToBackground(Some(
                 ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
             )) => {
                 let _ = result_tx.send(
@@ -1396,7 +1396,7 @@ async fn run_background<TPlat: PlatformRef>(
                     },
                 );
             }
-            WhatHappened::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
+            WakeUpReason::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
                 result_tx,
             })) => {
                 // The runtime service adds a delay between the moment a best block is reported by the
@@ -1417,7 +1417,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // far.
                 let _ = result_tx.send(background.best_near_head_of_chain);
             }
-            WhatHappened::ToBackground(Some(ToBackground::UnpinBlock {
+            WakeUpReason::ToBackground(Some(ToBackground::UnpinBlock {
                 result_tx,
                 subscription_id,
                 block_hash,
@@ -1457,7 +1457,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let _ = result_tx.send(Ok(()));
             }
-            WhatHappened::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
+            WakeUpReason::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
                 result_tx,
                 subscription_id,
                 block_hash,
@@ -1501,7 +1501,7 @@ async fn run_background<TPlat: PlatformRef>(
                     block_state_root_hash: pinned_block.state_trie_root_hash,
                 })));
             }
-            WhatHappened::Notification(Some(notification)) => {
+            WakeUpReason::Notification(Some(notification)) => {
                 match notification {
                     sync_service::Notification::Block(new_block) => {
                         log::debug!(
@@ -1642,7 +1642,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
                 background.start_necessary_downloads().await;
             }
-            WhatHappened::RuntimeDownloadFinished(async_op_id, download_result) => {
+            WakeUpReason::RuntimeDownloadFinished(async_op_id, download_result) => {
                 let concerned_blocks = match &background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                         either::Left(tree.async_op_blocks(async_op_id))
