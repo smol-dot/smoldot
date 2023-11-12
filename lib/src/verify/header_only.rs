@@ -164,6 +164,17 @@ pub enum Error {
     GrandpaChangesOverlap,
 }
 
+impl Error {
+    /// Returns `true` if the error isn't actually about the block being verified but about a
+    /// bad configuration of the chain.
+    pub fn is_invalid_chain_configuration(&self) -> bool {
+        matches!(
+            self,
+            Error::BabeVerification(babe::VerifyError::InvalidChainConfiguration(_))
+        )
+    }
+}
+
 /// Verifies whether a block is valid.
 pub fn verify(config: Config) -> Result<Success, Error> {
     // Check that there is no mismatch in the parent header hash.
