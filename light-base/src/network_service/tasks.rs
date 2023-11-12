@@ -113,14 +113,14 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
         // Now wait for something interesting to happen before looping again.
 
-        enum WhatHappened {
+        enum WakeUpReason {
             CoordinatorMessage(service::CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
         }
 
-        let what_happened: WhatHappened = {
+        let wake_up_reason: WakeUpReason = {
             // If the connection task has self-destructed and that no message is being sent, stop
             // the task altogether as nothing will happen.
             if connection_task.is_none() && message_sending.is_none() {
@@ -130,8 +130,8 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
             let coordinator_message = async {
                 match coordinator_to_connection.next().await {
-                    Some(msg) => WhatHappened::CoordinatorMessage(msg),
-                    None => WhatHappened::CoordinatorDead,
+                    Some(msg) => WakeUpReason::CoordinatorMessage(msg),
+                    None => WakeUpReason::CoordinatorDead,
                 }
             };
 
@@ -148,7 +148,7 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 async {
                     if let Some(fut) = fut {
                         fut.await;
-                        WhatHappened::SocketEvent
+                        WakeUpReason::SocketEvent
                     } else {
                         future::pending().await
                     }
@@ -163,28 +163,28 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 };
                 message_sending.set(None);
                 if result.is_ok() {
-                    WhatHappened::MessageSent
+                    WakeUpReason::MessageSent
                 } else {
-                    WhatHappened::CoordinatorDead
+                    WakeUpReason::CoordinatorDead
                 }
             };
 
             coordinator_message.or(socket_event).or(message_sent).await
         };
 
-        match what_happened {
-            WhatHappened::CoordinatorMessage(message) => {
+        match wake_up_reason {
+            WakeUpReason::CoordinatorMessage(message) => {
                 // The coordinator normally guarantees that no message is sent after the task
                 // is destroyed.
                 let connection_task = connection_task.as_mut().unwrap_or_else(|| unreachable!());
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
-            WhatHappened::CoordinatorDead => {
+            WakeUpReason::CoordinatorDead => {
                 log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
                 return;
             }
-            WhatHappened::SocketEvent => {}
-            WhatHappened::MessageSent => {}
+            WakeUpReason::SocketEvent => {}
+            WakeUpReason::MessageSent => {}
         }
     }
 }
@@ -233,7 +233,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
 
         // Now wait for something interesting to happen before looping again.
 
-        enum WhatHappened<TPlat: PlatformRef> {
+        enum WakeUpReason<TPlat: PlatformRef> {
             CoordinatorMessage(service::CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent(pin::Pin<Box<TPlat::Stream>>, usize),
@@ -242,11 +242,11 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             ConnectionReset,
         }
 
-        let what_happened: WhatHappened<TPlat> = {
+        let wake_up_reason: WakeUpReason<TPlat> = {
             let coordinator_message = async {
                 match coordinator_to_connection.next().await {
-                    Some(msg) => WhatHappened::CoordinatorMessage(msg),
-                    None => WhatHappened::CoordinatorDead,
+                    Some(msg) => WakeUpReason::CoordinatorMessage(msg),
+                    None => WakeUpReason::CoordinatorDead,
                 }
             };
 
@@ -263,7 +263,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 async move {
                     if let Some(fut) = fut {
                         let (stream, substream_id) = fut.await;
-                        WhatHappened::SocketEvent(stream, substream_id)
+                        WakeUpReason::SocketEvent(stream, substream_id)
                     } else {
                         future::pending().await
                     }
@@ -279,9 +279,9 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     };
                 message_sending.set(None);
                 if result.is_ok() {
-                    WhatHappened::MessageSent
+                    WakeUpReason::MessageSent
                 } else {
-                    WhatHappened::CoordinatorDead
+                    WakeUpReason::CoordinatorDead
                 }
             };
 
@@ -291,8 +291,8 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     future::pending().await
                 } else {
                     match platform.next_substream(&mut connection).await {
-                        Some((stream, direction)) => WhatHappened::NewSubstream(stream, direction),
-                        None => WhatHappened::ConnectionReset,
+                        Some((stream, direction)) => WakeUpReason::NewSubstream(stream, direction),
+                        None => WakeUpReason::ConnectionReset,
                     }
                 }
             };
@@ -304,15 +304,15 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 .await
         };
 
-        match what_happened {
-            WhatHappened::CoordinatorMessage(message) => {
+        match wake_up_reason {
+            WakeUpReason::CoordinatorMessage(message) => {
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
-            WhatHappened::CoordinatorDead => {
+            WakeUpReason::CoordinatorDead => {
                 log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
                 return;
             }
-            WhatHappened::SocketEvent(mut socket, substream_id) => {
+            WakeUpReason::SocketEvent(mut socket, substream_id) => {
                 debug_assert!(message_sending.is_none());
 
                 let substream_fate = match platform.read_write_access(socket.as_mut()) {
@@ -388,13 +388,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     });
                 }
             }
-            WhatHappened::MessageSent => {}
-            WhatHappened::ConnectionReset => {
+            WakeUpReason::MessageSent => {}
+            WakeUpReason::ConnectionReset => {
                 debug_assert!(!connection_task.is_reset_called());
                 log::trace!(target: "connections", "Connection({address_string}) => Reset");
                 connection_task.reset();
             }
-            WhatHappened::NewSubstream(substream, direction) => {
+            WakeUpReason::NewSubstream(substream, direction) => {
                 log::trace!(target: "connections", "Connection({address_string}) => NewSubstream({direction:?})");
                 let outbound = match direction {
                     SubstreamDirection::Outbound => true,

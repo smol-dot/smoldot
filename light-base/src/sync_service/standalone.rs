@@ -215,7 +215,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        enum WhatHappened {
+        enum WakeUpReason {
             NetworkEvent(network_service::Event),
             ForegroundMessage(ToBackground),
             ForegroundClosed,
@@ -224,15 +224,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             MustLoopAgain,
         }
 
-        let what_happened = {
+        let wake_up_reason = {
             async {
                 // We expect the networking channel to never close, so the event is unwrapped.
-                WhatHappened::NetworkEvent(from_network_service.next().await.unwrap())
+                WakeUpReason::NetworkEvent(from_network_service.next().await.unwrap())
             }
             .or(async {
                 from_foreground.next().await.map_or(
-                    WhatHappened::ForegroundClosed,
-                    WhatHappened::ForegroundMessage,
+                    WakeUpReason::ForegroundClosed,
+                    WakeUpReason::ForegroundMessage,
                 )
             })
             .or(async {
@@ -240,14 +240,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     future::pending::<()>().await
                 }
                 let (request_id, result) = task.pending_requests.select_next_some().await;
-                WhatHappened::RequestFinished(request_id, result)
+                WakeUpReason::RequestFinished(request_id, result)
             })
             .or(async {
                 (&mut task.warp_sync_taking_long_time_warning).await;
                 task.warp_sync_taking_long_time_warning =
                     future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
                         .fuse();
-                WhatHappened::WarpSyncTakingLongTimeWarning
+                WakeUpReason::WarpSyncTakingLongTimeWarning
             })
             .or(async {
                 // If the list of CPU-heavy operations to perform is potentially non-empty,
@@ -258,31 +258,31 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 if queue_empty {
                     future::pending::<()>().await;
                 }
-                WhatHappened::MustLoopAgain
+                WakeUpReason::MustLoopAgain
             })
             .await
         };
 
-        let response_outcome = match what_happened {
-            WhatHappened::NetworkEvent(network_event) => {
+        let response_outcome = match wake_up_reason {
+            WakeUpReason::NetworkEvent(network_event) => {
                 // Something happened on the networking.
                 task.inject_network_event(network_event);
                 continue;
             }
 
-            WhatHappened::ForegroundMessage(message) => {
+            WakeUpReason::ForegroundMessage(message) => {
                 // Received message from the front `SyncService`.
                 task.process_foreground_message(message);
                 continue;
             }
 
-            WhatHappened::ForegroundClosed => {
+            WakeUpReason::ForegroundClosed => {
                 // The channel with the frontend sync service has been closed.
                 // Closing the sync background task as a result.
                 return;
             }
 
-            WhatHappened::RequestFinished(request_id, result) => {
+            WakeUpReason::RequestFinished(request_id, result) => {
                 // A request has been finished.
                 // `result` is an error if the request got cancelled by the sync state machine.
                 let Ok(result) = result else {
@@ -355,7 +355,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 }
             }
 
-            WhatHappened::WarpSyncTakingLongTimeWarning => {
+            WakeUpReason::WarpSyncTakingLongTimeWarning => {
                 match task.sync.status() {
                     all::Status::Sync => {}
                     all::Status::WarpSyncFragments {
@@ -391,7 +391,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 continue;
             }
 
-            WhatHappened::MustLoopAgain => {
+            WakeUpReason::MustLoopAgain => {
                 continue;
             }
         };

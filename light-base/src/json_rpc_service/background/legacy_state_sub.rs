@@ -552,7 +552,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
         }
 
-        enum WhatHappened<'a, TPlat: PlatformRef> {
+        enum WakeUpReason<'a, TPlat: PlatformRef> {
             SubscriptionNotification {
                 notification: runtime_service::Notification,
                 subscription: &'a mut runtime_service::Subscription<TPlat>,
@@ -571,10 +571,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         }
 
         // Asynchronously wait for something to happen. This can potentially take a long time.
-        let event: WhatHappened<'_, TPlat> = {
+        let event: WakeUpReason<'_, TPlat> = {
             let subscription_event = async {
                 match &mut task.subscription {
-                    Subscription::NotCreated => WhatHappened::SubscriptionDead,
+                    Subscription::NotCreated => WakeUpReason::SubscriptionDead,
                     Subscription::Active {
                         subscription,
                         pinned_blocks,
@@ -584,7 +584,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         current_finalized_block,
                         finalized_heads_subscriptions_stale,
                     } => match subscription.next().await {
-                        Some(notification) => WhatHappened::SubscriptionNotification {
+                        Some(notification) => WakeUpReason::SubscriptionNotification {
                             notification,
                             subscription,
                             pinned_blocks,
@@ -594,18 +594,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             current_finalized_block,
                             finalized_heads_subscriptions_stale,
                         },
-                        None => WhatHappened::SubscriptionDead,
+                        None => WakeUpReason::SubscriptionDead,
                     },
                     Subscription::Pending(pending) => {
-                        WhatHappened::SubscriptionReady(pending.await)
+                        WakeUpReason::SubscriptionReady(pending.await)
                     }
                 }
             };
 
             let message = async {
                 match task.requests_rx.next().await {
-                    Some(msg) => WhatHappened::Message(msg),
-                    None => WhatHappened::ForegroundDead,
+                    Some(msg) => WakeUpReason::Message(msg),
+                    None => WakeUpReason::ForegroundDead,
                 }
             };
 
@@ -615,7 +615,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         // Perform internal state updates depending on what happened.
         match event {
             // Runtime service is now ready to give us blocks.
-            WhatHappened::SubscriptionReady(subscribe_all) => {
+            WakeUpReason::SubscriptionReady(subscribe_all) => {
                 // We must transition to `Subscription::Active`.
                 let mut pinned_blocks =
                     hashbrown::HashMap::with_capacity_and_hasher(32, Default::default());
@@ -672,7 +672,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // A new non-finalized block has appeared!
-            WhatHappened::SubscriptionNotification {
+            WakeUpReason::SubscriptionNotification {
                 notification: runtime_service::Notification::Block(block),
                 pinned_blocks,
                 current_best_block,
@@ -731,7 +731,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // A block has been finalized.
-            WhatHappened::SubscriptionNotification {
+            WakeUpReason::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::Finalized {
                         hash: finalized_hash,
@@ -773,7 +773,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // The current best block has now changed.
-            WhatHappened::SubscriptionNotification {
+            WakeUpReason::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::BestBlockChanged {
                         hash: new_best_hash,
@@ -788,7 +788,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // Request from the JSON-RPC client.
-            WhatHappened::Message(Message::SubscriptionStart(request)) => match request.request() {
+            WakeUpReason::Message(Message::SubscriptionStart(request)) => match request.request() {
                 methods::MethodCall::chain_subscribeAllHeads {} => {
                     let subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
@@ -946,7 +946,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             },
 
             // JSON-RPC client has unsubscribed.
-            WhatHappened::Message(Message::SubscriptionDestroyed { subscription_id }) => {
+            WakeUpReason::Message(Message::SubscriptionDestroyed { subscription_id }) => {
                 // We don't know the type of the unsubscription, that's not a big deal. Just
                 // remove the entry from everywhere.
                 task.all_heads_subscriptions.remove(&subscription_id);
@@ -971,7 +971,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 // TODO: shrink_to_fit?
             }
 
-            WhatHappened::Message(Message::RecentBlockRuntimeAccess {
+            WakeUpReason::Message(Message::RecentBlockRuntimeAccess {
                 block_hash,
                 result_tx,
             }) => {
@@ -1004,7 +1004,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(access);
             }
 
-            WhatHappened::Message(Message::CurrentBestBlockHash { result_tx }) => {
+            WakeUpReason::Message(Message::CurrentBestBlockHash { result_tx }) => {
                 match &task.subscription {
                     Subscription::Active {
                         current_best_block, ..
@@ -1017,7 +1017,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
             }
 
-            WhatHappened::Message(Message::BlockNumber {
+            WakeUpReason::Message(Message::BlockNumber {
                 block_hash,
                 result_tx,
             }) => {
@@ -1046,7 +1046,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(block_number);
             }
 
-            WhatHappened::Message(Message::BlockHeader {
+            WakeUpReason::Message(Message::BlockHeader {
                 block_hash,
                 result_tx,
             }) => {
@@ -1065,7 +1065,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(header);
             }
 
-            WhatHappened::Message(Message::BlockStateRootAndNumber {
+            WakeUpReason::Message(Message::BlockStateRootAndNumber {
                 block_hash,
                 result_tx,
             }) => {
@@ -1183,7 +1183,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
             // Background task dedicated to performing a fetch for a block trie root and number
             // has finished.
-            WhatHappened::Message(Message::BlockStateRootAndNumberFinished {
+            WakeUpReason::Message(Message::BlockStateRootAndNumberFinished {
                 block_hash,
                 result,
             }) => {
@@ -1202,7 +1202,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished.
-            WhatHappened::Message(Message::StorageFetch {
+            WakeUpReason::Message(Message::StorageFetch {
                 block_hash,
                 result: Ok(result),
             }) => {
@@ -1273,19 +1273,19 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished but was unsuccessful.
-            WhatHappened::Message(Message::StorageFetch { result: Err(_), .. }) => {
+            WakeUpReason::Message(Message::StorageFetch { result: Err(_), .. }) => {
                 debug_assert!(task.storage_query_in_progress);
                 task.storage_query_in_progress = false;
                 // TODO: add a delay or something?
             }
 
             // JSON-RPC service has been destroyed. Stop the task altogether.
-            WhatHappened::ForegroundDead => {
+            WakeUpReason::ForegroundDead => {
                 return;
             }
 
             // The subscription towards the runtime service needs to be renewed.
-            WhatHappened::SubscriptionDead => {
+            WakeUpReason::SubscriptionDead => {
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of this task resumes.
                 // The maximum number of pinned block is ignored, as this maximum is a way to
