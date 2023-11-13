@@ -240,8 +240,8 @@ where
     ///
     /// Has no effect if the peer-chain association didn't exist.
     ///
-    /// If the peer isn't assigned to any chain anymore, all of its addresses are also removed
-    /// from the collection.
+    /// If the peer isn't assigned to any chain anymore and doesn't have any connected address,
+    /// all of its addresses are also removed from the collection.
     pub fn unassign_slot_and_remove_chain_peer(&mut self, chain: &TChainId, peer_id: &PeerId) {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it wasn't assigned in the first place.
@@ -290,9 +290,10 @@ where
     /// Inserts a new address for the given peer.
     ///
     /// If the peer doesn't belong to any chain (see [`BasicPeeringStrategy::insert_chain_peer`]),
-    /// then this function has no effect. This is to avoid accidentally collecting addresses for
-    /// peers that will never be removed and create a memory leak. For this reason, you most likely
-    /// want to call [`BasicPeeringStrategy::insert_chain_peer`] before calling this function.
+    /// then this function has no effect, unless the peer has a connected address. This is to
+    /// avoid accidentally collecting addresses for peers that will never be removed and create a
+    /// memory leak. For this reason, you most likely want to call
+    /// [`BasicPeeringStrategy::insert_chain_peer`] before calling this function.
     ///
     /// A maximum number of addresses that are maintained for this peer must be passed as
     /// parameter. If this number is exceeded, an address in the "not connected" state (other than
@@ -645,6 +646,8 @@ where
             AddressState::Disconnected => return Err(DisconnectAddrError::NotConnected),
         }
 
+        self.try_clean_up_peer_id(peer_id_index);
+
         Ok(())
     }
 
@@ -707,6 +710,14 @@ where
             .range((peer_id_index, usize::min_value())..=(peer_id_index, usize::max_value()))
             .next()
             .is_some()
+        {
+            return;
+        }
+
+        if self
+            .addresses
+            .range((peer_id_index, Vec::new())..(peer_id_index + 1, Vec::new()))
+            .any(|(_, state)| matches!(state, AddressState::Connected))
         {
             return;
         }
@@ -819,6 +830,43 @@ mod tests {
 
         assert_eq!(bps.peer_addresses(&peer_id).count(), 1);
         bps.unassign_slot_and_remove_chain_peer(&0, &peer_id);
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 0);
+    }
+
+    #[test]
+    fn addresses_not_removed_if_connected_when_peer_has_no_chain_association() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
+
+        assert!(matches!(
+            bps.insert_chain_peer(0, peer_id.clone(), usize::max_value()),
+            InsertChainPeerResult::Inserted { peer_removed: None }
+        ));
+
+        assert!(matches!(
+            bps.insert_or_set_connected_address(&peer_id, Vec::new(), usize::max_value()),
+            InsertAddressResult::Inserted {
+                address_removed: None
+            }
+        ));
+
+        assert!(matches!(
+            bps.insert_address(&peer_id, vec![1], usize::max_value()),
+            InsertAddressResult::Inserted {
+                address_removed: None
+            }
+        ));
+
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 2);
+        bps.unassign_slot_and_remove_chain_peer(&0, &peer_id);
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 2);
+
+        bps.disconnect_addr(&peer_id, &[]).unwrap();
         assert_eq!(bps.peer_addresses(&peer_id).count(), 0);
     }
 
