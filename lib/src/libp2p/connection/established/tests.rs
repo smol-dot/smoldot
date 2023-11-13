@@ -804,7 +804,9 @@ fn outbound_substream_close_demanded() {
     match event {
         either::Right(Event::NotificationIn { id, notification }) => {
             assert_eq!(notification, b"notif");
-            connections.bob.close_notifications_substream(id)
+            connections
+                .bob
+                .close_in_notifications_substream(id, Duration::from_secs(100))
         }
         _ev => unreachable!("{:?}", _ev),
     }
@@ -813,7 +815,7 @@ fn outbound_substream_close_demanded() {
     connections = connections_update;
     match event {
         either::Left(Event::NotificationsOutCloseDemanded { id }) => {
-            connections.alice.close_notifications_substream(id);
+            connections.alice.close_out_notifications_substream(id);
         }
         _ev => unreachable!("{:?}", _ev),
     }

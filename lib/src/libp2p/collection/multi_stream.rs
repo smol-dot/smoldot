@@ -87,16 +87,12 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         outbound_substreams_map:
             hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
 
-        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
+        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] or a
+        /// [`ConnectionToCoordinatorInner::NotificationsInClose`] is emitted, an
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
-        /// list, the acceptance/refusal is dismissed.
-        notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
-
-        /// After a `NotificationsInOpenCancel` is emitted by the connection, an
-        /// entry is added to this list. If the coordinator accepts or refuses a substream in this
-        /// list, the acceptance/refusal is dismissed.
+        /// list, or closes a substream in this list, the acceptance/refusal/closing is dismissed.
         // TODO: this works only because SubstreamIds aren't reused
-        inbound_negotiated_cancel_acknowledgments:
+        notifications_in_close_acknowledgments:
             hashbrown::HashSet<established::SubstreamId, fnv::FnvBuildHasher>,
 
         /// Messages about inbound accept cancellations to send back.
@@ -212,8 +208,7 @@ where
                 established,
                 outbound_substreams_map,
                 handshake_finished_message_to_send,
-                notifications_in_open_cancel_acknowledgments,
-                inbound_negotiated_cancel_acknowledgments,
+                notifications_in_close_acknowledgments,
                 inbound_accept_cancel_events,
                 ..
             } => {
@@ -254,7 +249,7 @@ where
                         Some(ConnectionToCoordinatorInner::InboundNegotiated { id, protocol_name })
                     }
                     Some(established::Event::InboundNegotiatedCancel { id, .. }) => {
-                        inbound_negotiated_cancel_acknowledgments.insert(id);
+                        notifications_in_close_acknowledgments.insert(id);
                         None
                     }
                     Some(established::Event::InboundAcceptedCancel { id, .. }) => {
@@ -281,13 +276,14 @@ where
                         Some(ConnectionToCoordinatorInner::NotificationsInOpen { id, handshake })
                     }
                     Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
-                        notifications_in_open_cancel_acknowledgments.push_back(id);
+                        notifications_in_close_acknowledgments.insert(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInOpenCancel { id })
                     }
                     Some(established::Event::NotificationIn { id, notification }) => {
                         Some(ConnectionToCoordinatorInner::NotificationIn { id, notification })
                     }
                     Some(established::Event::NotificationsInClose { id, outcome, .. }) => {
+                        notifications_in_close_acknowledgments.insert(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInClose { id, outcome })
                     }
                     Some(established::Event::NotificationsOutResult { id, result }) => {
@@ -389,12 +385,12 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    inbound_negotiated_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     inbound_accept_cancel_events,
                     ..
                 },
             ) => {
-                if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.accept_inbound(substream_id, inbound_ty, None);
                 } else {
                     inbound_accept_cancel_events.push_back(substream_id)
@@ -404,11 +400,11 @@ where
                 CoordinatorToConnectionInner::RejectInbound { substream_id },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    inbound_negotiated_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.reject_inbound(substream_id);
                 }
             }
@@ -475,7 +471,7 @@ where
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
                 if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
-                    established.close_notifications_substream(inner_substream_id);
+                    established.close_out_notifications_substream(inner_substream_id);
                 }
             }
             (
@@ -520,16 +516,11 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    notifications_in_open_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if let Some(idx) = notifications_in_open_cancel_acknowledgments
-                    .iter()
-                    .position(|s| *s == substream_id)
-                {
-                    notifications_in_open_cancel_acknowledgments.remove(idx);
-                } else {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.accept_in_notifications_substream(
                         substream_id,
                         handshake,
@@ -541,17 +532,28 @@ where
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    notifications_in_open_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if let Some(idx) = notifications_in_open_cancel_acknowledgments
-                    .iter()
-                    .position(|s| *s == substream_id)
-                {
-                    notifications_in_open_cancel_acknowledgments.remove(idx);
-                } else {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.reject_in_notifications_substream(substream_id);
+                }
+            }
+            (
+                CoordinatorToConnectionInner::CloseInNotifications {
+                    substream_id,
+                    timeout,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_close_acknowledgments,
+                    ..
+                },
+            ) => {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
+                    established
+                        .close_in_notifications_substream(substream_id, now.clone() + timeout);
                 }
             }
             (
@@ -571,6 +573,7 @@ where
                 | CoordinatorToConnectionInner::RejectInbound { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::CloseInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
@@ -584,6 +587,7 @@ where
                 | CoordinatorToConnectionInner::RejectInbound { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::CloseInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
@@ -989,10 +993,7 @@ where
                                 0,
                                 Default::default(),
                             ),
-                            notifications_in_open_cancel_acknowledgments: VecDeque::with_capacity(
-                                4,
-                            ),
-                            inbound_negotiated_cancel_acknowledgments:
+                            notifications_in_close_acknowledgments:
                                 hashbrown::HashSet::with_capacity_and_hasher(2, Default::default()),
                             inbound_accept_cancel_events: VecDeque::with_capacity(2),
                         };

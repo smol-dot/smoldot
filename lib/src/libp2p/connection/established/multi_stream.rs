@@ -849,18 +849,17 @@ where
     }
 
     /// Closes a notifications substream opened after a successful
-    /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`MultiStream::accept_in_notifications_substream`].
+    /// [`Event::NotificationsOutResult`].
     ///
-    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
-    /// in other words before the remote has accepted/refused the substream.
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
+    pub fn close_out_notifications_substream(&mut self, substream_id: SubstreamId) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::MultiStream(id) => id,
             _ => panic!(),
@@ -874,7 +873,32 @@ where
             .inner
             .as_mut()
             .unwrap()
-            .close_notifications_substream();
+            .close_out_notifications_substream();
+    }
+
+    /// Closes a notifications substream that was accepted using
+    /// [`MultiStream::accept_in_notifications_substream`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn close_in_notifications_substream(&mut self, substream_id: SubstreamId, timeout: TNow) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::MultiStream(id) => id,
+            _ => panic!(),
+        };
+
+        let inner_substream_id = self.out_in_substreams_map.get(&substream_id).unwrap();
+
+        self.in_substreams
+            .get_mut(inner_substream_id)
+            .unwrap()
+            .inner
+            .as_mut()
+            .unwrap()
+            .close_in_notifications_substream(timeout);
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
