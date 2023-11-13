@@ -219,7 +219,7 @@ where
     ///
     /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
     /// [`Substream::notification_substream_queued_bytes`] and
-    /// [`Substream::close_notifications_substream`] can be used, and
+    /// [`Substream::close_out_notifications_substream`] can be used, and
     /// [`Event::NotificationsOutCloseDemanded`] and [`Event::NotificationsOutReset`] can be
     /// generated.
     pub fn notifications_out(
