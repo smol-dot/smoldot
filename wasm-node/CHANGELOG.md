@@ -4,7 +4,7 @@
 
 ### Changed
 
-- The `hash` parameter of `chainHead_unstable_unpin` has been renamed to `hashOrHashes`, in accordance with the latest changes in the JSON-RPC API specification. ([#1097](https://github.com/smol-dot/smoldot/pull/1097))
+- The `hash` parameter of `chainHead_unstable_unpin` has been renamed to `hashOrHashes`, in accordance with the latest changes in the JSON-RPC API specification. ([#1329](https://github.com/smol-dot/smoldot/pull/1329))
 
 ### Fixed
 
