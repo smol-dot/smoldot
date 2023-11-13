@@ -671,18 +671,17 @@ where
     }
 
     /// Closes a notifications substream opened after a successful
-    /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`SingleStream::accept_in_notifications_substream`].
+    /// [`Event::NotificationsOutResult`].
     ///
-    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
-    /// in other words before the remote has accepted/refused the substream.
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
+    pub fn close_out_notifications_substream(&mut self, substream_id: SubstreamId) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
             _ => panic!(),
@@ -696,7 +695,33 @@ where
             .as_mut()
             .unwrap()
             .0
-            .close_notifications_substream();
+            .close_out_notifications_substream();
+        self.inner.yamux.mark_substream_write_ready(substream_id);
+    }
+
+    /// Closes a notifications substream that was accepted using
+    /// [`SingleStream::accept_in_notifications_substream`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn close_in_notifications_substream(&mut self, substream_id: SubstreamId, timeout: TNow) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
+        };
+
+        if !self.inner.yamux.has_substream(substream_id) {
+            panic!()
+        }
+
+        self.inner.yamux[substream_id]
+            .as_mut()
+            .unwrap()
+            .0
+            .close_in_notifications_substream(timeout);
         self.inner.yamux.mark_substream_write_ready(substream_id);
     }
 

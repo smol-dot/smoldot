@@ -1209,29 +1209,43 @@ where
         }
     }
 
-    /// Closes a notifications substream opened after a successful
-    /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`Substream::accept_in_notifications_substream`].
+    /// Closes a outgoing notifications substream opened after a successful
+    /// [`Event::NotificationsOutResult`].
     ///
-    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
-    /// in other words before the remote has accepted/refused the substream.
-    ///
-    /// In the case of an inbound substream, notifications can continue to be received. Calling
-    /// this function only asynchronously signals to the remote that the substream should be
-    /// closed. It does not enforce the closing.
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the substream isn't a notifications substream, or if the notifications substream
     /// isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self) {
+    pub fn close_out_notifications_substream(&mut self) {
         match &mut self.inner {
             SubstreamInner::NotificationsOutHandshakeRecv { .. }
             | SubstreamInner::NotificationsOut { .. } => {
                 self.inner = SubstreamInner::NotificationsOutClosed;
             }
+            _ => panic!(),
+        };
+    }
+
+    /// Closes an ingoing notifications substream that was accepted using
+    /// [`Substream::accept_in_notifications_substream`].
+    ///
+    /// Notifications can continue to be received. Calling this function only asynchronously
+    /// signals to the remote that the substream should be closed. The closing is enforced only
+    /// after the given timeout elapses.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn close_in_notifications_substream(&mut self, timeout: TNow) {
+        match &mut self.inner {
             SubstreamInner::NotificationsIn { close_desired, .. } if !*close_desired => {
+                // TODO: use timeout
                 *close_desired = true
             }
             _ => panic!(),

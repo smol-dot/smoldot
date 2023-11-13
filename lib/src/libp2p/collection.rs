@@ -309,6 +309,8 @@ enum SubstreamState {
     /// Substream hasn't been accepted or refused yet.
     Pending,
     Open,
+    /// Substream is in the process of being closed. Only relevant for inbound substreams.
+    RequestedClosing,
 }
 
 impl<TConn, TNow> Network<TConn, TNow>
@@ -949,6 +951,43 @@ where
         }
     }
 
+    /// Start the closing of an inbound notifications substream that was previously accepted with
+    /// [`Network::accept_in_notifications`]
+    ///
+    /// Calling this function will later generate a [`Event::NotificationsInClose`] event once the
+    /// substream is effectively closed.
+    /// This function gracefully asks the remote to close the substream. The remote has the
+    /// duration indicated with `timeout` to effectively close the substream. In the meanwhile,
+    /// notifications can still be received.
+    ///
+    /// This function generates a message destined to the connection. Use
+    /// [`Network::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to an accepted inbound notifications
+    /// substream.
+    ///
+    #[track_caller]
+    pub fn start_close_in_notifications(&mut self, substream_id: SubstreamId, timeout: Duration) {
+        let (connection_id, state, inner_substream_id) =
+            match self.ingoing_notification_substreams.get_mut(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
+        assert!(matches!(state, SubstreamState::Open));
+
+        self.messages_to_connections.push_back((
+            *connection_id,
+            CoordinatorToConnectionInner::CloseInNotifications {
+                substream_id: *inner_substream_id,
+                timeout,
+            },
+        ));
+
+        *state = SubstreamState::RequestedClosing;
+    }
+
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
     ///
     /// If the substream was in the meanwhile yielded in an [`Event::RequestInCancel`], then this
@@ -1084,6 +1123,7 @@ where
                             substream_id,
                             result: Err(NotificationsOutErr::ConnectionShutdown),
                         },
+                        SubstreamState::RequestedClosing => unreachable!(), // Never set for outgoing notification substreams.
                     });
                 }
 
@@ -1103,16 +1143,24 @@ where
                     .map(|(k, v)| (*k, *v))
                     .next()
                 {
-                    self.ingoing_notification_substreams
+                    let (_, state, _) = self
+                        .ingoing_notification_substreams
                         .remove(&substream_id)
                         .unwrap();
                     self.ingoing_notification_substreams_by_connection
                         .remove(&key)
                         .unwrap();
 
-                    return Some(Event::NotificationsInClose {
-                        substream_id,
-                        outcome: Err(NotificationsInClosedErr::ConnectionShutdown),
+                    return Some(match state {
+                        SubstreamState::Open | SubstreamState::RequestedClosing => {
+                            Event::NotificationsInClose {
+                                substream_id,
+                                outcome: Err(NotificationsInClosedErr::ConnectionShutdown),
+                            }
+                        }
+                        SubstreamState::Pending => {
+                            Event::NotificationsInOpenCancel { substream_id }
+                        }
                     });
                 }
 
@@ -1474,12 +1522,14 @@ where
                             .remove(&substream_id)
                             .unwrap();
                         match state {
-                            SubstreamState::Open => Event::NotificationsInClose {
-                                substream_id,
-                                outcome: Err(NotificationsInClosedErr::Substream(
-                                    established::NotificationsInClosedErr::SubstreamReset,
-                                )),
-                            },
+                            SubstreamState::Open | SubstreamState::RequestedClosing => {
+                                Event::NotificationsInClose {
+                                    substream_id,
+                                    outcome: Err(NotificationsInClosedErr::Substream(
+                                        established::NotificationsInClosedErr::SubstreamReset,
+                                    )),
+                                }
+                            }
                             SubstreamState::Pending => {
                                 Event::NotificationsInOpenCancel { substream_id }
                             }
@@ -1535,8 +1585,26 @@ where
                         .ingoing_notification_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
                         .unwrap();
-                    let _was_in = self.ingoing_notification_substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
+                    let (_, state, _) = self
+                        .ingoing_notification_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+                    debug_assert!(matches!(
+                        state,
+                        SubstreamState::Open | SubstreamState::RequestedClosing
+                    ));
+
+                    if let SubstreamState::Open = state {
+                        // As documented, we must confirm the reception of the event by sending
+                        // back a rejection, provided that no such event has been sent beforehand.
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::CloseInNotifications {
+                                substream_id: inner_substream_id,
+                                timeout: Duration::new(0, 0),
+                            },
+                        ));
+                    }
 
                     Event::NotificationsInClose {
                         substream_id,
@@ -1756,6 +1824,10 @@ enum ConnectionToCoordinatorInner {
         notification: Vec<u8>,
     },
     /// See the corresponding event in [`established::Event`].
+    ///
+    /// In order to avoid race conditions, this must always be acknowledged by sending back a
+    /// [`CoordinatorToConnectionInner::CloseInNotifications`] message if no such message was
+    /// sent in the past.
     NotificationsInClose {
         id: established::SubstreamId,
         outcome: Result<(), established::NotificationsInClosedErr>,
@@ -1855,6 +1927,10 @@ enum CoordinatorToConnectionInner {
     },
     RejectInNotifications {
         substream_id: established::SubstreamId,
+    },
+    CloseInNotifications {
+        substream_id: established::SubstreamId,
+        timeout: Duration,
     },
 
     /// Answer an incoming request.
