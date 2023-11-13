@@ -24,7 +24,12 @@ use smoldot::{
     executor,
     json_rpc::{methods, service},
 };
-use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    num::NonZeroUsize,
+    pin::{self, Pin},
+    sync::Arc,
+};
 
 use crate::{consensus_service, database_thread, LogCallback};
 
@@ -66,17 +71,21 @@ pub enum Message {
 /// Spawns a new tasks dedicated to handling a `chainHead_unstable_follow` subscription.
 ///
 /// Returns the identifier of the subscription.
-pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
+pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
     let mut json_rpc_subscription = config.chain_head_follow_subscription.accept();
     let json_rpc_subscription_id = json_rpc_subscription.subscription_id().to_owned();
     let return_value = json_rpc_subscription_id.clone();
 
     let tasks_executor = config.tasks_executor.clone();
     tasks_executor(Box::pin(async move {
-        let mut consensus_service_subscription = config
+        let consensus_service_subscription = config
             .consensus_service
             .subscribe_all(32, NonZeroUsize::new(32).unwrap())
             .await;
+        let mut consensus_service_subscription_new_blocks =
+            pin::pin!(consensus_service_subscription.new_blocks);
+
+        let mut foreground_receiver = pin::pin!(config.receiver);
 
         let mut pinned_blocks =
             hashbrown::HashSet::with_capacity_and_hasher(32, fnv::FnvBuildHasher::default());
@@ -144,8 +153,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
             }
 
             let wake_up_reason = async {
-                consensus_service_subscription
-                    .new_blocks
+                consensus_service_subscription_new_blocks
                     .next()
                     .await
                     .map_or(
@@ -154,8 +162,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                     )
             }
             .or(async {
-                config
-                    .receiver
+                foreground_receiver
                     .next()
                     .await
                     .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Foreground)
