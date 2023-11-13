@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `hash` parameter of `chainHead_unstable_unpin` has been renamed to `hashOrHashes`, in accordance with the latest changes in the JSON-RPC API specification. ([#1329](https://github.com/smol-dot/smoldot/pull/1329))
+
 ### Fixed
 
 - Fix panic when requesting a block with a specific hash from the peer-to-peer network and none of the peers has the block. ([#1303](https://github.com/smol-dot/smoldot/pull/1303))

@@ -840,9 +840,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_unpin {
                 follow_subscription: _,
-                hash,
+                hash_or_hashes,
             } => {
-                let all_hashes = match &hash {
+                let all_hashes = match &hash_or_hashes {
                     methods::HashHexStringSingleOrArray::Single(hash) => {
                         either::Left(iter::once(&hash.0))
                     }
