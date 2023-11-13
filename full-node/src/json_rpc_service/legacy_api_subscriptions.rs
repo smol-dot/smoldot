@@ -22,7 +22,7 @@ use smoldot::{
     executor::{host::HostVmPrototype, CoreVersion},
     trie,
 };
-use std::{collections::BTreeSet, iter, mem, num::NonZeroUsize, ops, sync::Arc};
+use std::{collections::BTreeSet, iter, mem, num::NonZeroUsize, ops, pin::Pin, sync::Arc};
 
 use crate::{consensus_service, database_thread};
 
@@ -37,7 +37,7 @@ pub struct SubscribeAllHeads {
 
 struct SubscribeAllHeadsSubscription {
     subscription_id: consensus_service::SubscriptionId,
-    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    new_blocks: Pin<Box<async_channel::Receiver<consensus_service::Notification>>>,
     blocks_to_unpin: Vec<[u8; 32]>,
 }
 
@@ -72,7 +72,7 @@ impl SubscribeAllHeads {
 
                     self.subscription.insert(SubscribeAllHeadsSubscription {
                         subscription_id: subscribe_all.id,
-                        new_blocks: subscribe_all.new_blocks,
+                        new_blocks: Box::pin(subscribe_all.new_blocks),
                         blocks_to_unpin,
                     })
                 }
@@ -115,7 +115,7 @@ pub struct SubscribeFinalizedHeads {
 
 struct SubscribeFinalizedHeadsSubscription {
     subscription_id: consensus_service::SubscriptionId,
-    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    new_blocks: Pin<Box<async_channel::Receiver<consensus_service::Notification>>>,
     pinned_blocks: HashMap<[u8; 32], Vec<u8>>,
     blocks_to_unpin: Vec<[u8; 32]>,
 }
@@ -152,7 +152,7 @@ impl SubscribeFinalizedHeads {
 
                     self.subscription = Some(SubscribeFinalizedHeadsSubscription {
                         subscription_id: subscribe_all.id,
-                        new_blocks: subscribe_all.new_blocks,
+                        new_blocks: Box::pin(subscribe_all.new_blocks),
                         pinned_blocks,
                         blocks_to_unpin,
                     });
@@ -224,7 +224,7 @@ pub struct SubscribeNewHeads {
 
 struct SubscribeNewHeadsSubscription {
     subscription_id: consensus_service::SubscriptionId,
-    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    new_blocks: Pin<Box<async_channel::Receiver<consensus_service::Notification>>>,
     pinned_blocks: HashMap<[u8; 32], Vec<u8>>,
     blocks_to_unpin: Vec<[u8; 32]>,
     current_best_block_hash: [u8; 32],
@@ -271,7 +271,7 @@ impl SubscribeNewHeads {
 
                 let subscription = self.subscription.insert(SubscribeNewHeadsSubscription {
                     subscription_id: subscribe_all.id,
-                    new_blocks: subscribe_all.new_blocks,
+                    new_blocks: Box::pin(subscribe_all.new_blocks),
                     pinned_blocks,
                     blocks_to_unpin: Vec::with_capacity(8),
                     current_best_block_hash,
@@ -388,7 +388,7 @@ pub struct SubscribeRuntimeVersion {
 
 struct SubscribeRuntimeVersionSubscription {
     subscription_id: consensus_service::SubscriptionId,
-    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    new_blocks: Pin<Box<async_channel::Receiver<consensus_service::Notification>>>,
     pinned_blocks: HashMap<[u8; 32], Arc<HostVmPrototype>>,
     blocks_to_unpin: Vec<[u8; 32]>,
     current_best_block_hash: [u8; 32],
@@ -443,7 +443,7 @@ impl SubscribeRuntimeVersion {
                     .subscription
                     .insert(SubscribeRuntimeVersionSubscription {
                         subscription_id: subscribe_all.id,
-                        new_blocks: subscribe_all.new_blocks,
+                        new_blocks: Box::pin(subscribe_all.new_blocks),
                         pinned_blocks,
                         blocks_to_unpin: Vec::with_capacity(8),
                         current_best_block_hash,
@@ -616,7 +616,7 @@ struct SubscribeStorageSubscription {
     /// Identifier of the subscription towards the consensus service.
     subscription_id: consensus_service::SubscriptionId,
     /// Channel connected to the consensus service where notifications are received.
-    new_blocks: async_channel::Receiver<consensus_service::Notification>,
+    new_blocks: Pin<Box<async_channel::Receiver<consensus_service::Notification>>>,
     /// List of block hashes that are still pinned but are not necessary anymore and should be
     /// unpinned.
     blocks_to_unpin: Vec<[u8; 32]>,
@@ -714,7 +714,7 @@ impl SubscribeStorage {
                         // in order to not miss a storage change.
                         new_report_remaining_keys: self.keys.iter().cloned().collect(),
                         subscription_id: subscribe_all.id,
-                        new_blocks: subscribe_all.new_blocks,
+                        new_blocks: Box::pin(subscribe_all.new_blocks),
                         pinned_blocks,
                         pinned_blocks_by_hash,
                         pinned_blocks_storage_changes: BTreeSet::new(),
