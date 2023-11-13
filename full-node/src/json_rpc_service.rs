@@ -590,7 +590,7 @@ fn spawn_client_main_task(
                         }
                         methods::MethodCall::chainHead_unstable_unpin {
                             follow_subscription,
-                            hash,
+                            hash_or_hashes: hash,
                         } => {
                             if let Some(follow_subscription) =
                                 chain_head_follow_subscriptions.get_mut(&*follow_subscription)
