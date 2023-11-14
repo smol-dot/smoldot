@@ -3510,6 +3510,8 @@ where
         }
     }
 
+    /// Checks whether the given [`PeerIndex`] is still in use, and if no removes it from
+    /// [`ChainNetwork::peers`].
     fn try_clean_up_peer(&mut self, peer_index: PeerIndex) {
         if self
             .connections_by_peer_id
