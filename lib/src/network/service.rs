@@ -674,6 +674,7 @@ where
         };
 
         let chains = {
+            // TODO: this works only because there's only one GossipKind
             let mut chains_and_after =
                 self.gossip_desired_peers
                     .split_off(&(peer_index, kind, usize::min_value()));
@@ -686,14 +687,11 @@ where
             chains_and_after
         };
 
-        for (_, _, chain_index) in chains {
+        for (_removed_peer_index, _, chain_index) in chains {
+            debug_assert_eq!(_removed_peer_index, peer_index);
             let _was_in =
                 self.gossip_desired_peers_by_chain
                     .remove(&(chain_index, kind, peer_index));
-            debug_assert!(_was_in);
-            let _was_in = self
-                .gossip_desired_peers
-                .remove(&(peer_index, kind, chain_index));
             debug_assert!(_was_in);
             self.connected_unopened_gossip_desired.remove(&(
                 peer_index,
