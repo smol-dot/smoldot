@@ -722,8 +722,6 @@ where
                     ref mut remaining_bytes,
                     ..
                 } => {
-                    debug_assert_ne!(*remaining_bytes, 0);
-
                     // It is possible that we are receiving data corresponding to a substream for
                     // which a RST has been sent out by the local node. Since the
                     // local state machine doesn't keep track of RST'ted substreams, any
@@ -765,6 +763,7 @@ where
                     // If instead there is enough data, we copy all the data immediately
                     // in order to avoid the cost of splitting the buffer.
 
+                    debug_assert_ne!(*remaining_bytes, 0);
                     let to_copy = if *expected_incoming_bytes == Some(0) {
                         // If the substream refuses to process more incoming data right now,
                         // we copy everything into its read buffer in order to free the outer
@@ -782,10 +781,6 @@ where
                             usize::try_from(*remaining_bytes).unwrap_or(usize::max_value()),
                         )
                     };
-
-                    // Make sure that some progress is always made, otherwise we might get into
-                    // an infinite loop.
-                    debug_assert_ne!(to_copy, 0);
 
                     match outer_read_write.incoming_bytes_take(to_copy) {
                         Ok(Some(mut data)) => {
@@ -826,6 +821,10 @@ where
                         // Also stop processing incoming data so that we can process the substream.
                         break;
                     }
+
+                    // Make sure that some progress was made, otherwise we might get into an
+                    // infinite loop.
+                    debug_assert_ne!(to_copy, 0);
                 }
 
                 Incoming::Header => {
