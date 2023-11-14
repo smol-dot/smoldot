@@ -189,7 +189,7 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     // TODO: shrink to fit from time to time
     substreams: hashbrown::HashMap<SubstreamId, SubstreamInfo, fnv::FnvBuildHasher>,
 
-    /// Connections indexed by the value in [`ConnectionInfo::peer_id`].
+    /// Connections indexed by the value in [`ConnectionInfo::peer_index`].
     connections_by_peer_id: BTreeSet<(PeerIndex, collection::ConnectionId)>,
 
     /// All the outbound notification substreams, indexed by protocol, `PeerId`, and state.
