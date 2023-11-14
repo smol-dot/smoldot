@@ -781,6 +781,7 @@ where
                             usize::try_from(*remaining_bytes).unwrap_or(usize::max_value()),
                         )
                     };
+                    debug_assert!(to_copy != 0 || expected_incoming_bytes.is_none());
 
                     match outer_read_write.incoming_bytes_take(to_copy) {
                         Ok(Some(mut data)) => {
