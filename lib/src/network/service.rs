@@ -3357,16 +3357,25 @@ where
         // TODO: only relevant for GossipKind::ConsensusTransactions
         // If none is found, then we are not considered "gossip-connected", and return an error
         // no matter what, even if a substream of the requested protocol exists.
-        // TODO: O(n) ; optimize this by using range()
         let block_announces_substream = self
             .notification_substreams_by_peer_id
-            .iter()
-            .find(move |(p, id, d, s, _)| {
-                *p == NotificationsProtocol::BlockAnnounces { chain_index }
-                    && *id == peer_index
-                    && *d == SubstreamDirection::Out
-                    && *s == NotificationsSubstreamState::Open
-            })
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces { chain_index },
+                    peer_index,
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::Open,
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::Open,
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
             .map(|(_, _, _, _, substream_id)| *substream_id)
             .ok_or(QueueNotificationError::NoConnection)?;
 
@@ -3374,16 +3383,25 @@ where
         let substream_id = if matches!(protocol, NotificationsProtocol::BlockAnnounces { .. }) {
             block_announces_substream
         } else {
-            // TODO: O(n) ; optimize this by using range()
             let id = self
                 .notification_substreams_by_peer_id
-                .iter()
-                .find(move |(p, id, d, s, _)| {
-                    *p == protocol
-                        && *id == peer_index
-                        && *d == SubstreamDirection::Out
-                        && *s == NotificationsSubstreamState::Open
-                })
+                .range(
+                    (
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::Open,
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::Open,
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .next()
                 .map(|(_, _, _, _, substream_id)| *substream_id);
             // If we are "gossip-connected" but no open transaction/grandpa substream exists, we
             // silently discard the notification.
