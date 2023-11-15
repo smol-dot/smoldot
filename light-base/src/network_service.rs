@@ -1853,17 +1853,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     service::GossipKind::ConsensusTransactions,
                 );
             }
-            WakeUpReason::CanStartConnect(peer_id) => {
+            WakeUpReason::CanStartConnect(expected_peer_id) => {
                 // TODO: restore rate limiting
 
-                let Some(multiaddr) = task.peering_strategy.addr_to_connected(&peer_id) else {
+                let Some(multiaddr) = task.peering_strategy.addr_to_connected(&expected_peer_id)
+                else {
                     // There is no address for that peer in the address book.
                     task.network.gossip_remove_desired_all(
-                        &peer_id,
+                        &expected_peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
                     task.peering_strategy.unassign_slots_and_ban(
-                        &peer_id,
+                        &expected_peer_id,
                         task.platform.now() + Duration::from_secs(10),
                     );
                     continue;
@@ -1873,7 +1874,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     Ok(a) => a,
                     Err(multiaddr::FromVecError { addr }) => {
                         // Address is in an invalid format.
-                        let _was_in = task.peering_strategy.remove_address(&peer_id, &addr);
+                        let _was_in = task
+                            .peering_strategy
+                            .remove_address(&expected_peer_id, &addr);
                         debug_assert!(_was_in);
                         continue;
                     }
@@ -1896,7 +1899,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     // Address is in an invalid format or isn't supported by the platform.
                     let _was_in = task
                         .peering_strategy
-                        .remove_address(&peer_id, multiaddr.as_ref());
+                        .remove_address(&expected_peer_id, multiaddr.as_ref());
                     debug_assert!(_was_in);
                     continue;
                 };
@@ -1913,14 +1916,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(
                     target: "network",
                     "Connections({}) <= StartConnecting(remote_addr={}, local_peer_id={})",
-                    peer_id,
+                    expected_peer_id,
                     multiaddr,
                     peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id(),
                 );
 
                 let (coordinator_to_connection_tx, coordinator_to_connection_rx) =
                     async_channel::bounded(8);
-                let task_name = format!("connection-{}-{}", peer_id, multiaddr);
+                let task_name = format!("connection-{}", multiaddr);
 
                 match address {
                     address_parse::AddressOrMultiStreamAddress::Address(address) => {
@@ -1936,7 +1939,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     noise_key: &noise_key,
                                 },
                                 multiaddr.clone().into_vec(),
-                                Some(peer_id.clone()),
+                                Some(expected_peer_id.clone()),
                                 coordinator_to_connection_tx,
                             );
 
@@ -1993,7 +1996,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     noise_key: &noise_key,
                                 },
                                 multiaddr.clone().into_vec(),
-                                Some(peer_id.clone()),
+                                Some(expected_peer_id.clone()),
                                 coordinator_to_connection_tx,
                             );
 
