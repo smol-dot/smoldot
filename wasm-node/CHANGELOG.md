@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Smoldot will now only try opening a maximum of five connections simultaneously, then one per second. This avoids possible situations where a server is being accidentally hammered by smoldot, and avoids potentially making traffic suspicious to some ISPs.
+- Smoldot will now only try opening a maximum of five connections simultaneously, then one per second. This avoids possible situations where a server is being accidentally hammered by smoldot, and avoids potentially making traffic suspicious to some ISPs. ([#1340](https://github.com/smol-dot/smoldot/pull/1340))
 
 ## 2.0.8 - 2023-11-15
 
