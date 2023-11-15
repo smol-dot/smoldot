@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "arrayvec 0.7.4",
  "async-lock 3.1.0",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-full-node"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-channel 2.1.0",
  "blake2-rfc",
@@ -2449,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "async-channel 2.1.0",
  "async-lock 3.1.0",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "2.0.7"
+version = "2.0.8"
 dependencies = [
  "async-executor",
  "async-task",
