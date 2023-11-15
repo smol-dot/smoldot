@@ -2818,8 +2818,40 @@ where
             let observed_addr = &self.inner[substream_info.connection_id].address;
             let ed25519_public_key = &self.inner[substream_info.connection_id].ed25519_public_key;
 
-            // TODO: all protocols
-            let supported_protocols = [codec::ProtocolName::Ping].into_iter();
+            let supported_protocols = [codec::ProtocolName::Ping, codec::ProtocolName::Identify]
+                .into_iter()
+                .chain(self.chains.iter().flat_map(|(_, chain)| {
+                    [
+                        codec::ProtocolName::BlockAnnounces {
+                            genesis_hash: chain.genesis_hash,
+                            fork_id: chain.fork_id.as_deref(),
+                        },
+                        codec::ProtocolName::Transactions {
+                            genesis_hash: chain.genesis_hash,
+                            fork_id: chain.fork_id.as_deref(),
+                        },
+                    ]
+                    .into_iter()
+                    .chain(
+                        chain
+                            .grandpa_protocol_config
+                            .is_some()
+                            .then_some(codec::ProtocolName::Grandpa {
+                                genesis_hash: chain.genesis_hash,
+                                fork_id: chain.fork_id.as_deref(),
+                            })
+                            .into_iter(),
+                    )
+                    .chain(
+                        chain
+                            .allow_inbound_block_requests
+                            .then_some(codec::ProtocolName::Sync {
+                                genesis_hash: chain.genesis_hash,
+                                fork_id: chain.fork_id.as_deref(),
+                            })
+                            .into_iter(),
+                    )
+                }));
 
             let supported_protocols_names = supported_protocols
                 .map(codec::encode_protocol_name_string)
