@@ -66,10 +66,6 @@ pub struct Config<TPlat: PlatformRef> {
         network_service::ChainId,
     ),
 
-    /// Receiver for events coming from the network, as returned by
-    /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: Pin<Box<dyn stream::Stream<Item = network_service::Event> + Send>>,
-
     /// Extra fields depending on whether the chain is a relay chain or a parachain.
     pub chain_type: ConfigChainType<TPlat>,
 }
@@ -168,7 +164,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 from_foreground,
                 config.network_service.0.clone(),
                 config.network_service.1,
-                config.network_events_receiver,
             )),
             ConfigChainType::RelayChain(config_relay_chain) => {
                 Box::pin(standalone::start_standalone_chain(
@@ -180,7 +175,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     from_foreground,
                     config.network_service.0.clone(),
                     config.network_service.1,
-                    config.network_events_receiver,
                 ))
             }
         };

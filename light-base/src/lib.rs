@@ -1175,7 +1175,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 log_name: log_name.clone(),
                 block_number_bytes,
                 network_service: (network_service.clone(), network_service_chain_id),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
                         finalized_block_header,
@@ -1212,7 +1211,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 block_number_bytes,
                 platform: platform.clone(),
                 network_service: (network_service.clone(), network_service_chain_id),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
                 chain_type: sync_service::ConfigChainType::RelayChain(
                     sync_service::ConfigRelayChain {
                         chain_information: chain_information.clone(),

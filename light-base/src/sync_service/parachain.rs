@@ -51,7 +51,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_id: network_service::ChainId,
-    from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     ParachainBackgroundTask {
         log_target,
@@ -59,9 +58,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         block_number_bytes,
         relay_chain_block_number_bytes,
         parachain_id,
+        from_network_service: Box::pin(network_service.subscribe(network_chain_id).await),
         network_service,
         network_chain_id,
-        from_network_service: from_network_service.fuse(),
         sync_sources: sources::AllForksSources::new(
             40,
             header::decode(&finalized_block_header, block_number_bytes)
@@ -128,7 +127,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     network_chain_id: network_service::ChainId,
 
     /// Events coming from the networking service.
-    from_network_service: stream::Fuse<stream::BoxStream<'static, network_service::Event>>,
+    from_network_service: Pin<Box<async_channel::Receiver<network_service::Event>>>,
 
     /// Runtime service of the relay chain.
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
