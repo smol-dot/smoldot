@@ -1093,10 +1093,9 @@ fn start_services<TPlat: platform::PlatformRef>(
     network_identify_agent_version: String,
 ) -> ChainServices<TPlat> {
     // The network service is responsible for connecting to the peer-to-peer network.
-    let (network_service, network_service_chain_ids, mut network_event_receivers) =
+    let (network_service, network_service_chain_ids) =
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
-            num_events_receivers: 1, // Configures the length of `network_event_receivers`
             identify_agent_version: network_identify_agent_version,
             connections_open_pool_size: 5,
             connections_open_pool_restore_delay: Duration::from_secs(1),

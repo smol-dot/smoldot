@@ -47,10 +47,10 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, mem, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, StreamExt as _};
+use futures_util::{future, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -77,9 +77,6 @@ pub struct Config<TPlat> {
 
     /// Value sent back for the agent version when receiving an identification request.
     pub identify_agent_version: String,
-
-    /// Number of event receivers returned by [`NetworkService::new`].
-    pub num_events_receivers: usize,
 
     /// List of chains to connect to. Chains are later referred to by their index in this list.
     pub chains: Vec<ConfigChain>,
@@ -153,17 +150,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub fn new(
-        config: Config<TPlat>,
-    ) -> (
-        Arc<Self>,
-        Vec<ChainId>,
-        Vec<stream::BoxStream<'static, Event>>,
-    ) {
-        let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
-            .map(|_| async_channel::bounded(16))
-            .unzip();
-
+    pub fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<ChainId>) {
         let mut log_chain_names =
             hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
         let mut chain_ids = Vec::with_capacity(config.chains.len());
@@ -272,7 +259,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 platform: config.platform.clone(),
                 open_gossip_links: BTreeMap::new(),
                 event_pending_send: None,
-                event_senders: either::Left(event_senders),
+                event_senders: either::Left(Vec::new()),
                 pending_new_subscriptions: Vec::new(),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 messages_rx,
@@ -305,20 +292,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             marker: core::marker::PhantomData,
         });
 
-        // Adjust the event receivers to keep the `final_network_service` alive.
-        let event_receivers = event_receivers
-            .into_iter()
-            .map(|rx| {
-                let mut final_network_service = Some(final_network_service.clone());
-                rx.chain(stream::poll_fn(move |_| {
-                    drop(final_network_service.take());
-                    Poll::Ready(None)
-                }))
-                .boxed()
-            })
-            .collect();
-
-        (final_network_service, chain_ids, event_receivers)
+        (final_network_service, chain_ids)
     }
 
     /// Subscribes to the networking events that happen on the given chain.
@@ -329,6 +303,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     ///
     /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
     /// connections will be back-pressured until the channel isn't full anymore.
+    ///
+    /// The `Receiver` never returns `None` unless the [`NetworkService`] is destroyed.
     ///
     /// # Panic
     ///
