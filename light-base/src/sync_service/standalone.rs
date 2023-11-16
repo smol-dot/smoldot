@@ -1136,10 +1136,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             network_service::Event::Connected {
                 peer_id,
                 role,
-                chain_id,
                 best_block_number,
                 best_block_hash,
-            } if chain_id == self.network_chain_id => {
+            } => {
                 self.peers_source_id_map.insert(
                     peer_id.clone(),
                     self.sync
@@ -1147,9 +1146,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 );
             }
 
-            network_service::Event::Disconnected { peer_id, chain_id }
-                if chain_id == self.network_chain_id =>
-            {
+            network_service::Event::Disconnected { peer_id } => {
                 let sync_source_id = self.peers_source_id_map.remove(&peer_id).unwrap();
                 let (_, requests) = self.sync.remove_source(sync_source_id);
 
@@ -1162,11 +1159,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
-            network_service::Event::BlockAnnounce {
-                chain_id,
-                peer_id,
-                announce,
-            } if chain_id == self.network_chain_id => {
+            network_service::Event::BlockAnnounce { peer_id, announce } => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
@@ -1264,19 +1257,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             network_service::Event::GrandpaNeighborPacket {
                 peer_id,
-                chain_id,
                 finalized_block_height,
-            } if chain_id == self.network_chain_id => {
+            } => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 self.sync
                     .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
-            network_service::Event::GrandpaCommitMessage {
-                chain_id,
-                peer_id,
-                message,
-            } if chain_id == self.network_chain_id => {
+            network_service::Event::GrandpaCommitMessage { peer_id, message } => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 match self
                     .sync
@@ -1296,10 +1284,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                 }
-            }
-
-            _ => {
-                // Different chain index.
             }
         }
     }

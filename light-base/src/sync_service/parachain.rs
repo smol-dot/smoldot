@@ -619,10 +619,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             network_service::Event::Connected {
                 peer_id,
                 role,
-                chain_id,
                 best_block_number,
                 best_block_hash,
-            } if chain_id == self.network_chain_id => {
+            } => {
                 let local_id = self.sync_sources.add_source(
                     best_block_number,
                     best_block_hash,
@@ -630,18 +629,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 );
                 self.sync_sources_map.insert(peer_id, local_id);
             }
-            network_service::Event::Disconnected { peer_id, chain_id }
-                if chain_id == self.network_chain_id =>
-            {
+            network_service::Event::Disconnected { peer_id } => {
                 let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
                 let (_peer_id, _role) = self.sync_sources.remove(local_id);
                 debug_assert_eq!(peer_id, _peer_id);
             }
-            network_service::Event::BlockAnnounce {
-                chain_id,
-                peer_id,
-                announce,
-            } if chain_id == self.network_chain_id => {
+            network_service::Event::BlockAnnounce { peer_id, announce } => {
                 let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
                 if let Ok(decoded_header) =
@@ -664,7 +657,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
             }
             _ => {
-                // Uninteresting message or irrelevant chain index.
+                // Uninteresting message.
             }
         }
     }
