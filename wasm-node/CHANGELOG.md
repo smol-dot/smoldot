@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fix panic when verifying Babe signatures when the invalid SR25519 public key is invalid.
+- Fix panic when verifying Babe signatures when the invalid SR25519 public key is invalid. ([#1344](https://github.com/smol-dot/smoldot/pull/1344))
 
 ## 2.0.8 - 2023-11-15
 
