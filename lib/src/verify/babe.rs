@@ -213,6 +213,8 @@ pub enum VerifyError {
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
+    /// Public key used to for the signature is invalid.
+    BadPublicKey,
     /// Block header signature is invalid.
     BadSignature,
     /// VRF proof in the block header is invalid.
@@ -452,12 +454,9 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         .nth(usize::try_from(authority_index).map_err(|_| VerifyError::InvalidAuthorityIndex)?)
         .ok_or(VerifyError::InvalidAuthorityIndex)?;
 
-    // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
-    // happen as it's of type `[u8; 32]`.
-    let signing_public_key = schnorrkel::PublicKey::from_bytes(signing_authority.public_key)
-        .unwrap_or_else(|_| unreachable!());
-
     // Now verifying the signature in the seal.
+    let signing_public_key = schnorrkel::PublicKey::from_bytes(signing_authority.public_key)
+        .map_err(|_| VerifyError::BadPublicKey)?;
     signing_public_key
         .verify_simple(b"substrate", &pre_seal_hash, &seal_signature)
         .map_err(|_| VerifyError::BadSignature)?;
