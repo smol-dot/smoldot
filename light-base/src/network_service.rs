@@ -41,6 +41,7 @@ use crate::platform::{self, address_parse, PlatformRef};
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
+    collections::BTreeMap,
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -64,8 +65,8 @@ use smoldot::{
     network::{basic_peering_strategy, codec, service},
 };
 
-pub use service::{ChainId, EncodedMerkleProof, QueueNotificationError};
 pub use codec::Role;
+pub use service::{ChainId, EncodedMerkleProof, QueueNotificationError};
 
 mod tasks;
 
@@ -198,6 +199,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     allow_inbound_block_requests: false,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
+                        block_number_bytes: chain.block_number_bytes,
                         num_out_slots: chain.num_out_slots,
                     },
                 })
@@ -268,6 +270,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 num_recent_connection_opening: 0,
                 next_recent_connection_restore: None,
                 platform: config.platform.clone(),
+                open_gossip_links: BTreeMap::new(),
                 event_pending_send: None,
                 event_senders: either::Left(event_senders),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
@@ -910,6 +913,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Delay after which [`BackgroundTask::num_recent_connection_opening`] is increased by one.
     next_recent_connection_restore: Option<Pin<Box<TPlat::Delay>>>,
 
+    /// List of all open gossip links.
+    // TODO: using this data structure unfortunately means that PeerIds are cloned a lot, maybe some user data in ChainNetwork is better? not sure
+    open_gossip_links: BTreeMap<(ChainId, PeerId), OpenGossipLinkState>,
+
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
@@ -958,8 +965,19 @@ struct BackgroundTask<TPlat: PlatformRef> {
 struct Chain {
     log_name: String,
 
+    /// See [`ConfigChain::block_number_bytes`].
+    // TODO: redundant with ChainNetwork? since we might not need to know this in the future i'm reluctant to add a getter to ChainNetwork
+    block_number_bytes: usize,
+
     /// See [`ConfigChain::num_out_slots`].
     num_out_slots: usize,
+}
+
+struct OpenGossipLinkState {
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
+    /// `None` if unknown.
+    finalized_block_height: Option<u64>,
 }
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
@@ -1499,6 +1517,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     announce.decode().is_best
                 );
 
+                let decoded_announce = announce.decode();
+                if decoded_announce.is_best {
+                    let link = task
+                        .open_gossip_links
+                        .get_mut(&(chain_id, peer_id.clone()))
+                        .unwrap();
+                    if let Ok(decoded) = header::decode(
+                        &decoded_announce.scale_encoded_header,
+                        task.network[chain_id].block_number_bytes,
+                    ) {
+                        link.best_block_hash = header::hash_from_scale_encoded_header(
+                            &decoded_announce.scale_encoded_header,
+                        );
+                        link.best_block_number = decoded.number;
+                    }
+                }
+
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some(Event::BlockAnnounce {
                     chain_id,
@@ -1522,6 +1557,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     best_number,
                     HashDisplay(&best_hash)
                 );
+
+                let _prev_value = task.open_gossip_links.insert(
+                    (chain_id, peer_id.clone()),
+                    OpenGossipLinkState {
+                        best_block_number: best_number,
+                        best_block_hash: best_hash,
+                        finalized_block_height: None,
+                    },
+                );
+                debug_assert!(_prev_value.is_none());
 
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some(Event::Connected {
@@ -1591,6 +1636,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                     ban_duration
                 );
+
+                let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
+                debug_assert!(_was_in.is_some());
+
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
                 task.peering_strategy.unassign_slot_and_ban(
@@ -1849,6 +1898,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     state.set_id,
                     state.commit_finalized_height,
                 );
+
+                task.open_gossip_links
+                    .get_mut(&(chain_id, peer_id.clone()))
+                    .unwrap()
+                    .finalized_block_height = Some(state.commit_finalized_height);
 
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some(Event::GrandpaNeighborPacket {
