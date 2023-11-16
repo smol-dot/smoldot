@@ -31,7 +31,6 @@ use crate::{network_service, platform::PlatformRef, runtime_service};
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
-use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
