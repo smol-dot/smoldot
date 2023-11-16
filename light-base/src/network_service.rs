@@ -1131,22 +1131,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     unreachable!()
                 };
 
-                if let Some(event_to_dispatch) = task.event_pending_send.take() {
+                if let Some((event_to_dispatch_chain_id, event_to_dispatch)) =
+                    task.event_pending_send.take()
+                {
                     let mut event_senders = mem::take(event_senders);
                     task.event_senders = either::Right(Box::pin(async move {
-                        for (chain_id, sender) in event_senders.iter_mut() {
-                            if event_to_dispatch.0 != *chain_id {
-                                continue;
+                        // Elements in `event_senders` are removed one by one and inserted
+                        // back if the channel is still open.
+                        for index in (0..event_senders.len()).rev() {
+                            let (event_sender_chain_id, event_sender) =
+                                event_senders.swap_remove(index);
+                            if event_sender_chain_id == event_to_dispatch_chain_id {
+                                if event_sender.send(event_to_dispatch.clone()).await.is_err() {
+                                    continue;
+                                }
                             }
-
-                            // For simplicity we don't get rid of closed senders because senders
-                            // aren't supposed to close, and that leaving closed senders in the
-                            // list doesn't have any consequence other than one extra iteration
-                            // every time.
-                            // TODO: change that ^
-                            let _ = sender.send(event_to_dispatch.1.clone()).await;
+                            event_senders.push((event_sender_chain_id, event_sender));
                         }
-
                         event_senders
                     }));
                 } else if !task.pending_new_subscriptions.is_empty() {
