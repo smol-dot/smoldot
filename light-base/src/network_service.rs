@@ -273,6 +273,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 open_gossip_links: BTreeMap::new(),
                 event_pending_send: None,
                 event_senders: either::Left(event_senders),
+                pending_new_subscriptions: Vec::new(),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 messages_rx,
                 blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
@@ -318,6 +319,36 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .collect();
 
         (final_network_service, chain_ids, event_receivers)
+    }
+
+    /// Subscribes to the networking events that happen on the given chain.
+    ///
+    /// Calling this function returns a `Receiver` that receives events about the chain.
+    /// The new channel will immediately receive events about all the existing connections, so
+    /// that it is able to maintain a coherent view of the network.
+    ///
+    /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
+    /// connections will be back-pressured until the channel isn't full anymore.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub async fn subscribe(&self, chain_id: ChainId) -> async_channel::Receiver<Event> {
+        assert!(self.log_chain_names.contains_key(&chain_id));
+
+        let (tx, rx) = async_channel::bounded(128);
+
+        let _ = self
+            .messages_tx
+            .send(ToBackground::Subscribe {
+                chain_id,
+                sender: tx,
+            })
+            .await
+            .unwrap();
+
+        rx
     }
 
     /// Sends a blocks request to the given peer.
@@ -802,6 +833,10 @@ impl CallProofRequestError {
 }
 
 enum ToBackground {
+    Subscribe {
+        chain_id: ChainId,
+        sender: async_channel::Sender<Event>,
+    },
     ConnectionMessage {
         connection_id: service::ConnectionId,
         message: service::ConnectionToCoordinator,
@@ -933,6 +968,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
         Pin<Box<dyn future::Future<Output = Vec<async_channel::Sender<Event>>> + Send>>,
     >,
 
+    /// Whenever [`NetworkService::subscribe`] is called, the new sender is added to this list.
+    /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
+    pending_new_subscriptions: Vec<async_channel::Sender<Event>>,
+
     messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
 
     blocks_requests: HashMap<
@@ -973,7 +1012,9 @@ struct Chain {
     num_out_slots: usize,
 }
 
+#[derive(Clone)]
 struct OpenGossipLinkState {
+    role: Role,
     best_block_number: u64,
     best_block_hash: [u8; 32],
     /// `None` if unknown.
@@ -1000,11 +1041,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             let message_received =
                 async { WakeUpReason::Message(task.messages_rx.next().await.unwrap()) };
             let service_event = async {
-                if let Some(event) = task
-                    .event_pending_send
-                    .is_none()
-                    .then(|| task.network.next_event())
-                    .flatten()
+                if let Some(event) = (task.event_pending_send.is_none()
+                    && task.pending_new_subscriptions.is_empty())
+                .then(|| task.network.next_event())
+                .flatten()
                 {
                     WakeUpReason::NetworkEvent(event)
                 } else if let Some(start_connect) = {
@@ -1094,7 +1134,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
                     WakeUpReason::EventSendersReady
-                } else if task.event_pending_send.is_some() {
+                } else if task.event_pending_send.is_some()
+                    || !task.pending_new_subscriptions.is_empty()
+                {
                     WakeUpReason::EventSendersReady
                 } else {
                     future::pending().await
@@ -1135,6 +1177,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                         event_senders
                     }));
+                } else if !task.pending_new_subscriptions.is_empty() {
+                    let pending_new_subscriptions = mem::take(&mut task.pending_new_subscriptions);
+                    let mut event_senders = mem::take(event_senders);
+                    // TODO: cloning :-/
+                    let open_gossip_links = task.open_gossip_links.clone();
+                    task.event_senders = either::Right(Box::pin(async move {
+                        for new_subscription in pending_new_subscriptions {
+                            for ((chain_id, peer_id), state) in &open_gossip_links {
+                                let _ = new_subscription
+                                    .send(Event::Connected {
+                                        peer_id: peer_id.clone(),
+                                        chain_id: *chain_id,
+                                        role: state.role,
+                                        best_block_number: state.best_block_number,
+                                        best_block_hash: state.best_block_hash,
+                                    })
+                                    .await;
+
+                                if let Some(finalized_block_height) = state.finalized_block_height {
+                                    let _ = new_subscription
+                                        .send(Event::GrandpaNeighborPacket {
+                                            peer_id: peer_id.clone(),
+                                            chain_id: *chain_id,
+                                            finalized_block_height,
+                                        })
+                                        .await;
+                                }
+                            }
+
+                            event_senders.push(new_subscription);
+                        }
+
+                        event_senders
+                    }));
                 }
             }
             WakeUpReason::Message(ToBackground::ConnectionMessage {
@@ -1143,6 +1219,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }) => {
                 task.network
                     .inject_connection_message(connection_id, message);
+            }
+            WakeUpReason::Message(ToBackground::Subscribe { chain_id, sender }) => {
+                // TODO: chainId unused
+                task.pending_new_subscriptions.push(sender);
             }
             WakeUpReason::Message(ToBackground::StartBlocksRequest {
                 target,
@@ -1563,6 +1643,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     OpenGossipLinkState {
                         best_block_number: best_number,
                         best_block_hash: best_hash,
+                        role,
                         finalized_block_height: None,
                     },
                 );
