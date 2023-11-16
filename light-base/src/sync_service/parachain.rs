@@ -51,7 +51,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_id: network_service::ChainId,
-    from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     ParachainBackgroundTask {
         log_target,
@@ -59,9 +58,9 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         block_number_bytes,
         relay_chain_block_number_bytes,
         parachain_id,
+        from_network_service: Box::pin(network_service.subscribe(network_chain_id).await),
         network_service,
         network_chain_id,
-        from_network_service: from_network_service.fuse(),
         sync_sources: sources::AllForksSources::new(
             40,
             header::decode(&finalized_block_header, block_number_bytes)
@@ -128,7 +127,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     network_chain_id: network_service::ChainId,
 
     /// Events coming from the networking service.
-    from_network_service: stream::Fuse<stream::BoxStream<'static, network_service::Event>>,
+    from_network_service: Pin<Box<async_channel::Receiver<network_service::Event>>>,
 
     /// Runtime service of the relay chain.
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -620,10 +619,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             network_service::Event::Connected {
                 peer_id,
                 role,
-                chain_id,
                 best_block_number,
                 best_block_hash,
-            } if chain_id == self.network_chain_id => {
+            } => {
                 let local_id = self.sync_sources.add_source(
                     best_block_number,
                     best_block_hash,
@@ -631,18 +629,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 );
                 self.sync_sources_map.insert(peer_id, local_id);
             }
-            network_service::Event::Disconnected { peer_id, chain_id }
-                if chain_id == self.network_chain_id =>
-            {
+            network_service::Event::Disconnected { peer_id } => {
                 let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
                 let (_peer_id, _role) = self.sync_sources.remove(local_id);
                 debug_assert_eq!(peer_id, _peer_id);
             }
-            network_service::Event::BlockAnnounce {
-                chain_id,
-                peer_id,
-                announce,
-            } if chain_id == self.network_chain_id => {
+            network_service::Event::BlockAnnounce { peer_id, announce } => {
                 let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
                 if let Ok(decoded_header) =
@@ -665,7 +657,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
             }
             _ => {
-                // Uninteresting message or irrelevant chain index.
+                // Uninteresting message.
             }
         }
     }
