@@ -65,6 +65,7 @@ use smoldot::{
 };
 
 pub use service::{ChainId, EncodedMerkleProof, QueueNotificationError};
+pub use codec::Role;
 
 mod tasks;
 
@@ -193,7 +194,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     best_hash: chain.best_block.1,
                     best_number: chain.best_block.0,
                     genesis_hash: chain.genesis_block_hash,
-                    role: codec::Role::Light,
+                    role: Role::Light,
                     allow_inbound_block_requests: false,
                     user_data: Chain {
                         log_name: chain.log_name.clone(),
@@ -715,7 +716,7 @@ pub enum Event {
     Connected {
         peer_id: PeerId,
         chain_id: ChainId,
-        role: codec::Role,
+        role: Role,
         best_block_number: u64,
         best_block_hash: [u8; 32],
     },
