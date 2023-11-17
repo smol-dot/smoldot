@@ -863,16 +863,15 @@ where
                 // Try to add data to `handshake_read_buffer`.
                 // TODO: this is very suboptimal; improve
                 // TODO: this doesn't properly back-pressure, because we read unconditionally
-                let (protobuf_frame_size, flags) = {
-                    let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
-                        nom::combinator::map_parser(
+                let protobuf_frame_size = {
+                    let mut parser =
+                        nom::combinator::map_parser::<_, _, _, nom::error::Error<&[u8]>, _, _>(
                             nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                             protobuf::message_decode! {
                                 #[optional] flags = 1 => protobuf::enum_tag_decode,
                                 #[optional] message = 2 => protobuf::bytes_tag_decode,
                             },
-                        ),
-                    );
+                        );
 
                     match parser(&read_write.incoming_buffer) {
                         Ok((rest, framed_message)) => {
@@ -881,7 +880,13 @@ where
                             }
 
                             let protobuf_frame_size = handshake_read_buffer.len() - rest.len();
-                            (protobuf_frame_size, framed_message.flags)
+                            // If the remote has sent a `FIN` or `RESET_STREAM` flag, mark the
+                            // remote writing side as closed.
+                            if framed_message.flags.map_or(false, |f| f == 0 || f == 2) {
+                                // TODO: no, handshake error
+                                return SubstreamFate::Reset;
+                            }
+                            protobuf_frame_size
                         }
                         Err(nom::Err::Incomplete(needed)) => {
                             read_write.expected_incoming_bytes = Some(
@@ -891,7 +896,7 @@ where
                                         nom::Needed::Unknown => 1,
                                     },
                             );
-                            return SubstreamFate::Continue;
+                            0
                         }
                         Err(_) => {
                             // Message decoding error.
@@ -900,15 +905,7 @@ where
                         }
                     }
                 };
-
                 let _ = read_write.incoming_bytes_take(protobuf_frame_size);
-
-                // If the remote has sent a `FIN` or `RESET_STREAM` flag, mark the
-                // remote writing side as closed.
-                if flags.map_or(false, |f| f == 0 || f == 2) {
-                    // TODO: no, handshake error
-                    return SubstreamFate::Reset;
-                }
 
                 let mut sub_read_write = ReadWrite {
                     now: read_write.now.clone(),
@@ -937,21 +934,34 @@ where
                 if sub_read_write.write_bytes_queued != read_write.write_bytes_queued {
                     let written_bytes =
                         sub_read_write.write_bytes_queued - read_write.write_bytes_queued;
+                    debug_assert_eq!(
+                        written_bytes,
+                        sub_read_write
+                            .write_buffers
+                            .iter()
+                            .fold(0, |s, b| s + b.len())
+                    );
 
                     // TODO: don't do the encoding manually but use the protobuf module?
                     let tag = protobuf::tag_encode(2, 2).collect::<Vec<_>>();
                     let data_len = leb128::encode_usize(written_bytes).collect::<Vec<_>>();
                     let libp2p_prefix =
-                        leb128::encode_usize(tag.len() + data_len.len()).collect::<Vec<_>>();
+                        leb128::encode_usize(tag.len() + data_len.len() + written_bytes)
+                            .collect::<Vec<_>>();
 
                     // The spec mentions that a frame plus its length prefix shouldn't exceed
                     // 16kiB. This is normally ensured by forbidding the substream from writing
                     // more data than would fit in 16kiB.
-                    debug_assert!(libp2p_prefix.len() + tag.len() + data_len.len() <= 16384);
+                    debug_assert!(
+                        libp2p_prefix.len() + tag.len() + data_len.len() + written_bytes <= 16384
+                    );
 
                     read_write.write_out(libp2p_prefix);
                     read_write.write_out(tag);
                     read_write.write_out(data_len);
+                    for buffer in sub_read_write.write_buffers {
+                        read_write.write_out(buffer);
+                    }
                 }
 
                 match handshake_outcome {

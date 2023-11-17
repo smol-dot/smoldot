@@ -387,7 +387,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (!state.connections.has(message.connectionId))
                     return;
                 // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                if (message.streamId !== undefined && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 state.instance!.streamMessage(message.connectionId, message.message, message.streamId);
                 break;
@@ -405,7 +405,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (!state.connections.has(message.connectionId))
                     return;
                 // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                if (message.streamId !== undefined && !state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 state.instance!.streamWritableBytes(message.connectionId, message.numExtra, message.streamId);
                 break;
@@ -415,7 +415,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (!state.connections.has(message.connectionId))
                     return;
                 // The stream might have been reset locally in the past.
-                if (message.streamId && !state.connections.get(message.connectionId)!.has(message.streamId))
+                if (!state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 state.connections.get(message.connectionId)!.delete(message.streamId);
                 state.instance!.streamReset(message.connectionId, message.streamId);

@@ -873,14 +873,20 @@ pub(crate) fn connection_multi_stream_set_handshake_info(
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
-    assert!(matches!(
-        connection.inner,
-        ConnectionInner::MultiStreamUnknownHandshake { .. }
-    ));
+    let (opened_substreams_to_pick_up, connection_handles_alive) = match &mut connection.inner {
+        ConnectionInner::MultiStreamUnknownHandshake {
+            opened_substreams_to_pick_up,
+            connection_handles_alive,
+        } => (
+            mem::take(opened_substreams_to_pick_up),
+            *connection_handles_alive,
+        ),
+        _ => unreachable!(),
+    };
 
     connection.inner = ConnectionInner::MultiStreamWebRtc {
-        opened_substreams_to_pick_up: VecDeque::with_capacity(8),
-        connection_handles_alive: 0,
+        opened_substreams_to_pick_up,
+        connection_handles_alive,
         local_tls_certificate_sha256: *local_tls_certificate_sha256,
     };
     connection.something_happened.notify(usize::max_value());

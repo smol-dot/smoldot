@@ -227,6 +227,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             .desired_outbound_substreams()
             .saturating_sub(pending_opening_out_substreams)
         {
+            log::trace!(target: "connections", "Connection({address_string}) <= OpenSubstream");
             platform.open_out_substream(&mut connection);
             pending_opening_out_substreams += 1;
         }
@@ -255,7 +256,9 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 // must be called. Because we only call `read_write_access` when `message_sending`
                 // is `None`, we also call `wait_read_write_again` only when `message_sending` is
                 // `None`.
-                let fut = if message_sending.as_ref().as_pin_ref().is_none() {
+                let fut = if message_sending.as_ref().as_pin_ref().is_none()
+                    && !when_substreams_rw_ready.is_empty()
+                {
                     Some(when_substreams_rw_ready.select_next_some())
                 } else {
                     None
@@ -344,6 +347,10 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                             );
                         }
 
+                        if let SubstreamFate::Reset = substream_fate {
+                            log::trace!(target: "connections", "Connection({address_string}) <= ResetSubstream(substream_id={substream_id})");
+                        }
+
                         substream_fate
                     }
                     Err(err) => {
@@ -382,7 +389,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     when_substreams_rw_ready.push({
                         let platform = platform.clone();
                         Box::pin(async move {
-                            platform.wait_read_write_again(socket.as_mut());
+                            platform.wait_read_write_again(socket.as_mut()).await;
                             (socket, substream_id)
                         })
                     });
@@ -395,13 +402,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 connection_task.reset();
             }
             WakeUpReason::NewSubstream(substream, direction) => {
-                log::trace!(target: "connections", "Connection({address_string}) => NewSubstream({direction:?})");
                 let outbound = match direction {
                     SubstreamDirection::Outbound => true,
                     SubstreamDirection::Inbound => false,
                 };
                 let substream_id = next_substream_id;
                 next_substream_id += 1;
+                log::trace!(target: "connections", "Connection({address_string}) => SubstreamOpened(substream_id={substream_id}, direction={direction:?})");
                 connection_task.add_substream(substream_id, outbound);
                 if outbound {
                     pending_opening_out_substreams -= 1;
