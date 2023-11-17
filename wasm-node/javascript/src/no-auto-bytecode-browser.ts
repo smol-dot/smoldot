@@ -338,7 +338,6 @@ function connect(config: ConnectionConfig): Connection {
             // Therefore we don't care about events concerning the fact that the connection is now fully
             // open.
             state.pc.onconnectionstatechange = (_event) => {
-                console.log("state change to " + state.pc!.connectionState);
                 if (state.pc!.connectionState == "closed" || state.pc!.connectionState == "disconnected" || state.pc!.connectionState == "failed") {
                     killAllJs();
                     config.onConnectionReset("WebRTC state transitioned to " + state.pc!.connectionState);
