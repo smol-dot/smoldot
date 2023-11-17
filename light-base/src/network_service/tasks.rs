@@ -333,7 +333,7 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                             || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
                         {
                             log::trace!(target: "connections",
-                                "Connection({address_string}) <=> substream_id={substream_id}; read={}; written={}; wake_up_after={:?}; write_close={:?}; fate={substream_fate:?}",
+                                "Connection({address_string}) <=> substream_id={substream_id}; read={}; written={}; wake_up_after={:?}; write_close={:?}",
                                 socket_read_write.read_bytes - read_bytes_before,
                                 socket_read_write.write_bytes_queued - written_bytes_before,
                                 socket_read_write.wake_up_after.as_ref().map(|w| {
