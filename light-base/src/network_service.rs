@@ -2140,11 +2140,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .await;
 
                         // Convert the SHA256 hashes into multihashes.
-                        let local_tls_certificate_multihash = [12u8, 32]
+                        let local_tls_certificate_multihash = [18u8, 32]
                             .into_iter()
                             .chain(connection.local_tls_certificate_sha256.into_iter())
                             .collect();
-                        let remote_tls_certificate_multihash = [12u8, 32]
+                        let remote_tls_certificate_multihash = [18u8, 32]
                             .into_iter()
                             .chain(remote_certificate_sha256.into_iter())
                             .collect();
