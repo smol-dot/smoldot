@@ -83,4 +83,5 @@ pub mod established;
 pub mod multistream_select;
 pub mod noise;
 pub mod single_stream_handshake;
+pub mod webrtc_framing;
 pub mod yamux;

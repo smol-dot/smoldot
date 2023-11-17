@@ -20,13 +20,12 @@
 use super::{
     super::super::read_write::ReadWrite, substream, Config, Event, SubstreamId, SubstreamIdInner,
 };
-use crate::util::{self, leb128, protobuf};
+use crate::{libp2p::connection::webrtc_framing, util};
 
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{
-    cmp, fmt,
+    fmt,
     hash::Hash,
-    mem,
     ops::{Add, Index, IndexMut, Sub},
     time::Duration,
 };
@@ -95,11 +94,8 @@ struct Substream<TNow, TSubUd> {
     /// Underlying state machine for the substream. Always `Some` while the substream is alive,
     /// and `None` if it has been reset.
     inner: Option<substream::Substream<TNow>>,
-    /// All incoming data is first transferred to this buffer.
-    // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
-    read_buffer: Vec<u8>,
-    remote_writing_side_closed: bool,
-    local_writing_side_closed: bool,
+    /// State of the message frames.
+    framing: webrtc_framing::WebRtcFraming,
 }
 
 const MAX_PENDING_EVENTS: usize = 4;
@@ -195,9 +191,7 @@ where
                 id: out_substream_id,
                 inner: Some(substream::Substream::ingoing(self.max_protocol_name_len)),
                 user_data: None,
-                read_buffer: Vec::new(),
-                local_writing_side_closed: false,
-                remote_writing_side_closed: false,
+                framing: webrtc_framing::WebRtcFraming::new(),
             }
         } else if self.ping_substream.is_none() {
             let out_substream_id = self.next_out_substream_id;
@@ -209,9 +203,7 @@ where
                 id: out_substream_id,
                 inner: Some(substream::Substream::ping_out(self.ping_protocol.clone())),
                 user_data: None,
-                read_buffer: Vec::new(),
-                local_writing_side_closed: false,
-                remote_writing_side_closed: false,
+                framing: webrtc_framing::WebRtcFraming::new(),
             }
         } else if let Some(desired) = self.desired_out_substreams.pop_front() {
             desired
@@ -306,207 +298,42 @@ where
             read_write.wake_up_after(&self.next_ping);
         }
 
-        loop {
-            // Don't process any more data before events are pulled.
-            if self.pending_events.len() >= MAX_PENDING_EVENTS {
-                return SubstreamFate::Continue;
-            }
+        // Don't process any more data before events are pulled.
+        if self.pending_events.len() >= MAX_PENDING_EVENTS {
+            return SubstreamFate::Continue;
+        }
 
-            // In the situation where there's not enough space in the outgoing buffer to write an
-            // outgoing Protobuf frame, we just return immediately.
-            // This is necessary because calling `substream.read_write` can generate a write
-            // close message.
-            // TODO: this is error-prone, as we have no guarantee that the outgoing buffer will ever be > 6 bytes, for example in principle the API user could decide to use only a write buffer of 2 bytes, although that would be a very stupid thing to do
-            if read_write.write_bytes_queueable.unwrap_or(0) < 6 {
-                return SubstreamFate::Continue;
-            }
-
-            // If this flag is still `false` at the end of the loop, we break out of it.
-            let mut continue_looping = false;
-
-            // The incoming data is not directly the data of the substream. Instead, everything
-            // is wrapped within a Protobuf frame. For this reason, we first transfer the data to
-            // a buffer.
-            //
-            // According to the libp2p WebRTC spec, a frame and its length prefix must not be
-            // larger than 16kiB, meaning that the read buffer never has to exceed this size.
-            //
-            // Try to add data to `substream.read_buffer`.
-            // TODO: this is very suboptimal; improve
-            // TODO: this doesn't properly back-pressure, because we read unconditionally
-            let must_reset = {
-                let (protobuf_frame_size, must_reset) = {
-                    let mut parser =
-                        nom::combinator::map_parser::<_, _, _, nom::error::Error<&[u8]>, _, _>(
-                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                            protobuf::message_decode! {
-                                #[optional] flags = 1 => protobuf::enum_tag_decode,
-                                #[optional] message = 2 => protobuf::bytes_tag_decode,
-                            },
-                        );
-                    match parser(&read_write.incoming_buffer) {
-                        Ok((rest, framed_message)) => {
-                            if let Some(message) = framed_message.message {
-                                substream.read_buffer.extend_from_slice(message);
-                            }
-
-                            let protobuf_frame_size = read_write.incoming_buffer.len() - rest.len();
-
-                            // If the remote has sent a `FIN` or `RESET_STREAM` flag, mark the remote writing
-                            // side as closed.
-                            if framed_message.flags.map_or(false, |f| f == 0 || f == 2) {
-                                substream.remote_writing_side_closed = true;
-                            }
-
-                            // If the remote has sent a `RESET_STREAM` flag, also reset the substream.
-                            let must_reset = framed_message.flags.map_or(false, |f| f == 2);
-
-                            (protobuf_frame_size, must_reset)
-                        }
-                        Err(nom::Err::Incomplete(needed)) => {
-                            read_write.expected_incoming_bytes = Some(
-                                read_write.incoming_buffer.len()
-                                    + match needed {
-                                        nom::Needed::Size(s) => s.get(),
-                                        nom::Needed::Unknown => 1,
-                                    },
-                            );
-                            (0, false)
-                        }
-                        Err(_) => {
-                            // Message decoding error.
-                            // TODO: no, must ask the state machine to reset
-                            return SubstreamFate::Reset;
-                        }
-                    }
-                };
-
-                let _ = read_write.incoming_bytes_take(protobuf_frame_size);
-                must_reset
-            };
-
-            let event = if must_reset {
-                substream.inner.take().unwrap().reset()
-            } else {
-                let mut sub_read_write = ReadWrite {
-                    now: read_write.now.clone(),
-                    incoming_buffer: mem::take(&mut substream.read_buffer),
-                    read_bytes: 0,
-                    expected_incoming_bytes: if substream.remote_writing_side_closed {
-                        None
-                    } else {
-                        Some(0)
-                    },
-                    write_buffers: Vec::new(),
-                    write_bytes_queued: read_write.write_bytes_queued,
-                    // Don't write out more than one frame.
-                    // TODO: this `10` is here for the length and protobuf frame size and is a bit hacky
-                    write_bytes_queueable: if !substream.local_writing_side_closed {
-                        Some(
-                            cmp::min(read_write.write_bytes_queueable.unwrap(), 16384)
-                                .saturating_sub(10),
-                        )
-                    } else {
-                        None
-                    },
-                    wake_up_after: None,
-                };
-
-                let (substream_update, event) = substream
-                    .inner
-                    .take()
-                    .unwrap()
-                    .read_write(&mut sub_read_write);
-
+        // Now process the substream.
+        let event = match substream.framing.read_write(read_write) {
+            Ok(mut framing) => {
+                let (substream_update, event) =
+                    substream.inner.take().unwrap().read_write(&mut framing);
                 substream.inner = substream_update;
-                substream.read_buffer = sub_read_write.incoming_buffer;
-                if let Some(wake_up_after) = &sub_read_write.wake_up_after {
-                    read_write.wake_up_after(wake_up_after)
-                }
-
-                // Determine whether we should send a message on that substream with a specific
-                // flag.
-                let flag_to_write_out = if substream.inner.is_none()
-                    && (!substream.remote_writing_side_closed
-                        || !substream.local_writing_side_closed)
-                {
-                    // Send a `RESET_STREAM` if the state machine has reset while a side was still
-                    // open.
-                    Some(2)
-                } else if !substream.local_writing_side_closed
-                    && sub_read_write.write_bytes_queueable.is_none()
-                {
-                    // Send a `FIN` if the state machine has closed the writing side while it
-                    // wasn't closed before.
-                    substream.local_writing_side_closed = true;
-                    Some(0)
-                } else {
-                    None
-                };
-
-                // Send out message.
-                if flag_to_write_out.is_some()
-                    || sub_read_write.write_bytes_queued != read_write.write_bytes_queued
-                {
-                    let written_bytes =
-                        sub_read_write.write_bytes_queued - read_write.write_bytes_queued;
-
-                    // TODO: flags not written
-
-                    // TODO: don't do the encoding manually but use the protobuf module?
-                    let tag = protobuf::tag_encode(2, 2).collect::<Vec<_>>();
-                    let data_len = leb128::encode_usize(written_bytes).collect::<Vec<_>>();
-                    let libp2p_prefix =
-                        leb128::encode_usize(tag.len() + data_len.len() + written_bytes)
-                            .collect::<Vec<_>>();
-
-                    // The spec mentions that a frame plus its length prefix shouldn't exceed
-                    // 16kiB. This is normally ensured by forbidding the substream from writing
-                    // more data than would fit in 16kiB.
-                    debug_assert!(
-                        libp2p_prefix.len() + tag.len() + data_len.len() + written_bytes <= 16384
-                    );
-
-                    read_write.write_out(libp2p_prefix);
-                    read_write.write_out(tag);
-                    read_write.write_out(data_len);
-                    for buffer in sub_read_write.write_buffers {
-                        read_write.write_out(buffer);
-                    }
-
-                    // We continue looping because the substream might have more data to send.
-                    continue_looping = true;
-                }
-
                 event
-            };
-
-            match event {
-                None => {}
-                Some(other) => {
-                    continue_looping = true;
-                    Self::on_substream_event(
-                        &mut self.pending_events,
-                        substream.id,
-                        &mut substream.user_data,
-                        other,
-                    )
-                }
             }
+            Err(_) => substream.inner.take().unwrap().reset(),
+        };
 
-            // WebRTC never closes the writing side.
-            debug_assert!(read_write.write_bytes_queueable.is_none());
+        if let Some(event) = event {
+            read_write.wake_up_asap();
+            Self::on_substream_event(
+                &mut self.pending_events,
+                substream.id,
+                &mut substream.user_data,
+                event,
+            )
+        }
 
-            if substream.inner.is_none() {
-                if Some(substream_id) == self.ping_substream.as_ref() {
-                    self.ping_substream = None;
-                }
-                self.out_in_substreams_map.remove(&substream.id);
-                self.in_substreams.remove(substream_id);
-                break SubstreamFate::Reset;
-            } else if !continue_looping {
-                break SubstreamFate::Continue;
+        // The substream is `None` if it needs to be reset.
+        if substream.inner.is_none() {
+            if Some(substream_id) == self.ping_substream.as_ref() {
+                self.ping_substream = None;
             }
+            self.out_in_substreams_map.remove(&substream.id);
+            self.in_substreams.remove(substream_id);
+            SubstreamFate::Reset
+        } else {
+            SubstreamFate::Continue
         }
     }
 
@@ -624,9 +451,7 @@ where
                 max_response_size,
             )),
             user_data: Some(user_data),
-            read_buffer: Vec::new(),
-            local_writing_side_closed: false,
-            remote_writing_side_closed: false,
+            framing: webrtc_framing::WebRtcFraming::new(),
         });
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
@@ -687,9 +512,7 @@ where
                 max_handshake_size,
             )),
             user_data: Some(user_data),
-            read_buffer: Vec::new(),
-            local_writing_side_closed: false,
-            remote_writing_side_closed: false,
+            framing: webrtc_framing::WebRtcFraming::new(),
         });
 
         SubstreamId(SubstreamIdInner::MultiStream(substream_id))
