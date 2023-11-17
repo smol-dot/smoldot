@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix several WebRTC-related panics and bugs. ([#1348](https://github.com/smol-dot/smoldot/pull/1348))
+
 ## 2.0.9 - 2023-11-16
 
 ### Changed
