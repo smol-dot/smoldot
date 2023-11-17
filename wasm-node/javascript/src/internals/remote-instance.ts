@@ -216,9 +216,9 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             portToServer.postMessage(msg);
         },
 
-        streamReset(connectionId, streamId) {
+        streamReset(connectionId, streamId, message) {
             state.connections.get(connectionId)!.delete(streamId);
-            const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId };
+            const msg: ClientToServer = { ty: "stream-reset", connectionId, streamId, message };
             portToServer.postMessage(msg);
         },
     };
@@ -418,7 +418,7 @@ export async function startInstanceServer(config: ServerConfig, initPortToClient
                 if (!state.connections.get(message.connectionId)!.has(message.streamId))
                     return;
                 state.connections.get(message.connectionId)!.delete(message.streamId);
-                state.instance!.streamReset(message.connectionId, message.streamId);
+                state.instance!.streamReset(message.connectionId, message.streamId, message.message);
                 break;
             }
         }
@@ -453,4 +453,4 @@ type ClientToServer =
     { ty: "stream-message", connectionId: number, streamId?: number, message: Uint8Array } |
     { ty: "stream-opened", connectionId: number, streamId: number, direction: "inbound" | "outbound" } |
     { ty: "stream-writable-bytes", connectionId: number, streamId?: number, numExtra: number } |
-    { ty: "stream-reset", connectionId: number, streamId: number };
+    { ty: "stream-reset", connectionId: number, streamId: number, message: string };

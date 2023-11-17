@@ -245,7 +245,10 @@ function connect(config: ConnectionConfig): Connection {
                 config.onWritableBytes(65536, streamId);
             };
 
-            dataChannel.onerror = dataChannel.onclose = (_error) => {
+            dataChannel.onerror = dataChannel.onclose = (event) => {
+                // Note that Firefox doesn't support <https://developer.mozilla.org/en-US/docs/Web/API/RTCErrorEvent>.
+                const message = (event instanceof RTCErrorEvent) ? event.error.toString() : "RTCDataChannel closed";
+
                 if (!isOpen.value) {
                     // Substream wasn't opened yet and thus has failed to open. The API has no
                     // mechanism to report substream openings failures. We could try opening it
@@ -253,7 +256,7 @@ function connect(config: ConnectionConfig): Connection {
                     // entire connection.
                     killAllJs();
                     // Note that the event doesn't give any additional reason for the failure.
-                    config.onConnectionReset("data channel failed to open");
+                    config.onConnectionReset("data channel failed to open: " + message);
                 } else {
                     // Substream was open and is now closed. Normal situation.
                     dataChannel.onopen = null;
@@ -262,7 +265,7 @@ function connect(config: ConnectionConfig): Connection {
                     dataChannel.onbufferedamountlow = null;
                     dataChannel.onmessage = null;
                     state.dataChannels.delete(streamId);
-                    config.onStreamReset(streamId);
+                    config.onStreamReset(streamId, message);
                 }
             };
 

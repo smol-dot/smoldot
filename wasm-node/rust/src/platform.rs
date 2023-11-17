@@ -263,7 +263,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let _prev_value = lock.streams.insert(
             (connection_id, None),
             Stream {
-                reset: false,
+                reset: None,
                 messages_queue: VecDeque::with_capacity(8),
                 messages_queue_total_size: 0,
                 something_happened: event_listener::Event::new(),
@@ -277,7 +277,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             stream_id: None,
             read_buffer: Vec::new(),
             inner_expected_incoming_bytes: Some(1),
-            is_reset: false,
+            is_reset: None,
             writable_bytes: 0,
             write_closable,
             write_closed: false,
@@ -430,7 +430,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     stream_id: Some(stream_id),
                     read_buffer: Vec::new(),
                     inner_expected_incoming_bytes: Some(1),
-                    is_reset: false,
+                    is_reset: None,
                     writable_bytes: 0,
                     write_closable: false, // Note: this is currently hardcoded for WebRTC.
                     write_closed: false,
@@ -468,7 +468,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         Box::pin(async move {
             let stream = stream.get_mut();
 
-            if stream.is_reset {
+            if stream.is_reset.is_some() {
                 future::pending::<()>().await;
             }
 
@@ -480,8 +480,8 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         .get_mut(&(stream.connection_id, stream.stream_id))
                         .unwrap();
 
-                    if stream_inner.reset {
-                        stream.is_reset = true;
+                    if let Some(msg) = &stream_inner.reset {
+                        stream.is_reset = Some(msg.clone());
                         return;
                     }
 
@@ -551,8 +551,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>> {
         let stream = stream.get_mut();
 
-        if stream.is_reset {
-            return Err(StreamError {});
+        if let Some(message) = &stream.is_reset {
+            return Err(StreamError {
+                message: message.clone(),
+            });
         }
 
         Ok(ReadWriteAccess {
@@ -632,7 +634,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
             // `unwrap()` is ok as there's no way that `buffer.len()` doesn't fit in a `u64`.
             TOTAL_BYTES_SENT.fetch_add(u64::try_from(buffer.len()).unwrap(), Ordering::Relaxed);
 
-            if !stream_inner.reset {
+            if stream_inner.reset.is_none() {
                 unsafe {
                     bindings::stream_send(
                         self.stream.connection_id,
@@ -645,7 +647,7 @@ impl<'a> Drop for ReadWriteAccess<'a> {
         }
 
         if self.read_write.write_bytes_queueable.is_none() && !self.stream.write_closed {
-            if !stream_inner.reset && self.stream.write_closable {
+            if stream_inner.reset.is_none() && self.stream.write_closable {
                 unsafe {
                     bindings::stream_send_close(
                         self.stream.connection_id,
@@ -664,8 +666,9 @@ pub(crate) struct StreamWrapper {
     stream_id: Option<u32>,
     read_buffer: Vec<u8>,
     inner_expected_incoming_bytes: Option<usize>,
-    /// `true` if the remote has reset the stream and `update_stream` has since then been called.
-    is_reset: bool,
+    /// `Some` if the remote has reset the stream and `update_stream` has since then been called.
+    /// Contains the error message.
+    is_reset: Option<String>,
     writable_bytes: usize,
     write_closable: bool,
     write_closed: bool,
@@ -686,7 +689,7 @@ impl Drop for StreamWrapper {
 
         let remove_connection = match &mut connection.inner {
             ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
-                if !removed_stream.reset {
+                if removed_stream.reset.is_none() {
                     unsafe {
                         bindings::reset_connection(self.connection_id);
                     }
@@ -703,7 +706,7 @@ impl Drop for StreamWrapper {
                 connection_handles_alive,
                 ..
             } => {
-                if !removed_stream.reset {
+                if removed_stream.reset.is_none() {
                     unsafe {
                         bindings::connection_stream_reset(
                             self.connection_id,
@@ -773,8 +776,10 @@ impl Drop for MultiStreamWrapper {
 }
 
 #[derive(Debug, derive_more::Display, Clone)]
-#[display(fmt = "stream error")]
-pub(crate) struct StreamError;
+#[display(fmt = "{message}")]
+pub(crate) struct StreamError {
+    message: String,
+}
 
 static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
     next_connection_id: 0,
@@ -843,8 +848,8 @@ enum ConnectionInner {
 }
 
 struct Stream {
-    /// `true` if [`bindings::stream_reset`] has been called.
-    reset: bool,
+    /// `Some` if [`bindings::stream_reset`] has been called. Contains the error message.
+    reset: Option<String>,
     /// Sum of the writable bytes reported through [`bindings::stream_writable_bytes`] that
     /// haven't been processed yet in a call to `update_stream`.
     writable_bytes_extra: usize,
@@ -910,7 +915,7 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
         .streams
         .get_mut(&(connection_id, actual_stream_id))
         .unwrap();
-    debug_assert!(!stream.reset);
+    debug_assert!(stream.reset.is_none());
 
     // As documented, the number of writable bytes must never become exceedingly large (a few
     // megabytes). As such, this can't overflow unless there is a bug on the JavaScript side.
@@ -936,7 +941,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
         .streams
         .get_mut(&(connection_id, actual_stream_id))
         .unwrap();
-    debug_assert!(!stream.reset);
+    debug_assert!(stream.reset.is_none());
 
     TOTAL_BYTES_RECEIVED.fetch_add(u64::try_from(message.len()).unwrap(), Ordering::Relaxed);
 
@@ -990,7 +995,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
         let _prev_value = lock.streams.insert(
             (connection_id, Some(stream_id)),
             Stream {
-                reset: false,
+                reset: None,
                 messages_queue: VecDeque::with_capacity(8),
                 messages_queue_total_size: 0,
                 something_happened: event_listener::Event::new(),
@@ -1018,6 +1023,10 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
 }
 
 pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
+    let message = str::from_utf8(&message)
+        .unwrap_or_else(|_| panic!("non-UTF-8 message"))
+        .to_owned();
+
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
@@ -1036,9 +1045,7 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
 
     connection.inner = ConnectionInner::Reset {
         connection_handles_alive,
-        _message: str::from_utf8(&message)
-            .unwrap_or_else(|_| panic!("non-UTF-8 message"))
-            .to_owned(),
+        _message: message.clone(),
     };
 
     connection.something_happened.notify(usize::max_value());
@@ -1046,16 +1053,20 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
     for ((_, _), stream) in lock.streams.range_mut(
         (connection_id, Some(u32::min_value()))..=(connection_id, Some(u32::max_value())),
     ) {
-        stream.reset = true;
+        stream.reset = Some(message.clone());
         stream.something_happened.notify(usize::max_value());
     }
     if let Some(stream) = lock.streams.get_mut(&(connection_id, None)) {
-        stream.reset = true;
+        stream.reset = Some(message);
         stream.something_happened.notify(usize::max_value());
     }
 }
 
-pub(crate) fn stream_reset(connection_id: u32, stream_id: u32) {
+pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Vec<u8>) {
+    let message: String = str::from_utf8(&message)
+        .unwrap_or_else(|_| panic!("non-UTF-8 message"))
+        .to_owned();
+
     // Note that, as documented, it is illegal to call this function on single-stream substreams.
     // We can thus assume that the `stream_id` is valid.
     let mut lock = STATE.try_lock().unwrap();
@@ -1063,6 +1074,6 @@ pub(crate) fn stream_reset(connection_id: u32, stream_id: u32) {
         .streams
         .get_mut(&(connection_id, Some(stream_id)))
         .unwrap();
-    stream.reset = true;
+    stream.reset = Some(message);
     stream.something_happened.notify(usize::max_value());
 }
