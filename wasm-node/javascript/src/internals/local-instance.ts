@@ -96,7 +96,7 @@ export interface Instance {
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
     streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => void,
-    streamReset: (connectionId: number, streamId: number) => void,
+    streamReset: (connectionId: number, streamId: number, message: string) => void,
 }
 
 /**
@@ -594,10 +594,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             );
         },
 
-        streamReset: (connectionId: number, streamId: number) => {
+        streamReset: (connectionId: number, streamId: number, message: string) => {
             if (!state.instance)
                 return;
-            state.instance.exports.stream_reset(connectionId, streamId);
+            state.bufferIndices[0] = new TextEncoder().encode(message);
+            state.instance.exports.stream_reset(connectionId, streamId, 0);
+            delete state.bufferIndices[0]
         },
     };
 }
@@ -626,7 +628,7 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
     stream_message: (connectionId: number, streamId: number, bufferIndex: number) => void,
     connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
     connection_reset: (connectionId: number, bufferIndex: number) => void,
-    stream_reset: (connectionId: number, streamId: number) => void,
+    stream_reset: (connectionId: number, streamId: number, bufferIndex: number) => void,
 }
 
 interface SmoldotWasmInstance extends WebAssembly.Instance {
