@@ -178,8 +178,6 @@ function connect(config: ConnectionConfig): Connection {
         const { targetPort, ipVersion, targetIp, remoteTlsCertificateSha256 } =
             config.address;
 
-        // TODO: detect localhost for Firefox? https://bugzilla.mozilla.org/show_bug.cgi?id=1659672
-
         const state: {
             // Note that `pc` can be the connection, but also null or undefined.
             // `undefined` means "certificate generation in progress", while `null` means "opening must
@@ -290,6 +288,20 @@ function connect(config: ConnectionConfig): Connection {
             if (state.pc === null)
                 return;
 
+            // Due to <https://bugzilla.mozilla.org/show_bug.cgi?id=1659672>, connections from
+            // Firefox to a localhost WebRTC server always fails. Since this bug has been opened
+            // for three years at the time of writing, it is unlikely to be fixed in the short
+            // term. In order to provider better user feedback, we straight up refuse connecting
+            // and stop the connection.
+            // Note that this is just a hint. Failing to detect this will lead to the WebRTC
+            // handshake  timing out.
+            // TODO: eventually remove this if the Firefox bug is fixed
+            if ((targetIp == 'localhost' || targetIp == '127.0.0.1' || targetIp == '::1') && navigator.userAgent.indexOf('Firefox') !== -1) {
+                killAllJs();
+                config.onConnectionReset("Firefox can't connect to a localhost WebRTC server");
+                return;
+            }
+
             // Create a new WebRTC connection.
             state.pc = new RTCPeerConnection({ certificates: [localCertificate] });
 
@@ -328,7 +340,7 @@ function connect(config: ConnectionConfig): Connection {
                 config.onConnectionReset('Failed to obtain the browser certificate fingerprint');
                 return;
             }
-            
+
             let localTlsCertificateSha256 = new Uint8Array(32);
             localTlsCertificateSha256.set(localTlsCertificateHex!.split(':').map((s) => parseInt(s, 16)), 0);
 
