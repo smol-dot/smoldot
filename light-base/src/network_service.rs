@@ -2047,7 +2047,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         ) {
                             log::debug!(
                                 target: "network",
-                                "Slots({}) ∌ {} (reason=no_address, ban_duration={:?})",
+                                "Slots({}) ∌ {} (reason=no-address, ban_duration={:?})",
                                 &task.network[chain_id].log_name,
                                 expected_peer_id,
                                 ban_duration
