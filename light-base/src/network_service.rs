@@ -1569,6 +1569,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // it is not possible to be sure that we will reach 0 connections or connection
                 // attempts, and thus we ban the peer every time.
                 let ban_duration = Duration::from_secs(5);
+                task.network.gossip_remove_desired_all(
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
                 for (&chain_id, what_happened) in task
                     .peering_strategy
                     .unassign_slots_and_ban(&peer_id, task.platform.now() + ban_duration)
