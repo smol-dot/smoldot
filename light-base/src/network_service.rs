@@ -1526,6 +1526,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     task.peering_strategy
                         .remove_address(expected_peer_id, remote_addr.as_ref());
+                    // TODO: if Bob says that its address is the same as Alice's, and we try to connect to both Alice and Bob, then the Bob connection will reach this path and set Alice's address as connected even though it's already connected; this will later cause a state mismatch when disconnecting
                     let _ = task.peering_strategy.insert_or_set_connected_address(
                         &peer_id,
                         remote_addr.clone().into_vec(),
@@ -1536,27 +1537,67 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
-                address,
-                expected_peer_id,
+                expected_peer_id: Some(_),
                 ..
-            }) => {
-                if let Some(expected_peer_id) = expected_peer_id {
-                    task.peering_strategy
-                        .disconnect_addr(&expected_peer_id, &address)
-                        .unwrap();
-                    let address = Multiaddr::try_from(address).unwrap();
-                    log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
-                }
-            }
-            WakeUpReason::NetworkEvent(service::Event::Disconnected {
-                address, peer_id, ..
-            }) => {
+            })
+            | WakeUpReason::NetworkEvent(service::Event::Disconnected { .. }) => {
+                let (address, peer_id, handshake_finished) = match wake_up_reason {
+                    WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                        address,
+                        expected_peer_id: Some(peer_id),
+                        ..
+                    }) => (address, peer_id, false),
+                    WakeUpReason::NetworkEvent(service::Event::Disconnected {
+                        address,
+                        peer_id,
+                        ..
+                    }) => (address, peer_id, true),
+                    _ => unreachable!(),
+                };
+
                 task.peering_strategy
                     .disconnect_addr(&peer_id, &address)
                     .unwrap();
-
                 let address = Multiaddr::try_from(address).unwrap();
-                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
+                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished={handshake_finished:?})", peer_id, address);
+
+                // Ban the peer in order to avoid trying over and over again the same address(es).
+                // Even if the handshake was finished, it is possible that the peer simply shuts
+                // down connections immediately after it has been opened, hence the ban.
+                // Due to race conditions and peerid mismatches, it is possible that there is
+                // another existing connection or connection attempt with that same peer. However,
+                // it is not possible to be sure that we will reach 0 connections or connection
+                // attempts, and thus we ban the peer every time.
+                let ban_duration = Duration::from_secs(5);
+                task.network.gossip_remove_desired_all(
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
+                for (&chain_id, what_happened) in task
+                    .peering_strategy
+                    .unassign_slots_and_ban(&peer_id, task.platform.now() + ban_duration)
+                {
+                    if matches!(
+                        what_happened,
+                        basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
+                    ) {
+                        log::debug!(
+                            target: "network",
+                            "Slots({}) ∌ {} (reason=pre-handshake-disconnect, ban-duration={:?})",
+                            &task.network[chain_id].log_name,
+                            peer_id,
+                            ban_duration
+                        );
+                    }
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                expected_peer_id: None,
+                ..
+            }) => {
+                // This path can't be reached as we always set an expected peer id when creating
+                // a connection.
+                debug_assert!(false);
             }
             WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
