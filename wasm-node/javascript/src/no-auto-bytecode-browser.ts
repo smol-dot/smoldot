@@ -54,7 +54,7 @@ export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
     // an issue.
     if ((typeof isSecureContext === 'boolean' && isSecureContext) && typeof location !== undefined) {
         const loc = location.toString();
-        if (loc.indexOf('localhost') !== -1 || loc.indexOf('127.0.0.1') !== -1 || loc.indexOf('::1') !== -1) {
+        if (loc.indexOf('localhost') !== -1 && loc.indexOf('127.0.0.1') !== -1 && loc.indexOf('::1') !== -1) {
             options.forbidNonLocalWs = true;
         }
     }
