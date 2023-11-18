@@ -1537,61 +1537,63 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
-                address,
-                expected_peer_id,
+                expected_peer_id: Some(_),
                 ..
-            }) => {
-                let Some(expected_peer_id) = expected_peer_id else {
-                    debug_assert!(false);
-                    continue;
+            })
+            | WakeUpReason::NetworkEvent(service::Event::Disconnected { .. }) => {
+                let (address, peer_id, handshake_finished) = match wake_up_reason {
+                    WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                        address,
+                        expected_peer_id: Some(peer_id),
+                        ..
+                    }) => (address, peer_id, false),
+                    WakeUpReason::NetworkEvent(service::Event::Disconnected {
+                        address,
+                        peer_id,
+                        ..
+                    }) => (address, peer_id, true),
+                    _ => unreachable!(),
                 };
 
                 task.peering_strategy
-                    .disconnect_addr(&expected_peer_id, &address)
+                    .disconnect_addr(&peer_id, &address)
                     .unwrap();
                 let address = Multiaddr::try_from(address).unwrap();
-                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
+                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished={handshake_finished:?})", peer_id, address);
 
+                // Ban the peer in order to avoid trying over and over again the same address(es).
+                // Even if the handshake was finished, it is possible that the peer simply shuts
+                // down connections immediately after it has been opened, hence the ban.
                 // Due to race conditions and peerid mismatches, it is possible that there is
-                // another existing connection or connection attempt with that same peer.
-                // If this isn't the case and that this was the last connection attempt, then
-                // we ban the peer.
-                // Banning the peer is necessary in order to avoid trying over and over again the
-                // same address(es).
-                if task
-                    .network
-                    .num_potential_and_established_connections(&expected_peer_id)
-                    == 0
+                // another existing connection or connection attempt with that same peer. However,
+                // it is not possible to be sure that we will reach 0 connections or connection
+                // attempts, and thus we ban the peer every time.
+                let ban_duration = Duration::from_secs(5);
+                for (&chain_id, what_happened) in task
+                    .peering_strategy
+                    .unassign_slots_and_ban(&peer_id, task.platform.now() + ban_duration)
                 {
-                    let ban_duration = Duration::from_secs(5);
-                    for (&chain_id, what_happened) in task.peering_strategy.unassign_slots_and_ban(
-                        &expected_peer_id,
-                        task.platform.now() + ban_duration,
+                    if matches!(
+                        what_happened,
+                        basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
                     ) {
-                        if matches!(
-                            what_happened,
-                            basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
-                        ) {
-                            log::debug!(
-                                target: "network",
-                                "Slots({}) ∌ {} (reason=pre-handshake-disconnect, ban-duration={:?})",
-                                &task.network[chain_id].log_name,
-                                expected_peer_id,
-                                ban_duration
-                            );
-                        }
+                        log::debug!(
+                            target: "network",
+                            "Slots({}) ∌ {} (reason=pre-handshake-disconnect, ban-duration={:?})",
+                            &task.network[chain_id].log_name,
+                            peer_id,
+                            ban_duration
+                        );
                     }
                 }
             }
-            WakeUpReason::NetworkEvent(service::Event::Disconnected {
-                address, peer_id, ..
+            WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                expected_peer_id: None,
+                ..
             }) => {
-                task.peering_strategy
-                    .disconnect_addr(&peer_id, &address)
-                    .unwrap();
-
-                let address = Multiaddr::try_from(address).unwrap();
-                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=true)", peer_id, address);
+                // This path can't be reached as we always set an expected peer id when creating
+                // a connection.
+                debug_assert!(false);
             }
             WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
