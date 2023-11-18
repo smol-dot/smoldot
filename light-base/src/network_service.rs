@@ -1668,7 +1668,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 if had_slot {
                     log::debug!(
                         target: "network",
-                        "Slots({}) ∌ {} (reason=gossip-open-failed, ban_duration={:?})",
+                        "Slots({}) ∌ {} (reason=gossip-open-failed, ban-duration={:?})",
                         &task.network[chain_id].log_name,
                         peer_id,
                         ban_duration
@@ -1708,7 +1708,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 ) {
                     log::debug!(
                         target: "network",
-                        "Slots({}) ∌ {} (reason=gossip-closed, ban_duration={:?})",
+                        "Slots({}) ∌ {} (reason=gossip-closed, ban-duration={:?})",
                         &task.network[chain_id].log_name,
                         peer_id,
                         ban_duration
@@ -2047,7 +2047,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         ) {
                             log::debug!(
                                 target: "network",
-                                "Slots({}) ∌ {} (reason=no-address, ban_duration={:?})",
+                                "Slots({}) ∌ {} (reason=no-address, ban-duration={:?})",
                                 &task.network[chain_id].log_name,
                                 expected_peer_id,
                                 ban_duration
