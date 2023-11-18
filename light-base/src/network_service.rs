@@ -1645,29 +1645,38 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id, error,
                 );
                 let ban_duration = Duration::from_secs(15);
-                // TODO: adjust log message if there was no slot assigned?
-                log::debug!(
-                    target: "network",
-                    "Slots({}) ∌ {} (ban_duration={:?})",
-                    &task.network[chain_id].log_name,
-                    peer_id,
-                    ban_duration
-                );
+
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
-                task.network.gossip_remove_desired(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
-                if let service::GossipConnectError::GenesisMismatch { .. } = error {
-                    task.peering_strategy
-                        .unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
+                let had_slot = if let service::GossipConnectError::GenesisMismatch { .. } = error {
+                    matches!(
+                        task.peering_strategy
+                            .unassign_slot_and_remove_chain_peer(&chain_id, &peer_id),
+                        basic_peering_strategy::UnassignSlotAndRemoveChainPeer::HadSlot
+                    )
                 } else {
-                    task.peering_strategy.unassign_slot_and_ban(
-                        &chain_id,
+                    matches!(
+                        task.peering_strategy.unassign_slot_and_ban(
+                            &chain_id,
+                            &peer_id,
+                            task.platform.now() + ban_duration,
+                        ),
+                        basic_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                    )
+                };
+
+                if had_slot {
+                    log::debug!(
+                        target: "network",
+                        "Slots({}) ∌ {} (reason=gossip-open-failed, ban-duration={:?})",
+                        &task.network[chain_id].log_name,
+                        peer_id,
+                        ban_duration
+                    );
+                    task.network.gossip_remove_desired(
+                        chain_id,
                         &peer_id,
-                        task.platform.now() + ban_duration,
+                        service::GossipKind::ConsensusTransactions,
                     );
                 }
             }
@@ -1683,30 +1692,33 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     peer_id,
                 );
                 let ban_duration = Duration::from_secs(10);
-                // TODO: adjust log message if there was no slot assigned?
-                log::debug!(
-                    target: "network",
-                    "Slots({}) ∌ {} (ban_duration={:?})",
-                    &task.network[chain_id].log_name,
-                    peer_id,
-                    ban_duration
-                );
 
                 let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                 debug_assert!(_was_in.is_some());
 
                 // Note that peer doesn't necessarily have an out slot, as this event might happen
                 // as a result of an inbound gossip connection.
-                task.peering_strategy.unassign_slot_and_ban(
-                    &chain_id,
-                    &peer_id,
-                    task.platform.now() + ban_duration,
-                );
-                task.network.gossip_remove_desired(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
+                if matches!(
+                    task.peering_strategy.unassign_slot_and_ban(
+                        &chain_id,
+                        &peer_id,
+                        task.platform.now() + ban_duration,
+                    ),
+                    basic_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                ) {
+                    log::debug!(
+                        target: "network",
+                        "Slots({}) ∌ {} (reason=gossip-closed, ban-duration={:?})",
+                        &task.network[chain_id].log_name,
+                        peer_id,
+                        ban_duration
+                    );
+                    task.network.gossip_remove_desired(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                }
 
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
@@ -2040,10 +2052,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         &expected_peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
-                    task.peering_strategy.unassign_slots_and_ban(
+                    let ban_duration = Duration::from_secs(10);
+                    for (&chain_id, what_happened) in task.peering_strategy.unassign_slots_and_ban(
                         &expected_peer_id,
-                        task.platform.now() + Duration::from_secs(10),
-                    );
+                        task.platform.now() + ban_duration,
+                    ) {
+                        if matches!(
+                            what_happened,
+                            basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
+                        ) {
+                            log::debug!(
+                                target: "network",
+                                "Slots({}) ∌ {} (reason=no-address, ban-duration={:?})",
+                                &task.network[chain_id].log_name,
+                                expected_peer_id,
+                                ban_duration
+                            );
+                        }
+                    }
                     continue;
                 };
 
