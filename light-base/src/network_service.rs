@@ -1770,7 +1770,24 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
                         match Multiaddr::try_from(addr) {
-                            Ok(a) => valid_addrs.push(a),
+                            Ok(a) => {
+                                if platform::address_parse::multiaddr_to_address(&a)
+                                    .ok()
+                                    .map_or(false, |addr| {
+                                        task.platform.supports_connection_type((&addr).into())
+                                    })
+                                {
+                                    valid_addrs.push(a)
+                                } else {
+                                    log::debug!(
+                                        target: "network",
+                                        "Discovery({}) => UnsupportedAddress(peer_id={}, addr={})",
+                                        &task.network[chain_id].log_name,
+                                        peer_id,
+                                        &a
+                                    );
+                                }
+                            }
                             Err(err) => {
                                 log::debug!(
                                     target: "network",
@@ -1779,7 +1796,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     peer_id,
                                     hex::encode(&err.addr)
                                 );
-                                continue;
                             }
                         }
                     }

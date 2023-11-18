@@ -17,12 +17,21 @@
 
 use smoldot::libp2p::{multiaddr::ProtocolRef, multihash, Multiaddr};
 
-use super::{Address, IpAddr, MultiStreamAddress};
+use super::{Address, ConnectionType, IpAddr, MultiStreamAddress};
 use core::str;
 
 pub enum AddressOrMultiStreamAddress<'a> {
     Address(Address<'a>),
     MultiStreamAddress(MultiStreamAddress),
+}
+
+impl<'a> From<&'a AddressOrMultiStreamAddress<'a>> for ConnectionType {
+    fn from(address: &'a AddressOrMultiStreamAddress<'a>) -> ConnectionType {
+        match address {
+            AddressOrMultiStreamAddress::Address(a) => ConnectionType::from(a),
+            AddressOrMultiStreamAddress::MultiStreamAddress(a) => ConnectionType::from(a),
+        }
+    }
 }
 
 /// Parses a [`Multiaddr`] into an [`Address`] or [`MultiStreamAddress`].

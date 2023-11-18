@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Addresses that are not supported by the host platform are now ignored during the discovery process. For example, TCP/IP connections are ignored while in a browser. This avoids populating the address book with peers that we know we can't connect to anyway.
+
 ## 2.0.10 - 2023-11-17
 
 ### Fixed
