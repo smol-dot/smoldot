@@ -45,6 +45,20 @@ export {
 export function startWithBytecode(options: ClientOptionsWithBytecode): Client {
     options.forbidTcp = true;
 
+    // When in a secure context, browsers refuse to open non-secure WebSocket connections to
+    // non-localhost. There is an exception if the page is localhost, in which case all connections
+    // are allowed.
+    // Detecting this ahead of time is better for the overall health of the client, as it will
+    // avoid storing in memory addresses that it knows it can't connect to.
+    // The condition below is a hint, and false-positives or false-negatives are not fundamentally
+    // an issue.
+    if ((typeof isSecureContext === 'boolean' && isSecureContext) && typeof location !== undefined) {
+        const loc = location.toString();
+        if (loc.indexOf('localhost') !== -1 || loc.indexOf('127.0.0.1') !== -1 || loc.indexOf('::1') !== -1) {
+            options.forbidNonLocalWs = true;
+        }
+    }
+
     return innerStart(options, options.bytecode, {
         performanceNow: () => {
             return performance.now()
