@@ -901,6 +901,21 @@ where
         &self.inner[id].address
     }
 
+    /// Returns the number of connections with the given peer.
+    ///
+    /// Both connections that have and have not finished their handshaking phase are considered.
+    pub fn num_potential_and_established_connections(&self, peer_id: &PeerId) -> usize {
+        let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
+            return 0;
+        };
+
+        self.connections_by_peer_id
+            .range(
+                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
+            )
+            .count()
+    }
+
     /// Pulls a message that must be sent to a connection.
     ///
     /// The message must be passed to [`SingleStreamConnectionTask::inject_coordinator_message`]

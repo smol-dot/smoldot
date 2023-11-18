@@ -1526,6 +1526,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     task.peering_strategy
                         .remove_address(expected_peer_id, remote_addr.as_ref());
+                    // TODO: if Bob says that its address is the same as Alice's, and we try to connect to both Alice and Bob, then the Bob connection will reach this path and set Alice's address as connected even though it's already connected; this will later cause a state mismatch when disconnecting
                     let _ = task.peering_strategy.insert_or_set_connected_address(
                         &peer_id,
                         remote_addr.clone().into_vec(),
@@ -1540,12 +1541,46 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 expected_peer_id,
                 ..
             }) => {
-                if let Some(expected_peer_id) = expected_peer_id {
-                    task.peering_strategy
-                        .disconnect_addr(&expected_peer_id, &address)
-                        .unwrap();
-                    let address = Multiaddr::try_from(address).unwrap();
-                    log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
+                let Some(expected_peer_id) = expected_peer_id else {
+                    debug_assert!(false);
+                    continue;
+                };
+
+                task.peering_strategy
+                    .disconnect_addr(&expected_peer_id, &address)
+                    .unwrap();
+                let address = Multiaddr::try_from(address).unwrap();
+                log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished=false)", expected_peer_id, address);
+
+                // Due to race conditions and peerid mismatches, it is possible that there is
+                // another existing connection or connection attempt with that same peer.
+                // If this isn't the case and that this was the last connection attempt, then
+                // we ban the peer.
+                // Banning the peer is necessary in order to avoid trying over and over again the
+                // same address(es).
+                if task
+                    .network
+                    .num_potential_and_established_connections(&expected_peer_id)
+                    == 0
+                {
+                    let ban_duration = Duration::from_secs(5);
+                    for (&chain_id, what_happened) in task.peering_strategy.unassign_slots_and_ban(
+                        &expected_peer_id,
+                        task.platform.now() + ban_duration,
+                    ) {
+                        if matches!(
+                            what_happened,
+                            basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
+                        ) {
+                            log::debug!(
+                                target: "network",
+                                "Slots({}) ∌ {} (reason=pre-handshake-disconnect, ban-duration={:?})",
+                                &task.network[chain_id].log_name,
+                                expected_peer_id,
+                                ban_duration
+                            );
+                        }
+                    }
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::Disconnected {
