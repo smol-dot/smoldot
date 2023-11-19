@@ -98,6 +98,7 @@ soketto = { version = "0.7.1", optional = true }
 wasmtime = { version = "12.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
+hex-literal = "0.4.1"
 criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
