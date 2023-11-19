@@ -95,7 +95,7 @@ Due to the history of this repository, the code written in 2022 and before belon
 
 ## Governance and contributions
 
-This project operates under the typical "benevolent dictator" model. The main maintener, @tomaka, is being remunerated to work on the source code through Polkadot treasury proposals.
+This project operates under the typical "benevolent dictator" model. The main maintainer, @tomaka, is being remunerated to work on the source code through Polkadot treasury proposals.
 
 Pull requests are welcome. However, if your changes are substantial, you are strongly encouraged to first discuss the nature of the changes through an issue or discussion. In general, unless the changes you are making are trivial, you are never wrong if you first open an issue instead of a pull request. Keep in mind that changes that might seem easy are often harder than they look. Changes that are *actually* easy have a high chance of having already been completed.
 
@@ -115,7 +115,7 @@ While the light client is fully maintained, please be aware that at the moment t
 
 - Smoldot crashes due to a certain exchange of messages on the libp2p networking level, including a high volume of data.
 - Smoldot crashes due to a certain exchange of messages on the JSON-RPC requests level, including a high volume of requests or responses.
-- A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly due to techincal reasons. A warning is printed when a legacy JSON-RPC request is called.
+- A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly due to technical reasons. A warning is printed when a legacy JSON-RPC request is called.
 
 Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones documented), infinite loops, or allocating an ever increasing amount of memory (a.k.a. a "memory leak").
 
