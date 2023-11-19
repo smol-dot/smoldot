@@ -115,7 +115,6 @@ pub(super) async fn connection_task(
                         super::ToBackground::FromConnectionTask {
                             connection_id,
                             opaque_message: Some(opaque_message),
-                            connection_now_dead: false,
                         },
                     ));
                 }
@@ -124,7 +123,6 @@ pub(super) async fn connection_task(
                     .send(super::ToBackground::FromConnectionTask {
                         connection_id,
                         opaque_message,
-                        connection_now_dead: true,
                     })
                     .await;
                 return;
@@ -133,18 +131,18 @@ pub(super) async fn connection_task(
 
         // Now wait for something interesting to happen before looping again.
 
-        enum WhatHappened {
+        enum WakeUpReason {
             CoordinatorMessage(CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
         }
 
-        let what_happened: WhatHappened = {
+        let wake_up_reason: WakeUpReason = {
             let coordinator_message = async {
                 match coordinator_to_connection.next().await {
-                    Some(msg) => WhatHappened::CoordinatorMessage(msg),
-                    None => WhatHappened::CoordinatorDead,
+                    Some(msg) => WakeUpReason::CoordinatorMessage(msg),
+                    None => WakeUpReason::CoordinatorDead,
                 }
             };
 
@@ -163,7 +161,7 @@ pub(super) async fn connection_task(
                 async {
                     if let Some(fut) = fut {
                         fut.await;
-                        WhatHappened::SocketEvent
+                        WakeUpReason::SocketEvent
                     } else {
                         future::pending().await
                     }
@@ -178,22 +176,22 @@ pub(super) async fn connection_task(
                 };
                 message_sending = None;
                 if result.is_ok() {
-                    WhatHappened::MessageSent
+                    WakeUpReason::MessageSent
                 } else {
-                    WhatHappened::CoordinatorDead
+                    WakeUpReason::CoordinatorDead
                 }
             };
 
             coordinator_message.or(socket_event).or(message_sent).await
         };
 
-        match what_happened {
-            WhatHappened::CoordinatorMessage(message) => {
+        match wake_up_reason {
+            WakeUpReason::CoordinatorMessage(message) => {
                 connection_task.inject_coordinator_message(&Instant::now(), message);
             }
-            WhatHappened::CoordinatorDead => return,
-            WhatHappened::SocketEvent => {}
-            WhatHappened::MessageSent => {}
+            WakeUpReason::CoordinatorDead => return,
+            WakeUpReason::SocketEvent => {}
+            WakeUpReason::MessageSent => {}
         }
     }
 }

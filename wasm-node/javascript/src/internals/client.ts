@@ -172,7 +172,7 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamReset: (streamId: number) => void;
+    onStreamReset: (streamId: number, message: string) => void;
 
     /**
      * Callback called when some data sent using {@link Connection.send} has effectively been
@@ -354,10 +354,10 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                             throw new Error();
                         state.instance.instance.streamWritableBytes(connectionId, numExtra, streamId);
                     },
-                    onStreamReset(streamId) {
+                    onStreamReset(streamId, message) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamReset(connectionId, streamId);
+                        state.instance.instance.streamReset(connectionId, streamId, message);
                     },
                 }));
                 break;

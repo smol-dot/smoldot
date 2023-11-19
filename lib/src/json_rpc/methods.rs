@@ -488,7 +488,7 @@ define_methods! {
     ) -> (),
     chainHead_unstable_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexStringSingleOrArray
+        #[rename = "hashOrHashes"] hash_or_hashes: HashHexStringSingleOrArray
     ) -> (),
 
     chainSpec_v1_chainName() -> Cow<'a, str>,

@@ -584,10 +584,15 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 ///
 /// It is illegal to call this function on a single-stream connections.
 ///
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
+/// reason for closing, then provide this buffer index to the function. The Rust code will call
+/// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
+/// index can be de-assigned and buffer destroyed once this function returns.
+///
 /// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
-    crate::platform::stream_reset(connection_id, stream_id);
+pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32, buffer_index: u32) {
+    crate::platform::stream_reset(connection_id, stream_id, get_buffer(buffer_index));
 }
 
 pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {

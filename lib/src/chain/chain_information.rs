@@ -442,6 +442,7 @@ impl<'a> ChainInformationRef<'a> {
             ..
         } = &self.finality
         {
+            // TODO: check consistency with the finalized block header
             if let Some(change) = finalized_scheduled_change.as_ref() {
                 if change.0 <= self.finalized_block_header.number {
                     return Err(ValidityError::ScheduledGrandPaChangeBeforeFinalized);

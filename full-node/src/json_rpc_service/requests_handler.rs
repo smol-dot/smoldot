@@ -22,7 +22,12 @@ use smoldot::{
     json_rpc::{methods, parse, service},
     trie,
 };
-use std::{future::Future, iter, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    iter,
+    pin::{self, Pin},
+    sync::Arc,
+};
 
 use crate::{
     consensus_service, database_thread,
@@ -79,11 +84,12 @@ pub enum Message {
     SubscriptionStart(service::SubscriptionStartProcess),
 }
 
-pub fn spawn_requests_handler(mut config: Config) {
+pub fn spawn_requests_handler(config: Config) {
     let tasks_executor = config.tasks_executor.clone();
     tasks_executor(Box::pin(async move {
+        let mut receiver = pin::pin!(config.receiver);
         loop {
-            match config.receiver.next().await {
+            match receiver.next().await {
                 Some(Message::Request(request)) => match request.request() {
                     methods::MethodCall::rpc_methods {} => {
                         request.respond(methods::Response::rpc_methods(methods::RpcMethods {

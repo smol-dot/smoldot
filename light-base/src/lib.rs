@@ -86,7 +86,7 @@
 extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{num::NonZeroU32, ops, pin};
+use core::{num::NonZeroU32, ops, pin, time::Duration};
 use futures_util::FutureExt as _;
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
@@ -1093,11 +1093,12 @@ fn start_services<TPlat: platform::PlatformRef>(
     network_identify_agent_version: String,
 ) -> ChainServices<TPlat> {
     // The network service is responsible for connecting to the peer-to-peer network.
-    let (network_service, network_service_chain_ids, mut network_event_receivers) =
+    let (network_service, network_service_chain_ids) =
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
-            num_events_receivers: 1, // Configures the length of `network_event_receivers`
             identify_agent_version: network_identify_agent_version,
+            connections_open_pool_size: 5,
+            connections_open_pool_restore_delay: Duration::from_secs(1),
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),
                 num_out_slots: 4,
@@ -1173,7 +1174,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 log_name: log_name.clone(),
                 block_number_bytes,
                 network_service: (network_service.clone(), network_service_chain_id),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
                         finalized_block_header,
@@ -1210,7 +1210,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                 block_number_bytes,
                 platform: platform.clone(),
                 network_service: (network_service.clone(), network_service_chain_id),
-                network_events_receiver: network_event_receivers.pop().unwrap(),
                 chain_type: sync_service::ConfigChainType::RelayChain(
                     sync_service::ConfigRelayChain {
                         chain_information: chain_information.clone(),

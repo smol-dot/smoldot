@@ -31,7 +31,6 @@ use crate::{network_service, platform::PlatformRef, runtime_service};
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
-use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
@@ -65,10 +64,6 @@ pub struct Config<TPlat: PlatformRef> {
         Arc<network_service::NetworkService<TPlat>>,
         network_service::ChainId,
     ),
-
-    /// Receiver for events coming from the network, as returned by
-    /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: Pin<Box<dyn stream::Stream<Item = network_service::Event> + Send>>,
 
     /// Extra fields depending on whether the chain is a relay chain or a parachain.
     pub chain_type: ConfigChainType<TPlat>,
@@ -168,7 +163,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 from_foreground,
                 config.network_service.0.clone(),
                 config.network_service.1,
-                config.network_events_receiver,
             )),
             ConfigChainType::RelayChain(config_relay_chain) => {
                 Box::pin(standalone::start_standalone_chain(
@@ -180,7 +174,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     from_foreground,
                     config.network_service.0.clone(),
                     config.network_service.1,
-                    config.network_events_receiver,
                 ))
             }
         };

@@ -55,7 +55,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_id: network_service::ChainId,
-    mut from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
@@ -109,6 +108,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         .fuse(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
+        from_network_service: Box::pin(network_service.subscribe(network_chain_id).await),
         network_service,
         network_chain_id,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
@@ -215,7 +215,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
-        enum WhatHappened {
+        enum WakeUpReason {
             NetworkEvent(network_service::Event),
             ForegroundMessage(ToBackground),
             ForegroundClosed,
@@ -224,15 +224,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             MustLoopAgain,
         }
 
-        let what_happened = {
+        let wake_up_reason = {
             async {
                 // We expect the networking channel to never close, so the event is unwrapped.
-                WhatHappened::NetworkEvent(from_network_service.next().await.unwrap())
+                WakeUpReason::NetworkEvent(task.from_network_service.next().await.unwrap())
             }
             .or(async {
                 from_foreground.next().await.map_or(
-                    WhatHappened::ForegroundClosed,
-                    WhatHappened::ForegroundMessage,
+                    WakeUpReason::ForegroundClosed,
+                    WakeUpReason::ForegroundMessage,
                 )
             })
             .or(async {
@@ -240,14 +240,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     future::pending::<()>().await
                 }
                 let (request_id, result) = task.pending_requests.select_next_some().await;
-                WhatHappened::RequestFinished(request_id, result)
+                WakeUpReason::RequestFinished(request_id, result)
             })
             .or(async {
                 (&mut task.warp_sync_taking_long_time_warning).await;
                 task.warp_sync_taking_long_time_warning =
                     future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
                         .fuse();
-                WhatHappened::WarpSyncTakingLongTimeWarning
+                WakeUpReason::WarpSyncTakingLongTimeWarning
             })
             .or(async {
                 // If the list of CPU-heavy operations to perform is potentially non-empty,
@@ -258,31 +258,31 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 if queue_empty {
                     future::pending::<()>().await;
                 }
-                WhatHappened::MustLoopAgain
+                WakeUpReason::MustLoopAgain
             })
             .await
         };
 
-        let response_outcome = match what_happened {
-            WhatHappened::NetworkEvent(network_event) => {
+        let response_outcome = match wake_up_reason {
+            WakeUpReason::NetworkEvent(network_event) => {
                 // Something happened on the networking.
                 task.inject_network_event(network_event);
                 continue;
             }
 
-            WhatHappened::ForegroundMessage(message) => {
+            WakeUpReason::ForegroundMessage(message) => {
                 // Received message from the front `SyncService`.
                 task.process_foreground_message(message);
                 continue;
             }
 
-            WhatHappened::ForegroundClosed => {
+            WakeUpReason::ForegroundClosed => {
                 // The channel with the frontend sync service has been closed.
                 // Closing the sync background task as a result.
                 return;
             }
 
-            WhatHappened::RequestFinished(request_id, result) => {
+            WakeUpReason::RequestFinished(request_id, result) => {
                 // A request has been finished.
                 // `result` is an error if the request got cancelled by the sync state machine.
                 let Ok(result) = result else {
@@ -355,7 +355,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 }
             }
 
-            WhatHappened::WarpSyncTakingLongTimeWarning => {
+            WakeUpReason::WarpSyncTakingLongTimeWarning => {
                 match task.sync.status() {
                     all::Status::Sync => {}
                     all::Status::WarpSyncFragments {
@@ -391,7 +391,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 continue;
             }
 
-            WhatHappened::MustLoopAgain => {
+            WakeUpReason::MustLoopAgain => {
                 continue;
             }
         };
@@ -448,6 +448,8 @@ struct Task<TPlat: PlatformRef> {
     /// Index within the network service of the chain we are interested in. Must be indicated to
     /// the network service whenever a request is started.
     network_chain_id: network_service::ChainId,
+    /// Events coming from the networking service.
+    from_network_service: Pin<Box<async_channel::Receiver<network_service::Event>>>,
 
     /// List of requests currently in progress.
     pending_requests: stream::FuturesUnordered<
@@ -1134,10 +1136,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
             network_service::Event::Connected {
                 peer_id,
                 role,
-                chain_id,
                 best_block_number,
                 best_block_hash,
-            } if chain_id == self.network_chain_id => {
+            } => {
                 self.peers_source_id_map.insert(
                     peer_id.clone(),
                     self.sync
@@ -1145,9 +1146,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 );
             }
 
-            network_service::Event::Disconnected { peer_id, chain_id }
-                if chain_id == self.network_chain_id =>
-            {
+            network_service::Event::Disconnected { peer_id } => {
                 let sync_source_id = self.peers_source_id_map.remove(&peer_id).unwrap();
                 let (_, requests) = self.sync.remove_source(sync_source_id);
 
@@ -1160,11 +1159,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 }
             }
 
-            network_service::Event::BlockAnnounce {
-                chain_id,
-                peer_id,
-                announce,
-            } if chain_id == self.network_chain_id => {
+            network_service::Event::BlockAnnounce { peer_id, announce } => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
@@ -1262,19 +1257,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             network_service::Event::GrandpaNeighborPacket {
                 peer_id,
-                chain_id,
                 finalized_block_height,
-            } if chain_id == self.network_chain_id => {
+            } => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 self.sync
                     .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
-            network_service::Event::GrandpaCommitMessage {
-                chain_id,
-                peer_id,
-                message,
-            } if chain_id == self.network_chain_id => {
+            network_service::Event::GrandpaCommitMessage { peer_id, message } => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 match self
                     .sync
@@ -1294,10 +1284,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                 }
-            }
-
-            _ => {
-                // Different chain index.
             }
         }
     }

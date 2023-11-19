@@ -213,6 +213,8 @@ pub enum VerifyError {
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
+    /// Public key used to for the signature is invalid.
+    BadPublicKey,
     /// Block header signature is invalid.
     BadSignature,
     /// VRF proof in the block header is invalid.
@@ -223,16 +225,30 @@ pub enum VerifyError {
     OverPrimaryClaimThreshold,
     /// Type of slot claim forbidden by current configuration.
     ForbiddenSlotType,
+    /// Overflow when calculating the starting slot of the next epoch.
+    NextEpochStartSlotNumberOverflow,
+    /// Overflow when calculating the index of the next epoch.
+    EpochIndexOverflow,
+    /// The configuration of the chain is invalid. It can't be determined whether the block is
+    /// valid or not.
+    InvalidChainConfiguration(InvalidChainConfiguration),
+}
+
+/// See [`VerifyError::InvalidChainConfiguration`]
+#[derive(Debug, derive_more::Display)]
+pub enum InvalidChainConfiguration {
+    /// The start slot of the epoch the parent block belongs to is superior to the slot where the
+    /// parent block was authored.
+    ParentEpochStartSlotWithBlockMismatch,
+    /// No current epoch was provided, but the next epoch has an index equal to 0.
+    NoCurrentEpochButNextEpochNonZero,
+    /// The next epoch has a non-zero epoch index, but has a start slot.
+    NonZeroNextEpochYetHasStartSlot,
+    /// Parent block doesn't belong to any epoch but is not the genesis block.
+    NonGenesisBlockNoCurrentEpoch,
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
-///
-/// # Panic
-///
-/// Panics if `config.parent_block_header` is invalid.
-/// Panics if `config.parent_block_epoch` is `None` and `config.parent_header.number` is not 0.
-/// Panics if `config.header.number` is not `config.parent_block_header.number + 1`.
-///
 pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError> {
     // TODO: handle OnDisabled
 
@@ -275,15 +291,29 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // Verify consistency of the configuration.
     if let Some(curr) = &config.parent_block_epoch {
-        assert!(curr.start_slot_number.is_some());
-        assert!(curr.start_slot_number <= parent_slot_number);
-    } else {
-        assert_eq!(config.parent_block_next_epoch.epoch_index, 0);
+        if curr.start_slot_number.map_or(true, |epoch_start| {
+            parent_slot_number.map_or(true, |parent_slot_number| epoch_start > parent_slot_number)
+        }) {
+            return Err(VerifyError::InvalidChainConfiguration(
+                InvalidChainConfiguration::ParentEpochStartSlotWithBlockMismatch,
+            ));
+        }
+    } else if config.parent_block_next_epoch.epoch_index != 0 {
+        return Err(VerifyError::InvalidChainConfiguration(
+            InvalidChainConfiguration::NoCurrentEpochButNextEpochNonZero,
+        ));
+    } else if config.parent_block_header.number != 0 {
+        return Err(VerifyError::InvalidChainConfiguration(
+            InvalidChainConfiguration::NonGenesisBlockNoCurrentEpoch,
+        ));
     }
-    assert_eq!(
-        config.parent_block_next_epoch.epoch_index == 0,
-        config.parent_block_next_epoch.start_slot_number.is_none()
-    );
+    if (config.parent_block_next_epoch.epoch_index == 0)
+        != config.parent_block_next_epoch.start_slot_number.is_none()
+    {
+        return Err(VerifyError::InvalidChainConfiguration(
+            InvalidChainConfiguration::NonZeroNextEpochYetHasStartSlot,
+        ));
+    }
 
     // Verify the epoch transition of the block.
     // `block_epoch_info` contains the epoch the block belongs to.
@@ -293,7 +323,6 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     ) {
         (Some(parent_epoch), false) => parent_epoch,
         (None, false) => {
-            assert_eq!(config.parent_block_header.number, 0);
             return Err(VerifyError::MissingEpochChangeLog);
         }
         (Some(_), true)
@@ -308,23 +337,37 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             return Err(VerifyError::UnexpectedEpochChangeLog);
         }
         (None, true) => {
-            assert_eq!(config.header.number, 1);
+            // Should only happen if the block being verified is block 1. It is, however, not the
+            // responsibility of this module to check whether the block number is equal to the
+            // parent's plus one.
             &config.parent_block_next_epoch
         }
     };
 
     // Check if the current slot number indicates that entire epochs have been skipped.
-    let skipped_epochs = block_epoch_info
-        .start_slot_number
-        .map_or(0, |start_slot_number| {
-            (slot_number - start_slot_number) / config.slots_per_epoch
-        });
+    let skipped_epochs = if let Some(epoch_start_slot) = block_epoch_info.start_slot_number {
+        // We have checked that the slot number of the block is superior to its parent's, and
+        // we have checked that the parent's slot number is superior or equal to the epoch
+        // start slot number, and we have checked that the epoch cannot transition if the
+        // slot number of the block is inferior to the next epoch start. Consequently, the
+        // substraction below cannot underflow.
+        (slot_number - epoch_start_slot) / config.slots_per_epoch // `slots_per_epoch` is a `NonZero` type
+    } else {
+        0
+    };
 
     // Calculate the epoch index of the epoch of the block.
     // This is the vast majority of the time equal to `block_epoch_info.epoch_index`. However,
     // if no block has been produced for an entire epoch, the value needs to be increased by the
     // number of skipped epochs.
-    let block_epoch_index = block_epoch_info.epoch_index + skipped_epochs;
+    // Note that this calculation can only overflow in case where the `epoch_index` is superior
+    // to its starting slot, and that `slots_per_epoch` is 1. In other words, this is expected to
+    // never overflow as something else would overflow beforehand. But we prefer to return an error
+    // rather than unwrap in order to avoid all possible panicking situations.
+    let block_epoch_index = block_epoch_info
+        .epoch_index
+        .checked_add(skipped_epochs)
+        .ok_or(VerifyError::EpochIndexOverflow)?;
 
     // TODO: in case of epoch change, should also check the randomness value; while the runtime
     //       checks that the randomness value is correct, light clients in particular do not
@@ -354,37 +397,38 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     // If the block contains an epoch transition, build the information about the new epoch.
     // This is done now, as the header is consumed below.
     let epoch_transition_target =
-        config
-            .header
-            .digest
-            .babe_epoch_information()
-            .map(|(info, maybe_config)| {
-                let start_slot_number = Some(
-                    block_epoch_info
-                        .start_slot_number
-                        .unwrap_or(slot_number)
-                        .checked_add(config.slots_per_epoch.get())
-                        .unwrap()
-                        // If some epochs have been skipped, we need to adjust the starting slot of
-                        // the next epoch.
-                        .checked_add(
-                            skipped_epochs
-                                .checked_mul(config.slots_per_epoch.get())
-                                .unwrap(),
-                        )
-                        .unwrap(),
-                );
-                chain_information::BabeEpochInformation {
-                    epoch_index: block_epoch_index.checked_add(1).unwrap(),
-                    start_slot_number,
-                    authorities: info.authorities.map(Into::into).collect(),
-                    randomness: *info.randomness,
-                    c: maybe_config.map_or(block_epoch_info.c, |config| config.c),
-                    allowed_slots: maybe_config.map_or(block_epoch_info.allowed_slots, |config| {
-                        config.allowed_slots
-                    }),
-                }
-            });
+        if let Some((info, maybe_config)) = config.header.digest.babe_epoch_information() {
+            let start_slot_number = Some(
+                block_epoch_info
+                    .start_slot_number
+                    .unwrap_or(slot_number)
+                    .checked_add(config.slots_per_epoch.get())
+                    .ok_or(VerifyError::NextEpochStartSlotNumberOverflow)?
+                    // If some epochs have been skipped, we need to adjust the starting slot of
+                    // the next epoch.
+                    .checked_add(
+                        skipped_epochs
+                            .checked_mul(config.slots_per_epoch.get())
+                            .ok_or(VerifyError::NextEpochStartSlotNumberOverflow)?,
+                    )
+                    .ok_or(VerifyError::NextEpochStartSlotNumberOverflow)?,
+            );
+
+            Some(chain_information::BabeEpochInformation {
+                epoch_index: block_epoch_index
+                    .checked_add(1)
+                    .ok_or(VerifyError::EpochIndexOverflow)?,
+                start_slot_number,
+                authorities: info.authorities.map(Into::into).collect(),
+                randomness: *info.randomness,
+                c: maybe_config.map_or(block_epoch_info.c, |config| config.c),
+                allowed_slots: maybe_config.map_or(block_epoch_info.allowed_slots, |config| {
+                    config.allowed_slots
+                }),
+            })
+        } else {
+            None
+        };
 
     // Make sure that the header wouldn't put Babe in a non-sensical state.
     if let Some(epoch_transition_target) = &epoch_transition_target {
@@ -410,12 +454,9 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         .nth(usize::try_from(authority_index).map_err(|_| VerifyError::InvalidAuthorityIndex)?)
         .ok_or(VerifyError::InvalidAuthorityIndex)?;
 
-    // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
-    // happen as it's of type `[u8; 32]`.
-    let signing_public_key =
-        schnorrkel::PublicKey::from_bytes(signing_authority.public_key).unwrap();
-
     // Now verifying the signature in the seal.
+    let signing_public_key = schnorrkel::PublicKey::from_bytes(signing_authority.public_key)
+        .map_err(|_| VerifyError::BadPublicKey)?;
     signing_public_key
         .verify_simple(b"substrate", &pre_seal_hash, &seal_signature)
         .map_err(|_| VerifyError::BadSignature)?;

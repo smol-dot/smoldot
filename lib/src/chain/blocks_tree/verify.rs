@@ -166,7 +166,7 @@ impl<T> NonFinalizedTree<T> {
                 }
             };
 
-            verify::header_only::verify(verify::header_only::Config {
+            match verify::header_only::verify(verify::header_only::Config {
                 consensus: consensus_config,
                 finality: match &parent_finality {
                     BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
@@ -181,9 +181,20 @@ impl<T> NonFinalizedTree<T> {
                     header::decode(parent_block_header, self.block_number_bytes)
                         .unwrap_or_else(|_| unreachable!())
                 },
-            })
-        }
-        .map_err(HeaderVerifyError::VerificationFailed)?;
+            }) {
+                Ok(s) => s,
+                Err(err) => {
+                    // The code in this module is meant to ensure that the chain is in an
+                    // appropriate state, therefore `is_invalid_chain_configuration` being `true`
+                    // would indicate a bug in the code somewhere.
+                    // We use a `debug_assert` rather than `assert` in order to avoid crashing,
+                    // as treating the header as invalid is an appropriate way to handle a bug
+                    // here.
+                    debug_assert!(!err.is_invalid_chain_configuration());
+                    return Err(HeaderVerifyError::VerificationFailed(err));
+                }
+            }
+        };
 
         // Updated consensus information for the block being verified.
         let (best_score_num_primary_slots, best_score_num_secondary_slots, consensus_update) =
@@ -590,6 +601,7 @@ pub enum HeaderVerifySuccess {
 }
 
 /// Error that can happen when verifying a block header.
+// TODO: some of these errors are redundant with verify::header_only::Error
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.

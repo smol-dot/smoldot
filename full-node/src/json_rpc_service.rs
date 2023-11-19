@@ -590,12 +590,12 @@ fn spawn_client_main_task(
                         }
                         methods::MethodCall::chainHead_unstable_unpin {
                             follow_subscription,
-                            hash,
+                            hash_or_hashes,
                         } => {
                             if let Some(follow_subscription) =
                                 chain_head_follow_subscriptions.get_mut(&*follow_subscription)
                             {
-                                let block_hashes = match hash {
+                                let block_hashes = match hash_or_hashes {
                                     methods::HashHexStringSingleOrArray::Array(list) => {
                                         list.into_iter().map(|h| h.0).collect::<Vec<_>>()
                                     }

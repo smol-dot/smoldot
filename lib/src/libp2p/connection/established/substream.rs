@@ -101,8 +101,9 @@ enum SubstreamInner<TNow> {
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
-        /// If true, the local node wants to shut down the substream.
-        close_desired: bool,
+        /// If `Some`, the local node wants to shut down the substream. If the given timeout is
+        /// reached, the closing is forced.
+        close_desired_timeout: Option<TNow>,
         /// Size of the next notification, if known. If `Some`, we have already extracted the
         /// length from the incoming buffer.
         next_notification_size: Option<usize>,
@@ -218,7 +219,7 @@ where
     ///
     /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
     /// [`Substream::notification_substream_queued_bytes`] and
-    /// [`Substream::close_notifications_substream`] can be used, and
+    /// [`Substream::close_out_notifications_substream`] can be used, and
     /// [`Event::NotificationsOutCloseDemanded`] and [`Event::NotificationsOutReset`] can be
     /// generated.
     pub fn notifications_out(
@@ -903,14 +904,27 @@ where
                 )
             }
             SubstreamInner::NotificationsIn {
-                close_desired,
+                close_desired_timeout,
                 mut next_notification_size,
                 mut handshake,
                 max_notification_size,
             } => {
                 read_write.write_from_vec_deque(&mut handshake);
 
-                if close_desired && handshake.is_empty() {
+                if close_desired_timeout
+                    .as_ref()
+                    .map_or(false, |timeout| *timeout >= read_write.now)
+                {
+                    read_write.wake_up_asap();
+                    return (
+                        Some(SubstreamInner::NotificationsInClosed),
+                        Some(Event::NotificationsInClose {
+                            outcome: Err(NotificationsInClosedErr::CloseDesiredTimeout),
+                        }),
+                    );
+                }
+
+                if close_desired_timeout.is_some() && handshake.is_empty() {
                     read_write.close_write();
                 }
 
@@ -952,7 +966,7 @@ where
 
                 (
                     Some(SubstreamInner::NotificationsIn {
-                        close_desired,
+                        close_desired_timeout,
                         next_notification_size,
                         handshake,
                         max_notification_size,
@@ -1144,7 +1158,7 @@ where
     ) {
         if let SubstreamInner::NotificationsInWait = &mut self.inner {
             self.inner = SubstreamInner::NotificationsIn {
-                close_desired: false,
+                close_desired_timeout: None,
                 next_notification_size: None,
                 handshake: {
                     let handshake_len = handshake.len();
@@ -1209,30 +1223,46 @@ where
         }
     }
 
-    /// Closes a notifications substream opened after a successful
-    /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`Substream::accept_in_notifications_substream`].
+    /// Closes a outgoing notifications substream opened after a successful
+    /// [`Event::NotificationsOutResult`].
     ///
-    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
-    /// in other words before the remote has accepted/refused the substream.
-    ///
-    /// In the case of an inbound substream, notifications can continue to be received. Calling
-    /// this function only asynchronously signals to the remote that the substream should be
-    /// closed. It does not enforce the closing.
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the substream isn't a notifications substream, or if the notifications substream
     /// isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self) {
+    pub fn close_out_notifications_substream(&mut self) {
         match &mut self.inner {
             SubstreamInner::NotificationsOutHandshakeRecv { .. }
             | SubstreamInner::NotificationsOut { .. } => {
                 self.inner = SubstreamInner::NotificationsOutClosed;
             }
-            SubstreamInner::NotificationsIn { close_desired, .. } if !*close_desired => {
-                *close_desired = true
+            _ => panic!(),
+        };
+    }
+
+    /// Closes an ingoing notifications substream that was accepted using
+    /// [`Substream::accept_in_notifications_substream`].
+    ///
+    /// Notifications can continue to be received. Calling this function only asynchronously
+    /// signals to the remote that the substream should be closed. The closing is enforced only
+    /// after the given timeout elapses.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn close_in_notifications_substream(&mut self, timeout: TNow) {
+        match &mut self.inner {
+            SubstreamInner::NotificationsIn {
+                close_desired_timeout,
+                ..
+            } if close_desired_timeout.is_none() => {
+                *close_desired_timeout = Some(timeout);
             }
             _ => panic!(),
         };
@@ -1578,4 +1608,6 @@ pub enum NotificationsInClosedErr {
     SubstreamClosed,
     /// Substream has been reset.
     SubstreamReset,
+    /// Substream has been force-closed because the graceful timeout has been reached.
+    CloseDesiredTimeout,
 }

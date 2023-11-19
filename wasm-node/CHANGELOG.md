@@ -2,10 +2,41 @@
 
 ## Unreleased
 
+### Changed
+
+- Addresses that are not supported by the host platform are now ignored during the discovery process. For example, TCP/IP connections are ignored while in a browser. This avoids populating the address book with peers that we know we can't connect to anyway. ([#1359](https://github.com/smol-dot/smoldot/pull/1359), [#1360](https://github.com/smol-dot/smoldot/pull/1360))
+- Smoldot will no longer try to connect to the same address over and over again. ([#1358](https://github.com/smol-dot/smoldot/pull/1358))
+
+### Fixed
+
+- Fix panic when the runtime of a chain provides consensus information that is inconsistent with the information found in the finalized block. ([#1317](https://github.com/smol-dot/smoldot/pull/1317))
+
+## 2.0.10 - 2023-11-17
+
+### Fixed
+
+- Fix several WebRTC-related panics and bugs. ([#1348](https://github.com/smol-dot/smoldot/pull/1348), [#1350](https://github.com/smol-dot/smoldot/pull/1350), [#1354](https://github.com/smol-dot/smoldot/pull/1354))
+
+## 2.0.9 - 2023-11-16
+
+### Changed
+
+- Smoldot will now only try opening a maximum of five connections simultaneously, then one per second. This avoids possible situations where a server is being accidentally hammered by smoldot, and avoids potentially making traffic suspicious to some ISPs. ([#1340](https://github.com/smol-dot/smoldot/pull/1340))
+
+### Fixed
+
+- Fix panic when verifying Babe signatures when the invalid SR25519 public key is invalid. ([#1344](https://github.com/smol-dot/smoldot/pull/1344))
+
+## 2.0.8 - 2023-11-15
+
+### Changed
+
+- The `hash` parameter of `chainHead_unstable_unpin` has been renamed to `hashOrHashes`, in accordance with the latest changes in the JSON-RPC API specification. ([#1329](https://github.com/smol-dot/smoldot/pull/1329))
+
 ### Fixed
 
 - Fix panic when requesting a block with a specific hash from the peer-to-peer network and none of the peers has the block. ([#1303](https://github.com/smol-dot/smoldot/pull/1303))
-- Fix panic when the runtime of a chain provides consensus information that is inconsistent with the information found in the finalized block. ([#1317](https://github.com/smol-dot/smoldot/pull/1317))
+- Fix panic when discovery has been running for some time and decides to purge from the address book a peer we are still connected to. ([#1332](https://github.com/smol-dot/smoldot/pull/1332))
 
 ## 2.0.7 - 2023-11-02
 
