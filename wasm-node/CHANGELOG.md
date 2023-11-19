@@ -7,6 +7,10 @@
 - Addresses that are not supported by the host platform are now ignored during the discovery process. For example, TCP/IP connections are ignored while in a browser. This avoids populating the address book with peers that we know we can't connect to anyway. ([#1359](https://github.com/smol-dot/smoldot/pull/1359), [#1360](https://github.com/smol-dot/smoldot/pull/1360))
 - Smoldot will no longer try to connect to the same address over and over again. ([#1358](https://github.com/smol-dot/smoldot/pull/1358))
 
+### Fixed
+
+- Fix panic when the runtime of a chain provides consensus information that is inconsistent with the information found in the finalized block. ([#1317](https://github.com/smol-dot/smoldot/pull/1317))
+
 ## 2.0.10 - 2023-11-17
 
 ### Fixed

@@ -369,16 +369,42 @@ impl<'a> ChainInformationRef<'a> {
                 if let Err(err) = finalized_block_epoch_information.validate() {
                     return Err(ValidityError::InvalidBabe(err));
                 }
-            }
 
-            if let Some(finalized_block_epoch_information) = &finalized_block_epoch_information {
                 if self.finalized_block_header.number == 0 {
                     return Err(ValidityError::UnexpectedBabeFinalizedEpoch);
                 }
-                if finalized_block_epoch_information
-                    .start_slot_number
-                    .is_none()
+
+                if let Some(epoch_start_slot_number) =
+                    finalized_block_epoch_information.start_slot_number
                 {
+                    if let Some(babe_preruntime) =
+                        self.finalized_block_header.digest.babe_pre_runtime()
+                    {
+                        if self.finalized_block_header.number == 0 {
+                            return Err(ValidityError::ConsensusAlgorithmMismatch);
+                        }
+                        if babe_preruntime.slot_number() < epoch_start_slot_number {
+                            return Err(ValidityError::HeaderBabeSlotInferiorToEpochStartSlot);
+                        }
+                    } else if self.finalized_block_header.number != 0 {
+                        return Err(ValidityError::ConsensusAlgorithmMismatch);
+                    }
+                    if (self.finalized_block_header.digest.babe_seal().is_some()
+                        != (self.finalized_block_header.number != 0))
+                        || self.finalized_block_header.digest.has_any_aura()
+                    {
+                        return Err(ValidityError::ConsensusAlgorithmMismatch);
+                    }
+                    if let Some((epoch_change, _new_config)) =
+                        self.finalized_block_header.digest.babe_epoch_information()
+                    {
+                        if epoch_change.authorities != finalized_next_epoch_transition.authorities
+                            || epoch_change.randomness != finalized_next_epoch_transition.randomness
+                        {
+                            return Err(ValidityError::BabeEpochInfoMismatch);
+                        }
+                    }
+                } else {
                     return Err(ValidityError::MissingBabeSlotStartNumber);
                 }
                 if finalized_block_epoch_information.epoch_index + 1
@@ -395,12 +421,28 @@ impl<'a> ChainInformationRef<'a> {
             }
         }
 
+        if let ChainInformationConsensusRef::Aura { .. } = &self.consensus {
+            if (self
+                .finalized_block_header
+                .digest
+                .aura_pre_runtime()
+                .is_some()
+                != (self.finalized_block_header.number != 0))
+                || (self.finalized_block_header.digest.aura_seal().is_some()
+                    != (self.finalized_block_header.number != 0))
+                || self.finalized_block_header.digest.has_any_babe()
+            {
+                return Err(ValidityError::ConsensusAlgorithmMismatch);
+            }
+        }
+
         if let ChainInformationFinalityRef::Grandpa {
             after_finalized_block_authorities_set_id,
             finalized_scheduled_change,
             ..
         } = &self.finality
         {
+            // TODO: check consistency with the finalized block header
             if let Some(change) = finalized_scheduled_change.as_ref() {
                 if change.0 <= self.finalized_block_header.number {
                     return Err(ValidityError::ScheduledGrandPaChangeBeforeFinalized);
@@ -564,6 +606,9 @@ impl<'a> From<&'a ChainInformationFinality> for ChainInformationFinalityRef<'a> 
 /// Error when turning a [`ChainInformation`] into a [`ValidChainInformation`].
 #[derive(Debug, derive_more::Display)]
 pub enum ValidityError {
+    /// The finalized block doesn't use the same consensus algorithm as the one in the chain
+    /// information.
+    ConsensusAlgorithmMismatch,
     /// Found a Babe slot start number for future Babe epoch number 0. A future Babe epoch 0 has
     /// no known starting slot.
     UnexpectedBabeSlotStartNumber,
@@ -576,6 +621,10 @@ pub enum ValidityError {
     NonLinearBabeEpochs,
     /// Finalized block is not number 0, but no Babe epoch information has been provided.
     NoBabeFinalizedEpoch,
+    /// The slot of the finalized block is inferior to the start slot of the epoch it belongs to.
+    HeaderBabeSlotInferiorToEpochStartSlot,
+    /// Mismatch between the finalized block header digest and the Babe next epoch information.
+    BabeEpochInfoMismatch,
     /// Scheduled GrandPa authorities change is before finalized block.
     ScheduledGrandPaChangeBeforeFinalized,
     /// The finalized block is block number 0, but the GrandPa authorities set id is not 0.
