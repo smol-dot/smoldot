@@ -176,13 +176,15 @@ function connect(config: ConnectionConfig): Connection {
                 connection = null;
             },
 
-            send: (data: Uint8Array): void => {
-                (connection as WebSocket).send(data);
+            send: (data: Array<Uint8Array>): void => {
                 if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
                     bufferedAmountCheck.nextTimeout = 10;
                     setTimeout(checkBufferedAmount, 10);
                 }
-                bufferedAmountCheck.quenedUnreportedBytes += data.length;
+                for (const buffer of data) {
+                    bufferedAmountCheck.quenedUnreportedBytes += buffer.length;
+                }
+                (connection as WebSocket).send(new Blob(data));
             },
 
             closeSend: (): void => { throw new Error('Wrong connection type') },
@@ -490,10 +492,12 @@ function connect(config: ConnectionConfig): Connection {
                 }
             },
 
-            send: (data: Uint8Array, streamId: number): void => {
+            send: (data: Array<Uint8Array>, streamId: number): void => {
                 const channel = state.dataChannels.get(streamId)!;
-                channel.channel.send(data);
-                channel.bufferedBytes += data.length;
+                for (const buffer of data) {
+                    channel.bufferedBytes += buffer.length;
+                }
+                channel.channel.send(new Blob(data));
             },
 
             closeSend: (): void => { throw new Error('Wrong connection type') },

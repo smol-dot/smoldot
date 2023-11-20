@@ -627,23 +627,34 @@ impl<'a> Drop for ReadWriteAccess<'a> {
 
         self.stream.inner_expected_incoming_bytes = self.read_write.expected_incoming_bytes;
 
-        for buffer in self.read_write.write_buffers.drain(..) {
-            assert!(buffer.len() <= self.stream.writable_bytes);
-            self.stream.writable_bytes -= buffer.len();
+        if !self.read_write.write_buffers.is_empty() && stream_inner.reset.is_none() {
+            let mut io_vectors = Vec::with_capacity(self.read_write.write_buffers.len());
+            let mut total_length = 0;
+
+            for buffer in &self.read_write.write_buffers {
+                io_vectors.push(bindings::StreamSendIoVector {
+                    ptr: u32::try_from(buffer.as_ptr() as usize).unwrap(),
+                    len: u32::try_from(buffer.len()).unwrap(),
+                });
+                total_length += buffer.len();
+            }
+
+            assert!(total_length <= self.stream.writable_bytes);
+            self.stream.writable_bytes -= total_length;
 
             // `unwrap()` is ok as there's no way that `buffer.len()` doesn't fit in a `u64`.
-            TOTAL_BYTES_SENT.fetch_add(u64::try_from(buffer.len()).unwrap(), Ordering::Relaxed);
+            TOTAL_BYTES_SENT.fetch_add(u64::try_from(total_length).unwrap(), Ordering::Relaxed);
 
-            if stream_inner.reset.is_none() {
-                unsafe {
-                    bindings::stream_send(
-                        self.stream.connection_id,
-                        self.stream.stream_id.unwrap_or(0),
-                        u32::try_from(buffer.as_ptr() as usize).unwrap(),
-                        u32::try_from(buffer.len()).unwrap(),
-                    );
-                }
+            unsafe {
+                bindings::stream_send(
+                    self.stream.connection_id,
+                    self.stream.stream_id.unwrap_or(0),
+                    u32::try_from(io_vectors.as_ptr() as usize).unwrap(),
+                    u32::try_from(io_vectors.len()).unwrap(),
+                );
             }
+
+            self.read_write.write_buffers.clear();
         }
 
         if self.read_write.write_bytes_queueable.is_none() && !self.stream.write_closed {

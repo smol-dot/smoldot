@@ -91,7 +91,7 @@ export interface Connection {
      *
      * Must not be called after `closeSend` has been called.
      */
-    send(data: Uint8Array, streamId?: number): void;
+    send(data: Array<Uint8Array>, streamId?: number): void;
 
     /**
      * Closes the writing side of the given stream of the given connection.

@@ -114,19 +114,21 @@ function connect(config: ConnectionConfig): Connection {
                 socket.onerror = () => { };
                 socket.close();
             },
-            send: (data: Uint8Array): void => {
+            send: (data: Array<Uint8Array>): void => {
                 // The WebSocket library that we use seems to spontaneously transition connections
                 // to the "closed" state but not call the `onclosed` callback immediately. Calling
                 // `send` on that object throws an exception. In order to avoid panicking smoldot,
                 // we thus absorb any exception thrown here.
                 // See also <https://github.com/paritytech/smoldot/issues/2937>.
                 try {
-                    socket.send(data);
                     if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
                         bufferedAmountCheck.nextTimeout = 10;
                         setTimeout(checkBufferedAmount, 10);
                     }
-                    bufferedAmountCheck.quenedUnreportedBytes += data.length;
+                    for (const buffer of data) {
+                        bufferedAmountCheck.quenedUnreportedBytes += buffer.length;
+                    }
+                    socket.send(new Blob(data));
                 } catch (_error) { }
             },
             closeSend: (): void => { throw new Error('Wrong connection type') },
@@ -191,31 +193,35 @@ function connect(config: ConnectionConfig): Connection {
                 socket.inner.then((connec) => connec!.close());
             },
 
-            send: (data: Uint8Array): void => {
-                let dataCopy = Uint8Array.from(data)  // Deep copy of the data
+            send: (data: Array<Uint8Array>): void => {
+                let dataCopy = data.map((buf) => Uint8Array.from(buf));  // Deep copy of the data
                 socket.inner = socket.inner.then(async (c) => {
-                    while (dataCopy.length > 0) {
-                        if (socket.destroyed || c === null)
-                            return c;
-                        let outcome: number | string;
-                        try {
-                            outcome = await c.write(dataCopy);
-                            config.onWritableBytes(dataCopy.length);
-                        } catch (error) {
-                            // The type of `error` is unclear, but we assume that it implements `Error`
-                            outcome = (error as Error).toString()
+                    for (let buffer of dataCopy) {
+                        while (buffer.length > 0) {
+                            if (socket.destroyed || c === null)
+                                return c;
+                            let outcome: number | string;
+                            try {
+                                outcome = await c.write(buffer);
+                                config.onWritableBytes(buffer.length);
+                            } catch (error) {
+                                // The type of `error` is unclear, but we assume that it
+                                // implements `Error`
+                                outcome = (error as Error).toString()
+                            }
+                            if (typeof outcome !== 'number') {
+                                // The socket is reported closed, but `socket.destroyed` is still
+                                // `false` (see check above). As such, we must inform the
+                                // inner layers.
+                                socket.destroyed = true;
+                                config.onConnectionReset(outcome);
+                                return c;
+                            }
+                            // Note that, contrary to `read`, it is possible for `outcome` to be 0.
+                            // This happen if the write had to be interrupted, and the only thing
+                            // we have to do is try writing again.
+                            buffer = buffer.slice(outcome);
                         }
-                        if (typeof outcome !== 'number') {
-                            // The socket is reported closed, but `socket.destroyed` is still
-                            // `false` (see check above). As such, we must inform the inner layers.
-                            socket.destroyed = true;
-                            config.onConnectionReset(outcome);
-                            return c;
-                        }
-                        // Note that, contrary to `read`, it is possible for `outcome` to be 0.
-                        // This happen if the write had to be interrupted, and the only thing
-                        // we have to do is try writing again.
-                        dataCopy = dataCopy.slice(outcome);
                     }
                     return c;
                 });
