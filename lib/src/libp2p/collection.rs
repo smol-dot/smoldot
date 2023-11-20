@@ -126,6 +126,11 @@ pub struct Config {
     /// >           many substreams.
     pub max_inbound_substreams: usize,
 
+    /// Maximum size in bytes of the protocols supported by the local node. Any protocol larger
+    /// than that requested by the remote is automatically refused. Necessary in order to avoid
+    /// situations where the remote sends an infinitely-sized protocol name.
+    pub max_protocol_name_len: usize,
+
     /// Amount of time after which a connection handshake is considered to have taken too long
     /// and must be aborted.
     pub handshake_timeout: Duration,
@@ -264,6 +269,9 @@ pub struct Network<TConn, TNow> {
     /// See [`Config::max_inbound_substreams`].
     max_inbound_substreams: usize,
 
+    /// See [`Config::max_protocol_name_len`].
+    max_protocol_name_len: usize,
+
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
@@ -356,6 +364,7 @@ where
             ingoing_negotiated_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
+            max_protocol_name_len: config.max_protocol_name_len,
             ping_protocol: config.ping_protocol.into(),
             now_pin: PhantomData,
         }
@@ -370,7 +379,6 @@ where
         when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
         substreams_capacity: usize,
-        max_protocol_name_len: usize,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         let connection_id = self.next_connection_id;
@@ -401,7 +409,7 @@ where
             handshake_timeout: when_connection_start + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
             substreams_capacity,
-            max_protocol_name_len,
+            max_protocol_name_len: self.max_protocol_name_len,
             ping_protocol: self.ping_protocol.clone(),
         });
 
@@ -426,7 +434,6 @@ where
         when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
         substreams_capacity: usize,
-        max_protocol_name_len: usize,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -488,7 +495,7 @@ where
             handshake,
             self.max_inbound_substreams,
             substreams_capacity,
-            max_protocol_name_len,
+            self.max_protocol_name_len,
             self.ping_protocol.clone(),
         );
 
@@ -588,6 +595,26 @@ where
                 established: was_established,
                 shutting_down: true,
             },
+        }
+    }
+
+    /// Modifies the value that was initially passed through [`Config::max_protocol_name_len`].
+    ///
+    /// The new value only applies to substreams opened after this function has been called.
+    pub fn set_max_protocol_name_len(&mut self, new_max_length: usize) {
+        if self.max_protocol_name_len == new_max_length {
+            return;
+        }
+
+        self.max_protocol_name_len = new_max_length;
+
+        // Send a message to all connections to update this value.
+        self.messages_to_connections.reserve(self.connections.len());
+        for connection_id in self.connections.keys() {
+            self.messages_to_connections.push_back((
+                *connection_id,
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+            ));
         }
     }
 
@@ -1889,6 +1916,9 @@ enum CoordinatorToConnectionInner {
     },
     RejectInbound {
         substream_id: established::SubstreamId,
+    },
+    SetMaxProtocolNameLen {
+        new_max_length: usize,
     },
 
     StartRequest {

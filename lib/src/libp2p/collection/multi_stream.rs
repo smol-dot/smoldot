@@ -400,6 +400,24 @@ where
                 }
             }
             (
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+                MultiStreamConnectionTaskInner::Handshake {
+                    established: Some(established),
+                    ..
+                }
+                | MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                established.set_max_protocol_name_len(new_max_length);
+            }
+            (
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. },
+                MultiStreamConnectionTaskInner::Handshake {
+                    established: None, ..
+                },
+            ) => {
+                unreachable!()
+            }
+            (
                 CoordinatorToConnectionInner::StartRequest {
                     protocol_name,
                     request_data,
@@ -562,6 +580,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInbound { .. }
                 | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
                 | CoordinatorToConnectionInner::CloseInNotifications { .. }
@@ -576,6 +595,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInbound { .. }
                 | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
                 | CoordinatorToConnectionInner::CloseInNotifications { .. }
