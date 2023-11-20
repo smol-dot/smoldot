@@ -115,7 +115,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             Some(ProtocolRef::Certhash(hash)),
         ) => {
             // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
-            let multihash = multihash::MultihashRef::from_bytes(&hash).unwrap();
+            let multihash = multihash::Multihash::from_bytes(&hash).unwrap();
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
@@ -136,7 +136,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             Some(ProtocolRef::Certhash(hash)),
         ) => {
             // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
-            let multihash = multihash::MultihashRef::from_bytes(&hash).unwrap();
+            let multihash = multihash::Multihash::from_bytes(&hash).unwrap();
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }

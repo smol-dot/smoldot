@@ -208,7 +208,7 @@ pub enum ProtocolRef<'a> {
     DnsAddr(DomainNameRef<'a>),
     Ip4([u8; 4]),
     Ip6([u8; 16]),
-    P2p(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
+    P2p(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to Multihash
     Quic,
     Tcp(u16),
     Tls,
@@ -220,7 +220,7 @@ pub enum ProtocolRef<'a> {
     Memory(u64),
     WebRtcDirect,
     /// Contains the multihash of the TLS certificate.
-    Certhash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
+    Certhash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to Multihash
 }
 
 impl<'a> ProtocolRef<'a> {
@@ -260,7 +260,7 @@ impl<'a> ProtocolRef<'a> {
                 let decoded = bs58::decode(s)
                     .into_vec()
                     .map_err(|_| ParseError::NotBase58)?;
-                if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
+                if let Err((err, _)) = multihash::Multihash::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
                 }
                 Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
@@ -302,7 +302,7 @@ impl<'a> ProtocolRef<'a> {
                 let decoded = base64_flavor
                     .decode(&s[1..])
                     .map_err(|_| ParseError::InvalidBase64)?;
-                if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
+                if let Err((err, _)) = multihash::Multihash::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
                 }
                 Ok(ProtocolRef::Certhash(Cow::Owned(decoded)))
@@ -534,7 +534,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             421 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                    |s| multihash::Multihash::<&[u8]>::from_bytes(s).is_ok(),
                 ),
                 |b| ProtocolRef::P2p(Cow::Borrowed(b)),
             )(bytes),
@@ -548,7 +548,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             466 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                    |s| multihash::Multihash::<&[u8]>::from_bytes(s).is_ok(),
                 ),
                 |b| ProtocolRef::Certhash(Cow::Borrowed(b)),
             )(bytes),

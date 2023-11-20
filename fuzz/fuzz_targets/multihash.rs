@@ -18,5 +18,5 @@
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    let _ = smoldot::libp2p::multihash::MultihashRef::from_bytes(data);
+    let _ = smoldot::libp2p::multihash::Multihash::from_bytes(data);
 });
