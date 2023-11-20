@@ -249,8 +249,16 @@ extern "C" {
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
     pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
-    /// Queues data on the given stream. The data is found in the memory of the WebAssembly
-    /// virtual machine, at the given pointer.
+    /// Queues data on the given stream.
+    ///
+    /// `ptr` is a memory address where `len` consecutive elements of type [`StreamSendIoVector`]
+    /// are found. Each element consists in two little-endian 32 bits unsigned integers: the first
+    /// one is a pointer, and the second one is a length in bytes. The data to write on the stream
+    /// consists in the concatenation of all these buffers.
+    ///
+    /// > **Note**: This interface is similar the famous UNIX function `writev`. `ptr` is the same
+    /// >           as `iov`, and `len` the same as `iovcnt`.
+    /// >           See <https://linux.die.net/man/2/writev>.
     ///
     /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
     /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
@@ -294,6 +302,16 @@ extern "C" {
     ///
     /// Only one task can be currently executing at any time.
     pub fn current_task_exit();
+}
+
+/// See [`stream_send`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(C)]
+pub struct StreamSendIoVector {
+    /// Pointer to a buffer of data to write.
+    pub ptr: u32,
+    /// Length of the buffer of data.
+    pub len: u32,
 }
 
 /// Initializes the client.
