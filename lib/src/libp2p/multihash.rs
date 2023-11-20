@@ -28,7 +28,8 @@ use crate::util;
 /// A multihash made of a code and a slice of data.
 ///
 /// This type contains a generic parameter `T` that stores the multihash itself, for example
-/// `Vec<u8>` or `&[u8`.
+/// `Vec<u8>` or `&[u8]`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Multihash<T>(T);
 
 impl<T: AsRef<[u8]>> Multihash<T> {
