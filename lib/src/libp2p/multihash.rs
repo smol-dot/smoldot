@@ -63,7 +63,7 @@ impl<'a> Multihash<&'a [u8]> {
         input: &'a [u8],
     ) -> Result<(Multihash<&'a [u8]>, &'a [u8]), FromBytesError> {
         match multihash::<nom::error::Error<&[u8]>>(input) {
-            Ok((rest, multihash)) => Ok((Multihash(&input.as_ref()[..rest.len()]), rest)),
+            Ok((rest, _)) => Ok((Multihash(&input.as_ref()[..rest.len()]), rest)),
             Err(_) => Err(FromBytesError::DecodeError),
         }
     }
