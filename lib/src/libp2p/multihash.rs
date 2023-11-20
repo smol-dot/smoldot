@@ -29,9 +29,9 @@ use crate::util;
 ///
 /// This type contains a generic parameter `T` that stores the multihash itself, for example
 /// `Vec<u8>` or `&[u8`.
-pub struct MultihashRef<T>(T);
+pub struct Multihash<T>(T);
 
-impl<T: AsRef<[u8]>> MultihashRef<T> {
+impl<T: AsRef<[u8]>> Multihash<T> {
     /// Returns the code stored in this multihash.
     pub fn hash_algorithm_code(&self) -> u32 {
         decode(&self.0.as_ref()).unwrap().0
@@ -45,64 +45,64 @@ impl<T: AsRef<[u8]>> MultihashRef<T> {
     /// Checks whether `input` is a valid multihash.
     pub fn from_bytes(input: T) -> Result<Self, FromBytesError> {
         let _ = decode(input.as_ref())?;
-        Ok(MultihashRef(input))
+        Ok(Multihash(input))
     }
 
-    /// Destroys the [`MultihashRef`] and returns the underlying buffer.
+    /// Destroys the [`Multihash`] and returns the underlying buffer.
     pub fn into_bytes(self) -> T {
         self.0
     }
 }
 
-impl<'a> MultihashRef<&'a [u8]> {
+impl<'a> Multihash<&'a [u8]> {
     /// Checks whether `input` is a valid multihash.
     ///
-    /// Contrary to [`MultihashRef::from_bytes`], doesn't return an error if the slice is too long
+    /// Contrary to [`Multihash::from_bytes`], doesn't return an error if the slice is too long
     /// but returns the remainder.
     pub fn from_bytes_partial(
         input: &'a [u8],
-    ) -> Result<(MultihashRef<&'a [u8]>, &'a [u8]), FromBytesError> {
+    ) -> Result<(Multihash<&'a [u8]>, &'a [u8]), FromBytesError> {
         match multihash::<nom::error::Error<&[u8]>>(input) {
-            Ok((rest, multihash)) => Ok((MultihashRef(&input.as_ref()[..rest.len()]), rest)),
+            Ok((rest, multihash)) => Ok((Multihash(&input.as_ref()[..rest.len()]), rest)),
             Err(_) => Err(FromBytesError::DecodeError),
         }
     }
 }
 
-impl MultihashRef<Vec<u8>> {
+impl Multihash<Vec<u8>> {
     /// Builds a multihash from the "identity" hash algorithm code and the provided data.
     ///
-    /// Calling [`MultihashRef::data`] on the returned value will always yield back the same data
+    /// Calling [`Multihash::data`] on the returned value will always yield back the same data
     /// as was passed as parameter.
     pub fn identity<'a>(data: &'a [u8]) -> Self {
         let mut out = Vec::with_capacity(data.len() + 8);
         out.extend(util::leb128::encode(0u32));
         out.extend(util::leb128::encode_usize(data.len()));
         out.extend_from_slice(data);
-        MultihashRef(out)
+        Multihash(out)
     }
 }
 
-impl<T> AsRef<T> for MultihashRef<T> {
+impl<T> AsRef<T> for Multihash<T> {
     fn as_ref(&self) -> &T {
         &self.0
     }
 }
 
-/// Error when turning bytes into a [`MultihashRef`].
+/// Error when turning bytes into a [`Multihash`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum FromBytesError {
     /// The multihash is invalid.
     DecodeError,
 }
 
-impl<T: AsRef<[u8]>> fmt::Debug for MultihashRef<T> {
+impl<T: AsRef<[u8]>> fmt::Debug for Multihash<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl<T: AsRef<[u8]>> fmt::Display for MultihashRef<T> {
+impl<T: AsRef<[u8]>> fmt::Display for Multihash<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let base58 = bs58::encode(self.0.as_ref()).into_string();
         write!(f, "{base58}")

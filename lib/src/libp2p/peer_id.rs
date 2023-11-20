@@ -167,7 +167,7 @@ impl PeerId {
         let key_enc = key.to_protobuf_encoding();
 
         let out = if key_enc.len() <= MAX_INLINE_KEY_LENGTH {
-            multihash::MultihashRef::identity(&key_enc).into_bytes()
+            multihash::Multihash::identity(&key_enc).into_bytes()
         } else {
             let mut out = vec![0; 34];
             out[0] = 0x12;
@@ -190,7 +190,7 @@ impl PeerId {
     ///
     /// In case of error, returns the bytes passed as parameter in addition to the error.
     pub fn from_bytes(data: Vec<u8>) -> Result<PeerId, (FromBytesError, Vec<u8>)> {
-        let result = match multihash::MultihashRef::from_bytes(&data) {
+        let result = match multihash::Multihash::from_bytes(&data) {
             Ok(hash) => {
                 // For a PeerId to be valid, it must use either the "identity" multihash code (0x0)
                 // or the "sha256" multihash code (0x12).
