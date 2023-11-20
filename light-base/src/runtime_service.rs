@@ -129,14 +129,18 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             let (tx, rx) = async_channel::bounded(16);
             let tx_weak = tx.downgrade();
             to_background = tx;
-            run_background(
-                log_target.clone(),
-                platform,
-                sync_service,
-                config.genesis_block_scale_encoded_header,
-                rx,
-                tx_weak,
-            )
+            async move {
+                run_background(
+                    log_target.clone(),
+                    platform,
+                    sync_service,
+                    config.genesis_block_scale_encoded_header,
+                    rx,
+                    tx_weak,
+                )
+                .await;
+                log::debug!(target: &log_target, "Shutdown");
+            }
         });
 
         RuntimeService {
