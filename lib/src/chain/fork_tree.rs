@@ -407,7 +407,7 @@ impl<T> ForkTree<T> {
         (iter1, iter2)
     }
 
-    /// Enumerates all the nodes, starting from the the given node, to the root. Each element
+    /// Enumerates all the nodes, starting from the given node, to the root. Each element
     /// returned by the iterator is a parent of the previous one. The iterator does include the
     /// node itself.
     ///
