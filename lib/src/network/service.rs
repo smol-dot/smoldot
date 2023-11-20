@@ -3062,6 +3062,63 @@ where
             a
         });
 
+        for (protocol, in_substream_id) in [
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Transactions {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Grandpa {
+                chain_index: chain_id.0,
+            },
+        ]
+        .into_iter()
+        .flat_map(|protocol| {
+            self.notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Pending,
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Pending,
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .map(move |&(_, _, _, _, substream_id)| (protocol, substream_id))
+        })
+        .collect::<Vec<_>>()
+        {
+            let _was_removed = self.notification_substreams_by_peer_id.remove(&(
+                protocol,
+                peer_index,
+                SubstreamDirection::In,
+                NotificationsSubstreamState::Pending,
+                in_substream_id,
+            ));
+            debug_assert!(_was_removed);
+
+            let _was_inserted = self.notification_substreams_by_peer_id.insert((
+                protocol,
+                peer_index,
+                SubstreamDirection::In,
+                NotificationsSubstreamState::Open,
+                in_substream_id,
+            ));
+            debug_assert!(_was_inserted);
+
+            self.inner
+                .accept_in_notifications(in_substream_id, handshake.clone(), 1024 * 1024)
+            // TODO: constant
+        }
+
         let substream_id = self.inner.open_out_notifications(
             connection_id,
             protocol_name,
