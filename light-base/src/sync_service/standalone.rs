@@ -108,7 +108,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         .fuse(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
-        from_network_service: Box::pin(network_service.subscribe(network_chain_id).await),
+        from_network_service: None,
         network_service,
         network_chain_id,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
@@ -216,6 +216,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
         enum WakeUpReason {
+            MustSubscribeNetworkEvents,
             NetworkEvent(network_service::Event),
             ForegroundMessage(ToBackground),
             ForegroundClosed,
@@ -226,8 +227,17 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
         let wake_up_reason = {
             async {
-                // We expect the networking channel to never close, so the event is unwrapped.
-                WakeUpReason::NetworkEvent(task.from_network_service.next().await.unwrap())
+                if let Some(from_network_service) = task.from_network_service.as_mut() {
+                    match from_network_service.next().await {
+                        Some(ev) => WakeUpReason::NetworkEvent(ev),
+                        None => {
+                            task.from_network_service = None;
+                            WakeUpReason::MustSubscribeNetworkEvents
+                        }
+                    }
+                } else {
+                    WakeUpReason::MustSubscribeNetworkEvents
+                }
             }
             .or(async {
                 from_foreground.next().await.map_or(
@@ -267,6 +277,21 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             WakeUpReason::NetworkEvent(network_event) => {
                 // Something happened on the networking.
                 task.inject_network_event(network_event);
+                continue;
+            }
+
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(task.from_network_service.is_none());
+                for (_, sync_source_id) in task.peers_source_id_map.drain() {
+                    let (_, requests) = task.sync.remove_source(sync_source_id);
+                    for (_, abort) in requests {
+                        abort.abort();
+                    }
+                }
+                task.from_network_service = Some(Box::pin(
+                    // As documented, `subscribe().await` is expected to return quickly.
+                    task.network_service.subscribe(task.network_chain_id).await,
+                ));
                 continue;
             }
 
@@ -448,8 +473,8 @@ struct Task<TPlat: PlatformRef> {
     /// Index within the network service of the chain we are interested in. Must be indicated to
     /// the network service whenever a request is started.
     network_chain_id: network_service::ChainId,
-    /// Events coming from the networking service.
-    from_network_service: Pin<Box<async_channel::Receiver<network_service::Event>>>,
+    /// Events coming from the networking service. `None` if not subscribed yet.
+    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
 
     /// List of requests currently in progress.
     pending_requests: stream::FuturesUnordered<

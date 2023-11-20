@@ -97,6 +97,13 @@ impl<TSrc> AllForksSources<TSrc> {
         self.sources.len()
     }
 
+    /// Remove all the sources.
+    pub fn clear(&mut self) {
+        self.sources.clear();
+        self.known_blocks1.clear();
+        self.known_blocks2.clear();
+    }
+
     /// Returns the list of all user datas of all sources.
     pub fn user_data_iter_mut(&'_ mut self) -> impl ExactSizeIterator<Item = &'_ mut TSrc> + '_ {
         self.sources.values_mut().map(|s| &mut s.user_data)

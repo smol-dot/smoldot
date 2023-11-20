@@ -301,15 +301,20 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// The new channel will immediately receive events about all the existing connections, so
     /// that it is able to maintain a coherent view of the network.
     ///
+    /// Note that this function is `async`, but it should return very quickly.
+    ///
     /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
     /// connections will be back-pressured until the channel isn't full anymore.
     ///
-    /// The `Receiver` never returns `None` unless the [`NetworkService`] is destroyed.
+    /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
+    /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
+    /// [`NetworkService::subscribe`] again to obtain a new `Receiver`.
     ///
     /// # Panic
     ///
     /// Panics if the given [`ChainId`] is invalid.
     ///
+    // TODO: consider not killing the background until the channel is destroyed, as that would be a more sensical behaviour
     pub async fn subscribe(&self, chain_id: ChainId) -> async_channel::Receiver<Event> {
         assert!(self.log_chain_names.contains_key(&chain_id));
 
