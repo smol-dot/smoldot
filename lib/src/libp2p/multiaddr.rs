@@ -534,7 +534,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             421 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                    |s| multihash::MultihashRef::<&[u8]>::from_bytes(s).is_ok(),
                 ),
                 |b| ProtocolRef::P2p(Cow::Borrowed(b)),
             )(bytes),
@@ -548,7 +548,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             466 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                    |s| multihash::MultihashRef::<&[u8]>::from_bytes(s).is_ok(),
                 ),
                 |b| ProtocolRef::Certhash(Cow::Borrowed(b)),
             )(bytes),

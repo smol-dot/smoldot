@@ -167,11 +167,7 @@ impl PeerId {
         let key_enc = key.to_protobuf_encoding();
 
         let out = if key_enc.len() <= MAX_INLINE_KEY_LENGTH {
-            let mut out = Vec::with_capacity(key_enc.len() + 8);
-            for slice in multihash::MultihashRef::identity(&key_enc).as_bytes() {
-                out.extend_from_slice(slice.as_ref())
-            }
-            out
+            multihash::MultihashRef::identity(&key_enc).into_bytes()
         } else {
             let mut out = vec![0; 34];
             out[0] = 0x12;
