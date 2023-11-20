@@ -369,10 +369,14 @@ where
     pub fn new(config: Config) -> Self {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
+        // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
+        let max_protocol_name_len = 256;
+
         ChainNetwork {
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 max_inbound_substreams: 128, // TODO: arbitrary value ; this value should be dynamically adjusted based on the number of chains that have been added
+                max_protocol_name_len,
                 randomness_seed: {
                     let mut seed = [0; 32];
                     randomness.fill_bytes(&mut seed);
@@ -795,8 +799,6 @@ where
         expected_peer_id: Option<PeerId>,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
-        let max_protocol_name_len = 256;
         let substreams_capacity = 16; // TODO: ?
         let ed25519_public_key = match handshake_kind {
             SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key, .. } => {
@@ -809,7 +811,6 @@ where
             when_connection_start,
             handshake_kind,
             substreams_capacity,
-            max_protocol_name_len,
             ConnectionInfo {
                 address: remote_addr,
                 ed25519_public_key,
@@ -852,8 +853,6 @@ where
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
-        // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
-        let max_protocol_name_len = 256;
         let substreams_capacity = 16; // TODO: ?
         let ed25519_public_key = match handshake_kind {
             MultiStreamHandshakeKind::WebRtc { noise_key, .. } => {
@@ -866,7 +865,6 @@ where
             when_connection_start,
             handshake_kind,
             substreams_capacity,
-            max_protocol_name_len,
             ConnectionInfo {
                 address: remote_addr,
                 peer_index: expected_peer_index,
