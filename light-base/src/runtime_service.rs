@@ -74,7 +74,7 @@ use core::{
 };
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, FutureExt as _, Stream, StreamExt as _};
+use futures_util::{future, stream, Stream, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
@@ -113,9 +113,6 @@ pub struct RuntimeService<TPlat: PlatformRef> {
 
     /// Sender to send messages to the background task.
     to_background: async_channel::Sender<ToBackground<TPlat>>,
-
-    /// Handle to abort the background task.
-    background_task_abort: future::AbortHandle,
 }
 
 impl<TPlat: PlatformRef> RuntimeService<TPlat> {
@@ -125,30 +122,25 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let log_target = format!("runtime-{}", config.log_name);
 
         // Spawns a task that runs in the background and updates the content of the mutex.
-        let background_task_abort;
         let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
             let sync_service = config.sync_service.clone();
             let platform = config.platform.clone();
             let (tx, rx) = async_channel::bounded(16);
-            let (abortable, abort) = future::abortable(run_background(
+            let tx_weak = tx.downgrade();
+            to_background = tx;
+            run_background(
                 log_target.clone(),
                 platform,
                 sync_service,
                 config.genesis_block_scale_encoded_header,
                 rx,
-                tx.downgrade(),
-            ));
-            background_task_abort = abort;
-            to_background = tx;
-            abortable.map(move |_| {
-                log::debug!(target: &log_target, "Shutdown");
-            })
+                tx_weak,
+            )
         });
 
         RuntimeService {
             sync_service: config.sync_service,
-            background_task_abort,
             to_background,
         }
     }
@@ -347,12 +339,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             .send(ToBackground::IsNearHeadOfChainHeuristic { result_tx })
             .await;
         result_rx.await.unwrap()
-    }
-}
-
-impl<TPlat: PlatformRef> Drop for RuntimeService<TPlat> {
-    fn drop(&mut self) {
-        self.background_task_abort.abort();
     }
 }
 
@@ -1335,7 +1321,10 @@ async fn run_background<TPlat: PlatformRef>(
                 // The sync service has reset the subscription.
                 background.blocks_stream = None;
             }
-            WakeUpReason::ToBackground(None) => todo!(),
+            WakeUpReason::ToBackground(None) => {
+                // Frontend and all subscriptions have shut down.
+                return;
+            }
             WakeUpReason::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
                 // remove senders that are closed. This is `O(n)`, but we expect this list to
