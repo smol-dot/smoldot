@@ -126,9 +126,9 @@ function connect(config: ConnectionConfig): Connection {
                         setTimeout(checkBufferedAmount, 10);
                     }
                     for (const buffer of data) {
-                        socket.send(buffer);
                         bufferedAmountCheck.quenedUnreportedBytes += buffer.length;
                     }
+                    socket.send(new Blob(data));
                 } catch (_error) { }
             },
             closeSend: (): void => { throw new Error('Wrong connection type') },

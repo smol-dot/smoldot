@@ -182,9 +182,9 @@ function connect(config: ConnectionConfig): Connection {
                     setTimeout(checkBufferedAmount, 10);
                 }
                 for (const buffer of data) {
-                    (connection as WebSocket).send(buffer);
                     bufferedAmountCheck.quenedUnreportedBytes += buffer.length;
                 }
+                (connection as WebSocket).send(new Blob(data));
             },
 
             closeSend: (): void => { throw new Error('Wrong connection type') },
@@ -495,9 +495,9 @@ function connect(config: ConnectionConfig): Connection {
             send: (data: Array<Uint8Array>, streamId: number): void => {
                 const channel = state.dataChannels.get(streamId)!;
                 for (const buffer of data) {
-                    channel.channel.send(buffer);
                     channel.bufferedBytes += buffer.length;
                 }
+                channel.channel.send(new Blob(data));
             },
 
             closeSend: (): void => { throw new Error('Wrong connection type') },
