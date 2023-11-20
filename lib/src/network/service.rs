@@ -369,14 +369,11 @@ where
     pub fn new(config: Config) -> Self {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
-        // TODO: do the max protocol name length better ; knowing that it can later change if a chain with a long forkId is added
-        let max_protocol_name_len = 256;
-
         ChainNetwork {
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 max_inbound_substreams: 128, // TODO: arbitrary value ; this value should be dynamically adjusted based on the number of chains that have been added
-                max_protocol_name_len,
+                max_protocol_name_len: 64,
                 randomness_seed: {
                     let mut seed = [0; 32];
                     randomness.fill_bytes(&mut seed);
@@ -455,6 +452,16 @@ where
             grandpa_protocol_config: config.grandpa_protocol_config,
             user_data: config.user_data,
         });
+
+        // TODO: consider optimizing this, as it's O(n) over the number of chains currently
+        self.inner.set_max_protocol_name_len(
+            self.chains
+                .iter()
+                .map(|chain| chain.1.fork_id.as_ref().map_or(0, |s| s.len() + 1))
+                .max()
+                .unwrap_or(0)
+                + 64,
+        );
 
         Ok(ChainId(chain_id))
     }

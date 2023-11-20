@@ -423,6 +423,13 @@ where
             .unwrap()
     }
 
+    /// Modifies the value that was initially passed through [`Config::max_protocol_name_len`].
+    ///
+    /// The new value only applies to substreams opened after this function has been called.
+    pub fn set_max_protocol_name_len(&mut self, new_value: usize) {
+        self.inner.max_protocol_name_len = new_value;
+    }
+
     /// Sends a request to the remote.
     ///
     /// This method only inserts the request into the connection object. Use

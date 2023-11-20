@@ -598,6 +598,26 @@ where
         }
     }
 
+    /// Modifies the value that was initially passed through [`Config::max_protocol_name_len`].
+    ///
+    /// The new value only applies to substreams opened after this function has been called.
+    pub fn set_max_protocol_name_len(&mut self, new_max_length: usize) {
+        if self.max_protocol_name_len == new_max_length {
+            return;
+        }
+
+        self.max_protocol_name_len = new_max_length;
+
+        // Send a message to all connections to update this value.
+        self.messages_to_connections.reserve(self.connections.len());
+        for connection_id in self.connections.keys() {
+            self.messages_to_connections.push_back((
+                *connection_id,
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+            ));
+        }
+    }
+
     /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
     /// name and indicate the type of the protocol.
     ///
@@ -1896,6 +1916,9 @@ enum CoordinatorToConnectionInner {
     },
     RejectInbound {
         substream_id: established::SubstreamId,
+    },
+    SetMaxProtocolNameLen {
+        new_max_length: usize,
     },
 
     StartRequest {

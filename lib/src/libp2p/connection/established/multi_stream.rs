@@ -153,6 +153,13 @@ where
         self.pending_events.pop_front()
     }
 
+    /// Modifies the value that was initially passed through [`Config::max_protocol_name_len`].
+    ///
+    /// The new value only applies to substreams opened after this function has been called.
+    pub fn set_max_protocol_name_len(&mut self, new_value: usize) {
+        self.max_protocol_name_len = new_value;
+    }
+
     /// Returns the number of new outbound substreams that the state machine would like to see
     /// opened.
     ///
