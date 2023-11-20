@@ -206,7 +206,7 @@ impl PeerId {
                     Err(FromBytesError::InvalidMultihashAlgorithm)
                 }
             }
-            Err(err) => Err(FromBytesError::DecodeError(err)),
+            Err((err, _)) => Err(FromBytesError::DecodeError(err)),
         };
 
         match result {

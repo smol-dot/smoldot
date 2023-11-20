@@ -44,8 +44,11 @@ impl<T: AsRef<[u8]>> Multihash<T> {
     }
 
     /// Checks whether `input` is a valid multihash.
-    pub fn from_bytes(input: T) -> Result<Self, FromBytesError> {
-        let _ = decode(input.as_ref())?;
+    pub fn from_bytes(input: T) -> Result<Self, (FromBytesError, T)> {
+        if let Err(err) = decode(input.as_ref()) {
+            return Err((err, input))
+        }
+
         Ok(Multihash(input))
     }
 

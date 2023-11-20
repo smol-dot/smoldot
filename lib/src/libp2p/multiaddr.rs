@@ -260,7 +260,7 @@ impl<'a> ProtocolRef<'a> {
                 let decoded = bs58::decode(s)
                     .into_vec()
                     .map_err(|_| ParseError::NotBase58)?;
-                if let Err(err) = multihash::Multihash::from_bytes(&decoded) {
+                if let Err((err, _)) = multihash::Multihash::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
                 }
                 Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
@@ -302,7 +302,7 @@ impl<'a> ProtocolRef<'a> {
                 let decoded = base64_flavor
                     .decode(&s[1..])
                     .map_err(|_| ParseError::InvalidBase64)?;
-                if let Err(err) = multihash::Multihash::from_bytes(&decoded) {
+                if let Err((err, _)) = multihash::Multihash::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
                 }
                 Ok(ProtocolRef::Certhash(Cow::Owned(decoded)))
