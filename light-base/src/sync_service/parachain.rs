@@ -58,7 +58,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         block_number_bytes,
         relay_chain_block_number_bytes,
         parachain_id,
-        from_network_service: Box::pin(network_service.subscribe(network_chain_id).await),
+        from_network_service: None,
         network_service,
         network_chain_id,
         sync_sources: sources::AllForksSources::new(
@@ -126,8 +126,8 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     /// Used to filter events from [`ParachainBackgroundTask::from_network_service`].
     network_chain_id: network_service::ChainId,
 
-    /// Events coming from the networking service.
-    from_network_service: Pin<Box<async_channel::Receiver<network_service::Event>>>,
+    /// Events coming from the networking service. `None` if not subscribed yet.
+    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
 
     /// Runtime service of the relay chain.
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -238,6 +238,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 },
                 Notification(runtime_service::Notification),
                 SubscriptionDead,
+                MustSubscribeNetworkEvents,
                 NetworkEvent(network_service::Event),
             }
 
@@ -247,7 +248,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     next_start_parahead_fetch,
                     relay_chain_subscribe_all,
                     in_progress_paraheads,
-                    is_subscribed,
+                    is_relaychain_subscribed,
                 ) = match &mut self.subscription_state {
                     ParachainBackgroundState::NotSubscribed {
                         subscribe_future, ..
@@ -314,10 +315,18 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 };
 
                 let network_event = async {
-                    if is_subscribed {
-                        // We expect the networking channel to never close, so the event is
-                        // unwrapped.
-                        WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
+                    if is_relaychain_subscribed {
+                        if let Some(from_network_service) = self.from_network_service.as_mut() {
+                            match from_network_service.next().await {
+                                Some(ev) => WakeUpReason::NetworkEvent(ev),
+                                None => {
+                                    self.from_network_service = None;
+                                    WakeUpReason::MustSubscribeNetworkEvents
+                                }
+                            }
+                        } else {
+                            WakeUpReason::MustSubscribeNetworkEvents
+                        }
                     } else {
                         future::pending().await
                     }
@@ -385,6 +394,16 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 WakeUpReason::ForegroundMessage(foreground_message) => {
                     // Message from the public API of the syncing service.
                     self.process_foreground_message(foreground_message).await;
+                }
+
+                WakeUpReason::MustSubscribeNetworkEvents => {
+                    debug_assert!(self.from_network_service.is_none());
+                    self.sync_sources.clear();
+                    self.sync_sources_map.clear();
+                    self.from_network_service = Some(Box::pin(
+                        // As documented, `subscribe().await` is expected to return quickly.
+                        self.network_service.subscribe(self.network_chain_id).await,
+                    ));
                 }
 
                 WakeUpReason::NetworkEvent(event) => {
