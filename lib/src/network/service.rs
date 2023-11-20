@@ -2295,7 +2295,7 @@ where
                     let _was_in = self.notification_substreams_by_peer_id.remove(&(
                         NotificationsProtocol::BlockAnnounces { chain_index },
                         peer_index, // TODO: cloning overhead :-/
-                        SubstreamDirection::Out,
+                        SubstreamDirection::In,
                         NotificationsSubstreamState::Open,
                         substream_id,
                     ));
