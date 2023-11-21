@@ -362,11 +362,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     // malicious.
                     worker
                         .runtime_service
-                        .subscribe_all(
-                            "transactions-service",
-                            32,
-                            NonZeroUsize::new(usize::max_value()).unwrap(),
-                        )
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await,
                 )
             };

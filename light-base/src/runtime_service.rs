@@ -160,8 +160,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
     ///
-    /// A name must be passed to be used for debugging purposes.
-    ///
     /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
     /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
@@ -178,7 +176,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// See [`SubscribeAll`] for information about the return value.
     pub async fn subscribe_all(
         &self,
-        subscription_name: &'static str,
         buffer_size: usize,
         max_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll<TPlat> {
@@ -187,7 +184,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             .to_background
             .send(ToBackground::SubscribeAll(ToBackgroundSubscribeAll {
                 result_tx,
-                subscription_name,
                 buffer_size,
                 max_pinned_blocks,
             }))
@@ -831,7 +827,6 @@ enum ToBackground<TPlat: PlatformRef> {
 
 struct ToBackgroundSubscribeAll<TPlat: PlatformRef> {
     result_tx: oneshot::Sender<SubscribeAll<TPlat>>,
-    subscription_name: &'static str,
     buffer_size: usize,
     max_pinned_blocks: NonZeroUsize,
 }
@@ -1295,11 +1290,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                     all_blocks_subscriptions.insert(
                         subscription_id,
-                        (
-                            pending_subscription.subscription_name,
-                            tx,
-                            pending_subscription.max_pinned_blocks.get() - 1,
-                        ),
+                        (tx, pending_subscription.max_pinned_blocks.get() - 1),
                     );
 
                     let _ = pending_subscription.result_tx.send(SubscribeAll {
@@ -1425,9 +1416,8 @@ async fn run_background<TPlat: PlatformRef>(
                         match pinned_blocks.remove(&(subscription_id.0, block_hash)) {
                             Some(b) => b.block_ignores_limit,
                             None => {
-                                // Cold path.
-                                // TODO: subscription name was used here but no longer is; get rid of this concept?
-                                if let Some((_, _, _)) =
+                                // Cold path.Ò
+                                if let Some((_, _)) =
                                     all_blocks_subscriptions.get(&subscription_id.0)
                                 {
                                     let _ = result_tx.send(Err(()));
@@ -1441,7 +1431,7 @@ async fn run_background<TPlat: PlatformRef>(
                     background.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
                     if !block_ignores_limit {
-                        let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
+                        let (_, finalized_pinned_remaining) = all_blocks_subscriptions
                             .get_mut(&subscription_id.0)
                             .unwrap();
                         *finalized_pinned_remaining += 1;
@@ -1466,8 +1456,7 @@ async fn run_background<TPlat: PlatformRef>(
                             Some(v) => v.clone(),
                             None => {
                                 // Cold path.
-                                // TODO: subscription name was used here but no longer is; remove this concept?
-                                if let Some((_, _, _)) =
+                                if let Some((_, _)) =
                                     all_blocks_subscriptions.get(&subscription_id.0)
                                 {
                                     let _ = result_tx.send(Err(()));
@@ -1819,7 +1808,7 @@ enum Tree<TPlat: PlatformRef> {
         /// Keys are assigned from [`Background::next_subscription_id`].
         all_blocks_subscriptions: hashbrown::HashMap<
             u64,
-            (&'static str, async_channel::Sender<Notification>, usize),
+            (async_channel::Sender<Notification>, usize),
             fnv::FnvBuildHasher,
         >,
 
@@ -1959,7 +1948,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         };
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (_, sender, finalized_pinned_remaining)) in
+                        for (subscription_id, (sender, finalized_pinned_remaining)) in
                             all_blocks_subscriptions.iter_mut()
                         {
                             let count_limit = pruned_blocks.len() + 1;
@@ -2048,7 +2037,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         });
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (_, sender, _)) in all_blocks_subscriptions.iter_mut()
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut()
                         {
                             if sender.try_send(notif.clone()).is_ok() {
                                 let _prev_value = pinned_blocks.insert(
@@ -2090,7 +2079,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         let notif = Notification::BestBlockChanged { hash };
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (_, sender, _)) in all_blocks_subscriptions.iter_mut()
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut()
                         {
                             if sender.try_send(notif.clone()).is_err() {
                                 to_remove.push(*subscription_id);
