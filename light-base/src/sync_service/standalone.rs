@@ -29,7 +29,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    iter,
+    cmp, iter,
     num::{NonZeroU32, NonZeroU64},
     pin::Pin,
     time::Duration,
@@ -136,12 +136,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         let queue_empty = {
             let mut queue_empty = true;
 
-            // Start a networking request (block requests, warp sync requests, etc.) that the
-            // syncing state machine would like to start.
-            if task.start_next_request() {
-                queue_empty = false;
-            }
-
             // TODO: handle obsolete requests
 
             // The sync state machine can be in a few various states. At the time of writing:
@@ -171,6 +165,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             NetworkEvent(network_service::Event),
             ForegroundMessage(ToBackground),
             ForegroundClosed,
+            StartRequest(all::SourceId, all::DesiredRequest),
             RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
             WarpSyncTakingLongTimeWarning,
             MustLoopAgain,
@@ -223,6 +218,21 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
                         .fuse();
                 WakeUpReason::WarpSyncTakingLongTimeWarning
+            })
+            .or(async {
+                // `desired_requests()` returns, in decreasing order of priority, the requests
+                // that should be started in order for the syncing to proceed. The fact that
+                // multiple requests are returned could be used to filter out undesired one. We
+                // use this filtering to enforce a maximum of one ongoing request per source.
+                let (source_id, _, request_detail) =
+                    match task.sync.desired_requests().find(|(source_id, _, _)| {
+                        task.sync.source_num_ongoing_requests(*source_id) == 0
+                    }) {
+                        Some(v) => v,
+                        None => future::pending().await,
+                    };
+
+                WakeUpReason::StartRequest(source_id, request_detail)
             })
             .or(async {
                 // If the list of CPU-heavy operations to perform is potentially non-empty,
@@ -638,6 +648,206 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 task.sync.call_proof_response(request_id, Err(err));
             }
 
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::BlocksRequest {
+                    first_block_hash,
+                    first_block_height,
+                    ascending,
+                    num_blocks,
+                    request_headers,
+                    request_bodies,
+                    request_justification,
+                },
+            ) => {
+                // Before inserting the request back to the syncing state machine, clamp the number
+                // of blocks to the number of blocks we expect to receive.
+                // This constant corresponds to the maximum number of blocks that nodes will answer
+                // in one request. If this constant happens to be inaccurate, everything will still
+                // work but less efficiently.
+                let num_blocks = NonZeroU64::new(cmp::min(64, num_blocks.get())).unwrap();
+
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let block_request = task.network_service.clone().blocks_request(
+                    peer_id,
+                    task.network_chain_id,
+                    network::codec::BlocksRequestConfig {
+                        start: if let Some(first_block_hash) = first_block_hash {
+                            network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
+                        } else {
+                            network::codec::BlocksRequestConfigStart::Number(first_block_height)
+                        },
+                        desired_count: NonZeroU32::new(
+                            u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                        )
+                        .unwrap(),
+                        direction: if ascending {
+                            network::codec::BlocksRequestDirection::Ascending
+                        } else {
+                            network::codec::BlocksRequestDirection::Descending
+                        },
+                        fields: network::codec::BlocksRequestFields {
+                            header: request_headers,
+                            body: request_bodies,
+                            justifications: request_justification,
+                        },
+                    },
+                    Duration::from_secs(10),
+                );
+
+                let (block_request, abort) = future::abortable(block_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::BlocksRequest {
+                        first_block_hash,
+                        first_block_height,
+                        ascending,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (request_id, block_request.await.map(RequestOutcome::Block))
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                },
+            ) => {
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let grandpa_request = task.network_service.clone().grandpa_warp_sync_request(
+                    peer_id,
+                    task.network_chain_id,
+                    sync_start_block_hash,
+                    // The timeout needs to be long enough to potentially download the maximum
+                    // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
+                    // 128 seconds. Unfortunately, 128 seconds is way too large, and for
+                    // pragmatic reasons we use a lower value.
+                    Duration::from_secs(24),
+                );
+
+                let (grandpa_request, abort) = future::abortable(grandpa_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::WarpSync {
+                        sync_start_block_hash,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        grandpa_request.await.map(RequestOutcome::WarpSync),
+                    )
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::StorageGetMerkleProof {
+                    block_hash, keys, ..
+                },
+            ) => {
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let storage_request = task.network_service.clone().storage_proof_request(
+                    task.network_chain_id,
+                    peer_id,
+                    network::codec::StorageProofRequestConfig {
+                        block_hash,
+                        keys: keys.clone().into_iter(),
+                    },
+                    Duration::from_secs(16),
+                );
+
+                let storage_request = async move {
+                    if let Ok(outcome) = storage_request.await {
+                        // TODO: log what happens
+                        Ok(outcome.decode().to_vec()) // TODO: no to_vec() here, needs some API change on the networking
+                    } else {
+                        Err(())
+                    }
+                };
+
+                let (storage_request, abort) = future::abortable(storage_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::StorageGet { block_hash, keys },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        storage_request.await.map(RequestOutcome::Storage),
+                    )
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            ) => {
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let call_proof_request = {
+                    // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
+                    let network_service = task.network_service.clone();
+                    let network_chain_id = task.network_chain_id;
+                    let parameter_vectored = parameter_vectored.clone();
+                    let function_name = function_name.clone();
+                    async move {
+                        let rq = network_service.call_proof_request(
+                            network_chain_id,
+                            peer_id,
+                            network::codec::CallProofRequestConfig {
+                                block_hash,
+                                method: Cow::Borrowed(&*function_name),
+                                parameter_vectored: iter::once(&parameter_vectored),
+                            },
+                            Duration::from_secs(16),
+                        );
+
+                        match rq.await {
+                            Ok(p) => Ok(p),
+                            Err(_) => Err(()),
+                        }
+                    }
+                };
+
+                let (call_proof_request, abort) = future::abortable(call_proof_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        call_proof_request.await.map(RequestOutcome::CallProof),
+                    )
+                }));
+            }
+
             WakeUpReason::WarpSyncTakingLongTimeWarning => {
                 match task.sync.status() {
                     all::Status::Sync => {}
@@ -740,194 +950,6 @@ enum RequestOutcome {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
-    /// Starts one network request if any is necessary.
-    ///
-    /// Returns `true` if a request has been started.
-    fn start_next_request(&mut self) -> bool {
-        // `desired_requests()` returns, in decreasing order of priority, the requests
-        // that should be started in order for the syncing to proceed. The fact that multiple
-        // requests are returned could be used to filter out undesired one. We use this
-        // filtering to enforce a maximum of one ongoing request per source.
-        let (source_id, _, mut request_detail) = match self
-            .sync
-            .desired_requests()
-            .find(|(source_id, _, _)| self.sync.source_num_ongoing_requests(*source_id) == 0)
-        {
-            Some(v) => v,
-            None => return false,
-        };
-
-        // Before inserting the request back to the syncing state machine, clamp the number
-        // of blocks to the number of blocks we expect to receive.
-        // This constant corresponds to the maximum number of blocks that nodes will answer
-        // in one request. If this constant happens to be inaccurate, everything will still
-        // work but less efficiently.
-        request_detail.num_blocks_clamp(NonZeroU64::new(64).unwrap());
-
-        match request_detail {
-            all::DesiredRequest::BlocksRequest {
-                first_block_hash,
-                first_block_height,
-                ascending,
-                num_blocks,
-                request_headers,
-                request_bodies,
-                request_justification,
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                let block_request = self.network_service.clone().blocks_request(
-                    peer_id,
-                    self.network_chain_id,
-                    network::codec::BlocksRequestConfig {
-                        start: if let Some(first_block_hash) = first_block_hash {
-                            network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
-                        } else {
-                            network::codec::BlocksRequestConfigStart::Number(first_block_height)
-                        },
-                        desired_count: NonZeroU32::new(
-                            u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                        )
-                        .unwrap(),
-                        direction: if ascending {
-                            network::codec::BlocksRequestDirection::Ascending
-                        } else {
-                            network::codec::BlocksRequestDirection::Descending
-                        },
-                        fields: network::codec::BlocksRequestFields {
-                            header: request_headers,
-                            body: request_bodies,
-                            justifications: request_justification,
-                        },
-                    },
-                    Duration::from_secs(10),
-                );
-
-                let (block_request, abort) = future::abortable(block_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(Box::pin(async move {
-                    (request_id, block_request.await.map(RequestOutcome::Block))
-                }));
-            }
-
-            all::DesiredRequest::WarpSync {
-                sync_start_block_hash,
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                let grandpa_request = self.network_service.clone().grandpa_warp_sync_request(
-                    peer_id,
-                    self.network_chain_id,
-                    sync_start_block_hash,
-                    // The timeout needs to be long enough to potentially download the maximum
-                    // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
-                    // 128 seconds. Unfortunately, 128 seconds is way too large, and for
-                    // pragmatic reasons we use a lower value.
-                    Duration::from_secs(24),
-                );
-
-                let (grandpa_request, abort) = future::abortable(grandpa_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(Box::pin(async move {
-                    (
-                        request_id,
-                        grandpa_request.await.map(RequestOutcome::WarpSync),
-                    )
-                }));
-            }
-
-            all::DesiredRequest::StorageGetMerkleProof {
-                block_hash,
-                ref keys,
-                ..
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                let storage_request = self.network_service.clone().storage_proof_request(
-                    self.network_chain_id,
-                    peer_id,
-                    network::codec::StorageProofRequestConfig {
-                        block_hash,
-                        keys: keys.clone().into_iter(),
-                    },
-                    Duration::from_secs(16),
-                );
-
-                let storage_request = async move {
-                    if let Ok(outcome) = storage_request.await {
-                        // TODO: log what happens
-                        Ok(outcome.decode().to_vec()) // TODO: no to_vec() here, needs some API change on the networking
-                    } else {
-                        Err(())
-                    }
-                };
-
-                let (storage_request, abort) = future::abortable(storage_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(Box::pin(async move {
-                    (
-                        request_id,
-                        storage_request.await.map(RequestOutcome::Storage),
-                    )
-                }));
-            }
-
-            all::DesiredRequest::RuntimeCallMerkleProof {
-                block_hash,
-                ref function_name,
-                ref parameter_vectored,
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-                let network_service = self.network_service.clone();
-                let network_chain_id = self.network_chain_id;
-                // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
-                let parameter_vectored = parameter_vectored.clone();
-                let function_name = function_name.clone();
-
-                let call_proof_request = async move {
-                    let rq = network_service.call_proof_request(
-                        network_chain_id,
-                        peer_id,
-                        network::codec::CallProofRequestConfig {
-                            block_hash,
-                            method: function_name,
-                            parameter_vectored: iter::once(parameter_vectored),
-                        },
-                        Duration::from_secs(16),
-                    );
-
-                    match rq.await {
-                        Ok(p) => Ok(p),
-                        Err(_) => Err(()),
-                    }
-                };
-
-                let (call_proof_request, abort) = future::abortable(call_proof_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(Box::pin(async move {
-                    (
-                        request_id,
-                        call_proof_request.await.map(RequestOutcome::CallProof),
-                    )
-                }));
-            }
-        }
-
-        true
-    }
-
     /// Verifies one block, or finality proof, or warp sync fragment, etc. that is queued for
     /// verification.
     ///
