@@ -295,9 +295,109 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 continue;
             }
 
-            WakeUpReason::ForegroundMessage(message) => {
-                // Received message from the front `SyncService`.
-                task.process_foreground_message(message);
+            WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
+                send_back,
+            }) => {
+                // Frontend is querying something.
+                let _ = send_back.send(task.sync.is_near_head_of_chain_heuristic());
+                continue;
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
+                send_back,
+                buffer_size,
+                runtime_interest,
+            }) => {
+                // Frontend would like to subscribe to events.
+
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+                task.all_notifications.push(tx);
+
+                let non_finalized_blocks_ancestry_order = {
+                    let best_hash = task.sync.best_block_hash();
+                    task.sync
+                        .non_finalized_blocks_ancestry_order()
+                        .map(|h| {
+                            let scale_encoding =
+                                h.scale_encoding_vec(task.sync.block_number_bytes());
+                            BlockNotification {
+                                is_new_best: header::hash_from_scale_encoded_header(
+                                    &scale_encoding,
+                                ) == best_hash,
+                                scale_encoded_header: scale_encoding,
+                                parent_hash: *h.parent_hash,
+                            }
+                        })
+                        .collect()
+                };
+
+                let _ = send_back.send(SubscribeAll {
+                    finalized_block_scale_encoded_header: task
+                        .sync
+                        .finalized_block_header()
+                        .scale_encoding_vec(task.sync.block_number_bytes()),
+                    finalized_block_runtime: if runtime_interest {
+                        task.known_finalized_runtime.take()
+                    } else {
+                        None
+                    },
+                    non_finalized_blocks_ancestry_order,
+                    new_blocks,
+                });
+
+                continue;
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
+                send_back,
+                block_number,
+                block_hash,
+            }) => {
+                // Frontend queries the list of peers which are expected to know about a certain
+                // block.
+                let finalized_num = task.sync.finalized_block_header().number;
+                let outcome = if block_number <= finalized_num {
+                    task.sync
+                        .sources()
+                        .filter(|source_id| {
+                            let source_best = task.sync.source_best_block(*source_id);
+                            source_best.0 > block_number
+                                || (source_best.0 == block_number && *source_best.1 == block_hash)
+                        })
+                        .map(|id| task.sync[id].0.clone())
+                        .collect()
+                } else {
+                    // As documented, `knows_non_finalized_block` would panic if the
+                    // block height was below the one of the known finalized block.
+                    task.sync
+                        .knows_non_finalized_block(block_number, &block_hash)
+                        .map(|id| task.sync[id].0.clone())
+                        .collect()
+                };
+                let _ = send_back.send(outcome);
+                continue;
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }) => {
+                // Frontend is querying the list of peers.
+                let out = task
+                    .sync
+                    .sources()
+                    .map(|src| {
+                        let (peer_id, role) = task.sync[src].clone();
+                        let (height, hash) = task.sync.source_best_block(src);
+                        (peer_id, role, height, *hash)
+                    })
+                    .collect::<Vec<_>>();
+                let _ = send_back.send(out);
+                continue;
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
+                send_back,
+            }) => {
+                // Frontend is querying the chain information.
+                let _ = send_back.send(Some(task.sync.as_chain_information().into()));
                 continue;
             }
 
@@ -1059,100 +1159,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
         }
 
         (self, true)
-    }
-
-    /// Process a request coming from the foreground service.
-    fn process_foreground_message(&mut self, message: ToBackground) {
-        match message {
-            ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                let _ = send_back.send(self.sync.is_near_head_of_chain_heuristic());
-            }
-
-            ToBackground::SubscribeAll {
-                send_back,
-                buffer_size,
-                runtime_interest,
-            } => {
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-                self.all_notifications.push(tx);
-
-                let non_finalized_blocks_ancestry_order = {
-                    let best_hash = self.sync.best_block_hash();
-                    self.sync
-                        .non_finalized_blocks_ancestry_order()
-                        .map(|h| {
-                            let scale_encoding =
-                                h.scale_encoding_vec(self.sync.block_number_bytes());
-                            BlockNotification {
-                                is_new_best: header::hash_from_scale_encoded_header(
-                                    &scale_encoding,
-                                ) == best_hash,
-                                scale_encoded_header: scale_encoding,
-                                parent_hash: *h.parent_hash,
-                            }
-                        })
-                        .collect()
-                };
-
-                let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: self
-                        .sync
-                        .finalized_block_header()
-                        .scale_encoding_vec(self.sync.block_number_bytes()),
-                    finalized_block_runtime: if runtime_interest {
-                        self.known_finalized_runtime.take()
-                    } else {
-                        None
-                    },
-                    non_finalized_blocks_ancestry_order,
-                    new_blocks,
-                });
-            }
-
-            ToBackground::PeersAssumedKnowBlock {
-                send_back,
-                block_number,
-                block_hash,
-            } => {
-                let finalized_num = self.sync.finalized_block_header().number;
-                let outcome = if block_number <= finalized_num {
-                    self.sync
-                        .sources()
-                        .filter(|source_id| {
-                            let source_best = self.sync.source_best_block(*source_id);
-                            source_best.0 > block_number
-                                || (source_best.0 == block_number && *source_best.1 == block_hash)
-                        })
-                        .map(|id| self.sync[id].0.clone())
-                        .collect()
-                } else {
-                    // As documented, `knows_non_finalized_block` would panic if the
-                    // block height was below the one of the known finalized block.
-                    self.sync
-                        .knows_non_finalized_block(block_number, &block_hash)
-                        .map(|id| self.sync[id].0.clone())
-                        .collect()
-                };
-                let _ = send_back.send(outcome);
-            }
-
-            ToBackground::SyncingPeers { send_back } => {
-                let out = self
-                    .sync
-                    .sources()
-                    .map(|src| {
-                        let (peer_id, role) = self.sync[src].clone();
-                        let (height, hash) = self.sync.source_best_block(src);
-                        (peer_id, role, height, *hash)
-                    })
-                    .collect::<Vec<_>>();
-                let _ = send_back.send(out);
-            }
-
-            ToBackground::SerializeChainInformation { send_back } => {
-                let _ = send_back.send(Some(self.sync.as_chain_information().into()));
-            }
-        }
     }
 
     /// Updates the task with a new event coming from the network service.
