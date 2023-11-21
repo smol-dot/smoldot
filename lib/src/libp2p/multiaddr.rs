@@ -202,10 +202,10 @@ pub enum ParseError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolRef<'a> {
-    Dns(DomainNameRef<'a>),
-    Dns4(DomainNameRef<'a>),
-    Dns6(DomainNameRef<'a>),
-    DnsAddr(DomainNameRef<'a>),
+    Dns(DomainName<&'a [u8]>),
+    Dns4(DomainName<&'a [u8]>),
+    Dns6(DomainName<&'a [u8]>),
+    DnsAddr(DomainName<&'a [u8]>),
     Ip4([u8; 4]),
     Ip6([u8; 16]),
     P2p(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to Multihash
@@ -229,19 +229,21 @@ impl<'a> ProtocolRef<'a> {
         match iter.next().ok_or(ParseError::UnexpectedEof)? {
             "dns" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Dns(DomainNameRef::try_from(addr)?))
+                Ok(ProtocolRef::Dns(DomainName::from_bytes(addr.as_bytes())?))
             }
             "dns4" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Dns4(DomainNameRef::try_from(addr)?))
+                Ok(ProtocolRef::Dns4(DomainName::from_bytes(addr.as_bytes())?))
             }
             "dns6" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Dns6(DomainNameRef::try_from(addr)?))
+                Ok(ProtocolRef::Dns6(DomainName::from_bytes(addr.as_bytes())?))
             }
             "dnsaddr" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::DnsAddr(DomainNameRef::try_from(addr)?))
+                Ok(ProtocolRef::DnsAddr(DomainName::from_bytes(
+                    addr.as_bytes(),
+                )?))
             }
             "ip4" => {
                 let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
@@ -375,7 +377,7 @@ impl<'a> ProtocolRef<'a> {
 impl<'a> fmt::Display for ProtocolRef<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            // Note that since a `DomainNameRef` always contains a valid domain name, it is
+            // Note that since a `DomainName` always contains a valid domain name, it is
             // guaranteed that `addr` never contains a `/`.
             ProtocolRef::Dns(addr) => write!(f, "/dns/{addr}"),
             ProtocolRef::Dns4(addr) => write!(f, "/dns4/{addr}"),
@@ -408,19 +410,19 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
 
 /// Domain name. Guarantees that the domain name has a valid syntax.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DomainNameRef<'a>(&'a str);
+pub struct DomainName<T = Vec<u8>>(T);
 
-impl<'a> DomainNameRef<'a> {
+impl<T> DomainName<T> {
     /// Returns the underlying bytes of the domain name.
-    pub fn into_bytes(self) -> &'a [u8] {
-        self.0.as_bytes()
+    pub fn into_bytes(self) -> T {
+        self.0
     }
-}
 
-impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
-    type Error = ParseError;
-
-    fn try_from(input: &'a str) -> Result<Self, Self::Error> {
+    /// Try to parse the given string as a domain name.
+    pub fn from_bytes(bytes: T) -> Result<DomainName<T>, ParseError>
+    where
+        T: AsRef<[u8]>,
+    {
         // Checks whether the input is valid domain name.
         // See https://datatracker.ietf.org/doc/html/rfc2181#section-11
 
@@ -428,14 +430,16 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
         // unnecessarily large binary size overhead (~1.1 MiB!), so the check is now implemented
         // manually instead.
 
-        if input.as_bytes().len() > 255 {
+        let as_str = str::from_utf8(bytes.as_ref()).map_err(|_| ParseError::InvalidDomainName)?;
+
+        if as_str.len() > 255 {
             return Err(ParseError::InvalidDomainName);
         }
 
-        if !input.is_empty() && input != "." {
+        if !as_str.is_empty() && as_str != "." {
             // The checks within this for loop would fail if `input` is empty or equal to ".",
             // even though "" and "." are valid domain names.
-            for label in input.split_terminator('.') {
+            for label in as_str.split_terminator('.') {
                 if label.is_empty() || label.as_bytes().len() > 63 {
                     return Err(ParseError::InvalidDomainName);
                 }
@@ -444,32 +448,34 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
 
         // In addition to the standard, we also forbid any domain name containing a `/` byte,
         // because it would mess up with the multiaddress format.
-        if input.chars().any(|c| c == '/') || input.as_bytes().iter().any(|b| *b == b'/') {
+        if as_str.chars().any(|c| c == '/') || as_str.as_bytes().iter().any(|b| *b == b'/') {
             return Err(ParseError::InvalidDomainName);
         }
 
         // Note that success here does in no way guarantee that this domain name is registrable,
         // only that its syntax is valid.
 
-        Ok(DomainNameRef(input))
+        Ok(DomainName(bytes))
     }
 }
 
-impl<'a> AsRef<[u8]> for DomainNameRef<'a> {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
+impl<T> AsRef<T> for DomainName<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
     }
 }
 
-impl<'a> fmt::Debug for DomainNameRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Debug for DomainName<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+        let as_str = str::from_utf8(self.0.as_ref()).unwrap();
+        fmt::Debug::fmt(as_str, f)
     }
 }
 
-impl<'a> fmt::Display for DomainNameRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Display for DomainName<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        let as_str = str::from_utf8(self.0.as_ref()).unwrap();
+        fmt::Display::fmt(as_str, f)
     }
 }
 
@@ -489,44 +495,28 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             53 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(s).ok(),
                 ),
                 ProtocolRef::Dns,
             )(bytes),
             54 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(s).ok(),
                 ),
                 ProtocolRef::Dns4,
             )(bytes),
             55 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(s).ok(),
                 ),
                 ProtocolRef::Dns6,
             )(bytes),
             56 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(s).ok(),
                 ),
                 ProtocolRef::DnsAddr,
             )(bytes),
