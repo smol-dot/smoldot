@@ -1130,15 +1130,6 @@ async fn background_task(mut inner: Inner) {
                             .remove(&substream_id)
                             .unwrap();
 
-                        // TODO: very verbose display
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "discovered; chain={}; nodes={:?}",
-                                inner.network[chain_id].log_name, nodes
-                            ),
-                        );
-
                         for (peer_id, addrs) in nodes {
                             let mut valid_addrs = Vec::with_capacity(addrs.len());
                             for addr in addrs {
@@ -1178,6 +1169,14 @@ async fn background_task(mut inner: Inner) {
                             }
 
                             for addr in valid_addrs {
+                                inner.log_callback.log(
+                                    LogLevel::Debug,
+                                    format!(
+                                        "discovered; chain={}; peer_id={peer_id}; address={addr}",
+                                        inner.network[chain_id].log_name
+                                    ),
+                                );
+
                                 match inner
                                     .peering_strategy
                                      .insert_address(&peer_id, addr.into_bytes(), 10) // TODO: constant
