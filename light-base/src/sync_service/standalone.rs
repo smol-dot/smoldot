@@ -162,60 +162,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             queue_empty
         };
 
-        // Processing the queue might have updated the best block of the syncing state machine.
-        if !task.network_up_to_date_best {
-            // The networking service needs to be kept up to date with what the local node
-            // considers as the best block.
-            // For some reason, first building the future then executing it solves a borrow
-            // checker error.
-            let fut = task.network_service.set_local_best_block(
-                network_chain_id,
-                task.sync.best_block_hash(),
-                task.sync.best_block_number(),
-            );
-            fut.await;
-
-            task.network_up_to_date_best = true;
-        }
-
-        // Processing the queue might have updated the finalized block of the syncing state
-        // machine.
-        if !task.network_up_to_date_finalized {
-            // If the chain uses GrandPa, the networking has to be kept up-to-date with the
-            // state of finalization for other peers to send back relevant gossip messages.
-            // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
-            // checker issues.
-            let grandpa_set_id =
-                if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    ..
-                } = task.sync.as_chain_information().as_ref().finality
-                {
-                    Some(after_finalized_block_authorities_set_id)
-                } else {
-                    None
-                };
-
-            if let Some(set_id) = grandpa_set_id {
-                let commit_finalized_height = task.sync.finalized_block_header().number;
-                task.network_service
-                    .set_local_grandpa_state(
-                        network_chain_id,
-                        network::service::GrandpaState {
-                            set_id,
-                            round_number: 1, // TODO:
-                            commit_finalized_height,
-                        },
-                    )
-                    .await;
-            }
-
-            task.network_up_to_date_finalized = true;
-        }
-
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
         enum WakeUpReason {
+            MustUpdateNetworkWithBestBlock,
+            MustUpdateNetworkWithFinalizedBlock,
             MustSubscribeNetworkEvents,
             NetworkEvent(network_service::Event),
             ForegroundMessage(ToBackground),
@@ -251,6 +202,20 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 }
                 let (request_id, result) = task.pending_requests.select_next_some().await;
                 WakeUpReason::RequestFinished(request_id, result)
+            })
+            .or(async {
+                if !task.network_up_to_date_finalized {
+                    WakeUpReason::MustUpdateNetworkWithFinalizedBlock
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if !task.network_up_to_date_best {
+                    WakeUpReason::MustUpdateNetworkWithBestBlock
+                } else {
+                    future::pending().await
+                }
             })
             .or(async {
                 (&mut task.warp_sync_taking_long_time_warning).await;
@@ -445,6 +410,54 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     // As documented, `subscribe().await` is expected to return quickly.
                     task.network_service.subscribe(task.network_chain_id).await,
                 ));
+            }
+
+            WakeUpReason::MustUpdateNetworkWithBestBlock => {
+                // The networking service needs to be kept up to date with what the local node
+                // considers as the best block.
+                // For some reason, first building the future then executing it solves a borrow
+                // checker error.
+                let fut = task.network_service.set_local_best_block(
+                    network_chain_id,
+                    task.sync.best_block_hash(),
+                    task.sync.best_block_number(),
+                );
+                fut.await;
+    
+                task.network_up_to_date_best = true;
+            }
+
+            WakeUpReason::MustUpdateNetworkWithFinalizedBlock => {
+                // If the chain uses GrandPa, the networking has to be kept up-to-date with the
+                // state of finalization for other peers to send back relevant gossip messages.
+                // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
+                // checker issues.
+                let grandpa_set_id =
+                    if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
+                        after_finalized_block_authorities_set_id,
+                        ..
+                    } = task.sync.as_chain_information().as_ref().finality
+                    {
+                        Some(after_finalized_block_authorities_set_id)
+                    } else {
+                        None
+                    };
+    
+                if let Some(set_id) = grandpa_set_id {
+                    let commit_finalized_height = task.sync.finalized_block_header().number;
+                    task.network_service
+                        .set_local_grandpa_state(
+                            network_chain_id,
+                            network::service::GrandpaState {
+                                set_id,
+                                round_number: 1, // TODO:
+                                commit_finalized_height,
+                            },
+                        )
+                        .await;
+                }
+    
+                task.network_up_to_date_finalized = true;
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
