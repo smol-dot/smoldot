@@ -15,10 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{
-    libp2p::{multiaddr, peer_id},
-    util::protobuf,
-};
+use crate::{libp2p::peer_id, util::protobuf};
 
 use alloc::vec::Vec;
 
@@ -91,9 +88,6 @@ pub enum DecodeFindNodeResponseError {
     /// Error while parsing a [`peer_id::PeerId`] in the response.
     #[display(fmt = "Invalid PeerId: {_0}")]
     BadPeerId(peer_id::FromBytesError),
-    /// Error while parsing a [`multiaddr::Multiaddr`] in the response.
-    #[display(fmt = "Invalid multiaddress: {_0}")]
-    BadMultiaddr(multiaddr::FromBytesError),
 }
 
 /// Error while decoding the Protobuf encoding.
