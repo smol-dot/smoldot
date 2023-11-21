@@ -20,9 +20,9 @@ use crate::{allocator, bindings, platform, timers::Delay};
 use alloc::{
     boxed::Box,
     format,
-    string::{String, ToString as _},
+    string::String,
 };
-use core::{panic::PanicInfo, sync::atomic::Ordering, time::Duration};
+use core::sync::atomic::Ordering, time::Duration;
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
@@ -126,10 +126,10 @@ pub(crate) fn init(max_log_level: u32) {
 }
 
 /// Stops execution, providing a string explaining what happened.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "std")))]
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    let message = info.to_string();
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let message = alloc::string::ToString::to_string(info);
 
     unsafe {
         bindings::panic(

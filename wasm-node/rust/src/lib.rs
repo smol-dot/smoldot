@@ -17,7 +17,7 @@
 
 //! Contains a light client implementation usable from a browser environment.
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 

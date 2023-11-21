@@ -9,6 +9,9 @@ repository.workspace = true
 include.workspace = true
 publish = false
 
+[features]
+std = []  # TODO: this `std` feature exists purely in order to bypass weird Cargo behaviour when running `cargo test`
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
