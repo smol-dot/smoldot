@@ -21,14 +21,16 @@ use futures_lite::future::FutureExt as _;
 
 use smoldot_light::platform::{read_write, SubstreamDirection};
 
-use core::{future, iter, mem, ops, pin, str, task, time::Duration};
-use std::{
+use alloc::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
+};
+use async_lock::Mutex;
+use core::{
+    future, iter, mem, ops, pin, str,
+    sync::atomic::{AtomicU64, Ordering},
+    task,
+    time::Duration,
 };
 
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have

@@ -22,13 +22,11 @@
 
 extern crate alloc;
 
-use core::{future, mem, num::NonZeroU32, pin::Pin, str};
+use alloc::sync::Arc;
+use async_lock::Mutex;
+use core::{future, mem, num::NonZeroU32, pin::Pin, str, task};
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
-use std::{
-    sync::{Arc, Mutex},
-    task,
-};
 
 pub mod bindings;
 
@@ -53,7 +51,7 @@ fn add_chain(
     json_rpc_max_subscriptions: u32,
     potential_relay_chains: Vec<u8>,
 ) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock_blocking();
 
     // Fail any new chain initialization if we're running low on memory space, which can
     // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
@@ -156,7 +154,7 @@ fn add_chain(
 }
 
 fn remove_chain(chain_id: u32) {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock_blocking();
 
     match client_lock
         .chains
@@ -185,7 +183,7 @@ fn remove_chain(chain_id: u32) {
 }
 
 fn chain_is_ok(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.lock().unwrap();
+    let client_lock = CLIENT.lock_blocking();
     if matches!(
         client_lock
             .chains
@@ -200,7 +198,7 @@ fn chain_is_ok(chain_id: u32) -> u32 {
 }
 
 fn chain_error_len(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.lock().unwrap();
+    let client_lock = CLIENT.lock_blocking();
     match client_lock
         .chains
         .get(usize::try_from(chain_id).unwrap())
@@ -212,7 +210,7 @@ fn chain_error_len(chain_id: u32) -> u32 {
 }
 
 fn chain_error_ptr(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.lock().unwrap();
+    let client_lock = CLIENT.lock_blocking();
     match client_lock
         .chains
         .get(usize::try_from(chain_id).unwrap())
@@ -230,7 +228,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
     let json_rpc_request: String = String::from_utf8(json_rpc_request)
         .unwrap_or_else(|_| panic!("non-UTF-8 JSON-RPC request"));
 
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock_blocking();
     let client_chain_id = match client_lock
         .chains
         .get(usize::try_from(chain_id).unwrap())
@@ -252,7 +250,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
 }
 
 fn json_rpc_responses_peek(chain_id: u32) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock_blocking();
     match client_lock
         .chains
         .get_mut(usize::try_from(chain_id).unwrap())
@@ -318,7 +316,7 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
 }
 
 fn json_rpc_responses_pop(chain_id: u32) {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock_blocking();
     match client_lock
         .chains
         .get_mut(usize::try_from(chain_id).unwrap())
@@ -335,7 +333,7 @@ struct JsonRpcResponsesNonEmptyWaker {
     chain_id: u32,
 }
 
-impl task::Wake for JsonRpcResponsesNonEmptyWaker {
+impl alloc::task::Wake for JsonRpcResponsesNonEmptyWaker {
     fn wake(self: Arc<Self>) {
         unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
     }
@@ -361,7 +359,7 @@ enum ExecutionState {
 
 fn advance_execution() {
     let runnable = {
-        let mut executor_execute_guard = EXECUTOR_EXECUTE.lock().unwrap();
+        let mut executor_execute_guard = EXECUTOR_EXECUTE.lock_blocking();
         match *executor_execute_guard {
             ExecutionState::NotStarted => {
                 // Spawn a task that repeatedly executes one task then yields.
@@ -385,7 +383,7 @@ fn advance_execution() {
                     };
 
                     async_task::spawn(run, |runnable| {
-                        let mut lock = EXECUTOR_EXECUTE.lock().unwrap();
+                        let mut lock = EXECUTOR_EXECUTE.lock_blocking();
                         if !matches!(*lock, ExecutionState::NotReady) {
                             return;
                         }

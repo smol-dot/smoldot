@@ -17,11 +17,11 @@
 
 use crate::{allocator, bindings, platform, timers::Delay};
 
-use core::time::Duration;
+use core::{sync::atomic::Ordering, time::Duration};
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
-use std::{panic, sync::atomic::Ordering};
+use std::panic;
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
