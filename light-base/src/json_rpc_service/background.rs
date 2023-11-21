@@ -670,9 +670,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         match multiaddr.parse::<multiaddr::Multiaddr>() {
-            Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
+            Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::Protocol::P2p(_))) => {
                 let peer_id_bytes = match addr.iter().last() {
-                    Some(multiaddr::ProtocolRef::P2p(peer_id)) => peer_id.into_owned(),
+                    Some(multiaddr::Protocol::P2p(peer_id)) => peer_id.to_owned(),
                     _ => unreachable!(),
                 };
                 addr.pop();

@@ -26,7 +26,7 @@ use smol::{
 };
 use smoldot::{
     libp2p::{
-        multiaddr::{Multiaddr, ProtocolRef},
+        multiaddr::{Multiaddr, Protocol},
         websocket, with_buffers,
     },
     network::service::{self, CoordinatorToConnection},
@@ -214,33 +214,33 @@ pub(super) fn multiaddr_to_socket(
 
     // Ensure ahead of time that the multiaddress is supported.
     let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
+        (Protocol::Ip4(ip), Protocol::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
             None,
         ),
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
+        (Protocol::Ip6(ip), Protocol::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
             None,
         ),
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws)) => {
             let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
             (either::Left(addr), Some(addr.to_string()))
         }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws)) => {
             let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
             (either::Left(addr), Some(addr.to_string()))
         }
 
         // TODO: we don't care about the differences between Dns, Dns4, and Dns6
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
             None,
         ) => (either::Right((addr.to_string(), *port)), None),
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
-            Some(ProtocolRef::Ws),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
+            Some(Protocol::Ws),
         ) => (
             either::Right((addr.to_string(), *port)),
             Some(format!("{}:{}", addr, *port)),

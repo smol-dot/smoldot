@@ -45,7 +45,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{
         connection,
-        multiaddr::{self, Multiaddr, ProtocolRef},
+        multiaddr::{self, Multiaddr, Protocol},
         peer_id::{self, PeerId},
     },
     network::{basic_peering_strategy, codec, service},
@@ -385,10 +385,10 @@ impl NetworkService {
                     let proto2 = iter.next();
                     let proto3 = iter.next();
                     match (proto1, proto2, proto3) {
-                        (Some(ProtocolRef::Ip4(ip)), Some(ProtocolRef::Tcp(port)), None) => {
+                        (Some(Protocol::Ip4(ip)), Some(Protocol::Tcp(port)), None) => {
                             Some(SocketAddr::from((ip, port)))
                         }
-                        (Some(ProtocolRef::Ip6(ip)), Some(ProtocolRef::Tcp(port)), None) => {
+                        (Some(Protocol::Ip6(ip)), Some(Protocol::Tcp(port)), None) => {
                             Some(SocketAddr::from((ip, port)))
                         }
                         _ => None,
@@ -456,10 +456,10 @@ impl NetworkService {
 
                         let multiaddr = [
                             match addr.ip() {
-                                IpAddr::V4(ip) => ProtocolRef::Ip4(ip.octets()),
-                                IpAddr::V6(ip) => ProtocolRef::Ip6(ip.octets()),
+                                IpAddr::V4(ip) => Protocol::<&[u8]>::Ip4(ip.octets()),
+                                IpAddr::V6(ip) => Protocol::Ip6(ip.octets()),
                             },
-                            ProtocolRef::Tcp(addr.port()),
+                            Protocol::Tcp(addr.port()),
                         ]
                         .into_iter()
                         .collect::<Multiaddr>();
