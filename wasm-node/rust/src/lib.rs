@@ -30,7 +30,7 @@ use alloc::{
     vec::Vec,
 };
 use async_lock::Mutex;
-use core::{future, mem, num::NonZeroU32, pin::Pin, str, task};
+use core::{num::NonZeroU32, pin::Pin, str, task};
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
 
@@ -345,10 +345,14 @@ impl alloc::task::Wake for JsonRpcResponsesNonEmptyWaker {
     }
 }
 
+/// List of light tasks waiting to be executed.
 static TASKS_QUEUE: crossbeam_queue::SegQueue<async_task::Runnable> =
     crossbeam_queue::SegQueue::new();
 
 fn advance_execution() {
+    // This function executes one task then returns. This ensures that the Wasm doesn't use up
+    // all the available CPU of the host.
+
     let Some(runnable) = TASKS_QUEUE.pop() else {
         return;
     };
