@@ -27,11 +27,11 @@ use core::{
 use super::multihash;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Multiaddr {
-    bytes: Vec<u8>,
+pub struct Multiaddr<T = Vec<u8>> {
+    bytes: T,
 }
 
-impl Multiaddr {
+impl Multiaddr<Vec<u8>> {
     /// Creates a new empty `Multiaddr`.
     pub fn empty() -> Self {
         Multiaddr { bytes: Vec::new() }
@@ -47,23 +47,6 @@ impl Multiaddr {
     /// Shrinks the memory used by the underlying container to its size.
     pub fn shrink_to_fit(&mut self) {
         self.bytes.shrink_to_fit();
-    }
-
-    /// Returns the serialized version of this `Multiaddr`.
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.bytes.clone()
-    }
-
-    /// Returns the serialized version of this `Multiaddr`.
-    pub fn into_vec(self) -> Vec<u8> {
-        self.bytes
-    }
-
-    /// Returns the list of components of the multiaddress.
-    pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> + '_ {
-        let mut iter =
-            nom::combinator::iterator(&self.bytes[..], protocol::<_, nom::error::Error<&'_ [u8]>>);
-        iter::from_fn(move || (&mut iter).next())
     }
 
     /// Pops the last protocol from the list.
@@ -87,14 +70,32 @@ impl Multiaddr {
     }
 }
 
-impl AsRef<[u8]> for Multiaddr {
-    fn as_ref(&self) -> &[u8] {
+impl<T> Multiaddr<T> {
+    /// Returns the serialized version of this `Multiaddr`.
+    pub fn into_bytes(self) -> T {
+        self.bytes
+    }
+}
+
+impl<T: AsRef<[u8]>> Multiaddr<T> {
+    /// Returns the list of components of the multiaddress.
+    pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> + '_ {
+        let mut iter = nom::combinator::iterator(
+            self.bytes.as_ref(),
+            protocol::<_, nom::error::Error<&'_ [u8]>>,
+        );
+        iter::from_fn(move || (&mut iter).next())
+    }
+}
+
+impl<T> AsRef<T> for Multiaddr<T> {
+    fn as_ref(&self) -> &T {
         &self.bytes
     }
 }
 
-impl<T: AsRef<[u8]>> From<Protocol<T>> for Multiaddr {
-    fn from(proto: Protocol<T>) -> Multiaddr {
+impl<T: AsRef<[u8]>> From<Protocol<T>> for Multiaddr<Vec<u8>> {
+    fn from(proto: Protocol<T>) -> Multiaddr<Vec<u8>> {
         let bytes = proto.as_bytes().fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
@@ -104,7 +105,7 @@ impl<T: AsRef<[u8]>> From<Protocol<T>> for Multiaddr {
     }
 }
 
-impl FromStr for Multiaddr {
+impl FromStr for Multiaddr<Vec<u8>> {
     type Err = ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
@@ -126,7 +127,7 @@ impl FromStr for Multiaddr {
     }
 }
 
-impl<T: AsRef<[u8]>> FromIterator<Protocol<T>> for Multiaddr {
+impl<T: AsRef<[u8]>> FromIterator<Protocol<T>> for Multiaddr<Vec<u8>> {
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = Protocol<T>>,
@@ -141,7 +142,7 @@ impl<T: AsRef<[u8]>> FromIterator<Protocol<T>> for Multiaddr {
     }
 }
 
-impl TryFrom<Vec<u8>> for Multiaddr {
+impl TryFrom<Vec<u8>> for Multiaddr<Vec<u8>> {
     type Error = FromVecError;
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
@@ -160,13 +161,13 @@ impl TryFrom<Vec<u8>> for Multiaddr {
     }
 }
 
-impl fmt::Debug for Multiaddr {
+impl<T: AsRef<[u8]>> fmt::Debug for Multiaddr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(&self, f)
     }
 }
 
-impl fmt::Display for Multiaddr {
+impl<T: AsRef<[u8]>> fmt::Display for Multiaddr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for protocol in self.iter() {
             fmt::Display::fmt(&protocol, f)?;
@@ -577,7 +578,7 @@ mod tests {
             let parsed = addr.parse::<Multiaddr>().unwrap();
             assert_eq!(parsed.to_string(), addr, "{}", addr);
             assert_eq!(
-                Multiaddr::try_from(parsed.to_vec()).unwrap(),
+                Multiaddr::try_from(parsed.as_ref().to_vec()).unwrap(),
                 parsed,
                 "{}",
                 addr

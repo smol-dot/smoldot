@@ -336,7 +336,7 @@ impl NetworkService {
                 // Note that we must call this function before `insert_address`, as documented
                 // in `basic_peering_strategy`.
                 peering_strategy.insert_chain_peer(chain_id, peer_id.clone(), usize::max_value());
-                peering_strategy.insert_address(&peer_id, addr.into_vec(), usize::max_value());
+                peering_strategy.insert_address(&peer_id, addr.into_bytes(), usize::max_value());
             }
 
             chain_names.insert(chain_id, chain.log_name);
@@ -843,7 +843,7 @@ async fn background_task(mut inner: Inner) {
                                 address_removed: Some(addr_rm),
                             } = inner.peering_strategy.insert_or_set_connected_address(
                                 &peer_id,
-                                remote_addr.clone().into_vec(),
+                                remote_addr.clone().into_bytes(),
                                 10, // TODO: constant
                             ) {
                                 let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
@@ -1180,7 +1180,7 @@ async fn background_task(mut inner: Inner) {
                             for addr in valid_addrs {
                                 match inner
                                     .peering_strategy
-                                     .insert_address(&peer_id, addr.into_vec(), 10) // TODO: constant
+                                     .insert_address(&peer_id, addr.into_bytes(), 10) // TODO: constant
                                     {
                                         basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
                                             let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
@@ -1474,7 +1474,7 @@ async fn background_task(mut inner: Inner) {
                         is_initiator: true,
                         noise_key: &inner.noise_key,
                     },
-                    multiaddr.clone().into_vec(),
+                    multiaddr.clone().into_bytes(),
                     Some(peer_id.clone()),
                     tx,
                 );
@@ -1569,7 +1569,7 @@ async fn background_task(mut inner: Inner) {
                         is_initiator: false,
                         noise_key: &inner.noise_key,
                     },
-                    multiaddr.clone().into_vec(),
+                    multiaddr.clone().into_bytes(),
                     None,
                     tx,
                 );

@@ -1431,9 +1431,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .insert_chain_peer(chain_id, peer_id.clone(), 30); // TODO: constant
 
                     for addr in addrs {
-                        let _ = task
-                            .peering_strategy
-                            .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
+                        let _ =
+                            task.peering_strategy
+                                .insert_address(&peer_id, addr.into_bytes(), 10);
+                        // TODO: constant
                     }
                 }
             }
@@ -1534,7 +1535,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     // TODO: if Bob says that its address is the same as Alice's, and we try to connect to both Alice and Bob, then the Bob connection will reach this path and set Alice's address as connected even though it's already connected; this will later cause a state mismatch when disconnecting
                     let _ = task.peering_strategy.insert_or_set_connected_address(
                         &peer_id,
-                        remote_addr.clone().into_vec(),
+                        remote_addr.clone().into_bytes(),
                         10,
                     );
                 } else {
@@ -1889,7 +1890,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     for addr in valid_addrs {
                         let _insert_result =
                             task.peering_strategy
-                                .insert_address(&peer_id, addr.into_vec(), 10); // TODO: constant
+                                .insert_address(&peer_id, addr.into_bytes(), 10); // TODO: constant
                         debug_assert!(!matches!(
                             _insert_result,
                             basic_peering_strategy::InsertAddressResult::UnknownPeer
@@ -2189,7 +2190,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     is_initiator: true,
                                     noise_key: &noise_key,
                                 },
-                                multiaddr.clone().into_vec(),
+                                multiaddr.clone().into_bytes(),
                                 Some(expected_peer_id.clone()),
                                 coordinator_to_connection_tx,
                             );
@@ -2246,7 +2247,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     remote_tls_certificate_multihash,
                                     noise_key: &noise_key,
                                 },
-                                multiaddr.clone().into_vec(),
+                                multiaddr.clone().into_bytes(),
                                 Some(expected_peer_id.clone()),
                                 coordinator_to_connection_tx,
                             );
