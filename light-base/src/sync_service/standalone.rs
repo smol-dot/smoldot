@@ -133,6 +133,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // Try to perform some CPU-heavy operations.
         // If any CPU-heavy verification was performed, then `queue_empty` will be `false`, in
         // which case we will loop again as soon as possible.
+        // TODO: integrate this within WakeUpReason, see https://github.com/smol-dot/smoldot/issues/1382 this is however complicated because process_one() moves out from sync, and that sync doesn't impl Sync, a refactor of AllSync might be necessary
         let queue_empty = {
             let mut queue_empty = true;
 
