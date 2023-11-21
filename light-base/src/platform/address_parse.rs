@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use smoldot::libp2p::{multiaddr::Protocol, multihash, Multiaddr};
+use smoldot::libp2p::multiaddr::{Multiaddr, Protocol};
 
 use super::{Address, ConnectionType, IpAddr, MultiStreamAddress};
 use core::str;
@@ -112,10 +112,8 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             Protocol::Ip4(ip),
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
-            Some(Protocol::Certhash(hash)),
+            Some(Protocol::Certhash(multihash)),
         ) => {
-            // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
-            let multihash = multihash::Multihash::from_bytes(&hash).unwrap();
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
@@ -133,10 +131,8 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             Protocol::Ip6(ip),
             Protocol::Udp(port),
             Some(Protocol::WebRtcDirect),
-            Some(Protocol::Certhash(hash)),
+            Some(Protocol::Certhash(multihash)),
         ) => {
-            // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
-            let multihash = multihash::Multihash::from_bytes(&hash).unwrap();
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }

@@ -20,11 +20,11 @@
 use alloc::{borrow::Cow, vec::Vec};
 use base64::Engine as _;
 use core::{
-    fmt, iter, ops,
+    fmt, iter,
     str::{self, FromStr},
 };
 
-use super::multihash;
+pub use super::multihash::{FromBytesError as MultihashFromBytesError, Multihash};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Multiaddr<T = Vec<u8>> {
@@ -190,7 +190,7 @@ pub enum ParseError {
     InvalidIp,
     NotBase58,
     InvalidDomainName,
-    InvalidMultihash(multihash::FromBytesError),
+    InvalidMultihash(MultihashFromBytesError),
     InvalidMemoryPayload,
     InvalidMultibase,
     InvalidBase64,
@@ -204,7 +204,7 @@ pub enum Protocol<T = Vec<u8>> {
     DnsAddr(DomainName<T>),
     Ip4([u8; 4]),
     Ip6([u8; 16]),
-    P2p(T), // TODO: a bit hacky because there's no "owned" equivalent to Multihash
+    P2p(Multihash<T>), // TODO: put directly a PeerId? unclear
     Quic,
     Tcp(u16),
     Tls,
@@ -216,7 +216,7 @@ pub enum Protocol<T = Vec<u8>> {
     Memory(u64),
     WebRtcDirect,
     /// Contains the multihash of the TLS certificate.
-    Certhash(T), // TODO: a bit hacky because there's no "owned" equivalent to Multihash
+    Certhash(Multihash<T>),
 }
 
 impl<'a> Protocol<Cow<'a, [u8]>> {
@@ -264,10 +264,10 @@ impl<'a> Protocol<Cow<'a, [u8]>> {
                 let decoded = bs58::decode(s)
                     .into_vec()
                     .map_err(|_| ParseError::NotBase58)?;
-                if let Err((err, _)) = multihash::Multihash::from_bytes(&decoded) {
-                    return Err(ParseError::InvalidMultihash(err));
-                }
-                Ok(Protocol::P2p(Cow::Owned(decoded)))
+                Ok(Protocol::P2p(
+                    Multihash::from_bytes(Cow::Owned(decoded))
+                        .map_err(|(err, _)| ParseError::InvalidMultihash(err))?,
+                ))
             }
             "tcp" => {
                 let port = iter.next().ok_or(ParseError::UnexpectedEof)?;
@@ -306,10 +306,10 @@ impl<'a> Protocol<Cow<'a, [u8]>> {
                 let decoded = base64_flavor
                     .decode(&s[1..])
                     .map_err(|_| ParseError::InvalidBase64)?;
-                if let Err((err, _)) = multihash::Multihash::from_bytes(&decoded) {
-                    return Err(ParseError::InvalidMultihash(err));
-                }
-                Ok(Protocol::Certhash(Cow::Owned(decoded)))
+                Ok(Protocol::Certhash(
+                    Multihash::from_bytes(Cow::Owned(decoded))
+                        .map_err(|(err, _)| ParseError::InvalidMultihash(err))?,
+                ))
             }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
@@ -354,7 +354,7 @@ impl<T: AsRef<[u8]>> Protocol<T> {
             Protocol::Ip4(ip) => ip.to_vec(),
             Protocol::Ip6(ip) => ip.to_vec(),
             Protocol::P2p(multihash) => {
-                let multihash = multihash.as_ref();
+                let multihash = multihash.as_ref().as_ref();
                 // TODO: what if not a valid multihash? the enum variant can be constructed by the user
                 let mut out = Vec::with_capacity(multihash.len() + 4);
                 out.extend(crate::util::leb128::encode_usize(multihash.len()));
@@ -364,7 +364,7 @@ impl<T: AsRef<[u8]>> Protocol<T> {
             Protocol::Tcp(port) | Protocol::Udp(port) => port.to_be_bytes().to_vec(),
             Protocol::Memory(payload) => payload.to_be_bytes().to_vec(),
             Protocol::Certhash(multihash) => {
-                let multihash = multihash.as_ref();
+                let multihash = multihash.as_ref().as_ref();
                 // TODO: what if not a valid multihash? the enum variant can be constructed by the user
                 let mut out = Vec::with_capacity(multihash.len() + 4);
                 out.extend(crate::util::leb128::encode_usize(multihash.len()));
@@ -400,7 +400,7 @@ impl<T: AsRef<[u8]>> fmt::Display for Protocol<T> {
             Protocol::Ip6(ip) => write!(f, "/ip6/{}", no_std_net::Ipv6Addr::from(*ip)),
             Protocol::P2p(multihash) => {
                 // Base58 encoding doesn't have `/` in its characters set.
-                write!(f, "/p2p/{}", bs58::encode(multihash).into_string())
+                write!(f, "/p2p/{}", bs58::encode(multihash.as_ref()).into_string())
             }
             Protocol::Quic => write!(f, "/quic"),
             Protocol::Tcp(port) => write!(f, "/tcp/{port}"),
@@ -414,7 +414,7 @@ impl<T: AsRef<[u8]>> fmt::Display for Protocol<T> {
                 write!(
                     f,
                     "/certhash/u{}",
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(multihash)
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(multihash.as_ref())
                 )
             }
         }
@@ -535,11 +535,11 @@ fn protocol<'a, T: From<&'a [u8]> + AsRef<[u8]>, E: nom::error::ParseError<&'a [
             )(bytes),
             273 => nom::combinator::map(nom::number::streaming::be_u16, Protocol::Udp)(bytes),
             421 => nom::combinator::map(
-                nom::combinator::verify(
+                nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::Multihash::<&[u8]>::from_bytes(s).is_ok(),
+                    |s| Multihash::from_bytes(From::from(s)).ok(),
                 ),
-                |b| Protocol::P2p(From::from(b)),
+                Protocol::P2p,
             )(bytes),
             448 => Ok((bytes, Protocol::Tls)),
             460 => Ok((bytes, Protocol::Quic)),
@@ -549,11 +549,11 @@ fn protocol<'a, T: From<&'a [u8]> + AsRef<[u8]>, E: nom::error::ParseError<&'a [
             777 => nom::combinator::map(nom::number::streaming::be_u64, Protocol::Memory)(bytes),
             280 => Ok((bytes, Protocol::WebRtcDirect)),
             466 => nom::combinator::map(
-                nom::combinator::verify(
+                nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::Multihash::<&[u8]>::from_bytes(s).is_ok(),
+                    |s| Multihash::from_bytes(From::from(s)).ok(),
                 ),
-                |b| Protocol::Certhash(From::from(b)),
+                Protocol::Certhash,
             )(bytes),
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
