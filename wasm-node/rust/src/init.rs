@@ -17,8 +17,12 @@
 
 use crate::{allocator, bindings, platform, timers::Delay};
 
-use alloc::{boxed::Box, format, string::{String, ToString as _}};
-use core::{sync::atomic::Ordering, time::Duration, panic::PanicInfo};
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+};
+use core::{panic::PanicInfo, sync::atomic::Ordering, time::Duration};
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
@@ -55,8 +59,8 @@ pub(crate) enum Chain {
 }
 
 pub(crate) fn init(max_log_level: u32) {
-    // Try initialize the logging and the panic hook.
-    let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
+    // Try initialize the logging.
+    if let Ok(_) = log::set_logger(&LOGGER) {
         log::set_max_level(match max_log_level {
             0 => log::LevelFilter::Off,
             1 => log::LevelFilter::Error,
@@ -65,7 +69,7 @@ pub(crate) fn init(max_log_level: u32) {
             4 => log::LevelFilter::Debug,
             _ => log::LevelFilter::Trace,
         })
-    });
+    }
 
     // First things first, print the version in order to make it easier to debug issues by
     // reading logs provided by third parties.
@@ -120,7 +124,7 @@ pub(crate) fn init(max_log_level: u32) {
         }),
     );
 }
-/*
+
 /// Stops execution, providing a string explaining what happened.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -140,10 +144,11 @@ fn panic(info: &PanicInfo) -> ! {
         #[cfg(not(target_arch = "wasm32"))]
         unreachable!();
     }
-}*/
+}
 
 /// Implementation of [`log::Log`] that sends out logs to the FFI.
 struct Logger;
+static LOGGER: Logger = Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, _: &log::Metadata) -> bool {
