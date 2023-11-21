@@ -17,12 +17,8 @@
 
 use crate::{allocator, bindings, platform, timers::Delay};
 
-use alloc::{
-    boxed::Box,
-    format,
-    string::String,
-};
-use core::sync::atomic::Ordering, time::Duration;
+use alloc::{boxed::Box, format, string::String};
+use core::{sync::atomic::Ordering, time::Duration};
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
