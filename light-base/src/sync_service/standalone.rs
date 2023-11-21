@@ -274,9 +274,163 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         };
 
         match wake_up_reason {
-            WakeUpReason::NetworkEvent(network_event) => {
-                // Something happened on the networking.
-                task.inject_network_event(network_event);
+            WakeUpReason::NetworkEvent(network_service::Event::Connected {
+                peer_id,
+                role,
+                best_block_number,
+                best_block_hash,
+            }) => {
+                task.peers_source_id_map.insert(
+                    peer_id.clone(),
+                    task.sync
+                        .add_source((peer_id, role), best_block_number, best_block_hash),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }) => {
+                let sync_source_id = task.peers_source_id_map.remove(&peer_id).unwrap();
+                let (_, requests) = task.sync.remove_source(sync_source_id);
+
+                // The `Disconnect` network event indicates that the main notifications substream
+                // with that peer has been closed, not necessarily that the connection as a whole
+                // has been closed. As such, the in-progress network requests might continue if
+                // we don't abort them.
+                for (_, abort) in requests {
+                    abort.abort();
+                }
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                peer_id,
+                announce,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                let decoded = announce.decode();
+
+                match header::decode(decoded.scale_encoded_header, task.sync.block_number_bytes()) {
+                    Ok(decoded_header) => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
+                            peer_id,
+                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
+                            decoded.is_best,
+                            HashDisplay(decoded_header.parent_hash)
+                        );
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
+                            peer_id,
+                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
+                            decoded.is_best,
+                        );
+
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync => InvalidBlockHeader(error={})",
+                            error
+                        );
+
+                        log::warn!(
+                            target: &task.log_target,
+                            "Failed to decode header in block announce received from {}. Error: {}",
+                            peer_id, error,
+                        )
+                    }
+                }
+
+                match task.sync.block_announce(
+                    sync_source_id,
+                    decoded.scale_encoded_header.to_owned(),
+                    decoded.is_best,
+                ) {
+                    all::BlockAnnounceOutcome::HeaderVerify
+                    | all::BlockAnnounceOutcome::AlreadyInChain => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync => Ok"
+                        );
+                    }
+                    all::BlockAnnounceOutcome::Discarded => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync => Discarded"
+                        );
+                    }
+                    all::BlockAnnounceOutcome::StoredForLater {} => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync => StoredForLater"
+                        );
+                    }
+                    all::BlockAnnounceOutcome::TooOld {
+                        announce_block_height,
+                        ..
+                    } => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync => TooOld"
+                        );
+
+                        log::warn!(
+                            target: &task.log_target,
+                            "Block announce header height (#{}) from {} is below finalized block",
+                            announce_block_height,
+                            peer_id
+                        );
+                    }
+                    all::BlockAnnounceOutcome::NotFinalizedChain => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync => NotFinalized"
+                        );
+
+                        log::warn!(
+                            target: &task.log_target,
+                            "Block announce from {} isn't part of finalized chain",
+                            peer_id
+                        );
+                    }
+                    all::BlockAnnounceOutcome::InvalidHeader(_) => {
+                        // Log messages are already printed above.
+                    }
+                }
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {
+                peer_id,
+                finalized_block_height,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                task.sync
+                    .update_source_finality_state(sync_source_id, finalized_block_height);
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::GrandpaCommitMessage {
+                peer_id,
+                message,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                match task
+                    .sync
+                    .grandpa_commit_message(sync_source_id, message.into_encoded())
+                {
+                    all::GrandpaCommitMessageOutcome::Queued => {
+                        // TODO: print more details?
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync <= QueuedGrandpaCommit"
+                        );
+                    }
+                    all::GrandpaCommitMessageOutcome::Discarded => {
+                        log::debug!(
+                            target: &task.log_target,
+                            "Sync <= IgnoredGrandpaCommit"
+                        );
+                    }
+                }
             }
 
             WakeUpReason::MustSubscribeNetworkEvents => {
@@ -1147,164 +1301,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
         }
 
         (self, true)
-    }
-
-    /// Updates the task with a new event coming from the network service.
-    fn inject_network_event(&mut self, network_event: network_service::Event) {
-        match network_event {
-            network_service::Event::Connected {
-                peer_id,
-                role,
-                best_block_number,
-                best_block_hash,
-            } => {
-                self.peers_source_id_map.insert(
-                    peer_id.clone(),
-                    self.sync
-                        .add_source((peer_id, role), best_block_number, best_block_hash),
-                );
-            }
-
-            network_service::Event::Disconnected { peer_id } => {
-                let sync_source_id = self.peers_source_id_map.remove(&peer_id).unwrap();
-                let (_, requests) = self.sync.remove_source(sync_source_id);
-
-                // The `Disconnect` network event indicates that the main notifications substream
-                // with that peer has been closed, not necessarily that the connection as a whole
-                // has been closed. As such, the in-progress network requests might continue if
-                // we don't abort them.
-                for (_, abort) in requests {
-                    abort.abort();
-                }
-            }
-
-            network_service::Event::BlockAnnounce { peer_id, announce } => {
-                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                let decoded = announce.decode();
-
-                match header::decode(decoded.scale_encoded_header, self.sync.block_number_bytes()) {
-                    Ok(decoded_header) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                            HashDisplay(decoded_header.parent_hash)
-                        );
-                    }
-                    Err(error) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                        );
-
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => InvalidBlockHeader(error={})",
-                            error
-                        );
-
-                        log::warn!(
-                            target: &self.log_target,
-                            "Failed to decode header in block announce received from {}. Error: {}",
-                            peer_id, error,
-                        )
-                    }
-                }
-
-                match self.sync.block_announce(
-                    sync_source_id,
-                    decoded.scale_encoded_header.to_owned(),
-                    decoded.is_best,
-                ) {
-                    all::BlockAnnounceOutcome::HeaderVerify
-                    | all::BlockAnnounceOutcome::AlreadyInChain => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => Ok"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::Discarded => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => Discarded"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::StoredForLater {} => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => StoredForLater"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::TooOld {
-                        announce_block_height,
-                        ..
-                    } => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => TooOld"
-                        );
-
-                        log::warn!(
-                            target: &self.log_target,
-                            "Block announce header height (#{}) from {} is below finalized block",
-                            announce_block_height,
-                            peer_id
-                        );
-                    }
-                    all::BlockAnnounceOutcome::NotFinalizedChain => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => NotFinalized"
-                        );
-
-                        log::warn!(
-                            target: &self.log_target,
-                            "Block announce from {} isn't part of finalized chain",
-                            peer_id
-                        );
-                    }
-                    all::BlockAnnounceOutcome::InvalidHeader(_) => {
-                        // Log messages are already printed above.
-                    }
-                }
-            }
-
-            network_service::Event::GrandpaNeighborPacket {
-                peer_id,
-                finalized_block_height,
-            } => {
-                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                self.sync
-                    .update_source_finality_state(sync_source_id, finalized_block_height);
-            }
-
-            network_service::Event::GrandpaCommitMessage { peer_id, message } => {
-                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                match self
-                    .sync
-                    .grandpa_commit_message(sync_source_id, message.into_encoded())
-                {
-                    all::GrandpaCommitMessageOutcome::Queued => {
-                        // TODO: print more details?
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= QueuedGrandpaCommit"
-                        );
-                    }
-                    all::GrandpaCommitMessageOutcome::Discarded => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= IgnoredGrandpaCommit"
-                        );
-                    }
-                }
-            }
-        }
     }
 
     /// Sends a notification to all the notification receivers.
