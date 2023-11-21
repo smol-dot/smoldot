@@ -22,8 +22,11 @@ use futures_lite::future::FutureExt as _;
 use smoldot_light::platform::{read_write, SubstreamDirection};
 
 use alloc::{
-    borrow::Cow,
+    borrow::{Cow, ToOwned as _},
+    boxed::Box,
     collections::{BTreeMap, VecDeque},
+    string::{String, ToString as _},
+    vec::Vec,
 };
 use async_lock::Mutex;
 use core::{

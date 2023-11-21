@@ -50,6 +50,8 @@
 //! they are treated as unsigned integers by the JavaScript.
 //!
 
+use alloc::vec::Vec;
+
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
     /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of

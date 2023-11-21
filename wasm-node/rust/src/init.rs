@@ -17,11 +17,11 @@
 
 use crate::{allocator, bindings, platform, timers::Delay};
 
-use core::{sync::atomic::Ordering, time::Duration};
+use alloc::{boxed::Box, format, string::{String, ToString as _}};
+use core::{sync::atomic::Ordering, time::Duration, panic::PanicInfo};
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
-use std::panic;
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
@@ -66,9 +66,6 @@ pub(crate) fn init(max_log_level: u32) {
             _ => log::LevelFilter::Trace,
         })
     });
-    panic::set_hook(Box::new(|info| {
-        panic(info.to_string());
-    }));
 
     // First things first, print the version in order to make it easier to debug issues by
     // reading logs provided by third parties.
@@ -125,7 +122,10 @@ pub(crate) fn init(max_log_level: u32) {
 }
 
 /// Stops execution, providing a string explaining what happened.
-fn panic(message: String) -> ! {
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    let message = info.to_string();
+
     unsafe {
         bindings::panic(
             u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
