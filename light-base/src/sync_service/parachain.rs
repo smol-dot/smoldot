@@ -82,11 +82,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
                 let relay_chain_sync = relay_chain_sync.clone();
                 Box::pin(async move {
                     relay_chain_sync
-                        .subscribe_all(
-                            "parachain-sync",
-                            32,
-                            NonZeroUsize::new(usize::max_value()).unwrap(),
-                        )
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await
                 })
             },
@@ -371,7 +367,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             Box::pin(async move {
                                 relay_chain_sync
                                     .subscribe_all(
-                                        "parachain-sync",
                                         32,
                                         NonZeroUsize::new(usize::max_value()).unwrap(),
                                     )
@@ -787,11 +782,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         let relay_chain_sync = self.relay_chain_sync.clone();
                         Box::pin(async move {
                             relay_chain_sync
-                                .subscribe_all(
-                                    "parachain-sync",
-                                    32,
-                                    NonZeroUsize::new(usize::max_value()).unwrap(),
-                                )
+                                .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                                 .await
                         })
                     },
