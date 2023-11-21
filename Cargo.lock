@@ -920,6 +920,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlmalloc"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "203540e710bfadb90e5e29930baf5d10270cec1f43ab34f46f78b147b2de715a"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2490,9 +2499,11 @@ dependencies = [
 name = "smoldot-light-wasm"
 version = "2.0.10"
 dependencies = [
- "async-executor",
+ "async-lock 3.1.1",
  "async-task",
+ "crossbeam-queue",
  "derive_more",
+ "dlmalloc",
  "event-listener 3.1.0",
  "fnv",
  "futures-lite 2.0.1",
