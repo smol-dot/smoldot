@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{alloc, bindings, platform, timers::Delay};
+use crate::{allocator, bindings, platform, timers::Delay};
 
 use core::time::Duration;
 use futures_util::stream;
@@ -92,7 +92,7 @@ pub(crate) fn init(max_log_level: u32) {
 
                 // For the unwrap below to fail, the quantity of allocated would have to
                 // not fit in a `u64`, which as of 2021 is basically impossible.
-                let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                let mem = u64::try_from(allocator::total_alloc_bytes()).unwrap();
 
                 // Due to the way the calculation below is performed, sending or receiving
                 // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`

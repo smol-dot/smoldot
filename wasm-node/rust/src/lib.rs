@@ -30,7 +30,7 @@ use std::{
 
 pub mod bindings;
 
-mod alloc;
+mod allocator;
 mod init;
 mod platform;
 mod timers;
@@ -57,7 +57,7 @@ fn add_chain(
     // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
     // OOM errors. The threshold is completely empirical and should probably be updated
     // regularly to account for changes in the implementation.
-    if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+    if allocator::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
         let chain_id = client_lock.chains.insert(init::Chain::Erroneous {
             error:
                 "Wasm node is running low on memory and will prevent any new chain from being added"
