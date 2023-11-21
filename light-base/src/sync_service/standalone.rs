@@ -273,11 +273,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             .await
         };
 
-        let response_outcome = match wake_up_reason {
+        match wake_up_reason {
             WakeUpReason::NetworkEvent(network_event) => {
                 // Something happened on the networking.
                 task.inject_network_event(network_event);
-                continue;
             }
 
             WakeUpReason::MustSubscribeNetworkEvents => {
@@ -292,7 +291,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     // As documented, `subscribe().await` is expected to return quickly.
                     task.network_service.subscribe(task.network_chain_id).await,
                 ));
-                continue;
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
@@ -300,7 +298,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             }) => {
                 // Frontend is querying something.
                 let _ = send_back.send(task.sync.is_near_head_of_chain_heuristic());
-                continue;
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
@@ -344,8 +341,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     non_finalized_blocks_ancestry_order,
                     new_blocks,
                 });
-
-                continue;
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
@@ -375,7 +370,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         .collect()
                 };
                 let _ = send_back.send(outcome);
-                continue;
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }) => {
@@ -390,7 +384,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     })
                     .collect::<Vec<_>>();
                 let _ = send_back.send(out);
-                continue;
             }
 
             WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
@@ -398,7 +391,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             }) => {
                 // Frontend is querying the chain information.
                 let _ = send_back.send(Some(task.sync.as_chain_information().into()));
-                continue;
             }
 
             WakeUpReason::ForegroundClosed => {
@@ -415,7 +407,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 };
 
                 // Inject the result of the request into the sync state machine.
-                match result {
+                let response_outcome = match result {
                     RequestOutcome::Block(Ok(v)) => {
                         task.sync
                             .blocks_request_response(
@@ -477,6 +469,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     RequestOutcome::CallProof(Err(err)) => {
                         task.sync.call_proof_response(request_id, Err(err)).1
                     }
+                };
+
+                // `response_outcome` represents the way the state machine has changed as a
+                // consequence of the response to a request.
+                match response_outcome {
+                    all::ResponseOutcome::Outdated
+                    | all::ResponseOutcome::Queued
+                    | all::ResponseOutcome::NotFinalizedChain { .. }
+                    | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
                 }
             }
 
@@ -512,22 +513,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         );
                     }
                 };
-
-                continue;
             }
 
-            WakeUpReason::MustLoopAgain => {
-                continue;
-            }
-        };
-
-        // `response_outcome` represents the way the state machine has changed as a
-        // consequence of the response to a request.
-        match response_outcome {
-            all::ResponseOutcome::Outdated
-            | all::ResponseOutcome::Queued
-            | all::ResponseOutcome::NotFinalizedChain { .. }
-            | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
+            WakeUpReason::MustLoopAgain => {}
         }
     }
 }
