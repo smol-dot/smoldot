@@ -20,6 +20,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
+extern crate alloc;
+
 use core::{future, mem, num::NonZeroU32, pin::Pin, str};
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;

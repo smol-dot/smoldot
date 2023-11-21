@@ -19,7 +19,7 @@
 //! simple, apart from the fact that it counts the total number of bytes that have been allocated.
 //! This value can then be retrieved by calling [`total_alloc_bytes`].
 
-use std::{alloc, sync::atomic};
+use core::{alloc, sync::atomic};
 
 /// Returns the total number of bytes that have been allocated through the Rust `alloc` crate
 /// throughout the entire Wasm node.
@@ -28,13 +28,10 @@ pub fn total_alloc_bytes() -> usize {
 }
 
 struct AllocCounter {
-    /// Use the default "system" allocator. In the context of Wasm, this uses the `dlmalloc`
-    /// library. See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
-    ///
-    /// While the `wee_alloc` crate is usually the recommended choice in WebAssembly, testing has
-    /// shown that using it makes memory usage explode from `~100MiB` to `~2GiB` and more (the
-    /// environment then refuses to allocate `4GiB`).
-    inner: alloc::System,
+    /// Use the `dlmalloc` allocator. This is the library that the Rust standard library uses in
+    /// the context of Wasm.
+    /// See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
+    inner: dlmalloc::GlobalDlmalloc,
 
     /// Total number of bytes allocated.
     total: atomic::AtomicUsize,
@@ -42,7 +39,7 @@ struct AllocCounter {
 
 #[global_allocator]
 static ALLOCATOR: AllocCounter = AllocCounter {
-    inner: alloc::System,
+    inner: dlmalloc::GlobalDlmalloc,
     total: atomic::AtomicUsize::new(0),
 };
 
