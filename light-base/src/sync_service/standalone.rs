@@ -423,7 +423,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     task.sync.best_block_number(),
                 );
                 fut.await;
-    
+
                 task.network_up_to_date_best = true;
             }
 
@@ -442,7 +442,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     } else {
                         None
                     };
-    
+
                 if let Some(set_id) = grandpa_set_id {
                     let commit_finalized_height = task.sync.finalized_block_header().number;
                     task.network_service
@@ -456,7 +456,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         )
                         .await;
                 }
-    
+
                 task.network_up_to_date_finalized = true;
             }
 
@@ -566,86 +566,76 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 return;
             }
 
-            WakeUpReason::RequestFinished(request_id, result) => {
-                // A request has been finished.
-                // `result` is an error if the request got cancelled by the sync state machine.
-                let Ok(result) = result else {
-                    continue;
-                };
+            WakeUpReason::RequestFinished(_, Err(_)) => {
+                // A request has been cancelled by the sync state machine. Nothing to do.
+            }
 
-                // Inject the result of the request into the sync state machine.
-                let response_outcome = match result {
-                    RequestOutcome::Block(Ok(v)) => {
-                        task.sync
-                            .blocks_request_response(
-                                request_id,
-                                Ok(v.into_iter().filter_map(|block| {
-                                    Some(all::BlockRequestSuccessBlock {
-                                        scale_encoded_header: block.header?,
-                                        scale_encoded_justifications: block
-                                            .justifications
-                                            .unwrap_or(Vec::new())
-                                            .into_iter()
-                                            .map(|j| all::Justification {
-                                                engine_id: j.engine_id,
-                                                justification: j.justification,
-                                            })
-                                            .collect(),
-                                        scale_encoded_extrinsics: Vec::new(),
-                                        user_data: (),
-                                    })
-                                })),
-                            )
-                            .1
-                    }
-                    RequestOutcome::Block(Err(_)) => {
-                        // TODO: should disconnect peer
-                        task.sync
-                            .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()))
-                            .1
-                    }
-                    RequestOutcome::WarpSync(Ok(result)) => {
-                        let decoded = result.decode();
-                        let fragments = decoded
-                            .fragments
-                            .into_iter()
-                            .map(|f| all::WarpSyncFragment {
-                                scale_encoded_header: f.scale_encoded_header.to_vec(),
-                                scale_encoded_justification: f.scale_encoded_justification.to_vec(),
-                            })
-                            .collect();
-                        task.sync
-                            .grandpa_warp_sync_response_ok(
-                                request_id,
-                                fragments,
-                                decoded.is_finished,
-                            )
-                            .1
-                    }
-                    RequestOutcome::WarpSync(Err(_)) => {
-                        // TODO: should disconnect peer
-                        task.sync.grandpa_warp_sync_response_err(request_id);
-                        continue;
-                    }
-                    RequestOutcome::Storage(r) => task.sync.storage_get_response(request_id, r).1,
-                    RequestOutcome::CallProof(Ok(r)) => {
-                        task.sync
-                            .call_proof_response(request_id, Ok(r.decode().to_owned()))
-                            .1
-                    } // TODO: need help from networking service to avoid this to_owned
-                    RequestOutcome::CallProof(Err(err)) => {
-                        task.sync.call_proof_response(request_id, Err(err)).1
-                    }
-                };
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Ok(v)))) => {
+                // Successful block request.
+                task.sync.blocks_request_response(
+                    request_id,
+                    Ok(v.into_iter().filter_map(|block| {
+                        Some(all::BlockRequestSuccessBlock {
+                            scale_encoded_header: block.header?,
+                            scale_encoded_justifications: block
+                                .justifications
+                                .unwrap_or(Vec::new())
+                                .into_iter()
+                                .map(|j| all::Justification {
+                                    engine_id: j.engine_id,
+                                    justification: j.justification,
+                                })
+                                .collect(),
+                            scale_encoded_extrinsics: Vec::new(),
+                            user_data: (),
+                        })
+                    })),
+                );
+            }
 
-                // `response_outcome` represents the way the state machine has changed as a
-                // consequence of the response to a request.
-                match response_outcome {
-                    all::ResponseOutcome::Outdated
-                    | all::ResponseOutcome::Queued
-                    | all::ResponseOutcome::NotFinalizedChain { .. }
-                    | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-                }
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Err(_)))) => {
+                // Failed block request.
+                // TODO: should disconnect peer
+                task.sync
+                    .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Ok(result)))) => {
+                // Successful warp sync request.
+                let decoded = result.decode();
+                let fragments = decoded
+                    .fragments
+                    .into_iter()
+                    .map(|f| all::WarpSyncFragment {
+                        scale_encoded_header: f.scale_encoded_header.to_vec(),
+                        scale_encoded_justification: f.scale_encoded_justification.to_vec(),
+                    })
+                    .collect();
+                task.sync
+                    .grandpa_warp_sync_response_ok(request_id, fragments, decoded.is_finished);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Err(_)))) => {
+                // Failed warp sync request.
+                // TODO: should disconnect peer
+                task.sync.grandpa_warp_sync_response_err(request_id);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(r))) => {
+                // Storage proof request.
+                task.sync.storage_get_response(request_id, r);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Ok(r)))) => {
+                // Successful call proof request.
+                task.sync
+                    .call_proof_response(request_id, Ok(r.decode().to_owned()));
+                // TODO: need help from networking service to avoid this to_owned
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(err)))) => {
+                // Failed call proof request.
+                task.sync.call_proof_response(request_id, Err(err));
             }
 
             WakeUpReason::WarpSyncTakingLongTimeWarning => {
