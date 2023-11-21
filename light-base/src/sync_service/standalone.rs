@@ -219,20 +219,25 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         .fuse();
                 WakeUpReason::WarpSyncTakingLongTimeWarning
             })
-            .or(async {
+            .or({
                 // `desired_requests()` returns, in decreasing order of priority, the requests
                 // that should be started in order for the syncing to proceed. The fact that
                 // multiple requests are returned could be used to filter out undesired one. We
                 // use this filtering to enforce a maximum of one ongoing request per source.
-                let (source_id, _, request_detail) =
-                    match task.sync.desired_requests().find(|(source_id, _, _)| {
+                let desired_request = task
+                    .sync
+                    .desired_requests()
+                    .find(|(source_id, _, _)| {
                         task.sync.source_num_ongoing_requests(*source_id) == 0
-                    }) {
-                        Some(v) => v,
-                        None => future::pending().await,
-                    };
-
-                WakeUpReason::StartRequest(source_id, request_detail)
+                    })
+                    .map(|(source_id, _, request_detail)| (source_id, request_detail));
+                async move {
+                    if let Some((source_id, request_detail)) = desired_request {
+                        WakeUpReason::StartRequest(source_id, request_detail)
+                    } else {
+                        future::pending().await
+                    }
+                }
             })
             .or(async {
                 // If the list of CPU-heavy operations to perform is potentially non-empty,
