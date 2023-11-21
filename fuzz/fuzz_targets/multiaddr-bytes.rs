@@ -20,5 +20,5 @@
 use core::convert::TryFrom as _;
 
 libfuzzer_sys::fuzz_target!(|data: Vec<u8>| {
-    let _ = smoldot::libp2p::multiaddr::Multiaddr::try_from(data);
+    let _ = smoldot::libp2p::multiaddr::Multiaddr::from_bytes(data);
 });

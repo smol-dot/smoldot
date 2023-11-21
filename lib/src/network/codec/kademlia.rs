@@ -93,7 +93,7 @@ pub enum DecodeFindNodeResponseError {
     BadPeerId(peer_id::FromBytesError),
     /// Error while parsing a [`multiaddr::Multiaddr`] in the response.
     #[display(fmt = "Invalid multiaddress: {_0}")]
-    BadMultiaddr(multiaddr::FromVecError),
+    BadMultiaddr(multiaddr::FromBytesError),
 }
 
 /// Error while decoding the Protobuf encoding.

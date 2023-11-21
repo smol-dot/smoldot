@@ -20,7 +20,7 @@
 use alloc::{borrow::Cow, vec::Vec};
 use base64::Engine as _;
 use core::{
-    fmt, iter,
+    fmt, iter, ops,
     str::{self, FromStr},
 };
 
@@ -78,6 +78,23 @@ impl<T> Multiaddr<T> {
 }
 
 impl<T: AsRef<[u8]>> Multiaddr<T> {
+    /// Checks whether the given bytes have the proper format, and if so wraps them
+    /// around a [`Multiaddr`].
+    pub fn from_bytes(bytes: T) -> Result<Self, (FromBytesError, T)> {
+        // Check whether this is indeed a valid list of protocols.
+        if nom::combinator::all_consuming(nom::multi::fold_many0(
+            nom::combinator::complete(protocol::<&[u8], nom::error::Error<&[u8]>>),
+            || (),
+            |(), _| (),
+        ))(bytes.as_ref())
+        .is_err()
+        {
+            return Err((FromBytesError, bytes));
+        }
+
+        Ok(Multiaddr { bytes })
+    }
+
     /// Returns the list of components of the multiaddress.
     pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> + '_ {
         let mut iter = nom::combinator::iterator(
@@ -142,25 +159,6 @@ impl<T: AsRef<[u8]>> FromIterator<Protocol<T>> for Multiaddr<Vec<u8>> {
     }
 }
 
-impl TryFrom<Vec<u8>> for Multiaddr<Vec<u8>> {
-    type Error = FromVecError;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        // Check whether this is indeed a valid list of protocols.
-        if nom::combinator::all_consuming(nom::multi::fold_many0(
-            nom::combinator::complete(protocol::<&[u8], nom::error::Error<&[u8]>>),
-            || (),
-            |(), _| (),
-        ))(&bytes)
-        .is_err()
-        {
-            return Err(FromVecError { addr: bytes });
-        }
-
-        Ok(Multiaddr { bytes })
-    }
-}
-
 impl<T: AsRef<[u8]>> fmt::Debug for Multiaddr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(&self, f)
@@ -177,12 +175,9 @@ impl<T: AsRef<[u8]>> fmt::Display for Multiaddr<T> {
     }
 }
 
-// TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 #[display(fmt = "Unable to parse multiaddress")]
-pub struct FromVecError {
-    pub addr: Vec<u8>,
-}
+pub struct FromBytesError;
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
@@ -578,7 +573,7 @@ mod tests {
             let parsed = addr.parse::<Multiaddr>().unwrap();
             assert_eq!(parsed.to_string(), addr, "{}", addr);
             assert_eq!(
-                Multiaddr::try_from(parsed.as_ref().to_vec()).unwrap(),
+                Multiaddr::from_bytes(parsed.as_ref().to_vec()).unwrap(),
                 parsed,
                 "{}",
                 addr

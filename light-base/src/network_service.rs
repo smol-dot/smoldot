@@ -1447,7 +1447,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             let addrs = task
                                 .peering_strategy
                                 .peer_addresses(peer_id)
-                                .map(|a| Multiaddr::try_from(a.to_owned()).unwrap())
+                                .map(|a| Multiaddr::from_bytes(a.to_owned()).unwrap())
                                 .collect::<Vec<_>>();
                             (peer_id.clone(), addrs)
                         })
@@ -1524,8 +1524,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 id,
             }) => {
                 let remote_addr =
-                    Multiaddr::try_from(task.network.connection_remote_addr(id).to_owned())
-                        .unwrap(); // TODO: review this unwrap
+                    Multiaddr::from_bytes(task.network.connection_remote_addr(id)).unwrap(); // TODO: review this unwrap
                 if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
                 {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
@@ -1535,7 +1534,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     // TODO: if Bob says that its address is the same as Alice's, and we try to connect to both Alice and Bob, then the Bob connection will reach this path and set Alice's address as connected even though it's already connected; this will later cause a state mismatch when disconnecting
                     let _ = task.peering_strategy.insert_or_set_connected_address(
                         &peer_id,
-                        remote_addr.clone().into_bytes(),
+                        remote_addr.into_bytes().to_vec(),
                         10,
                     );
                 } else {
@@ -1564,7 +1563,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.peering_strategy
                     .disconnect_addr(&peer_id, &address)
                     .unwrap();
-                let address = Multiaddr::try_from(address).unwrap();
+                let address = Multiaddr::from_bytes(address).unwrap();
                 log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished={handshake_finished:?})", peer_id, address);
 
                 // Ban the peer in order to avoid trying over and over again the same address(es).
@@ -1828,7 +1827,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
-                        match Multiaddr::try_from(addr) {
+                        match Multiaddr::from_bytes(addr) {
                             Ok(a) => {
                                 if platform::address_parse::multiaddr_to_address(&a)
                                     .ok()
@@ -1847,13 +1846,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     );
                                 }
                             }
-                            Err(err) => {
+                            Err((err, addr)) => {
                                 log::debug!(
                                     target: "network",
-                                    "Discovery({}) => InvalidAddress(peer_id={}, addr={})",
+                                    "Discovery({}) => InvalidAddress(peer_id={}, error={}, addr={})",
                                     &task.network[chain_id].log_name,
                                     peer_id,
-                                    hex::encode(&err.addr)
+                                    err,
+                                    hex::encode(&addr)
                                 );
                             }
                         }
@@ -2120,9 +2120,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     continue;
                 };
 
-                let multiaddr = match multiaddr::Multiaddr::try_from(multiaddr.to_owned()) {
+                let multiaddr = match multiaddr::Multiaddr::from_bytes(multiaddr.to_owned()) {
                     Ok(a) => a,
-                    Err(multiaddr::FromVecError { addr }) => {
+                    Err((multiaddr::FromBytesError, addr)) => {
                         // Address is in an invalid format.
                         let _was_in = task
                             .peering_strategy

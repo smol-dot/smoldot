@@ -825,7 +825,7 @@ async fn background_task(mut inner: Inner) {
                     } => {
                         inner.num_pending_out_attempts -= 1;
 
-                        let remote_addr = Multiaddr::try_from(
+                        let remote_addr = Multiaddr::from_bytes(
                             inner.network.connection_remote_addr(id).to_owned(),
                         )
                         .unwrap(); // TODO: review this unwrap
@@ -843,10 +843,10 @@ async fn background_task(mut inner: Inner) {
                                 address_removed: Some(addr_rm),
                             } = inner.peering_strategy.insert_or_set_connected_address(
                                 &peer_id,
-                                remote_addr.clone().into_bytes(),
+                                remote_addr.into_bytes().to_owned(),
                                 10, // TODO: constant
                             ) {
-                                let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
+                                let addr_rm = Multiaddr::from_bytes(addr_rm).unwrap();
                                 inner.log_callback.log(
                                     LogLevel::Debug,
                                     format!(
@@ -872,7 +872,7 @@ async fn background_task(mut inner: Inner) {
                                 .peering_strategy
                                 .disconnect_addr(&expected_peer_id, &address)
                                 .unwrap();
-                            let address = Multiaddr::try_from(address).unwrap();
+                            let address = Multiaddr::from_bytes(&address).unwrap();
                             inner.log_callback.log(
                                 LogLevel::Debug,
                                 format!(
@@ -889,7 +889,7 @@ async fn background_task(mut inner: Inner) {
                             .peering_strategy
                             .disconnect_addr(&peer_id, &address)
                             .unwrap();
-                        let address = Multiaddr::try_from(address).unwrap();
+                        let address = Multiaddr::from_bytes(&address).unwrap();
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
@@ -1142,14 +1142,14 @@ async fn background_task(mut inner: Inner) {
                         for (peer_id, addrs) in nodes {
                             let mut valid_addrs = Vec::with_capacity(addrs.len());
                             for addr in addrs {
-                                match Multiaddr::try_from(addr) {
+                                match Multiaddr::from_bytes(addr) {
                                     Ok(a) => valid_addrs.push(a),
-                                    Err(err) => {
+                                    Err((error, addr)) => {
                                         inner.log_callback.log(
                                             LogLevel::Debug,
                                             format!(
-                                                "discovery-invalid-address; addr={}",
-                                                hex::encode(&err.addr)
+                                                "discovery-invalid-address; error={error}, addr={}",
+                                                hex::encode(&addr)
                                             ),
                                         );
                                         continue;
@@ -1183,7 +1183,7 @@ async fn background_task(mut inner: Inner) {
                                      .insert_address(&peer_id, addr.into_bytes(), 10) // TODO: constant
                                     {
                                         basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
-                                            let addr_rm = Multiaddr::try_from(addr_rm).unwrap();
+                                            let addr_rm = Multiaddr::from_bytes(addr_rm).unwrap();
                                             inner
                                                 .log_callback
                                                 .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
@@ -1431,15 +1431,18 @@ async fn background_task(mut inner: Inner) {
                     continue;
                 };
 
-                let multiaddr = match multiaddr::Multiaddr::try_from(multiaddr.to_owned()) {
+                let multiaddr = match multiaddr::Multiaddr::from_bytes(multiaddr.to_owned()) {
                     Ok(a) => a,
-                    Err(multiaddr::FromVecError { addr }) => {
+                    Err((multiaddr::FromBytesError, multiaddr)) => {
                         // Address is in an invalid format.
                         inner.log_callback.log(
                             LogLevel::Debug,
-                            format!("invalid-address; peer_id={}; address={:?}", peer_id, addr),
+                            format!(
+                                "invalid-address; peer_id={}; address={:?}",
+                                peer_id, multiaddr
+                            ),
                         );
-                        let _was_in = inner.peering_strategy.remove_address(&peer_id, &addr);
+                        let _was_in = inner.peering_strategy.remove_address(&peer_id, &multiaddr);
                         debug_assert!(_was_in);
                         continue;
                     }
