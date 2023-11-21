@@ -2499,9 +2499,9 @@ dependencies = [
 name = "smoldot-light-wasm"
 version = "2.0.10"
 dependencies = [
- "async-executor",
  "async-lock 3.1.1",
  "async-task",
+ "crossbeam-queue",
  "derive_more",
  "dlmalloc",
  "event-listener 3.1.0",

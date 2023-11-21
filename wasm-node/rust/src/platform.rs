@@ -139,7 +139,15 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             future: task,
         };
 
-        super::EXECUTOR.spawn(task).detach();
+        let (runnable, task) = async_task::spawn(task, |runnable| {
+            super::TASKS_QUEUE.push(runnable);
+            unsafe {
+                bindings::advance_execution_ready();
+            }
+        });
+
+        task.detach();
+        runnable.schedule();
     }
 
     fn client_name(&self) -> Cow<str> {

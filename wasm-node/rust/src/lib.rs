@@ -345,76 +345,19 @@ impl alloc::task::Wake for JsonRpcResponsesNonEmptyWaker {
     }
 }
 
-/// Since "spawning a task" isn't really something that a browser or Node environment do
-/// efficiently, we instead combine all the asynchronous tasks into one executor.
-// TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
-static EXECUTOR: async_executor::Executor = async_executor::Executor::new();
-
-/// While [`EXECUTOR`] is global to all threads, [`EXECUTOR_EXECUTE`] is thread specific. If
-/// smoldot eventually gets support for multiple threads, this value would be store in a
-/// thread-local storage. Since it only has one thread, it is instead a global variable.
-static EXECUTOR_EXECUTE: Mutex<ExecutionState> = Mutex::new(ExecutionState::NotStarted);
-enum ExecutionState {
-    /// Execution has not started. Everything remains to be initialized. Default state.
-    NotStarted,
-    /// Execution has been started in the past and is now waiting to be woken up.
-    NotReady,
-    /// Execution has been woken up. Ready to continue running.
-    Ready(async_task::Runnable),
-}
+static TASKS_QUEUE: crossbeam_queue::SegQueue<async_task::Runnable> =
+    crossbeam_queue::SegQueue::new();
 
 fn advance_execution() {
-    let runnable = {
-        let mut executor_execute_guard = EXECUTOR_EXECUTE.try_lock().unwrap();
-        match *executor_execute_guard {
-            ExecutionState::NotStarted => {
-                // Spawn a task that repeatedly executes one task then yields.
-                // This makes sure that we return to the JS engine after every task.
-                let (runnable, task) = {
-                    let run = async move {
-                        loop {
-                            EXECUTOR.tick().await;
-                            let mut has_yielded = false;
-                            future::poll_fn(|cx| {
-                                if has_yielded {
-                                    task::Poll::Ready(())
-                                } else {
-                                    cx.waker().wake_by_ref();
-                                    has_yielded = true;
-                                    task::Poll::Pending
-                                }
-                            })
-                            .await;
-                        }
-                    };
-
-                    async_task::spawn(run, |runnable| {
-                        let mut lock = EXECUTOR_EXECUTE.try_lock().unwrap();
-                        if !matches!(*lock, ExecutionState::NotReady) {
-                            return;
-                        }
-                        *lock = ExecutionState::Ready(runnable);
-                        unsafe {
-                            bindings::advance_execution_ready();
-                        }
-                    })
-                };
-
-                task.detach();
-                *executor_execute_guard = ExecutionState::NotReady;
-                runnable
-            }
-            ExecutionState::NotReady => return,
-            ExecutionState::Ready(_) => {
-                let ExecutionState::Ready(runnable) =
-                    mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
-                else {
-                    unreachable!()
-                };
-                runnable
-            }
-        }
+    let Some(runnable) = TASKS_QUEUE.pop() else {
+        return;
     };
 
     runnable.run();
+
+    if !TASKS_QUEUE.is_empty() {
+        unsafe {
+            bindings::advance_execution_ready();
+        }
+    }
 }

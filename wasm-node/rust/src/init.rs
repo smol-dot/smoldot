@@ -120,7 +120,7 @@ pub(crate) fn init(max_log_level: u32) {
         }),
     );
 }
-
+/*
 /// Stops execution, providing a string explaining what happened.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -140,7 +140,7 @@ fn panic(info: &PanicInfo) -> ! {
         #[cfg(not(target_arch = "wasm32"))]
         unreachable!();
     }
-}
+}*/
 
 /// Implementation of [`log::Log`] that sends out logs to the FFI.
 struct Logger;
