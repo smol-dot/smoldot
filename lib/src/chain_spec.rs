@@ -254,8 +254,10 @@ impl ChainSpec {
         // not tie the code that parses chain specifications to the libp2p code.
         self.client_spec.boot_nodes.iter().map(|unparsed| {
             if let Ok(mut addr) = unparsed.parse::<libp2p::Multiaddr>() {
-                if let Some(libp2p::multiaddr::ProtocolRef::P2p(peer_id)) = addr.iter().last() {
-                    if let Ok(peer_id) = libp2p::peer_id::PeerId::from_bytes(peer_id.to_vec()) {
+                if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = addr.iter().last() {
+                    if let Ok(peer_id) =
+                        libp2p::peer_id::PeerId::from_bytes(peer_id.into_bytes().to_vec())
+                    {
                         addr.pop();
                         return Bootnode::Parsed {
                             multiaddr: addr.to_string(),
