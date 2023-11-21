@@ -1412,21 +1412,20 @@ async fn run_background<TPlat: PlatformRef>(
                     ..
                 } = &mut background.tree
                 {
-                    let block_ignores_limit =
-                        match pinned_blocks.remove(&(subscription_id.0, block_hash)) {
-                            Some(b) => b.block_ignores_limit,
-                            None => {
-                                // Cold path.Ò
-                                if let Some((_, _)) =
-                                    all_blocks_subscriptions.get(&subscription_id.0)
-                                {
-                                    let _ = result_tx.send(Err(()));
-                                } else {
-                                    let _ = result_tx.send(Ok(()));
-                                }
-                                continue;
+                    let block_ignores_limit = match pinned_blocks
+                        .remove(&(subscription_id.0, block_hash))
+                    {
+                        Some(b) => b.block_ignores_limit,
+                        None => {
+                            // Cold path.Ò
+                            if let Some((_, _)) = all_blocks_subscriptions.get(&subscription_id.0) {
+                                let _ = result_tx.send(Err(()));
+                            } else {
+                                let _ = result_tx.send(Ok(()));
                             }
-                        };
+                            continue;
+                        }
+                    };
 
                     background.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
@@ -2037,8 +2036,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         });
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut()
-                        {
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
                             if sender.try_send(notif.clone()).is_ok() {
                                 let _prev_value = pinned_blocks.insert(
                                     (*subscription_id, block_hash),
@@ -2079,8 +2077,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         let notif = Notification::BestBlockChanged { hash };
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut()
-                        {
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
                             if sender.try_send(notif.clone()).is_err() {
                                 to_remove.push(*subscription_id);
                             }

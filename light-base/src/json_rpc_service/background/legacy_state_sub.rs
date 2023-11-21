@@ -1294,10 +1294,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let runtime_service = task.runtime_service.clone();
                 task.subscription = Subscription::Pending(Box::pin(async move {
                     runtime_service
-                        .subscribe_all(
-                            32,
-                            NonZeroUsize::new(usize::max_value()).unwrap(),
-                        )
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await
                 }));
             }
