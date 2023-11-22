@@ -1482,144 +1482,140 @@ async fn run_background<TPlat: PlatformRef>(
                     block_state_root_hash: pinned_block.state_trie_root_hash,
                 })));
             }
-            WakeUpReason::Notification(Some(notification)) => {
-                match notification {
-                    sync_service::Notification::Block(new_block) => {
-                        log::debug!(
-                            target: &log_target,
-                            "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
-                            HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
-                            HashDisplay(&new_block.parent_hash),
-                            new_block.is_new_best
-                        );
+            WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
+                log::debug!(
+                    target: &log_target,
+                    "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
+                    HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
+                    HashDisplay(&new_block.parent_hash),
+                    new_block.is_new_best
+                );
 
-                        let near_head_of_chain = background
-                            .sync_service
-                            .is_near_head_of_chain_heuristic()
-                            .await;
+                let near_head_of_chain = background
+                    .sync_service
+                    .is_near_head_of_chain_heuristic()
+                    .await;
 
-                        // TODO: note that this code is never reached for parachains
-                        if new_block.is_new_best {
-                            background.best_near_head_of_chain = near_head_of_chain;
-                        }
+                // TODO: note that this code is never reached for parachains
+                if new_block.is_new_best {
+                    background.best_near_head_of_chain = near_head_of_chain;
+                }
 
-                        let same_runtime_as_parent = same_runtime_as_parent(
-                            &new_block.scale_encoded_header,
-                            sync_service.block_number_bytes(),
-                        );
+                let same_runtime_as_parent = same_runtime_as_parent(
+                    &new_block.scale_encoded_header,
+                    sync_service.block_number_bytes(),
+                );
 
-                        match &mut background.tree {
-                            Tree::FinalizedBlockRuntimeKnown {
-                                tree,
-                                finalized_block,
-                                ..
-                            } => {
-                                let parent_index = if new_block.parent_hash == finalized_block.hash
-                                {
-                                    None
-                                } else {
-                                    Some(
-                                        tree.input_output_iter_unordered()
-                                            .find(|block| {
-                                                block.user_data.hash == new_block.parent_hash
-                                            })
-                                            .unwrap()
-                                            .id,
-                                    )
-                                };
-
-                                tree.input_insert_block(
-                                    Block {
-                                        hash: header::hash_from_scale_encoded_header(
-                                            &new_block.scale_encoded_header,
-                                        ),
-                                        scale_encoded_header: new_block.scale_encoded_header,
-                                    },
-                                    parent_index,
-                                    same_runtime_as_parent,
-                                    new_block.is_new_best,
-                                );
-                            }
-                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                let parent_index = tree
-                                    .input_output_iter_unordered()
+                match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown {
+                        tree,
+                        finalized_block,
+                        ..
+                    } => {
+                        let parent_index = if new_block.parent_hash == finalized_block.hash {
+                            None
+                        } else {
+                            Some(
+                                tree.input_output_iter_unordered()
                                     .find(|block| block.user_data.hash == new_block.parent_hash)
                                     .unwrap()
-                                    .id;
-                                tree.input_insert_block(
-                                    Block {
-                                        hash: header::hash_from_scale_encoded_header(
-                                            &new_block.scale_encoded_header,
-                                        ),
-                                        scale_encoded_header: new_block.scale_encoded_header,
-                                    },
-                                    Some(parent_index),
-                                    same_runtime_as_parent,
-                                    new_block.is_new_best,
-                                );
-                            }
-                        }
+                                    .id,
+                            )
+                        };
 
-                        background.advance_and_notify_subscribers();
+                        tree.input_insert_block(
+                            Block {
+                                hash: header::hash_from_scale_encoded_header(
+                                    &new_block.scale_encoded_header,
+                                ),
+                                scale_encoded_header: new_block.scale_encoded_header,
+                            },
+                            parent_index,
+                            same_runtime_as_parent,
+                            new_block.is_new_best,
+                        );
                     }
-                    sync_service::Notification::Finalized {
-                        hash,
-                        best_block_hash,
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        let parent_index = tree
+                            .input_output_iter_unordered()
+                            .find(|block| block.user_data.hash == new_block.parent_hash)
+                            .unwrap()
+                            .id;
+                        tree.input_insert_block(
+                            Block {
+                                hash: header::hash_from_scale_encoded_header(
+                                    &new_block.scale_encoded_header,
+                                ),
+                                scale_encoded_header: new_block.scale_encoded_header,
+                            },
+                            Some(parent_index),
+                            same_runtime_as_parent,
+                            new_block.is_new_best,
+                        );
+                    }
+                }
+
+                background.advance_and_notify_subscribers();
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
+            }
+            WakeUpReason::Notification(Some(sync_service::Notification::Finalized {
+                hash,
+                best_block_hash,
+            })) => {
+                log::debug!(
+                    target: &log_target,
+                    "Worker <= InputFinalized(hash={}, best={})",
+                    HashDisplay(&hash), HashDisplay(&best_block_hash)
+                );
+
+                background.finalize(hash, best_block_hash).await;
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
+            }
+            WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
+                hash,
+            })) => {
+                log::debug!(
+                    target: &log_target,
+                    "Worker <= BestBlockChanged(hash={})",
+                    HashDisplay(&hash)
+                );
+
+                let near_head_of_chain = background
+                    .sync_service
+                    .is_near_head_of_chain_heuristic()
+                    .await;
+
+                background.best_near_head_of_chain = near_head_of_chain;
+
+                match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown {
+                        finalized_block,
+                        tree,
+                        ..
                     } => {
-                        log::debug!(
-                            target: &log_target,
-                            "Worker <= InputFinalized(hash={}, best={})",
-                            HashDisplay(&hash), HashDisplay(&best_block_hash)
-                        );
-
-                        background.finalize(hash, best_block_hash).await;
-                    }
-                    sync_service::Notification::BestBlockChanged { hash } => {
-                        log::debug!(
-                            target: &log_target,
-                            "Worker <= BestBlockChanged(hash={})",
-                            HashDisplay(&hash)
-                        );
-
-                        let near_head_of_chain = background
-                            .sync_service
-                            .is_near_head_of_chain_heuristic()
-                            .await;
-
-                        background.best_near_head_of_chain = near_head_of_chain;
-
-                        match &mut background.tree {
-                            Tree::FinalizedBlockRuntimeKnown {
-                                finalized_block,
-                                tree,
-                                ..
-                            } => {
-                                let idx = if hash == finalized_block.hash {
-                                    None
-                                } else {
-                                    Some(
-                                        tree.input_output_iter_unordered()
-                                            .find(|block| block.user_data.hash == hash)
-                                            .unwrap()
-                                            .id,
-                                    )
-                                };
-                                tree.input_set_best_block(idx);
-                            }
-                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                let idx = tree
-                                    .input_output_iter_unordered()
+                        let idx = if hash == finalized_block.hash {
+                            None
+                        } else {
+                            Some(
+                                tree.input_output_iter_unordered()
                                     .find(|block| block.user_data.hash == hash)
                                     .unwrap()
-                                    .id;
-                                tree.input_set_best_block(Some(idx));
-                            }
-                        }
-
-                        background.advance_and_notify_subscribers();
+                                    .id,
+                            )
+                        };
+                        tree.input_set_best_block(idx);
                     }
-                };
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        let idx = tree
+                            .input_output_iter_unordered()
+                            .find(|block| block.user_data.hash == hash)
+                            .unwrap()
+                            .id;
+                        tree.input_set_best_block(Some(idx));
+                    }
+                }
 
+                background.advance_and_notify_subscribers();
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::RuntimeDownloadFinished(
