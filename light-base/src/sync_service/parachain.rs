@@ -218,7 +218,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             // Report to the outside any block in the `async_tree` that is now ready.
             self.advance_and_report_notifications().await;
 
-            // Now wait until something interesting happens.
+            // Wait until something interesting happens.
             enum WakeUpReason<TPlat: PlatformRef> {
                 ForegroundClosed,
                 ForegroundMessage(ToBackground),
@@ -575,16 +575,106 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 WakeUpReason::ParaheadFetchFinished {
                     async_op_id,
-                    parahead_result,
+                    parahead_result: Ok(parahead),
                 } => {
-                    // A parahead fetching operation is finished.
-                    self.process_parahead_fetch_result(async_op_id, parahead_result)
-                        .await;
+                    // A parahead fetching operation is successful.
 
                     let runtime_subscription = match &mut self.subscription_state {
-                        ParachainBackgroundState::NotSubscribed { .. } => continue,
+                        ParachainBackgroundState::NotSubscribed { .. } => {
+                            debug_assert!(false);
+                            continue;
+                        }
                         ParachainBackgroundState::Subscribed(s) => s,
                     };
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
+                        HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
+                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
+                    );
+
+                    // Unpin the relay blocks whose parahead is now known.
+                    for block in runtime_subscription
+                        .async_tree
+                        .async_op_finished(async_op_id, Some(parahead))
+                    {
+                        let hash = runtime_subscription.async_tree.block_user_data(block);
+                        runtime_subscription
+                            .relay_chain_subscribe_all
+                            .unpin_block(*hash)
+                            .await;
+                    }
+
+                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
+                }
+
+                WakeUpReason::ParaheadFetchFinished {
+                    parahead_result: Err(ParaheadError::ObsoleteSubscription),
+                    ..
+                } => {
+                    // The relay chain runtime service has some kind of gap or issue and has
+                    // discarded the runtime.
+                    // Destroy the subscription and recreate the channels.
+                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
+                    self.subscription_state = ParachainBackgroundState::NotSubscribed {
+                        all_subscriptions: Vec::new(),
+                        subscribe_future: {
+                            let relay_chain_sync = self.relay_chain_sync.clone();
+                            Box::pin(async move {
+                                relay_chain_sync
+                                    .subscribe_all(
+                                        32,
+                                        NonZeroUsize::new(usize::max_value()).unwrap(),
+                                    )
+                                    .await
+                            })
+                        },
+                    };
+                }
+
+                WakeUpReason::ParaheadFetchFinished {
+                    async_op_id,
+                    parahead_result: Err(error),
+                } => {
+                    let runtime_subscription = match &mut self.subscription_state {
+                        ParachainBackgroundState::NotSubscribed { .. } => {
+                            debug_assert!(false);
+                            continue;
+                        }
+                        ParachainBackgroundState::Subscribed(s) => s,
+                    };
+
+                    // Several chains initially didn't support parachains, and have later been
+                    // upgraded to support them. Similarly, the parachain might not have had a core on
+                    // the relay chain until recently. For these reasons, errors when the relay chain
+                    // is not near head of the chain are most likely normal and do not warrant logging
+                    // an error.
+                    if self
+                        .relay_chain_sync
+                        .is_near_head_of_chain_heuristic()
+                        .await
+                        && !error.is_network_problem()
+                    {
+                        log::error!(
+                            target: &self.log_target,
+                            "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                            runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
+                            error
+                        );
+                    }
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "ParaheadFetchOperations => Error(relay_blocks={}, error={:?})",
+                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
+                        error
+                    );
+
+                    runtime_subscription
+                        .async_tree
+                        .async_op_failure(async_op_id, &self.platform.now());
+
                     runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
 
@@ -871,88 +961,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             }
             (ToBackground::SerializeChainInformation { send_back }, _) => {
                 let _ = send_back.send(None);
-            }
-        }
-    }
-
-    async fn process_parahead_fetch_result(
-        &mut self,
-        async_op_id: async_tree::AsyncOpId,
-        parahead_result: Result<Vec<u8>, ParaheadError>,
-    ) {
-        let runtime_subscription = match &mut self.subscription_state {
-            ParachainBackgroundState::NotSubscribed { .. } => return,
-            ParachainBackgroundState::Subscribed(s) => s,
-        };
-
-        match parahead_result {
-            Ok(parahead) => {
-                log::debug!(
-                    target: &self.log_target,
-                    "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
-                    HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
-                    runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
-                );
-
-                // Unpin the relay blocks whose parahead is now known.
-                for block in runtime_subscription
-                    .async_tree
-                    .async_op_finished(async_op_id, Some(parahead))
-                {
-                    let hash = runtime_subscription.async_tree.block_user_data(block);
-                    runtime_subscription
-                        .relay_chain_subscribe_all
-                        .unpin_block(*hash)
-                        .await;
-                }
-            }
-            Err(ParaheadError::ObsoleteSubscription) => {
-                // The relay chain runtime service has some kind of gap or issue and has discarded
-                // the runtime.
-                // Destroy the subscription and recreate the channels.
-                log::debug!(target: &self.log_target, "Subscriptions <= Reset");
-                self.subscription_state = ParachainBackgroundState::NotSubscribed {
-                    all_subscriptions: Vec::new(),
-                    subscribe_future: {
-                        let relay_chain_sync = self.relay_chain_sync.clone();
-                        Box::pin(async move {
-                            relay_chain_sync
-                                .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
-                                .await
-                        })
-                    },
-                };
-            }
-            Err(error) => {
-                // Several chains initially didn't support parachains, and have later been
-                // upgraded to support them. Similarly, the parachain might not have had a core on
-                // the relay chain until recently. For these reasons, errors when the relay chain
-                // is not near head of the chain are most likely normal and do not warrant logging
-                // an error.
-                if self
-                    .relay_chain_sync
-                    .is_near_head_of_chain_heuristic()
-                    .await
-                    && !error.is_network_problem()
-                {
-                    log::error!(
-                        target: &self.log_target,
-                        "Failed to fetch the parachain head from relay chain blocks {}: {}",
-                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
-                        error
-                    );
-                }
-
-                log::debug!(
-                    target: &self.log_target,
-                    "ParaheadFetchOperations => Error(relay_blocks={}, error={:?})",
-                    runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
-                    error
-                );
-
-                runtime_subscription
-                    .async_tree
-                    .async_op_failure(async_op_id, &self.platform.now());
             }
         }
     }
