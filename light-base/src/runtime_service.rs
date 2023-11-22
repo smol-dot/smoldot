@@ -1854,6 +1854,7 @@ async fn run_background<TPlat: PlatformRef>(
                 block_hash,
             })) => {
                 // Foreground wants a block unpinned.
+
                 if let Tree::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions,
                     pinned_blocks,
@@ -2109,8 +2110,8 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_set_best_block(Some(idx));
                     }
                 }
-
                 background.must_update_tree_and_notify_subscribers = true;
+
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
@@ -2128,9 +2129,9 @@ async fn run_background<TPlat: PlatformRef>(
                 // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
                 background.best_near_head_of_chain = true;
 
-                // Try to find an existing runtime identical to the one that has just been downloaded.
-                // This loop is `O(n)`, but given that we expect this list to very small (at most 1 or
-                // 2 elements), this is not a problem.
+                // Try to find an existing runtime identical to the one that has just been
+                // downloaded. This loop is `O(n)`, but given that we expect this list to very
+                // small (at most 1 or 2 elements), this is not a problem.
                 let existing_runtime = background
                     .runtimes
                     .iter()
@@ -2186,8 +2187,10 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_finished(async_op_id, Some(runtime));
                     }
                 }
-
                 background.must_update_tree_and_notify_subscribers = true;
+
+                // Because runtime downloads are clamped to a maximum, when a download is finished
+                // we should try to start new downloads.
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
@@ -2229,6 +2232,8 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
+                // Because runtime downloads are clamped to a maximum, when a download is finished
+                // we should try to start new downloads.
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
         }
