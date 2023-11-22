@@ -901,6 +901,7 @@ async fn run_background<TPlat: PlatformRef>(
             next_subscription_id: 0,
             best_near_head_of_chain: sync_service.is_near_head_of_chain_heuristic().await,
             tree,
+            must_update_tree_and_notify_subscribers: true,
             runtimes: slab::Slab::with_capacity(2),
             pending_subscriptions: Vec::with_capacity(8),
             blocks_stream: None,
@@ -915,6 +916,7 @@ async fn run_background<TPlat: PlatformRef>(
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
             NewNecessaryDownload,
+            MustAdvanceTree,
             StartPendingSubscribeAll,
             Notification(Option<sync_service::Notification>),
             ToBackground(Option<ToBackground<TPlat>>),
@@ -963,6 +965,14 @@ async fn run_background<TPlat: PlatformRef>(
                 (&mut background.wake_up_new_necessary_download).await;
                 background.wake_up_new_necessary_download = Box::pin(future::pending());
                 WakeUpReason::NewNecessaryDownload
+            })
+            .or(async {
+                if background.must_update_tree_and_notify_subscribers {
+                    background.must_update_tree_and_notify_subscribers = false;
+                    WakeUpReason::MustAdvanceTree
+                } else {
+                    future::pending().await
+                }
             })
             .await
         };
@@ -1114,6 +1124,9 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // There might be other downloads to start.
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
+            }
+            WakeUpReason::MustAdvanceTree => {
+                background.advance_and_notify_subscribers();
             }
             WakeUpReason::MustSubscribe => {
                 // The buffer size should be large enough so that, if the CPU is busy, it
@@ -1699,7 +1712,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.advance_and_notify_subscribers();
+                background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::Notification(Some(sync_service::Notification::Finalized {
@@ -1748,12 +1761,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.advance_and_notify_subscribers();
-
-                // Clean up unused runtimes to free up resources.
-                background
-                    .runtimes
-                    .retain(|_, runtime| runtime.strong_count() > 0);
+                background.must_update_tree_and_notify_subscribers = true;
             }
             WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
                 hash,
@@ -1799,7 +1807,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.advance_and_notify_subscribers();
+                background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::RuntimeDownloadFinished(
@@ -1873,8 +1881,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.advance_and_notify_subscribers();
-
+                background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::RuntimeDownloadFinished(async_op_id, Err(error)) => {
@@ -1976,6 +1983,9 @@ struct Background<TPlat: PlatformRef> {
     /// Tree of blocks received from the sync service. Keeps track of which block has been
     /// reported to the outer API.
     tree: Tree<TPlat>,
+
+    /// If `true`, the `AsyncTree`s potentially need being advanced.
+    must_update_tree_and_notify_subscribers: bool,
 
     /// List of subscription attempts started with
     /// [`Tree::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
