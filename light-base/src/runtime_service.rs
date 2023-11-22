@@ -934,11 +934,6 @@ async fn run_background<TPlat: PlatformRef>(
 
         let wake_up_reason: WakeUpReason<_> = {
             async {
-                (&mut background.wake_up_new_necessary_download).await;
-                background.wake_up_new_necessary_download = Box::pin(future::pending());
-                WakeUpReason::NewNecessaryDownload
-            }
-            .or(async {
                 if !background.pending_subscriptions.is_empty()
                     && matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. })
                 {
@@ -946,7 +941,7 @@ async fn run_background<TPlat: PlatformRef>(
                 } else {
                     future::pending().await
                 }
-            })
+            }
             .or(async {
                 if let Some(blocks_stream) = background.blocks_stream.as_mut() {
                     WakeUpReason::Notification(blocks_stream.next().await)
@@ -963,6 +958,11 @@ async fn run_background<TPlat: PlatformRef>(
                 } else {
                     future::pending().await
                 }
+            })
+            .or(async {
+                (&mut background.wake_up_new_necessary_download).await;
+                background.wake_up_new_necessary_download = Box::pin(future::pending());
+                WakeUpReason::NewNecessaryDownload
             })
             .await
         };
