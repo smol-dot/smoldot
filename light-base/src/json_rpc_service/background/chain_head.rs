@@ -98,7 +98,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     "Rejected `chainHead_unstable_follow` subscription due to limit reached."
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ApplicationDefined(
-                    -32100,
+                    -32800,
                     "Maximum number of `chainHead_unstable_follow` subscriptions reached",
                 ));
                 return;
