@@ -670,9 +670,239 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
 
-                (WakeUpReason::ForegroundMessage(foreground_message), _) => {
-                    // Message from the public API of the syncing service.
-                    self.process_foreground_message(foreground_message).await;
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
+                        send_back,
+                    }),
+                    ParachainBackgroundState::Subscribed(sub),
+                ) if sub.async_tree.output_finalized_async_user_data().is_some() => {
+                    // Since there is a mapping between relay chain blocks and parachain blocks,
+                    // whether a parachain is at the head of the chain is the same thing as whether
+                    // its relay chain is at the head of the chain.
+                    // Note that there is no ordering guarantee of any kind w.r.t. block subscriptions
+                    // notifications.
+                    let val = self
+                        .relay_chain_sync
+                        .is_near_head_of_chain_heuristic()
+                        .await;
+                    let _ = send_back.send(val);
+                }
+
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
+                        send_back,
+                    }),
+                    _,
+                ) => {
+                    // If no finalized parahead is known yet, we might be very close to the head but
+                    // also maybe very very far away. We lean on the cautious side and always return
+                    // `false`.
+                    let _ = send_back.send(false);
+                }
+
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
+                        send_back,
+                        buffer_size,
+                        ..
+                    }),
+                    ParachainBackgroundState::NotSubscribed {
+                        all_subscriptions, ..
+                    },
+                ) => {
+                    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+
+                    // No known finalized parahead.
+                    let _ = send_back.send(super::SubscribeAll {
+                        finalized_block_scale_encoded_header: self
+                            .obsolete_finalized_parahead
+                            .clone(),
+                        finalized_block_runtime: None,
+                        non_finalized_blocks_ancestry_order: Vec::new(),
+                        new_blocks,
+                    });
+
+                    all_subscriptions.push(tx);
+                }
+
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
+                        send_back,
+                        buffer_size,
+                        ..
+                    }),
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
+                    let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+
+                    // There are two possibilities here: either we know of any recent finalized
+                    // parahead, or we don't. In case where we don't know of any finalized parahead
+                    // yet, we report a single obsolete finalized parahead, which is
+                    // `obsolete_finalized_parahead`. The rest of this module makes sure that no
+                    // other block is reported to subscriptions as long as this is the case, and that
+                    // subscriptions are reset once the first known finalized parahead is known.
+                    if let Some(finalized_parahead) = runtime_subscription
+                        .async_tree
+                        .output_finalized_async_user_data()
+                    {
+                        // Finalized parahead is known.
+                        let finalized_parahash =
+                            header::hash_from_scale_encoded_header(finalized_parahead);
+                        let _ = send_back.send(super::SubscribeAll {
+                            finalized_block_scale_encoded_header: finalized_parahead.clone(),
+                            finalized_block_runtime: None,
+                            non_finalized_blocks_ancestry_order: {
+                                let mut list =
+                                    Vec::<([u8; 32], super::BlockNotification)>::with_capacity(
+                                        runtime_subscription
+                                            .async_tree
+                                            .num_input_non_finalized_blocks(),
+                                    );
+
+                                for relay_block in runtime_subscription
+                                    .async_tree
+                                    .input_output_iter_ancestry_order()
+                                {
+                                    let parablock = match relay_block.async_op_user_data {
+                                        Some(b) => b.as_ref().unwrap(),
+                                        None => continue,
+                                    };
+
+                                    let parablock_hash =
+                                        header::hash_from_scale_encoded_header(parablock);
+
+                                    // TODO: O(n)
+                                    if let Some((_, entry)) =
+                                        list.iter_mut().find(|(h, _)| *h == parablock_hash)
+                                    {
+                                        // Block is already in the list. Don't add it a second time.
+                                        if relay_block.is_output_best {
+                                            entry.is_new_best = true;
+                                        }
+                                        continue;
+                                    }
+
+                                    // Find the parent of the parablock. This is done by going through
+                                    // the ancestors of the corresponding relay chain block (until and
+                                    // including the finalized relay chain block) until we find one
+                                    // whose parablock is different from the parablock in question.
+                                    // If none is found, the parablock is the same as the finalized
+                                    // parablock.
+                                    let parent_hash = runtime_subscription
+                                        .async_tree
+                                        .ancestors(relay_block.id)
+                                        .find_map(|idx| {
+                                            let hash = header::hash_from_scale_encoded_header(
+                                                runtime_subscription
+                                                    .async_tree
+                                                    .block_async_user_data(idx)
+                                                    .unwrap()
+                                                    .as_ref()
+                                                    .unwrap(),
+                                            );
+                                            if hash != parablock_hash {
+                                                Some(hash)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .or_else(|| {
+                                            if finalized_parahash != parablock_hash {
+                                                Some(finalized_parahash)
+                                            } else {
+                                                None
+                                            }
+                                        });
+
+                                    // `parent_hash` is `None` if the parablock is
+                                    // the same as the finalized parablock, in which case we
+                                    // don't add it to the list.
+                                    if let Some(parent_hash) = parent_hash {
+                                        debug_assert!(
+                                            list.iter().filter(|(h, _)| *h == parent_hash).count()
+                                                == 1
+                                                || parent_hash == finalized_parahash
+                                        );
+                                        list.push((
+                                            parablock_hash,
+                                            super::BlockNotification {
+                                                is_new_best: relay_block.is_output_best,
+                                                scale_encoded_header: parablock.clone(),
+                                                parent_hash,
+                                            },
+                                        ));
+                                    }
+                                }
+
+                                list.into_iter().map(|(_, v)| v).collect()
+                            },
+                            new_blocks,
+                        });
+                    } else {
+                        // No known finalized parahead.
+                        let _ = send_back.send(super::SubscribeAll {
+                            finalized_block_scale_encoded_header: self
+                                .obsolete_finalized_parahead
+                                .clone(),
+                            finalized_block_runtime: None,
+                            non_finalized_blocks_ancestry_order: Vec::new(),
+                            new_blocks,
+                        });
+                    }
+
+                    runtime_subscription.all_subscriptions.push(tx);
+                }
+
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
+                        send_back,
+                        block_number,
+                        block_hash,
+                    }),
+                    _,
+                ) => {
+                    // If `block_number` is over the finalized block, then which source knows which
+                    // block is precisely tracked. Otherwise, it is assumed that all sources are on
+                    // the finalized chain and thus that all sources whose best block is superior to
+                    // `block_number` have it.
+                    let list = if block_number > self.sync_sources.finalized_block_height() {
+                        self.sync_sources
+                            .knows_non_finalized_block(block_number, &block_hash)
+                            .map(|local_id| self.sync_sources[local_id].0.clone())
+                            .collect()
+                    } else {
+                        self.sync_sources
+                            .keys()
+                            .filter(|local_id| {
+                                self.sync_sources.best_block(*local_id).0 >= block_number
+                            })
+                            .map(|local_id| self.sync_sources[local_id].0.clone())
+                            .collect()
+                    };
+
+                    let _ = send_back.send(list);
+                }
+
+                (WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }), _) => {
+                    let _ = send_back.send(
+                        self.sync_sources
+                            .keys()
+                            .map(|local_id| {
+                                let (height, hash) = self.sync_sources.best_block(local_id);
+                                let (peer_id, role) = self.sync_sources[local_id].clone();
+                                (peer_id, role, height, *hash)
+                            })
+                            .collect(),
+                    );
+                }
+
+                (
+                    WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
+                        send_back,
+                    }),
+                    _,
+                ) => {
+                    let _ = send_back.send(None);
                 }
 
                 (WakeUpReason::MustSubscribeNetworkEvents, _) => {
@@ -743,225 +973,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (WakeUpReason::NetworkEvent(_), _) => {
                     // Uninteresting message.
                 }
-            }
-        }
-    }
-
-    async fn process_foreground_message(&mut self, foreground_message: ToBackground) {
-        match (foreground_message, &mut self.subscription_state) {
-            (
-                ToBackground::IsNearHeadOfChainHeuristic { send_back },
-                ParachainBackgroundState::Subscribed(sub),
-            ) if sub.async_tree.output_finalized_async_user_data().is_some() => {
-                // Since there is a mapping between relay chain blocks and parachain blocks,
-                // whether a parachain is at the head of the chain is the same thing as whether
-                // its relay chain is at the head of the chain.
-                // Note that there is no ordering guarantee of any kind w.r.t. block subscriptions
-                // notifications.
-                let val = self
-                    .relay_chain_sync
-                    .is_near_head_of_chain_heuristic()
-                    .await;
-                let _ = send_back.send(val);
-            }
-            (ToBackground::IsNearHeadOfChainHeuristic { send_back }, _) => {
-                // If no finalized parahead is known yet, we might be very close to the head but
-                // also maybe very very far away. We lean on the cautious side and always return
-                // `false`.
-                let _ = send_back.send(false);
-            }
-            (
-                ToBackground::SubscribeAll {
-                    send_back,
-                    buffer_size,
-                    ..
-                },
-                ParachainBackgroundState::NotSubscribed {
-                    all_subscriptions, ..
-                },
-            ) => {
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-
-                // No known finalized parahead.
-                let _ = send_back.send(super::SubscribeAll {
-                    finalized_block_scale_encoded_header: self.obsolete_finalized_parahead.clone(),
-                    finalized_block_runtime: None,
-                    non_finalized_blocks_ancestry_order: Vec::new(),
-                    new_blocks,
-                });
-
-                all_subscriptions.push(tx);
-            }
-            (
-                ToBackground::SubscribeAll {
-                    send_back,
-                    buffer_size,
-                    ..
-                },
-                ParachainBackgroundState::Subscribed(runtime_subscription),
-            ) => {
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-
-                // There are two possibilities here: either we know of any recent finalized
-                // parahead, or we don't. In case where we don't know of any finalized parahead
-                // yet, we report a single obsolete finalized parahead, which is
-                // `obsolete_finalized_parahead`. The rest of this module makes sure that no
-                // other block is reported to subscriptions as long as this is the case, and that
-                // subscriptions are reset once the first known finalized parahead is known.
-                if let Some(finalized_parahead) = runtime_subscription
-                    .async_tree
-                    .output_finalized_async_user_data()
-                {
-                    // Finalized parahead is known.
-                    let finalized_parahash =
-                        header::hash_from_scale_encoded_header(finalized_parahead);
-                    let _ = send_back.send(super::SubscribeAll {
-                        finalized_block_scale_encoded_header: finalized_parahead.clone(),
-                        finalized_block_runtime: None,
-                        non_finalized_blocks_ancestry_order: {
-                            let mut list =
-                                Vec::<([u8; 32], super::BlockNotification)>::with_capacity(
-                                    runtime_subscription
-                                        .async_tree
-                                        .num_input_non_finalized_blocks(),
-                                );
-
-                            for relay_block in runtime_subscription
-                                .async_tree
-                                .input_output_iter_ancestry_order()
-                            {
-                                let parablock = match relay_block.async_op_user_data {
-                                    Some(b) => b.as_ref().unwrap(),
-                                    None => continue,
-                                };
-
-                                let parablock_hash =
-                                    header::hash_from_scale_encoded_header(parablock);
-
-                                // TODO: O(n)
-                                if let Some((_, entry)) =
-                                    list.iter_mut().find(|(h, _)| *h == parablock_hash)
-                                {
-                                    // Block is already in the list. Don't add it a second time.
-                                    if relay_block.is_output_best {
-                                        entry.is_new_best = true;
-                                    }
-                                    continue;
-                                }
-
-                                // Find the parent of the parablock. This is done by going through
-                                // the ancestors of the corresponding relay chain block (until and
-                                // including the finalized relay chain block) until we find one
-                                // whose parablock is different from the parablock in question.
-                                // If none is found, the parablock is the same as the finalized
-                                // parablock.
-                                let parent_hash = runtime_subscription
-                                    .async_tree
-                                    .ancestors(relay_block.id)
-                                    .find_map(|idx| {
-                                        let hash = header::hash_from_scale_encoded_header(
-                                            runtime_subscription
-                                                .async_tree
-                                                .block_async_user_data(idx)
-                                                .unwrap()
-                                                .as_ref()
-                                                .unwrap(),
-                                        );
-                                        if hash != parablock_hash {
-                                            Some(hash)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .or_else(|| {
-                                        if finalized_parahash != parablock_hash {
-                                            Some(finalized_parahash)
-                                        } else {
-                                            None
-                                        }
-                                    });
-
-                                // `parent_hash` is `None` if the parablock is
-                                // the same as the finalized parablock, in which case we
-                                // don't add it to the list.
-                                if let Some(parent_hash) = parent_hash {
-                                    debug_assert!(
-                                        list.iter().filter(|(h, _)| *h == parent_hash).count() == 1
-                                            || parent_hash == finalized_parahash
-                                    );
-                                    list.push((
-                                        parablock_hash,
-                                        super::BlockNotification {
-                                            is_new_best: relay_block.is_output_best,
-                                            scale_encoded_header: parablock.clone(),
-                                            parent_hash,
-                                        },
-                                    ));
-                                }
-                            }
-
-                            list.into_iter().map(|(_, v)| v).collect()
-                        },
-                        new_blocks,
-                    });
-                } else {
-                    // No known finalized parahead.
-                    let _ = send_back.send(super::SubscribeAll {
-                        finalized_block_scale_encoded_header: self
-                            .obsolete_finalized_parahead
-                            .clone(),
-                        finalized_block_runtime: None,
-                        non_finalized_blocks_ancestry_order: Vec::new(),
-                        new_blocks,
-                    });
-                }
-
-                runtime_subscription.all_subscriptions.push(tx);
-            }
-
-            (
-                ToBackground::PeersAssumedKnowBlock {
-                    send_back,
-                    block_number,
-                    block_hash,
-                },
-                _,
-            ) => {
-                // If `block_number` is over the finalized block, then which source knows which
-                // block is precisely tracked. Otherwise, it is assumed that all sources are on
-                // the finalized chain and thus that all sources whose best block is superior to
-                // `block_number` have it.
-                let list = if block_number > self.sync_sources.finalized_block_height() {
-                    self.sync_sources
-                        .knows_non_finalized_block(block_number, &block_hash)
-                        .map(|local_id| self.sync_sources[local_id].0.clone())
-                        .collect()
-                } else {
-                    self.sync_sources
-                        .keys()
-                        .filter(|local_id| {
-                            self.sync_sources.best_block(*local_id).0 >= block_number
-                        })
-                        .map(|local_id| self.sync_sources[local_id].0.clone())
-                        .collect()
-                };
-
-                let _ = send_back.send(list);
-            }
-            (ToBackground::SyncingPeers { send_back }, _) => {
-                let _ = send_back.send(
-                    self.sync_sources
-                        .keys()
-                        .map(|local_id| {
-                            let (height, hash) = self.sync_sources.best_block(local_id);
-                            let (peer_id, role) = self.sync_sources[local_id].clone();
-                            (peer_id, role, height, *hash)
-                        })
-                        .collect(),
-                );
-            }
-            (ToBackground::SerializeChainInformation { send_back }, _) => {
-                let _ = send_back.send(None);
             }
         }
     }
