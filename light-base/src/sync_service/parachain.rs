@@ -340,12 +340,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
             match (wake_up_reason, &mut self.subscription_state) {
                 (WakeUpReason::ForegroundClosed, _) => {
-                    // Terminate the parachain syncing.
+                    // Terminate the background task.
                     return;
                 }
 
                 (WakeUpReason::NewSubscription(relay_chain_subscribe_all), _) => {
-                    // Subscription finished.
+                    // Subscription to the relay chain has finished.
                     log::debug!(
                         target: &self.log_target,
                         "RelayChain => NewSubscription(finalized_hash={})",
@@ -407,15 +407,14 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     );
                 }
 
-                (WakeUpReason::AdvanceSyncTree, ParachainBackgroundState::NotSubscribed { .. }) => {
-                    // Ignore.
-                }
-
                 (
                     WakeUpReason::AdvanceSyncTree,
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
-                    while let Some(update) = runtime_subscription.async_tree.try_advance_output() {
+                    if let Some(update) = runtime_subscription.async_tree.try_advance_output() {
+                        // Make sure to process any notification that comes after.
+                        runtime_subscription.must_process_sync_tree = true;
+
                         match update {
                             async_tree::OutputUpdate::Finalized {
                                 async_op_user_data: new_finalized_parahead,
@@ -425,11 +424,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             } if *new_finalized_parahead != former_finalized_parahead => {
                                 debug_assert!(new_finalized_parahead.is_some());
 
-                                // If this is the first time (in this loop) a finalized parahead is known,
-                                // any `SubscribeAll` message that has been answered beforehand was
-                                // answered in a dummy way with a potentially obsolete finalized header.
-                                // For this reason, we reset all subscriptions to force all subscribers to
-                                // re-subscribe.
+                                // If this is the first time a finalized parahead is known, any
+                                // `SubscribeAll` message that has been answered beforehand was
+                                // answered in a dummy way with a potentially obsolete finalized
+                                // header.
+                                // For this reason, we reset all subscriptions to force all
+                                // subscribers to re-subscribe.
                                 if former_finalized_parahead.is_none() {
                                     runtime_subscription.all_subscriptions.clear();
                                 }
@@ -500,6 +500,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     }
                                 }
                             }
+
                             async_tree::OutputUpdate::Finalized { .. }
                             | async_tree::OutputUpdate::BestBlockChanged { .. } => {
                                 // Do not report anything to subscriptions if no finalized parahead is
@@ -565,6 +566,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     }
                                 }
                             }
+
                             async_tree::OutputUpdate::Block(block) => {
                                 // `block` borrows `async_tree`. We need to mutably access `async_tree`
                                 // below, so deconstruct `block` beforehand.
@@ -696,17 +698,11 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
-                    WakeUpReason::Notification(_) | WakeUpReason::StartParaheadFetch,
-                    ParachainBackgroundState::NotSubscribed { .. },
-                ) => {
-                    debug_assert!(false);
-                    continue;
-                }
-
-                (
                     WakeUpReason::StartParaheadFetch,
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
+                    // Must start downloading a parahead.
+
                     // Internal state check.
                     debug_assert_eq!(
                         runtime_subscription.reported_best_parahead_hash.is_some(),
@@ -779,6 +775,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
+                    // Relay chain has a new finalized block.
                     log::debug!(
                         target: &self.log_target,
                         "RelayChain => Finalized(hash={})",
@@ -807,6 +804,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     WakeUpReason::Notification(runtime_service::Notification::Block(block)),
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
+                    // Relay chain has a new block.
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                     log::debug!(
@@ -838,6 +836,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
+                    // Relay chain has a new best block.
                     log::debug!(
                         target: &self.log_target,
                         "RelayChain => BestBlockChanged(hash={})",
@@ -875,13 +874,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             })
                         },
                     };
-                }
-
-                (
-                    WakeUpReason::ParaheadFetchFinished { .. },
-                    ParachainBackgroundState::NotSubscribed { .. },
-                ) => {
-                    // Ignore parahead fetch operations if not subscribed.
                 }
 
                 (
@@ -950,11 +942,16 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     },
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
-                    // Several chains initially didn't support parachains, and have later been
-                    // upgraded to support them. Similarly, the parachain might not have had a core on
-                    // the relay chain until recently. For these reasons, errors when the relay chain
-                    // is not near head of the chain are most likely normal and do not warrant logging
-                    // an error.
+                    // Failed fetching a parahead.
+
+                    // Several relay chains initially didn't support parachains, and have later
+                    // been upgraded to support them. Similarly, the parachain might not have had a
+                    // core on the relay chain until recently. For these reasons, errors when the
+                    // relay chain is not near head of the chain are most likely normal and do
+                    // not warrant logging an error.
+                    // Note that `is_near_head_of_chain_heuristic` is normally not acceptable to
+                    // use due to being too vague, but since this is just about whether to print a
+                    // log message, it's completely fine.
                     if self
                         .relay_chain_sync
                         .is_near_head_of_chain_heuristic()
@@ -992,8 +989,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Since there is a mapping between relay chain blocks and parachain blocks,
                     // whether a parachain is at the head of the chain is the same thing as whether
                     // its relay chain is at the head of the chain.
-                    // Note that there is no ordering guarantee of any kind w.r.t. block subscriptions
-                    // notifications.
+                    // Note that there is no ordering guarantee of any kind w.r.t. block
+                    // subscriptions notifications.
                     let val = self
                         .relay_chain_sync
                         .is_near_head_of_chain_heuristic()
@@ -1007,9 +1004,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }),
                     _,
                 ) => {
-                    // If no finalized parahead is known yet, we might be very close to the head but
-                    // also maybe very very far away. We lean on the cautious side and always return
-                    // `false`.
+                    // If no finalized parahead is known yet, we might be very close to the head
+                    // but also maybe very very far away. We lean on the cautious side and always
+                    // return `false`.
                     let _ = send_back.send(false);
                 }
 
@@ -1052,8 +1049,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // parahead, or we don't. In case where we don't know of any finalized parahead
                     // yet, we report a single obsolete finalized parahead, which is
                     // `obsolete_finalized_parahead`. The rest of this module makes sure that no
-                    // other block is reported to subscriptions as long as this is the case, and that
-                    // subscriptions are reset once the first known finalized parahead is known.
+                    // other block is reported to subscriptions as long as this is the case, and
+                    // that subscriptions are reset once the first known finalized parahead
+                    // is known.
                     if let Some(finalized_parahead) = runtime_subscription
                         .async_tree
                         .output_finalized_async_user_data()
@@ -1176,8 +1174,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 ) => {
                     // If `block_number` is over the finalized block, then which source knows which
                     // block is precisely tracked. Otherwise, it is assumed that all sources are on
-                    // the finalized chain and thus that all sources whose best block is superior to
-                    // `block_number` have it.
+                    // the finalized chain and thus that all sources whose best block is superior
+                    // to `block_number` have it.
                     let list = if block_number > self.sync_sources.finalized_block_height() {
                         self.sync_sources
                             .knows_non_finalized_block(block_number, &block_hash)
@@ -1285,6 +1283,17 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (WakeUpReason::NetworkEvent(_), _) => {
                     // Uninteresting message.
+                }
+
+                (
+                    WakeUpReason::ParaheadFetchFinished { .. }
+                    | WakeUpReason::AdvanceSyncTree
+                    | WakeUpReason::Notification(_)
+                    | WakeUpReason::StartParaheadFetch,
+                    ParachainBackgroundState::NotSubscribed { .. },
+                ) => {
+                    // These paths are unreachable.
+                    debug_assert!(false);
                 }
             }
         }
