@@ -919,7 +919,8 @@ async fn run_background<TPlat: PlatformRef>(
             MustAdvanceTree,
             StartPendingSubscribeAll,
             Notification(Option<sync_service::Notification>),
-            ToBackground(Option<ToBackground<TPlat>>),
+            ToBackground(ToBackground<TPlat>),
+            ForegroundClosed,
             RuntimeDownloadFinished(
                 async_tree::AsyncOpId,
                 Result<
@@ -952,7 +953,13 @@ async fn run_background<TPlat: PlatformRef>(
                     WakeUpReason::MustSubscribe
                 }
             })
-            .or(async { WakeUpReason::ToBackground(background.to_background.next().await) })
+            .or(async {
+                background
+                    .to_background
+                    .next()
+                    .await
+                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::ToBackground)
+            })
             .or(async {
                 if !background.runtime_downloads.is_empty() {
                     let (async_op_id, download_result) =
@@ -1751,12 +1758,12 @@ async fn run_background<TPlat: PlatformRef>(
                 background.blocks_stream = None;
             }
 
-            WakeUpReason::ToBackground(None) => {
+            WakeUpReason::ForegroundClosed => {
                 // Frontend and all subscriptions have shut down.
                 return;
             }
 
-            WakeUpReason::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
+            WakeUpReason::ToBackground(ToBackground::SubscribeAll(msg)) => {
                 // Foreground wants to subscribe.
 
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
@@ -1768,13 +1775,13 @@ async fn run_background<TPlat: PlatformRef>(
                 background.pending_subscriptions.push(msg);
             }
 
-            WakeUpReason::ToBackground(Some(ToBackground::CompileAndPinRuntime {
+            WakeUpReason::ToBackground(ToBackground::CompileAndPinRuntime {
                 result_tx,
                 storage_code,
                 storage_heap_pages,
                 code_merkle_value,
                 closest_ancestor_excluding,
-            })) => {
+            }) => {
                 // Foreground wants to compile the given runtime.
 
                 // Try to find an existing identical runtime.
@@ -1806,9 +1813,9 @@ async fn run_background<TPlat: PlatformRef>(
                 let _ = result_tx.send(runtime);
             }
 
-            WakeUpReason::ToBackground(Some(
-                ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
-            )) => {
+            WakeUpReason::ToBackground(ToBackground::FinalizedRuntimeStorageMerkleValues {
+                result_tx,
+            }) => {
                 // Foreground wants the finalized runtime storage Merkle values.
                 let _ = result_tx.send(
                     if let Tree::FinalizedBlockRuntimeKnown { tree, .. } = &background.tree {
@@ -1824,9 +1831,7 @@ async fn run_background<TPlat: PlatformRef>(
                 );
             }
 
-            WakeUpReason::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
-                result_tx,
-            })) => {
+            WakeUpReason::ToBackground(ToBackground::IsNearHeadOfChainHeuristic { result_tx }) => {
                 // Foreground wants to query whether we are at the head of the chain.
 
                 // The runtime service adds a delay between the moment a best block is reported by
@@ -1848,11 +1853,11 @@ async fn run_background<TPlat: PlatformRef>(
                 let _ = result_tx.send(background.best_near_head_of_chain);
             }
 
-            WakeUpReason::ToBackground(Some(ToBackground::UnpinBlock {
+            WakeUpReason::ToBackground(ToBackground::UnpinBlock {
                 result_tx,
                 subscription_id,
                 block_hash,
-            })) => {
+            }) => {
                 // Foreground wants a block unpinned.
 
                 if let Tree::FinalizedBlockRuntimeKnown {
@@ -1889,11 +1894,11 @@ async fn run_background<TPlat: PlatformRef>(
                 let _ = result_tx.send(Ok(()));
             }
 
-            WakeUpReason::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
+            WakeUpReason::ToBackground(ToBackground::PinnedBlockRuntimeAccess {
                 result_tx,
                 subscription_id,
                 block_hash,
-            })) => {
+            }) => {
                 // Foreground wants to access the runtime of a pinned block.
 
                 let pinned_block = {
