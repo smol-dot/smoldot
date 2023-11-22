@@ -1814,15 +1814,66 @@ async fn run_background<TPlat: PlatformRef>(
                 // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
                 background.best_near_head_of_chain = true;
 
-                background
-                    .runtime_download_finished(
-                        async_op_id,
-                        storage_code,
-                        storage_heap_pages,
+                // Try to find an existing runtime identical to the one that has just been downloaded.
+                // This loop is `O(n)`, but given that we expect this list to very small (at most 1 or
+                // 2 elements), this is not a problem.
+                let existing_runtime = background
+                    .runtimes
+                    .iter()
+                    .filter_map(|(_, rt)| rt.upgrade())
+                    .find(|rt| {
+                        rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages
+                    });
+
+                // If no identical runtime was found, try compiling the runtime.
+                let runtime = if let Some(existing_runtime) = existing_runtime {
+                    existing_runtime
+                } else {
+                    let runtime =
+                        SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+                    match &runtime {
+                        Ok(runtime) => {
+                            log::info!(
+                                target: &background.log_target,
+                                "Successfully compiled runtime. Spec version: {}. Size of `:code`: {}.",
+                                runtime.runtime_spec.decode().spec_version,
+                                BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap())
+                            );
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                target: &background.log_target,
+                                "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
+                                This indicates an incompatibility between smoldot and the chain.",
+                                BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap()),
+                                error
+                            );
+                        }
+                    }
+
+                    let runtime = Arc::new(Runtime {
+                        heap_pages: storage_heap_pages,
+                        runtime_code: storage_code,
+                        runtime,
                         code_merkle_value,
                         closest_ancestor_excluding,
-                    )
-                    .await;
+                    });
+
+                    background.runtimes.insert(Arc::downgrade(&runtime));
+                    runtime
+                };
+
+                // Insert the runtime into the tree.
+                match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        tree.async_op_finished(async_op_id, runtime);
+                    }
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        tree.async_op_finished(async_op_id, Some(runtime));
+                    }
+                }
+
+                background.advance_and_notify_subscribers();
 
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
@@ -2013,74 +2064,6 @@ enum Tree<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
-    /// Injects into the state of `self` a completed runtime download.
-    async fn runtime_download_finished(
-        &mut self,
-        async_op_id: async_tree::AsyncOpId,
-        storage_code: Option<Vec<u8>>,
-        storage_heap_pages: Option<Vec<u8>>,
-        code_merkle_value: Option<Vec<u8>>,
-        closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) {
-        // Try to find an existing runtime identical to the one that has just been downloaded.
-        // This loop is `O(n)`, but given that we expect this list to very small (at most 1 or
-        // 2 elements), this is not a problem.
-        let existing_runtime = self
-            .runtimes
-            .iter()
-            .filter_map(|(_, rt)| rt.upgrade())
-            .find(|rt| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages);
-
-        // If no identical runtime was found, try compiling the runtime.
-        let runtime = if let Some(existing_runtime) = existing_runtime {
-            existing_runtime
-        } else {
-            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
-            match &runtime {
-                Ok(runtime) => {
-                    log::info!(
-                        target: &self.log_target,
-                        "Successfully compiled runtime. Spec version: {}. Size of `:code`: {}.",
-                        runtime.runtime_spec.decode().spec_version,
-                        BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap())
-                    );
-                }
-                Err(error) => {
-                    log::warn!(
-                        target: &self.log_target,
-                        "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
-                        This indicates an incompatibility between smoldot and the chain.",
-                        BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap()),
-                        error
-                    );
-                }
-            }
-
-            let runtime = Arc::new(Runtime {
-                heap_pages: storage_heap_pages,
-                runtime_code: storage_code,
-                runtime,
-                code_merkle_value,
-                closest_ancestor_excluding,
-            });
-
-            self.runtimes.insert(Arc::downgrade(&runtime));
-            runtime
-        };
-
-        // Insert the runtime into the tree.
-        match &mut self.tree {
-            Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                tree.async_op_finished(async_op_id, runtime);
-            }
-            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                tree.async_op_finished(async_op_id, Some(runtime));
-            }
-        }
-
-        self.advance_and_notify_subscribers();
-    }
-
     fn advance_and_notify_subscribers(&mut self) {
         loop {
             match &mut self.tree {
