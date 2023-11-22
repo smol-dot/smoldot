@@ -479,24 +479,16 @@ where
     ///
     pub fn remove_chain(&mut self, chain_id: ChainId) -> Result<TChain, RemoveChainError> {
         // Check whether the chain is still in use.
-        for protocol in [
-            NotificationsProtocol::BlockAnnounces {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Transactions {
-                chain_index: chain_id.0,
-            },
-            NotificationsProtocol::Grandpa {
-                chain_index: chain_id.0,
-            },
-        ] {
+        for protocol in [NotificationsProtocol::BlockAnnounces {
+            chain_index: chain_id.0,
+        }] {
             if self
                 .notification_substreams_by_peer_id
                 .range(
                     (
                         protocol,
                         PeerIndex(usize::min_value()),
-                        SubstreamDirection::In,
+                        SubstreamDirection::Out,
                         NotificationsSubstreamState::Pending,
                         SubstreamId::min_value(),
                     )
@@ -508,7 +500,7 @@ where
                             SubstreamId::max_value(),
                         ),
                 )
-                .next()
+                .find(|(_, _, direction, _, _)| matches!(*direction, SubstreamDirection::Out))
                 .is_some()
             {
                 return Err(RemoveChainError::InUse);
