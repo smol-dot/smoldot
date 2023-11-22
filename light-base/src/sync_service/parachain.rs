@@ -209,8 +209,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     >,
 
     /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch:
-        future::Either<Pin<Box<future::Fuse<TPlat::Delay>>>, future::Pending<()>>,
+    next_start_parahead_fetch: Pin<Box<dyn future::FusedFuture<Output = ()> + Send>>,
 }
 
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
@@ -400,7 +399,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             reported_best_parahead_hash: None,
                             async_tree,
                             in_progress_paraheads: stream::FuturesUnordered::new(),
-                            next_start_parahead_fetch: future::Either::Right(future::pending()),
+                            next_start_parahead_fetch: Box::pin(future::ready(())),
                         },
                     );
                 }
@@ -841,12 +840,11 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             {
                 async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
                     runtime_subscription.next_start_parahead_fetch =
-                        future::Either::Left(Box::pin(self.platform.sleep_until(when).fuse()));
+                        Box::pin(self.platform.sleep_until(when).fuse());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                    runtime_subscription.next_start_parahead_fetch =
-                        future::Either::Right(future::pending());
+                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::pending());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::Ready(op) => {
