@@ -969,151 +969,151 @@ async fn run_background<TPlat: PlatformRef>(
 
         match wake_up_reason {
             WakeUpReason::NewNecessaryDownload => {
-                loop {
-                    // Don't download more than 2 runtimes at a time.
-                    if background.runtime_downloads.len() >= 2 {
-                        break;
-                    }
-        
-                    // If there's nothing more to download, break out of the loop.
-                    let download_params = {
-                        let async_op = match &mut background.tree {
-                            Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                                tree.next_necessary_async_op(&background.platform.now())
-                            }
-                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                tree.next_necessary_async_op(&background.platform.now())
-                            }
-                        };
-        
-                        match async_op {
-                            async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
-                            async_tree::NextNecessaryAsyncOp::NotReady { when } => {
-                                background.wake_up_new_necessary_download = if let Some(when) = when {
-                                    Box::pin(background.platform.sleep_until(when)) as Pin<Box<_>>
-                                } else {
-                                    Box::pin(future::pending()) as Pin<Box<_>>
-                                };
-                                break;
-                            }
+                // Don't download more than 2 runtimes at a time.
+                if background.runtime_downloads.len() >= 2 {
+                    continue;
+                }
+
+                // If there's nothing more to download, continue looping.
+                let download_params = {
+                    let async_op = match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            tree.next_necessary_async_op(&background.platform.now())
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            tree.next_necessary_async_op(&background.platform.now())
                         }
                     };
-        
-                    log::debug!(
-                        target: &background.log_target,
-                        "Worker => NewDownload(block={})",
-                        HashDisplay(&download_params.block_user_data.hash)
-                    );
-        
-                    // Dispatches a runtime download task to `runtime_downloads`.
-                    background.runtime_downloads.push({
-                        let download_id = download_params.id;
-        
-                        // In order to perform the download, we need to known the state root hash of the
-                        // block in question, which requires decoding the block. If the decoding fails,
-                        // we report that the asynchronous operation has failed with the hope that this
-                        // block gets pruned in the future.
-                        match header::decode(
-                            &download_params.block_user_data.scale_encoded_header,
-                            background.sync_service.block_number_bytes(),
-                        ) {
-                            Ok(decoded_header) => {
-                                let sync_service = background.sync_service.clone();
-                                let block_hash = download_params.block_user_data.hash;
-                                let state_root = *decoded_header.state_root;
-                                let block_number = decoded_header.number;
-        
-                                Box::pin(async move {
-                                    let result = sync_service
-                                        .storage_query(
-                                            block_number,
-                                            &block_hash,
-                                            &state_root,
-                                            [
-                                                sync_service::StorageRequestItem {
-                                                    key: b":code".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-                                                },
-                                                sync_service::StorageRequestItem {
-                                                    key: b":code".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::Value,
-                                                },
-                                                sync_service::StorageRequestItem {
-                                                    key: b":heappages".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::Value,
-                                                },
-                                            ]
-                                            .into_iter(),
-                                            3,
-                                            Duration::from_secs(20),
-                                            NonZeroU32::new(3).unwrap(),
-                                        )
-                                        .await;
-        
-                                    let result = match result {
-                                        Ok(entries) => {
-                                            let heap_pages = entries
-                                                .iter()
-                                                .find_map(|entry| match entry {
-                                                    sync_service::StorageResultItem::Value {
-                                                        key,
-                                                        value,
-                                                    } if key == b":heappages" => {
-                                                        Some(value.clone()) // TODO: overhead
-                                                    }
-                                                    _ => None,
-                                                })
-                                                .unwrap();
-                                            let code = entries
-                                                .iter()
-                                                .find_map(|entry| match entry {
-                                                    sync_service::StorageResultItem::Value {
-                                                        key,
-                                                        value,
-                                                    } if key == b":code" => {
-                                                        Some(value.clone()) // TODO: overhead
-                                                    }
-                                                    _ => None,
-                                                })
-                                                .unwrap();
-                                            let (code_merkle_value, code_closest_ancestor) = if code.is_some() {
-                                                entries
-                                                    .iter()
-                                                    .find_map(|entry| match entry {
-                                                        sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                                                            requested_key,
-                                                            found_closest_ancestor_excluding,
-                                                            closest_descendant_merkle_value,
-                                                        } if requested_key == b":code" => {
-                                                            Some((closest_descendant_merkle_value.clone(), found_closest_ancestor_excluding.clone())) // TODO overhead
-                                                        }
-                                                        _ => None
-                                                    })
-                                                    .unwrap()
-                                            } else {
-                                                (None, None)
-                                            };
-                                            Ok((code, heap_pages, code_merkle_value, code_closest_ancestor))
-                                        }
-                                        Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
-                                    };
-        
-                                    (download_id, result)
-                                })
+
+                    match async_op {
+                        async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
+                        async_tree::NextNecessaryAsyncOp::NotReady { when } => {
+                            if let Some(when) = when {
+                                background.wake_up_new_necessary_download =
+                                    Box::pin(background.platform.sleep_until(when)) as Pin<Box<_>>;
                             }
-                            Err(error) => {
-                                log::warn!(
-                                    target: &background.log_target,
-                                    "Failed to decode header from sync service: {}", error
-                                );
-        
-                                Box::pin(async move {
-                                    (download_id, Err(RuntimeDownloadError::InvalidHeader(error)))
-                                })
-                            }
+                            continue;
                         }
-                    });
-                }
+                    }
+                };
+
+                log::debug!(
+                    target: &background.log_target,
+                    "Worker => NewDownload(block={})",
+                    HashDisplay(&download_params.block_user_data.hash)
+                );
+
+                // Dispatches a runtime download task to `runtime_downloads`.
+                background.runtime_downloads.push({
+                    let download_id = download_params.id;
+
+                    // In order to perform the download, we need to known the state root hash of the
+                    // block in question, which requires decoding the block. If the decoding fails,
+                    // we report that the asynchronous operation has failed with the hope that this
+                    // block gets pruned in the future.
+                    match header::decode(
+                        &download_params.block_user_data.scale_encoded_header,
+                        background.sync_service.block_number_bytes(),
+                    ) {
+                        Ok(decoded_header) => {
+                            let sync_service = background.sync_service.clone();
+                            let block_hash = download_params.block_user_data.hash;
+                            let state_root = *decoded_header.state_root;
+                            let block_number = decoded_header.number;
+
+                            Box::pin(async move {
+                                let result = sync_service
+                                    .storage_query(
+                                        block_number,
+                                        &block_hash,
+                                        &state_root,
+                                        [
+                                            sync_service::StorageRequestItem {
+                                                key: b":code".to_vec(),
+                                                ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                                            },
+                                            sync_service::StorageRequestItem {
+                                                key: b":code".to_vec(),
+                                                ty: sync_service::StorageRequestItemTy::Value,
+                                            },
+                                            sync_service::StorageRequestItem {
+                                                key: b":heappages".to_vec(),
+                                                ty: sync_service::StorageRequestItemTy::Value,
+                                            },
+                                        ]
+                                        .into_iter(),
+                                        3,
+                                        Duration::from_secs(20),
+                                        NonZeroU32::new(3).unwrap(),
+                                    )
+                                    .await;
+
+                                let result = match result {
+                                    Ok(entries) => {
+                                        let heap_pages = entries
+                                            .iter()
+                                            .find_map(|entry| match entry {
+                                                sync_service::StorageResultItem::Value {
+                                                    key,
+                                                    value,
+                                                } if key == b":heappages" => {
+                                                    Some(value.clone()) // TODO: overhead
+                                                }
+                                                _ => None,
+                                            })
+                                            .unwrap();
+                                        let code = entries
+                                            .iter()
+                                            .find_map(|entry| match entry {
+                                                sync_service::StorageResultItem::Value {
+                                                    key,
+                                                    value,
+                                                } if key == b":code" => {
+                                                    Some(value.clone()) // TODO: overhead
+                                                }
+                                                _ => None,
+                                            })
+                                            .unwrap();
+                                        let (code_merkle_value, code_closest_ancestor) = if code.is_some() {
+                                            entries
+                                                .iter()
+                                                .find_map(|entry| match entry {
+                                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                                                        requested_key,
+                                                        found_closest_ancestor_excluding,
+                                                        closest_descendant_merkle_value,
+                                                    } if requested_key == b":code" => {
+                                                        Some((closest_descendant_merkle_value.clone(), found_closest_ancestor_excluding.clone())) // TODO overhead
+                                                    }
+                                                    _ => None
+                                                })
+                                                .unwrap()
+                                        } else {
+                                            (None, None)
+                                        };
+                                        Ok((code, heap_pages, code_merkle_value, code_closest_ancestor))
+                                    }
+                                    Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
+                                };
+
+                                (download_id, result)
+                            })
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                target: &background.log_target,
+                                "Failed to decode header from sync service: {}", error
+                            );
+
+                            Box::pin(async move {
+                                (download_id, Err(RuntimeDownloadError::InvalidHeader(error)))
+                            })
+                        }
+                    }
+                });
+
+                // There might be other downloads to start.
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::MustSubscribe => {
                 // The buffer size should be large enough so that, if the CPU is busy, it
