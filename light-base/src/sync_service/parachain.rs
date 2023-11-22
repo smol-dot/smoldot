@@ -26,7 +26,7 @@ use core::{
     time::Duration,
 };
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, FutureExt as _, StreamExt as _};
+use futures_util::{future, stream, StreamExt as _};
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
@@ -209,15 +209,12 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     >,
 
     /// Future that is ready when we need to start a new parachain head fetch operation.
-    next_start_parahead_fetch: Pin<Box<dyn future::FusedFuture<Output = ()> + Send>>,
+    next_start_parahead_fetch: Pin<Box<dyn future::Future<Output = ()> + Send>>,
 }
 
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
     async fn run(mut self) {
         loop {
-            // Start fetching paraheads of new blocks whose parahead needs to be fetched.
-            self.start_paraheads_fetch();
-
             // Report to the outside any block in the `async_tree` that is now ready.
             self.advance_and_report_notifications().await;
 
@@ -267,7 +264,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 let start_parahead_fetch = async {
                     if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
-                        next_start_parahead_fetch.await;
+                        next_start_parahead_fetch.as_mut().await;
+                        *next_start_parahead_fetch = Box::pin(future::pending());
                         WakeUpReason::StartParaheadFetch
                     } else {
                         future::pending().await
@@ -405,7 +403,73 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 WakeUpReason::StartParaheadFetch => {
-                    // Do nothing. This is simply to wake up and loop again.
+                    let runtime_subscription = match &mut self.subscription_state {
+                        ParachainBackgroundState::NotSubscribed { .. } => continue,
+                        ParachainBackgroundState::Subscribed(s) => s,
+                    };
+
+                    // Internal state check.
+                    debug_assert_eq!(
+                        runtime_subscription.reported_best_parahead_hash.is_some(),
+                        runtime_subscription
+                            .async_tree
+                            .output_finalized_async_user_data()
+                            .is_some()
+                    );
+
+                    // Limit the maximum number of simultaneous downloads.
+                    if runtime_subscription.in_progress_paraheads.len() >= 4 {
+                        continue;
+                    }
+
+                    match runtime_subscription
+                        .async_tree
+                        .next_necessary_async_op(&self.platform.now())
+                    {
+                        async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
+                            runtime_subscription.next_start_parahead_fetch =
+                                Box::pin(self.platform.sleep_until(when));
+                        }
+                        async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
+                            runtime_subscription.next_start_parahead_fetch =
+                                Box::pin(future::pending());
+                        }
+                        async_tree::NextNecessaryAsyncOp::Ready(op) => {
+                            log::debug!(
+                                target: &self.log_target,
+                                "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
+                                HashDisplay(op.block_user_data),
+                            );
+
+                            runtime_subscription.in_progress_paraheads.push({
+                                let relay_chain_sync = self.relay_chain_sync.clone();
+                                let subscription_id =
+                                    runtime_subscription.relay_chain_subscribe_all.id();
+                                let block_hash = *op.block_user_data;
+                                let async_op_id = op.id;
+                                let relay_chain_block_number_bytes =
+                                    self.relay_chain_block_number_bytes;
+                                let parachain_id = self.parachain_id;
+                                Box::pin(async move {
+                                    (
+                                        async_op_id,
+                                        parahead(
+                                            &relay_chain_sync,
+                                            relay_chain_block_number_bytes,
+                                            subscription_id,
+                                            parachain_id,
+                                            &block_hash,
+                                        )
+                                        .await,
+                                    )
+                                })
+                            });
+
+                            // There might be more downloads to start.
+                            runtime_subscription.next_start_parahead_fetch =
+                                Box::pin(future::ready(()));
+                        }
+                    }
                 }
 
                 WakeUpReason::Notification(runtime_service::Notification::Finalized {
@@ -528,6 +592,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // A parahead fetching operation is finished.
                     self.process_parahead_fetch_result(async_op_id, parahead_result)
                         .await;
+
+                    let runtime_subscription = match &mut self.subscription_state {
+                        ParachainBackgroundState::NotSubscribed { .. } => continue,
+                        ParachainBackgroundState::Subscribed(s) => s,
+                    };
+                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
 
                 WakeUpReason::ForegroundMessage(foreground_message) => {
@@ -813,69 +883,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             }
             (ToBackground::SerializeChainInformation { send_back }, _) => {
                 let _ = send_back.send(None);
-            }
-        }
-    }
-
-    /// Start fetching parachain headers of new blocks whose parachain block needs to be fetched.
-    fn start_paraheads_fetch(&mut self) {
-        let runtime_subscription = match &mut self.subscription_state {
-            ParachainBackgroundState::NotSubscribed { .. } => return,
-            ParachainBackgroundState::Subscribed(s) => s,
-        };
-
-        // Internal state check.
-        debug_assert_eq!(
-            runtime_subscription.reported_best_parahead_hash.is_some(),
-            runtime_subscription
-                .async_tree
-                .output_finalized_async_user_data()
-                .is_some()
-        );
-
-        while runtime_subscription.in_progress_paraheads.len() < 4 {
-            match runtime_subscription
-                .async_tree
-                .next_necessary_async_op(&self.platform.now())
-            {
-                async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
-                    runtime_subscription.next_start_parahead_fetch =
-                        Box::pin(self.platform.sleep_until(when).fuse());
-                    break;
-                }
-                async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::pending());
-                    break;
-                }
-                async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                    log::debug!(
-                        target: &self.log_target,
-                        "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
-                        HashDisplay(op.block_user_data),
-                    );
-
-                    runtime_subscription.in_progress_paraheads.push({
-                        let relay_chain_sync = self.relay_chain_sync.clone();
-                        let subscription_id = runtime_subscription.relay_chain_subscribe_all.id();
-                        let block_hash = *op.block_user_data;
-                        let async_op_id = op.id;
-                        let relay_chain_block_number_bytes = self.relay_chain_block_number_bytes;
-                        let parachain_id = self.parachain_id;
-                        Box::pin(async move {
-                            (
-                                async_op_id,
-                                parahead(
-                                    &relay_chain_sync,
-                                    relay_chain_block_number_bytes,
-                                    subscription_id,
-                                    parachain_id,
-                                    &block_hash,
-                                )
-                                .await,
-                            )
-                        })
-                    });
-                }
             }
         }
     }
