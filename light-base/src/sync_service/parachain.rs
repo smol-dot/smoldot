@@ -198,6 +198,10 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
     /// when their parachain head fetching succeeds or when they are removed from the tree.
     async_tree: async_tree::AsyncTree<TPlat::Instant, [u8; 32], Option<Vec<u8>>>,
 
+    /// If `true`, [`ParachainBackgroundTaskAfterSubscription::async_tree`] might need to
+    /// be advanced.
+    must_process_sync_tree: bool,
+
     /// List of in-progress parachain head fetching operations.
     ///
     /// The operations require some blocks to be pinned within the relay chain runtime service,
@@ -215,9 +219,6 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
     async fn run(mut self) {
         loop {
-            // Report to the outside any block in the `async_tree` that is now ready.
-            self.advance_and_report_notifications().await;
-
             // Wait until something interesting happens.
             enum WakeUpReason<TPlat: PlatformRef> {
                 ForegroundClosed,
@@ -232,6 +233,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 SubscriptionDead,
                 MustSubscribeNetworkEvents,
                 NetworkEvent(network_service::Event),
+                AdvanceSyncTree,
             }
 
             let wake_up_reason: WakeUpReason<_> = {
@@ -240,16 +242,18 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     next_start_parahead_fetch,
                     relay_chain_subscribe_all,
                     in_progress_paraheads,
+                    must_process_sync_tree,
                     is_relaychain_subscribed,
                 ) = match &mut self.subscription_state {
                     ParachainBackgroundState::NotSubscribed {
                         subscribe_future, ..
-                    } => (Some(subscribe_future), None, None, None, false),
+                    } => (Some(subscribe_future), None, None, None, None, false),
                     ParachainBackgroundState::Subscribed(runtime_subscription) => (
                         None,
                         Some(&mut runtime_subscription.next_start_parahead_fetch),
                         Some(&mut runtime_subscription.relay_chain_subscribe_all),
                         Some(&mut runtime_subscription.in_progress_paraheads),
+                        Some(&mut runtime_subscription.must_process_sync_tree),
                         true,
                     ),
                 };
@@ -314,6 +318,18 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             }
                         } else {
                             WakeUpReason::MustSubscribeNetworkEvents
+                        }
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    if let Some(must_process_sync_tree) = must_process_sync_tree {
+                        if *must_process_sync_tree {
+                            *must_process_sync_tree = false;
+                            WakeUpReason::AdvanceSyncTree
+                        } else {
+                            future::pending().await
                         }
                     } else {
                         future::pending().await
@@ -384,10 +400,16 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             relay_chain_subscribe_all: relay_chain_subscribe_all.new_blocks,
                             reported_best_parahead_hash: None,
                             async_tree,
+                            must_process_sync_tree: false,
                             in_progress_paraheads: stream::FuturesUnordered::new(),
                             next_start_parahead_fetch: Box::pin(future::ready(())),
                         },
                     );
+                }
+
+                (WakeUpReason::AdvanceSyncTree, _) => {
+                    // Report to the outside any block in the `async_tree` that is now ready.
+                    self.advance_and_report_notifications().await;
                 }
 
                 (
@@ -495,6 +517,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     runtime_subscription
                         .async_tree
                         .input_finalize(finalized, best);
+                    runtime_subscription.must_process_sync_tree = true;
                 }
 
                 (
@@ -521,6 +544,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         false,
                         block.is_new_best,
                     );
+                    runtime_subscription.must_process_sync_tree = true;
+
+                    runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
 
                 (
@@ -545,6 +571,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     runtime_subscription
                         .async_tree
                         .input_set_best_block(node_idx);
+
+                    runtime_subscription.must_process_sync_tree = true;
                 }
 
                 (WakeUpReason::SubscriptionDead, _) => {
@@ -599,6 +627,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             .unpin_block(*hash)
                             .await;
                     }
+
+                    runtime_subscription.must_process_sync_tree = true;
 
                     runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
