@@ -1568,8 +1568,48 @@ async fn run_background<TPlat: PlatformRef>(
                     HashDisplay(&hash), HashDisplay(&best_block_hash)
                 );
 
-                background.finalize(hash, best_block_hash).await;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
+
+                match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown {
+                        tree,
+                        finalized_block,
+                        ..
+                    } => {
+                        debug_assert_ne!(finalized_block.hash, hash);
+                        let node_to_finalize = tree
+                            .input_output_iter_unordered()
+                            .find(|block| block.user_data.hash == hash)
+                            .unwrap()
+                            .id;
+                        let new_best_block = tree
+                            .input_output_iter_unordered()
+                            .find(|block| block.user_data.hash == best_block_hash)
+                            .unwrap()
+                            .id;
+                        tree.input_finalize(node_to_finalize, new_best_block);
+                    }
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        let node_to_finalize = tree
+                            .input_output_iter_unordered()
+                            .find(|block| block.user_data.hash == hash)
+                            .unwrap()
+                            .id;
+                        let new_best_block = tree
+                            .input_output_iter_unordered()
+                            .find(|block| block.user_data.hash == best_block_hash)
+                            .unwrap()
+                            .id;
+                        tree.input_finalize(node_to_finalize, new_best_block);
+                    }
+                }
+
+                background.advance_and_notify_subscribers();
+
+                // Clean up unused runtimes to free up resources.
+                background
+                    .runtimes
+                    .retain(|_, runtime| runtime.strong_count() > 0);
             }
             WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
                 hash,
@@ -2284,49 +2324,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 }
             });
         }
-    }
-
-    /// Updates `self` to take into account that the sync service has finalized the given block.
-    async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
-        match &mut self.tree {
-            Tree::FinalizedBlockRuntimeKnown {
-                tree,
-                finalized_block,
-                ..
-            } => {
-                debug_assert_ne!(finalized_block.hash, hash_to_finalize);
-                let node_to_finalize = tree
-                    .input_output_iter_unordered()
-                    .find(|block| block.user_data.hash == hash_to_finalize)
-                    .unwrap()
-                    .id;
-                let new_best_block = tree
-                    .input_output_iter_unordered()
-                    .find(|block| block.user_data.hash == new_best_block_hash)
-                    .unwrap()
-                    .id;
-                tree.input_finalize(node_to_finalize, new_best_block);
-            }
-            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                let node_to_finalize = tree
-                    .input_output_iter_unordered()
-                    .find(|block| block.user_data.hash == hash_to_finalize)
-                    .unwrap()
-                    .id;
-                let new_best_block = tree
-                    .input_output_iter_unordered()
-                    .find(|block| block.user_data.hash == new_best_block_hash)
-                    .unwrap()
-                    .id;
-                tree.input_finalize(node_to_finalize, new_best_block);
-            }
-        }
-
-        self.advance_and_notify_subscribers();
-
-        // Clean up unused runtimes to free up resources.
-        self.runtimes
-            .retain(|_, runtime| runtime.strong_count() > 0);
     }
 }
 
