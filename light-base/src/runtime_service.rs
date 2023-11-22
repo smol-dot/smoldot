@@ -1126,210 +1126,212 @@ async fn run_background<TPlat: PlatformRef>(
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::MustAdvanceTree => {
-                loop {
-                    match &mut background.tree {
-                        Tree::FinalizedBlockRuntimeKnown {
-                            tree,
-                            finalized_block,
-                            all_blocks_subscriptions,
-                            pinned_blocks,
-                        } => match tree.try_advance_output() {
-                            None => break,
-                            Some(async_tree::OutputUpdate::Finalized {
-                                user_data: new_finalized,
-                                best_block_index,
-                                pruned_blocks,
-                                former_finalized_async_op_user_data: former_finalized_runtime,
-                                ..
-                            }) => {
-                                *finalized_block = new_finalized;
-                                let best_block_hash = best_block_index
-                                    .map_or(finalized_block.hash, |idx| {
-                                        tree.block_user_data(idx).hash
-                                    });
+                background.must_update_tree_and_notify_subscribers = true;
 
-                                log::debug!(
-                                    target: &background.log_target,
-                                    "Worker => OutputFinalized(hash={}, best={})",
-                                    HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
-                                );
+                match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown {
+                        tree,
+                        finalized_block,
+                        all_blocks_subscriptions,
+                        pinned_blocks,
+                    } => match tree.try_advance_output() {
+                        None => {
+                            background.must_update_tree_and_notify_subscribers = false;
+                            continue;
+                        }
+                        Some(async_tree::OutputUpdate::Finalized {
+                            user_data: new_finalized,
+                            best_block_index,
+                            pruned_blocks,
+                            former_finalized_async_op_user_data: former_finalized_runtime,
+                            ..
+                        }) => {
+                            *finalized_block = new_finalized;
+                            let best_block_hash = best_block_index
+                                .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
 
-                                // The finalization might cause some runtimes in the list of runtimes
-                                // to have become unused. Clean them up.
-                                drop(former_finalized_runtime);
-                                background
-                                    .runtimes
-                                    .retain(|_, runtime| runtime.strong_count() > 0);
+                            log::debug!(
+                                target: &background.log_target,
+                                "Worker => OutputFinalized(hash={}, best={})",
+                                HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
+                            );
 
-                                let all_blocks_notif = Notification::Finalized {
-                                    best_block_hash,
-                                    hash: finalized_block.hash,
-                                    pruned_blocks: pruned_blocks
-                                        .iter()
-                                        .map(|(_, b, _)| b.hash)
-                                        .collect(),
-                                };
+                            // The finalization might cause some runtimes in the list of runtimes
+                            // to have become unused. Clean them up.
+                            drop(former_finalized_runtime);
+                            background
+                                .runtimes
+                                .retain(|_, runtime| runtime.strong_count() > 0);
 
-                                let mut to_remove = Vec::new();
-                                for (subscription_id, (sender, finalized_pinned_remaining)) in
-                                    all_blocks_subscriptions.iter_mut()
-                                {
-                                    let count_limit = pruned_blocks.len() + 1;
+                            let all_blocks_notif = Notification::Finalized {
+                                best_block_hash,
+                                hash: finalized_block.hash,
+                                pruned_blocks: pruned_blocks
+                                    .iter()
+                                    .map(|(_, b, _)| b.hash)
+                                    .collect(),
+                            };
 
-                                    if *finalized_pinned_remaining < count_limit {
-                                        to_remove.push(*subscription_id);
-                                        continue;
-                                    }
+                            let mut to_remove = Vec::new();
+                            for (subscription_id, (sender, finalized_pinned_remaining)) in
+                                all_blocks_subscriptions.iter_mut()
+                            {
+                                let count_limit = pruned_blocks.len() + 1;
 
-                                    if sender.try_send(all_blocks_notif.clone()).is_err() {
-                                        to_remove.push(*subscription_id);
-                                        continue;
-                                    }
-
-                                    *finalized_pinned_remaining -= count_limit;
-
-                                    // Mark the finalized and pruned blocks as finalized or non-canonical.
-                                    for block in iter::once(&finalized_block.hash)
-                                        .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
-                                    {
-                                        if let Some(pin) =
-                                            pinned_blocks.get_mut(&(*subscription_id, *block))
-                                        {
-                                            debug_assert!(pin.block_ignores_limit);
-                                            pin.block_ignores_limit = false;
-                                        }
-                                    }
+                                if *finalized_pinned_remaining < count_limit {
+                                    to_remove.push(*subscription_id);
+                                    continue;
                                 }
-                                for to_remove in to_remove {
-                                    all_blocks_subscriptions.remove(&to_remove);
-                                    let pinned_blocks_to_remove = pinned_blocks
-                                        .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
-                                        .map(|((_, h), _)| *h)
-                                        .collect::<Vec<_>>();
-                                    for block in pinned_blocks_to_remove {
-                                        pinned_blocks.remove(&(to_remove, block));
+
+                                if sender.try_send(all_blocks_notif.clone()).is_err() {
+                                    to_remove.push(*subscription_id);
+                                    continue;
+                                }
+
+                                *finalized_pinned_remaining -= count_limit;
+
+                                // Mark the finalized and pruned blocks as finalized or non-canonical.
+                                for block in iter::once(&finalized_block.hash)
+                                    .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
+                                {
+                                    if let Some(pin) =
+                                        pinned_blocks.get_mut(&(*subscription_id, *block))
+                                    {
+                                        debug_assert!(pin.block_ignores_limit);
+                                        pin.block_ignores_limit = false;
                                     }
                                 }
                             }
-                            Some(async_tree::OutputUpdate::Block(block)) => {
-                                let block_index = block.index;
-                                let block_runtime = block.async_op_user_data.clone();
-                                let block_hash = block.user_data.hash;
-                                let scale_encoded_header =
-                                    block.user_data.scale_encoded_header.clone();
-                                let is_new_best = block.is_new_best;
+                            for to_remove in to_remove {
+                                all_blocks_subscriptions.remove(&to_remove);
+                                let pinned_blocks_to_remove = pinned_blocks
+                                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                                    .map(|((_, h), _)| *h)
+                                    .collect::<Vec<_>>();
+                                for block in pinned_blocks_to_remove {
+                                    pinned_blocks.remove(&(to_remove, block));
+                                }
+                            }
+                        }
+                        Some(async_tree::OutputUpdate::Block(block)) => {
+                            let block_index = block.index;
+                            let block_runtime = block.async_op_user_data.clone();
+                            let block_hash = block.user_data.hash;
+                            let scale_encoded_header = block.user_data.scale_encoded_header.clone();
+                            let is_new_best = block.is_new_best;
 
-                                let (block_number, state_trie_root_hash) = {
-                                    let decoded = header::decode(
-                                        &scale_encoded_header,
-                                        background.sync_service.block_number_bytes(),
-                                    )
-                                    .unwrap();
-                                    (decoded.number, *decoded.state_root)
-                                };
+                            let (block_number, state_trie_root_hash) = {
+                                let decoded = header::decode(
+                                    &scale_encoded_header,
+                                    background.sync_service.block_number_bytes(),
+                                )
+                                .unwrap();
+                                (decoded.number, *decoded.state_root)
+                            };
 
-                                let parent_runtime = tree.parent(block_index).map_or(
-                                    tree.output_finalized_async_user_data().clone(),
-                                    |idx| tree.block_async_user_data(idx).unwrap().clone(),
-                                );
-
-                                log::debug!(
-                                    target: &background.log_target,
-                                    "Worker => OutputNewBlock(hash={}, is_new_best={})",
-                                    HashDisplay(&tree.block_user_data(block_index).hash),
-                                    is_new_best
-                                );
-
-                                let notif = Notification::Block(BlockNotification {
-                                    parent_hash: tree
-                                        .parent(block_index)
-                                        .map_or(finalized_block.hash, |idx| {
-                                            tree.block_user_data(idx).hash
-                                        }),
-                                    is_new_best,
-                                    scale_encoded_header,
-                                    new_runtime: if !Arc::ptr_eq(&parent_runtime, &block_runtime) {
-                                        Some(
-                                            block_runtime
-                                                .runtime
-                                                .as_ref()
-                                                .map(|rt| rt.runtime_spec.clone())
-                                                .map_err(|err| err.clone()),
-                                        )
-                                    } else {
-                                        None
-                                    },
+                            let parent_runtime = tree
+                                .parent(block_index)
+                                .map_or(tree.output_finalized_async_user_data().clone(), |idx| {
+                                    tree.block_async_user_data(idx).unwrap().clone()
                                 });
 
-                                let mut to_remove = Vec::new();
-                                for (subscription_id, (sender, _)) in
-                                    all_blocks_subscriptions.iter_mut()
-                                {
-                                    if sender.try_send(notif.clone()).is_ok() {
-                                        let _prev_value = pinned_blocks.insert(
-                                            (*subscription_id, block_hash),
-                                            PinnedBlock {
-                                                runtime: block_runtime.clone(),
-                                                state_trie_root_hash,
-                                                block_number,
-                                                block_ignores_limit: true,
-                                            },
-                                        );
-                                        debug_assert!(_prev_value.is_none());
-                                    } else {
-                                        to_remove.push(*subscription_id);
-                                    }
-                                }
-                                for to_remove in to_remove {
-                                    all_blocks_subscriptions.remove(&to_remove);
-                                    let pinned_blocks_to_remove = pinned_blocks
-                                        .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
-                                        .map(|((_, h), _)| *h)
-                                        .collect::<Vec<_>>();
-                                    for block in pinned_blocks_to_remove {
-                                        pinned_blocks.remove(&(to_remove, block));
-                                    }
+                            log::debug!(
+                                target: &background.log_target,
+                                "Worker => OutputNewBlock(hash={}, is_new_best={})",
+                                HashDisplay(&tree.block_user_data(block_index).hash),
+                                is_new_best
+                            );
+
+                            let notif = Notification::Block(BlockNotification {
+                                parent_hash: tree
+                                    .parent(block_index)
+                                    .map_or(finalized_block.hash, |idx| {
+                                        tree.block_user_data(idx).hash
+                                    }),
+                                is_new_best,
+                                scale_encoded_header,
+                                new_runtime: if !Arc::ptr_eq(&parent_runtime, &block_runtime) {
+                                    Some(
+                                        block_runtime
+                                            .runtime
+                                            .as_ref()
+                                            .map(|rt| rt.runtime_spec.clone())
+                                            .map_err(|err| err.clone()),
+                                    )
+                                } else {
+                                    None
+                                },
+                            });
+
+                            let mut to_remove = Vec::new();
+                            for (subscription_id, (sender, _)) in
+                                all_blocks_subscriptions.iter_mut()
+                            {
+                                if sender.try_send(notif.clone()).is_ok() {
+                                    let _prev_value = pinned_blocks.insert(
+                                        (*subscription_id, block_hash),
+                                        PinnedBlock {
+                                            runtime: block_runtime.clone(),
+                                            state_trie_root_hash,
+                                            block_number,
+                                            block_ignores_limit: true,
+                                        },
+                                    );
+                                    debug_assert!(_prev_value.is_none());
+                                } else {
+                                    to_remove.push(*subscription_id);
                                 }
                             }
-                            Some(async_tree::OutputUpdate::BestBlockChanged {
-                                best_block_index,
-                            }) => {
-                                let hash = best_block_index
-                                    .map_or(&*finalized_block, |idx| tree.block_user_data(idx))
-                                    .hash;
-
-                                log::debug!(
-                                    target: &background.log_target,
-                                    "Worker => OutputBestBlockChanged(hash={})",
-                                    HashDisplay(&hash),
-                                );
-
-                                let notif = Notification::BestBlockChanged { hash };
-
-                                let mut to_remove = Vec::new();
-                                for (subscription_id, (sender, _)) in
-                                    all_blocks_subscriptions.iter_mut()
-                                {
-                                    if sender.try_send(notif.clone()).is_err() {
-                                        to_remove.push(*subscription_id);
-                                    }
-                                }
-                                for to_remove in to_remove {
-                                    all_blocks_subscriptions.remove(&to_remove);
-                                    let pinned_blocks_to_remove = pinned_blocks
-                                        .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
-                                        .map(|((_, h), _)| *h)
-                                        .collect::<Vec<_>>();
-                                    for block in pinned_blocks_to_remove {
-                                        pinned_blocks.remove(&(to_remove, block));
-                                    }
+                            for to_remove in to_remove {
+                                all_blocks_subscriptions.remove(&to_remove);
+                                let pinned_blocks_to_remove = pinned_blocks
+                                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                                    .map(|((_, h), _)| *h)
+                                    .collect::<Vec<_>>();
+                                for block in pinned_blocks_to_remove {
+                                    pinned_blocks.remove(&(to_remove, block));
                                 }
                             }
-                        },
-                        Tree::FinalizedBlockRuntimeUnknown { tree } => match tree
-                            .try_advance_output()
-                        {
-                            None => break,
+                        }
+                        Some(async_tree::OutputUpdate::BestBlockChanged { best_block_index }) => {
+                            let hash = best_block_index
+                                .map_or(&*finalized_block, |idx| tree.block_user_data(idx))
+                                .hash;
+
+                            log::debug!(
+                                target: &background.log_target,
+                                "Worker => OutputBestBlockChanged(hash={})",
+                                HashDisplay(&hash),
+                            );
+
+                            let notif = Notification::BestBlockChanged { hash };
+
+                            let mut to_remove = Vec::new();
+                            for (subscription_id, (sender, _)) in
+                                all_blocks_subscriptions.iter_mut()
+                            {
+                                if sender.try_send(notif.clone()).is_err() {
+                                    to_remove.push(*subscription_id);
+                                }
+                            }
+                            for to_remove in to_remove {
+                                all_blocks_subscriptions.remove(&to_remove);
+                                let pinned_blocks_to_remove = pinned_blocks
+                                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                                    .map(|((_, h), _)| *h)
+                                    .collect::<Vec<_>>();
+                                for block in pinned_blocks_to_remove {
+                                    pinned_blocks.remove(&(to_remove, block));
+                                }
+                            }
+                        }
+                    },
+                    Tree::FinalizedBlockRuntimeUnknown { tree } => {
+                        match tree.try_advance_output() {
+                            None => {
+                                background.must_update_tree_and_notify_subscribers = false;
+                                continue;
+                            }
                             Some(async_tree::OutputUpdate::Block(_))
                             | Some(async_tree::OutputUpdate::BestBlockChanged { .. }) => continue,
                             Some(async_tree::OutputUpdate::Finalized {
@@ -1379,7 +1381,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     finalized_block: new_finalized,
                                 };
                             }
-                        },
+                        }
                     }
                 }
             }
