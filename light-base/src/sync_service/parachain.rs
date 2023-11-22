@@ -351,10 +351,97 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Do nothing. This is simply to wake up and loop again.
                 }
 
-                WakeUpReason::Notification(relay_chain_notif) => {
-                    // Update the local tree of blocks to match the update sent by the
-                    // relay chain syncing service.
-                    self.process_relay_chain_notification(relay_chain_notif);
+                WakeUpReason::Notification(runtime_service::Notification::Finalized {
+                    hash,
+                    best_block_hash,
+                    ..
+                }) => {
+                    let ParachainBackgroundState::Subscribed(runtime_subscription) =
+                        &mut self.subscription_state
+                    else {
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "RelayChain => Finalized(hash={})",
+                        HashDisplay(&hash)
+                    );
+
+                    let finalized = runtime_subscription
+                        .async_tree
+                        .input_output_iter_unordered()
+                        .find(|b| *b.user_data == hash)
+                        .unwrap()
+                        .id;
+                    let best = runtime_subscription
+                        .async_tree
+                        .input_output_iter_unordered()
+                        .find(|b| *b.user_data == best_block_hash)
+                        .unwrap()
+                        .id;
+                    runtime_subscription
+                        .async_tree
+                        .input_finalize(finalized, best);
+                }
+
+                WakeUpReason::Notification(runtime_service::Notification::Block(block)) => {
+                    let ParachainBackgroundState::Subscribed(runtime_subscription) =
+                        &mut self.subscription_state
+                    else {
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "RelayChain => Block(hash={}, parent_hash={})",
+                        HashDisplay(&hash),
+                        HashDisplay(&block.parent_hash)
+                    );
+
+                    let parent = runtime_subscription
+                        .async_tree
+                        .input_output_iter_unordered()
+                        .find(|b| *b.user_data == block.parent_hash)
+                        .map(|b| b.id); // TODO: check if finalized
+                    runtime_subscription.async_tree.input_insert_block(
+                        hash,
+                        parent,
+                        false,
+                        block.is_new_best,
+                    );
+                }
+
+                WakeUpReason::Notification(runtime_service::Notification::BestBlockChanged {
+                    hash,
+                }) => {
+                    let ParachainBackgroundState::Subscribed(runtime_subscription) =
+                        &mut self.subscription_state
+                    else {
+                        debug_assert!(false);
+                        continue;
+                    };
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "RelayChain => BestBlockChanged(hash={})",
+                        HashDisplay(&hash)
+                    );
+
+                    // If the block isn't found in `async_tree`, assume that it is equal to the
+                    // finalized block (that has left the tree already).
+                    let node_idx = runtime_subscription
+                        .async_tree
+                        .input_output_iter_unordered()
+                        .find(|b| *b.user_data == hash)
+                        .map(|b| b.id);
+                    runtime_subscription
+                        .async_tree
+                        .input_set_best_block(node_idx);
                 }
 
                 WakeUpReason::SubscriptionDead => {
@@ -1074,86 +1161,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
             }
         }
-    }
-
-    fn process_relay_chain_notification(
-        &mut self,
-        relay_chain_notif: runtime_service::Notification,
-    ) {
-        let runtime_subscription = match &mut self.subscription_state {
-            ParachainBackgroundState::NotSubscribed { .. } => return,
-            ParachainBackgroundState::Subscribed(s) => s,
-        };
-
-        match relay_chain_notif {
-            runtime_service::Notification::Finalized {
-                hash,
-                best_block_hash,
-                ..
-            } => {
-                log::debug!(
-                    target: &self.log_target,
-                    "RelayChain => Finalized(hash={})",
-                    HashDisplay(&hash)
-                );
-
-                let finalized = runtime_subscription
-                    .async_tree
-                    .input_output_iter_unordered()
-                    .find(|b| *b.user_data == hash)
-                    .unwrap()
-                    .id;
-                let best = runtime_subscription
-                    .async_tree
-                    .input_output_iter_unordered()
-                    .find(|b| *b.user_data == best_block_hash)
-                    .unwrap()
-                    .id;
-                runtime_subscription
-                    .async_tree
-                    .input_finalize(finalized, best);
-            }
-            runtime_service::Notification::Block(block) => {
-                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-
-                log::debug!(
-                    target: &self.log_target,
-                    "RelayChain => Block(hash={}, parent_hash={})",
-                    HashDisplay(&hash),
-                    HashDisplay(&block.parent_hash)
-                );
-
-                let parent = runtime_subscription
-                    .async_tree
-                    .input_output_iter_unordered()
-                    .find(|b| *b.user_data == block.parent_hash)
-                    .map(|b| b.id); // TODO: check if finalized
-                runtime_subscription.async_tree.input_insert_block(
-                    hash,
-                    parent,
-                    false,
-                    block.is_new_best,
-                );
-            }
-            runtime_service::Notification::BestBlockChanged { hash } => {
-                log::debug!(
-                    target: &self.log_target,
-                    "RelayChain => BestBlockChanged(hash={})",
-                    HashDisplay(&hash)
-                );
-
-                // If the block isn't found in `async_tree`, assume that it is equal to the
-                // finalized block (that has left the tree already).
-                let node_idx = runtime_subscription
-                    .async_tree
-                    .input_output_iter_unordered()
-                    .find(|b| *b.user_data == hash)
-                    .map(|b| b.id);
-                runtime_subscription
-                    .async_tree
-                    .input_set_best_block(node_idx);
-            }
-        };
     }
 
     fn set_new_subscription(
