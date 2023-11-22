@@ -479,33 +479,59 @@ where
     ///
     pub fn remove_chain(&mut self, chain_id: ChainId) -> Result<TChain, RemoveChainError> {
         // Check whether the chain is still in use.
-        // TODO: O(n); optimize
-        if self
-            .notification_substreams_by_peer_id
-            .iter()
-            .any(|(protocol, ..)| {
-                matches!(protocol,
-                NotificationsProtocol::BlockAnnounces {
-                    chain_index,
-                } |
-                NotificationsProtocol::Transactions {
-                    chain_index,
-                } |
-                NotificationsProtocol::Grandpa {
-                    chain_index,
-                } if *chain_index == chain_id.0)
-            })
-        {
-            return Err(RemoveChainError::InUse);
+        for protocol in [
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Transactions {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Grandpa {
+                chain_index: chain_id.0,
+            },
+        ] {
+            if self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        PeerIndex(usize::min_value()),
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Pending,
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            protocol,
+                            PeerIndex(usize::max_value()),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::Open,
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .next()
+                .is_some()
+            {
+                return Err(RemoveChainError::InUse);
+            }
         }
 
         // Clean up desired peers.
-        // TODO: optimize
         let desired = self
             .gossip_desired_peers_by_chain
-            .iter()
-            .filter(|(c, ..)| *c == chain_id.0)
-            .map(|(_, _, peer_id)| peer_id.clone())
+            .range(
+                (
+                    chain_id.0,
+                    GossipKind::ConsensusTransactions,
+                    PeerIndex(usize::min_value()),
+                )
+                    ..=(
+                        chain_id.0,
+                        GossipKind::ConsensusTransactions,
+                        PeerIndex(usize::max_value()),
+                    ),
+            )
+            // TODO: optimize to not Clone? is that possible?
+            .map(|(_, _, peer_index)| self.peers[peer_index.0].clone())
             .collect::<Vec<_>>();
         for desired in desired {
             self.gossip_remove_desired(chain_id, &desired, GossipKind::ConsensusTransactions);
