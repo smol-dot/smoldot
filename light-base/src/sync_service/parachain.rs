@@ -254,15 +254,20 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ),
                 };
 
-                let new_subscription = async {
+                async {
+                    match self.from_foreground.next().await {
+                        Some(msg) => WakeUpReason::ForegroundMessage(msg),
+                        None => WakeUpReason::ForegroundClosed,
+                    }
+                }
+                .or(async {
                     if let Some(subscribe_future) = subscribe_future {
                         WakeUpReason::NewSubscription(subscribe_future.await)
                     } else {
                         future::pending().await
                     }
-                };
-
-                let start_parahead_fetch = async {
+                })
+                .or(async {
                     if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
                         next_start_parahead_fetch.as_mut().await;
                         *next_start_parahead_fetch = Box::pin(future::pending());
@@ -270,9 +275,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     } else {
                         future::pending().await
                     }
-                };
-
-                let parahead_fetch_finished = async {
+                })
+                .or(async {
                     if let Some(in_progress_paraheads) = in_progress_paraheads {
                         if !in_progress_paraheads.is_empty() {
                             let (async_op_id, parahead_result) =
@@ -287,9 +291,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     } else {
                         future::pending().await
                     }
-                };
-
-                let subscription_notification = async {
+                })
+                .or(async {
                     if let Some(relay_chain_subscribe_all) = relay_chain_subscribe_all {
                         match relay_chain_subscribe_all.next().await {
                             Some(notif) => WakeUpReason::Notification(notif),
@@ -298,16 +301,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     } else {
                         future::pending().await
                     }
-                };
-
-                let on_foreground_message = async {
-                    match self.from_foreground.next().await {
-                        Some(msg) => WakeUpReason::ForegroundMessage(msg),
-                        None => WakeUpReason::ForegroundClosed,
-                    }
-                };
-
-                let network_event = async {
+                })
+                .or(async {
                     if is_relaychain_subscribed {
                         if let Some(from_network_service) = self.from_network_service.as_mut() {
                             match from_network_service.next().await {
@@ -323,15 +318,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     } else {
                         future::pending().await
                     }
-                };
-
-                on_foreground_message
-                    .or(new_subscription)
-                    .or(start_parahead_fetch)
-                    .or(parahead_fetch_finished)
-                    .or(subscription_notification)
-                    .or(network_event)
-                    .await
+                })
+                .await
             };
 
             match wake_up_reason {
