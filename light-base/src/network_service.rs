@@ -1005,6 +1005,7 @@ struct OpenGossipLinkState {
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         enum WakeUpReason {
+            ForegroundClosed,
             Message(ToBackground),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
@@ -1023,8 +1024,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         }
 
         let wake_up_reason = {
-            let message_received =
-                async { WakeUpReason::Message(task.messages_rx.next().await.unwrap()) };
+            let message_received = async {
+                task.messages_rx
+                    .next()
+                    .await
+                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+            };
             let message_from_task_received = async {
                 let (connection_id, message) = task.tasks_messages_rx.next().await.unwrap();
                 WakeUpReason::MessageFromConnection {
@@ -1144,6 +1149,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         };
 
         match wake_up_reason {
+            WakeUpReason::ForegroundClosed => {
+                // End the task.
+                return;
+            }
             WakeUpReason::EventSendersReady => {
                 // Dispatch the pending event, if any to the various senders.
 
