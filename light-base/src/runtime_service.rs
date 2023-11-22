@@ -1167,7 +1167,7 @@ async fn run_background<TPlat: PlatformRef>(
                 }
 
                 background.blocks_stream = Some(Box::pin(subscription.new_blocks));
-                background.wake_up_new_necessary_download = Box::pin(future::pending());
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
             WakeUpReason::StartPendingSubscribeAll => {
@@ -1620,8 +1620,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 };
 
-                // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
-                background.start_necessary_downloads().await;
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
             WakeUpReason::RuntimeDownloadFinished(async_op_id, download_result) => {
                 let concerned_blocks = match &background.tree {
@@ -1688,7 +1687,7 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.start_necessary_downloads().await;
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
         }
     }
