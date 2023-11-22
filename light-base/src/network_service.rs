@@ -201,35 +201,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let (messages_tx, messages_rx) = async_channel::bounded(32);
         let messages_rx = Box::pin(messages_rx);
 
-        // Spawn task starts a discovery request at a periodic interval.
-        // This is done through a separate task due to ease of implementation.
-        config.platform.spawn_task(
-            "network-discovery".into(),
-            Box::pin({
-                let platform = config.platform.clone();
-                let messages_tx = messages_tx.clone();
-                async move {
-                    let mut next_discovery = Duration::from_secs(5);
-
-                    loop {
-                        platform.sleep(next_discovery).await;
-                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
-
-                        log::trace!(target: "network", "Discovery <= Tick");
-
-                        if messages_tx
-                            .send(ToBackground::StartDiscovery)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-                .or(on_service_killed.listen())
-            }),
-        );
-
         // Spawn main task that processes the network service.
         let (tasks_messages_tx, tasks_messages_rx) = async_channel::bounded(32);
         let task = Box::pin(
@@ -272,6 +243,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 ),
                 storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
                 call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+                next_discovery_period: Duration::from_secs(5),
+                next_discovery: Box::pin(config.platform.sleep(Duration::from_secs(5))),
                 kademlia_find_node_requests: HashMap::with_capacity_and_hasher(
                     2,
                     Default::default(),
@@ -882,7 +855,6 @@ enum ToBackground {
         chain_id: ChainId,
         result: oneshot::Sender<Vec<PeerId>>,
     },
-    StartDiscovery,
 }
 
 struct BackgroundTask<TPlat: PlatformRef> {
@@ -979,6 +951,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
         fnv::FnvBuildHasher,
     >,
 
+    next_discovery_period: Duration,
+
+    next_discovery: Pin<Box<TPlat::Delay>>,
+
     kademlia_find_node_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
@@ -1021,6 +997,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 message: service::CoordinatorToConnection,
             },
             EventSendersReady,
+            StartDiscovery,
         }
 
         let wake_up_reason = {
@@ -1139,12 +1116,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     future::pending().await
                 }
             };
+            let start_discovery = async {
+                (&mut task.next_discovery).await;
+                task.next_discovery_period =
+                    cmp::min(task.next_discovery_period * 2, Duration::from_secs(120));
+                task.next_discovery = Box::pin(task.platform.sleep(task.next_discovery_period));
+                WakeUpReason::StartDiscovery
+            };
 
             message_received
                 .or(message_from_task_received)
                 .or(service_event)
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
+                .or(start_discovery)
                 .await
         };
 
@@ -1490,7 +1475,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect(),
                 );
             }
-            WakeUpReason::Message(ToBackground::StartDiscovery) => {
+            WakeUpReason::StartDiscovery => {
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
                     let random_peer_id = {
                         let mut pub_key = [0; 32];
