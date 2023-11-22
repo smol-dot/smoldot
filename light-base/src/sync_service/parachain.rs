@@ -401,9 +401,54 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ));
                 }
 
-                WakeUpReason::NetworkEvent(event) => {
-                    // Something happened on the networking.
-                    self.process_network_event(event)
+                WakeUpReason::NetworkEvent(network_service::Event::Connected {
+                    peer_id,
+                    role,
+                    best_block_number,
+                    best_block_hash,
+                }) => {
+                    let local_id = self.sync_sources.add_source(
+                        best_block_number,
+                        best_block_hash,
+                        (peer_id.clone(), role),
+                    );
+                    self.sync_sources_map.insert(peer_id, local_id);
+                }
+
+                WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }) => {
+                    let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
+                    let (_peer_id, _role) = self.sync_sources.remove(local_id);
+                    debug_assert_eq!(peer_id, _peer_id);
+                }
+
+                WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                    peer_id,
+                    announce,
+                }) => {
+                    let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
+                    let decoded = announce.decode();
+                    if let Ok(decoded_header) =
+                        header::decode(decoded.scale_encoded_header, self.block_number_bytes)
+                    {
+                        let decoded_header_hash =
+                            header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
+                        self.sync_sources.add_known_block(
+                            local_id,
+                            decoded_header.number,
+                            decoded_header_hash,
+                        );
+                        if decoded.is_best {
+                            self.sync_sources.add_known_block_and_set_best(
+                                local_id,
+                                decoded_header.number,
+                                decoded_header_hash,
+                            );
+                        }
+                    }
+                }
+
+                WakeUpReason::NetworkEvent(_) => {
+                    // Uninteresting message.
                 }
             }
         }
@@ -624,54 +669,6 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
             }
             (ToBackground::SerializeChainInformation { send_back }, _) => {
                 let _ = send_back.send(None);
-            }
-        }
-    }
-
-    fn process_network_event(&mut self, network_event: network_service::Event) {
-        match network_event {
-            network_service::Event::Connected {
-                peer_id,
-                role,
-                best_block_number,
-                best_block_hash,
-            } => {
-                let local_id = self.sync_sources.add_source(
-                    best_block_number,
-                    best_block_hash,
-                    (peer_id.clone(), role),
-                );
-                self.sync_sources_map.insert(peer_id, local_id);
-            }
-            network_service::Event::Disconnected { peer_id } => {
-                let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
-                let (_peer_id, _role) = self.sync_sources.remove(local_id);
-                debug_assert_eq!(peer_id, _peer_id);
-            }
-            network_service::Event::BlockAnnounce { peer_id, announce } => {
-                let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
-                let decoded = announce.decode();
-                if let Ok(decoded_header) =
-                    header::decode(decoded.scale_encoded_header, self.block_number_bytes)
-                {
-                    let decoded_header_hash =
-                        header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
-                    self.sync_sources.add_known_block(
-                        local_id,
-                        decoded_header.number,
-                        decoded_header_hash,
-                    );
-                    if decoded.is_best {
-                        self.sync_sources.add_known_block_and_set_best(
-                            local_id,
-                            decoded_header.number,
-                            decoded_header_hash,
-                        );
-                    }
-                }
-            }
-            _ => {
-                // Uninteresting message.
             }
         }
     }
