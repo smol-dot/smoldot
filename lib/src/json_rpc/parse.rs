@@ -289,7 +289,7 @@ pub fn build_error_response(
             (SerdeErrorCode::ServerError(n), msg)
         }
         ErrorResponse::ApplicationDefined(n, msg) => {
-            assert!(!(-32700..=-32000).contains(&n));
+            assert!(!(-32768..=-32000).contains(&n));
             (SerdeErrorCode::MethodError(n), msg)
         }
     };
