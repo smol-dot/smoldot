@@ -752,7 +752,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 Box::pin(async move {
                                     (
                                         async_op_id,
-                                        parahead(
+                                        fetch_parahead(
                                             &relay_chain_sync,
                                             relay_chain_block_number_bytes,
                                             subscription_id,
@@ -1291,7 +1291,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
     }
 }
 
-async fn parahead<TPlat: PlatformRef>(
+async fn fetch_parahead<TPlat: PlatformRef>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     subscription_id: runtime_service::SubscriptionId,
