@@ -530,6 +530,95 @@ where
             self.gossip_remove_desired(chain_id, &desired, GossipKind::ConsensusTransactions);
         }
 
+        // Close any notifications substream of the chain.
+        for protocol in [
+            NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Transactions {
+                chain_index: chain_id.0,
+            },
+            NotificationsProtocol::Grandpa {
+                chain_index: chain_id.0,
+            },
+        ] {
+            for (protocol, peer_index, direction, state, substream_id) in self
+                .notification_substreams_by_peer_id
+                .range(
+                    (
+                        protocol,
+                        PeerIndex(usize::min_value()),
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Pending,
+                        SubstreamId::min_value(),
+                    )
+                        ..=(
+                            protocol,
+                            PeerIndex(usize::max_value()),
+                            SubstreamDirection::Out,
+                            NotificationsSubstreamState::Open,
+                            SubstreamId::max_value(),
+                        ),
+                )
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                self.notification_substreams_by_peer_id.remove(&(
+                    protocol,
+                    peer_index,
+                    direction,
+                    state,
+                    substream_id,
+                ));
+
+                match (direction, state) {
+                    (SubstreamDirection::In, NotificationsSubstreamState::Pending) => {
+                        self.inner.reject_in_notifications(substream_id);
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
+                    (SubstreamDirection::In, NotificationsSubstreamState::Open) => {
+                        self.inner
+                            .start_close_in_notifications(substream_id, Duration::from_secs(5));
+                        // TODO: arbitrary timeout ^
+                        self.substreams.get_mut(&substream_id).unwrap().protocol = None;
+                    }
+                    (SubstreamDirection::Out, _) => {
+                        self.inner.close_out_notifications(substream_id);
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
+                }
+            }
+        }
+
+        // Process request-response protocols.
+        // TODO: how to do request-responses in non-O(n) time?
+        for (_, substream) in &mut self.substreams {
+            match substream.protocol {
+                Some(Protocol::BlockAnnounces { chain_index })
+                | Some(Protocol::Transactions { chain_index })
+                | Some(Protocol::Grandpa { chain_index })
+                | Some(Protocol::Sync { chain_index })
+                | Some(Protocol::LightUnknown { chain_index })
+                | Some(Protocol::LightStorage { chain_index })
+                | Some(Protocol::LightCall { chain_index })
+                | Some(Protocol::Kad { chain_index })
+                | Some(Protocol::SyncWarp { chain_index })
+                | Some(Protocol::State { chain_index }) => {
+                    if chain_index != chain_id.0 {
+                        continue;
+                    }
+                }
+                Some(Protocol::Identify) | Some(Protocol::Ping) | None => continue,
+            }
+
+            substream.protocol = None;
+
+            // TODO: cancel outgoing requests instead of just ignoring their response
+            // TODO: must send back an error to the ingoing requests; this is not a huge deal because requests will time out on the remote's side, but it's very stupid nonetheless
+        }
+
         // Actually remove the chain. This will panic if the `ChainId` is invalid.
         let chain = self.chains.remove(chain_id.0);
         let _was_in = self
