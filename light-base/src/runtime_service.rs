@@ -1622,7 +1622,31 @@ async fn run_background<TPlat: PlatformRef>(
 
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
-            WakeUpReason::RuntimeDownloadFinished(async_op_id, download_result) => {
+            WakeUpReason::RuntimeDownloadFinished(
+                async_op_id,
+                Ok((
+                    storage_code,
+                    storage_heap_pages,
+                    code_merkle_value,
+                    closest_ancestor_excluding,
+                )),
+            ) => {
+                // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
+                background.best_near_head_of_chain = true;
+
+                background
+                    .runtime_download_finished(
+                        async_op_id,
+                        storage_code,
+                        storage_heap_pages,
+                        code_merkle_value,
+                        closest_ancestor_excluding,
+                    )
+                    .await;
+
+                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
+            }
+            WakeUpReason::RuntimeDownloadFinished(async_op_id, Err(error)) => {
                 let concerned_blocks = match &background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                         either::Left(tree.async_op_blocks(async_op_id))
@@ -1634,56 +1658,27 @@ async fn run_background<TPlat: PlatformRef>(
                 .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
                 .to_string();
 
-                match download_result {
-                    Ok((
-                        storage_code,
-                        storage_heap_pages,
-                        code_merkle_value,
-                        closest_ancestor_excluding,
-                    )) => {
-                        log::debug!(
-                            target: &log_target,
-                            "Worker <= SuccessfulDownload(blocks=[{}])",
-                            concerned_blocks
-                        );
+                log::debug!(
+                    target: &log_target,
+                    "Worker <= FailedDownload(blocks=[{}], error={:?})",
+                    concerned_blocks,
+                    error
+                );
+                if !error.is_network_problem() {
+                    log::warn!(
+                        target: &log_target,
+                        "Failed to download :code and :heappages of blocks {}: {}",
+                        concerned_blocks,
+                        error
+                    );
+                }
 
-                        // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
-                        background.best_near_head_of_chain = true;
-
-                        background
-                            .runtime_download_finished(
-                                async_op_id,
-                                storage_code,
-                                storage_heap_pages,
-                                code_merkle_value,
-                                closest_ancestor_excluding,
-                            )
-                            .await;
+                match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        tree.async_op_failure(async_op_id, &background.platform.now());
                     }
-                    Err(error) => {
-                        log::debug!(
-                            target: &log_target,
-                            "Worker <= FailedDownload(blocks=[{}], error={:?})",
-                            concerned_blocks,
-                            error
-                        );
-                        if !error.is_network_problem() {
-                            log::warn!(
-                                target: &log_target,
-                                "Failed to download :code and :heappages of blocks {}: {}",
-                                concerned_blocks,
-                                error
-                            );
-                        }
-
-                        match &mut background.tree {
-                            Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                                tree.async_op_failure(async_op_id, &background.platform.now());
-                            }
-                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                tree.async_op_failure(async_op_id, &background.platform.now());
-                            }
-                        }
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        tree.async_op_failure(async_op_id, &background.platform.now());
                     }
                 }
 
