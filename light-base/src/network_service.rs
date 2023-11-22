@@ -137,9 +137,6 @@ pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground>,
 
-    /// Event notified when the [`NetworkService`] is destroyed.
-    on_service_killed: event_listener::Event,
-
     /// Dummy to hold the `TPlat` type.
     marker: core::marker::PhantomData<TPlat>,
 }
@@ -196,87 +193,51 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chain_ids.push(chain_id);
         }
 
-        let on_service_killed = event_listener::Event::new();
-
         let (messages_tx, messages_rx) = async_channel::bounded(32);
         let messages_rx = Box::pin(messages_rx);
 
-        // Spawn task starts a discovery request at a periodic interval.
-        // This is done through a separate task due to ease of implementation.
-        config.platform.spawn_task(
-            "network-discovery".into(),
-            Box::pin({
-                let platform = config.platform.clone();
-                let messages_tx = messages_tx.clone();
-                async move {
-                    let mut next_discovery = Duration::from_secs(5);
-
-                    loop {
-                        platform.sleep(next_discovery).await;
-                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
-
-                        log::trace!(target: "network", "Discovery <= Tick");
-
-                        if messages_tx
-                            .send(ToBackground::StartDiscovery)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-                .or(on_service_killed.listen())
-            }),
-        );
-
         // Spawn main task that processes the network service.
-        let task = Box::pin(
-            background_task(BackgroundTask {
-                randomness: rand_chacha::ChaCha20Rng::from_seed({
-                    let mut seed = [0; 32];
-                    config.platform.fill_random_bytes(&mut seed);
-                    seed
-                }),
-                identify_agent_version: config.identify_agent_version,
-                messages_tx: messages_tx.clone(),
-                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
-                    basic_peering_strategy::Config {
-                        randomness_seed: {
-                            let mut seed = [0; 32];
-                            config.platform.fill_random_bytes(&mut seed);
-                            seed
-                        },
-                        peers_capacity: 50, // TODO: ?
-                        chains_capacity: network.chains().count(),
+        let (tasks_messages_tx, tasks_messages_rx) = async_channel::bounded(32);
+        let task = Box::pin(background_task(BackgroundTask {
+            randomness: rand_chacha::ChaCha20Rng::from_seed({
+                let mut seed = [0; 32];
+                config.platform.fill_random_bytes(&mut seed);
+                seed
+            }),
+            identify_agent_version: config.identify_agent_version,
+            tasks_messages_tx,
+            tasks_messages_rx: Box::pin(tasks_messages_rx),
+            peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
+                basic_peering_strategy::Config {
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
                     },
-                ),
-                network,
-                connections_open_pool_size: config.connections_open_pool_size,
-                connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
-                num_recent_connection_opening: 0,
-                next_recent_connection_restore: None,
-                platform: config.platform.clone(),
-                open_gossip_links: BTreeMap::new(),
-                event_pending_send: None,
-                event_senders: either::Left(Vec::new()),
-                pending_new_subscriptions: Vec::new(),
-                important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
-                messages_rx,
-                blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
-                    8,
-                    Default::default(),
-                ),
-                storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                kademlia_find_node_requests: HashMap::with_capacity_and_hasher(
-                    2,
-                    Default::default(),
-                ),
-            })
-            .or(on_service_killed.listen()),
-        );
+                    peers_capacity: 50, // TODO: ?
+                    chains_capacity: network.chains().count(),
+                },
+            ),
+            network,
+            connections_open_pool_size: config.connections_open_pool_size,
+            connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
+            num_recent_connection_opening: 0,
+            next_recent_connection_restore: None,
+            platform: config.platform.clone(),
+            open_gossip_links: BTreeMap::new(),
+            event_pending_send: None,
+            event_senders: either::Left(Vec::new()),
+            pending_new_subscriptions: Vec::new(),
+            important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+            messages_rx,
+            blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            next_discovery_period: Duration::from_secs(5),
+            next_discovery: Box::pin(config.platform.sleep(Duration::from_secs(5))),
+            kademlia_find_node_requests: HashMap::with_capacity_and_hasher(2, Default::default()),
+        }));
 
         config
             .platform
@@ -288,7 +249,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let final_network_service = Arc::new(NetworkService {
             log_chain_names,
             messages_tx,
-            on_service_killed,
             marker: core::marker::PhantomData,
         });
 
@@ -719,12 +679,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     }
 }
 
-impl<TPlat: PlatformRef> Drop for NetworkService<TPlat> {
-    fn drop(&mut self) {
-        self.on_service_killed.notify(usize::max_value());
-    }
-}
-
 /// Event that can happen on the network service.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -813,10 +767,6 @@ enum ToBackground {
         chain_id: ChainId,
         sender: async_channel::Sender<Event>,
     },
-    ConnectionMessage {
-        connection_id: service::ConnectionId,
-        message: service::ConnectionToCoordinator,
-    },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
         target: PeerId, // TODO: takes by value because of future longevity issue
@@ -884,7 +834,6 @@ enum ToBackground {
         chain_id: ChainId,
         result: oneshot::Sender<Vec<PeerId>>,
     },
-    StartDiscovery,
 }
 
 struct BackgroundTask<TPlat: PlatformRef> {
@@ -898,7 +847,13 @@ struct BackgroundTask<TPlat: PlatformRef> {
     identify_agent_version: String,
 
     /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground>,
+    tasks_messages_tx:
+        async_channel::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
+
+    /// Channel to receive messages destined to the background task.
+    tasks_messages_rx: Pin<
+        Box<async_channel::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>>,
+    >,
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<
@@ -975,6 +930,10 @@ struct BackgroundTask<TPlat: PlatformRef> {
         fnv::FnvBuildHasher,
     >,
 
+    next_discovery_period: Duration,
+
+    next_discovery: Pin<Box<TPlat::Delay>>,
+
     kademlia_find_node_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
@@ -1001,22 +960,39 @@ struct OpenGossipLinkState {
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         enum WakeUpReason {
+            ForegroundClosed,
             Message(ToBackground),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
             NextRecentConnectionRestore,
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
+            MessageFromConnection {
+                connection_id: service::ConnectionId,
+                message: service::ConnectionToCoordinator,
+            },
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
             },
             EventSendersReady,
+            StartDiscovery,
         }
 
         let wake_up_reason = {
-            let message_received =
-                async { WakeUpReason::Message(task.messages_rx.next().await.unwrap()) };
+            let message_received = async {
+                task.messages_rx
+                    .next()
+                    .await
+                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+            };
+            let message_from_task_received = async {
+                let (connection_id, message) = task.tasks_messages_rx.next().await.unwrap();
+                WakeUpReason::MessageFromConnection {
+                    connection_id,
+                    message,
+                }
+            };
             let service_event = async {
                 if let Some(event) = (task.event_pending_send.is_none()
                     && task.pending_new_subscriptions.is_empty())
@@ -1119,15 +1095,28 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     future::pending().await
                 }
             };
+            let start_discovery = async {
+                (&mut task.next_discovery).await;
+                task.next_discovery_period =
+                    cmp::min(task.next_discovery_period * 2, Duration::from_secs(120));
+                task.next_discovery = Box::pin(task.platform.sleep(task.next_discovery_period));
+                WakeUpReason::StartDiscovery
+            };
 
             message_received
+                .or(message_from_task_received)
                 .or(service_event)
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
+                .or(start_discovery)
                 .await
         };
 
         match wake_up_reason {
+            WakeUpReason::ForegroundClosed => {
+                // End the task.
+                return;
+            }
             WakeUpReason::EventSendersReady => {
                 // Dispatch the pending event, if any to the various senders.
 
@@ -1194,10 +1183,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }));
                 }
             }
-            WakeUpReason::Message(ToBackground::ConnectionMessage {
+            WakeUpReason::MessageFromConnection {
                 connection_id,
                 message,
-            }) => {
+            } => {
                 task.network
                     .inject_connection_message(connection_id, message);
             }
@@ -1465,7 +1454,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect(),
                 );
             }
-            WakeUpReason::Message(ToBackground::StartDiscovery) => {
+            WakeUpReason::StartDiscovery => {
                 for chain_id in task.network.chains().collect::<Vec<_>>() {
                     let random_peer_id = {
                         let mut pub_key = [0; 32];
@@ -2204,7 +2193,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 connection_id,
                                 connection_task,
                                 coordinator_to_connection_rx,
-                                task.messages_tx.clone(),
+                                task.tasks_messages_tx.clone(),
                             ),
                         );
                     }
@@ -2261,7 +2250,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 connection_id,
                                 connection_task,
                                 coordinator_to_connection_rx,
-                                task.messages_tx.clone(),
+                                task.tasks_messages_tx.clone(),
                             ),
                         );
                     }
