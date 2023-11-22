@@ -322,13 +322,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 .await
             };
 
-            match wake_up_reason {
-                WakeUpReason::ForegroundClosed => {
+            match (wake_up_reason, &mut self.subscription_state) {
+                (WakeUpReason::ForegroundClosed, _) => {
                     // Terminate the parachain syncing.
                     return;
                 }
 
-                WakeUpReason::NewSubscription(relay_chain_subscribe_all) => {
+                (WakeUpReason::NewSubscription(relay_chain_subscribe_all), _) => {
                     // Subscription finished.
                     log::debug!(
                         target: &self.log_target,
@@ -390,12 +390,18 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     );
                 }
 
-                WakeUpReason::StartParaheadFetch => {
-                    let runtime_subscription = match &mut self.subscription_state {
-                        ParachainBackgroundState::NotSubscribed { .. } => continue,
-                        ParachainBackgroundState::Subscribed(s) => s,
-                    };
+                (
+                    WakeUpReason::Notification(_) | WakeUpReason::StartParaheadFetch,
+                    ParachainBackgroundState::NotSubscribed { .. },
+                ) => {
+                    debug_assert!(false);
+                    continue;
+                }
 
+                (
+                    WakeUpReason::StartParaheadFetch,
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
                     // Internal state check.
                     debug_assert_eq!(
                         runtime_subscription.reported_best_parahead_hash.is_some(),
@@ -460,18 +466,14 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }
                 }
 
-                WakeUpReason::Notification(runtime_service::Notification::Finalized {
-                    hash,
-                    best_block_hash,
-                    ..
-                }) => {
-                    let ParachainBackgroundState::Subscribed(runtime_subscription) =
-                        &mut self.subscription_state
-                    else {
-                        debug_assert!(false);
-                        continue;
-                    };
-
+                (
+                    WakeUpReason::Notification(runtime_service::Notification::Finalized {
+                        hash,
+                        best_block_hash,
+                        ..
+                    }),
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
                     log::debug!(
                         target: &self.log_target,
                         "RelayChain => Finalized(hash={})",
@@ -495,14 +497,10 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .input_finalize(finalized, best);
                 }
 
-                WakeUpReason::Notification(runtime_service::Notification::Block(block)) => {
-                    let ParachainBackgroundState::Subscribed(runtime_subscription) =
-                        &mut self.subscription_state
-                    else {
-                        debug_assert!(false);
-                        continue;
-                    };
-
+                (
+                    WakeUpReason::Notification(runtime_service::Notification::Block(block)),
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                     log::debug!(
@@ -525,16 +523,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     );
                 }
 
-                WakeUpReason::Notification(runtime_service::Notification::BestBlockChanged {
-                    hash,
-                }) => {
-                    let ParachainBackgroundState::Subscribed(runtime_subscription) =
-                        &mut self.subscription_state
-                    else {
-                        debug_assert!(false);
-                        continue;
-                    };
-
+                (
+                    WakeUpReason::Notification(runtime_service::Notification::BestBlockChanged {
+                        hash,
+                    }),
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
                     log::debug!(
                         target: &self.log_target,
                         "RelayChain => BestBlockChanged(hash={})",
@@ -553,7 +547,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .input_set_best_block(node_idx);
                 }
 
-                WakeUpReason::SubscriptionDead => {
+                (WakeUpReason::SubscriptionDead, _) => {
                     // Recreate the channel.
                     log::debug!(target: &self.log_target, "Subscriptions <= Reset");
                     self.subscription_state = ParachainBackgroundState::NotSubscribed {
@@ -570,23 +564,23 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             })
                         },
                     };
-                    continue;
                 }
 
-                WakeUpReason::ParaheadFetchFinished {
-                    async_op_id,
-                    parahead_result: Ok(parahead),
-                } => {
+                (
+                    WakeUpReason::ParaheadFetchFinished { .. },
+                    ParachainBackgroundState::NotSubscribed { .. },
+                ) => {
+                    // Ignore parahead fetch operations if not subscribed.
+                }
+
+                (
+                    WakeUpReason::ParaheadFetchFinished {
+                        async_op_id,
+                        parahead_result: Ok(parahead),
+                    },
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
                     // A parahead fetching operation is successful.
-
-                    let runtime_subscription = match &mut self.subscription_state {
-                        ParachainBackgroundState::NotSubscribed { .. } => {
-                            debug_assert!(false);
-                            continue;
-                        }
-                        ParachainBackgroundState::Subscribed(s) => s,
-                    };
-
                     log::debug!(
                         target: &self.log_target,
                         "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
@@ -609,10 +603,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
 
-                WakeUpReason::ParaheadFetchFinished {
-                    parahead_result: Err(ParaheadError::ObsoleteSubscription),
-                    ..
-                } => {
+                (
+                    WakeUpReason::ParaheadFetchFinished {
+                        parahead_result: Err(ParaheadError::ObsoleteSubscription),
+                        ..
+                    },
+                    _,
+                ) => {
                     // The relay chain runtime service has some kind of gap or issue and has
                     // discarded the runtime.
                     // Destroy the subscription and recreate the channels.
@@ -633,18 +630,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     };
                 }
 
-                WakeUpReason::ParaheadFetchFinished {
-                    async_op_id,
-                    parahead_result: Err(error),
-                } => {
-                    let runtime_subscription = match &mut self.subscription_state {
-                        ParachainBackgroundState::NotSubscribed { .. } => {
-                            debug_assert!(false);
-                            continue;
-                        }
-                        ParachainBackgroundState::Subscribed(s) => s,
-                    };
-
+                (
+                    WakeUpReason::ParaheadFetchFinished {
+                        async_op_id,
+                        parahead_result: Err(error),
+                    },
+                    ParachainBackgroundState::Subscribed(runtime_subscription),
+                ) => {
                     // Several chains initially didn't support parachains, and have later been
                     // upgraded to support them. Similarly, the parachain might not have had a core on
                     // the relay chain until recently. For these reasons, errors when the relay chain
@@ -678,12 +670,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     runtime_subscription.next_start_parahead_fetch = Box::pin(future::ready(()));
                 }
 
-                WakeUpReason::ForegroundMessage(foreground_message) => {
+                (WakeUpReason::ForegroundMessage(foreground_message), _) => {
                     // Message from the public API of the syncing service.
                     self.process_foreground_message(foreground_message).await;
                 }
 
-                WakeUpReason::MustSubscribeNetworkEvents => {
+                (WakeUpReason::MustSubscribeNetworkEvents, _) => {
                     debug_assert!(self.from_network_service.is_none());
                     self.sync_sources.clear();
                     self.sync_sources_map.clear();
@@ -693,12 +685,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ));
                 }
 
-                WakeUpReason::NetworkEvent(network_service::Event::Connected {
-                    peer_id,
-                    role,
-                    best_block_number,
-                    best_block_hash,
-                }) => {
+                (
+                    WakeUpReason::NetworkEvent(network_service::Event::Connected {
+                        peer_id,
+                        role,
+                        best_block_number,
+                        best_block_hash,
+                    }),
+                    _,
+                ) => {
                     let local_id = self.sync_sources.add_source(
                         best_block_number,
                         best_block_hash,
@@ -707,16 +702,22 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     self.sync_sources_map.insert(peer_id, local_id);
                 }
 
-                WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }) => {
+                (
+                    WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }),
+                    _,
+                ) => {
                     let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
                     let (_peer_id, _role) = self.sync_sources.remove(local_id);
                     debug_assert_eq!(peer_id, _peer_id);
                 }
 
-                WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
-                    peer_id,
-                    announce,
-                }) => {
+                (
+                    WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                        peer_id,
+                        announce,
+                    }),
+                    _,
+                ) => {
                     let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                     let decoded = announce.decode();
                     if let Ok(decoded_header) =
@@ -739,7 +740,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     }
                 }
 
-                WakeUpReason::NetworkEvent(_) => {
+                (WakeUpReason::NetworkEvent(_), _) => {
                     // Uninteresting message.
                 }
             }
