@@ -934,6 +934,7 @@ async fn run_background<TPlat: PlatformRef>(
             ),
         }
 
+        // Wait for something to happen or for some processing to be necessary.
         let wake_up_reason: WakeUpReason<_> = {
             async {
                 if !background.pending_subscriptions.is_empty()
@@ -979,12 +980,14 @@ async fn run_background<TPlat: PlatformRef>(
 
         match wake_up_reason {
             WakeUpReason::NewNecessaryDownload => {
+                // There might be a new runtime download to start.
+
                 // Don't download more than 2 runtimes at a time.
                 if background.runtime_downloads.len() >= 2 {
                     continue;
                 }
 
-                // If there's nothing more to download, continue looping.
+                // Grab what to download. If there's nothing more to download, continue looping.
                 let download_params = {
                     let async_op = match &mut background.tree {
                         Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
@@ -1125,9 +1128,9 @@ async fn run_background<TPlat: PlatformRef>(
                 // There might be other downloads to start.
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
-            WakeUpReason::MustAdvanceTree => {
-                background.must_update_tree_and_notify_subscribers = true;
 
+            WakeUpReason::MustAdvanceTree => {
+                // The tree of blocks might need to be advanced.
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
                         tree,
@@ -1135,10 +1138,7 @@ async fn run_background<TPlat: PlatformRef>(
                         all_blocks_subscriptions,
                         pinned_blocks,
                     } => match tree.try_advance_output() {
-                        None => {
-                            background.must_update_tree_and_notify_subscribers = false;
-                            continue;
-                        }
+                        None => continue,
                         Some(async_tree::OutputUpdate::Finalized {
                             user_data: new_finalized,
                             best_block_index,
@@ -1212,6 +1212,9 @@ async fn run_background<TPlat: PlatformRef>(
                                     pinned_blocks.remove(&(to_remove, block));
                                 }
                             }
+
+                            // There might be other updates.
+                            background.must_update_tree_and_notify_subscribers = true;
                         }
                         Some(async_tree::OutputUpdate::Block(block)) => {
                             let block_index = block.index;
@@ -1292,6 +1295,9 @@ async fn run_background<TPlat: PlatformRef>(
                                     pinned_blocks.remove(&(to_remove, block));
                                 }
                             }
+
+                            // There might be other updates.
+                            background.must_update_tree_and_notify_subscribers = true;
                         }
                         Some(async_tree::OutputUpdate::BestBlockChanged { best_block_index }) => {
                             let hash = best_block_index
@@ -1324,16 +1330,20 @@ async fn run_background<TPlat: PlatformRef>(
                                     pinned_blocks.remove(&(to_remove, block));
                                 }
                             }
+
+                            // There might be other updates.
+                            background.must_update_tree_and_notify_subscribers = true;
                         }
                     },
                     Tree::FinalizedBlockRuntimeUnknown { tree } => {
                         match tree.try_advance_output() {
-                            None => {
-                                background.must_update_tree_and_notify_subscribers = false;
+                            None => continue,
+                            Some(async_tree::OutputUpdate::Block(_))
+                            | Some(async_tree::OutputUpdate::BestBlockChanged { .. }) => {
+                                // There might be other updates.
+                                background.must_update_tree_and_notify_subscribers = true;
                                 continue;
                             }
-                            Some(async_tree::OutputUpdate::Block(_))
-                            | Some(async_tree::OutputUpdate::BestBlockChanged { .. }) => continue,
                             Some(async_tree::OutputUpdate::Finalized {
                                 user_data: new_finalized,
                                 former_finalized_async_op_user_data,
@@ -1380,12 +1390,18 @@ async fn run_background<TPlat: PlatformRef>(
                                     tree: new_tree,
                                     finalized_block: new_finalized,
                                 };
+
+                                // There might be other updates.
+                                background.must_update_tree_and_notify_subscribers = true;
                             }
                         }
                     }
                 }
             }
+
             WakeUpReason::MustSubscribe => {
+                // Subscription to the sync service must be recreated.
+
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of the runtime service resumes.
                 // Note that this `await` freezes the entire runtime service background task,
@@ -1584,7 +1600,10 @@ async fn run_background<TPlat: PlatformRef>(
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
+
             WakeUpReason::StartPendingSubscribeAll => {
+                // A subscription is waiting to be started.
+
                 // Extract the components of the `FinalizedBlockRuntimeKnown`.
                 let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
                     match &mut background.tree {
@@ -1726,15 +1745,20 @@ async fn run_background<TPlat: PlatformRef>(
                     });
                 }
             }
+
             WakeUpReason::Notification(None) => {
                 // The sync service has reset the subscription.
                 background.blocks_stream = None;
             }
+
             WakeUpReason::ToBackground(None) => {
                 // Frontend and all subscriptions have shut down.
                 return;
             }
+
             WakeUpReason::ToBackground(Some(ToBackground::SubscribeAll(msg))) => {
+                // Foreground wants to subscribe.
+
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
                 // remove senders that are closed. This is `O(n)`, but we expect this list to
                 // be rather small.
@@ -1743,6 +1767,7 @@ async fn run_background<TPlat: PlatformRef>(
                     .retain(|s| !s.result_tx.is_canceled());
                 background.pending_subscriptions.push(msg);
             }
+
             WakeUpReason::ToBackground(Some(ToBackground::CompileAndPinRuntime {
                 result_tx,
                 storage_code,
@@ -1750,6 +1775,8 @@ async fn run_background<TPlat: PlatformRef>(
                 code_merkle_value,
                 closest_ancestor_excluding,
             })) => {
+                // Foreground wants to compile the given runtime.
+
                 // Try to find an existing identical runtime.
                 let existing_runtime = background
                     .runtimes
@@ -1778,9 +1805,11 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let _ = result_tx.send(runtime);
             }
+
             WakeUpReason::ToBackground(Some(
                 ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx },
             )) => {
+                // Foreground wants the finalized runtime storage Merkle values.
                 let _ = result_tx.send(
                     if let Tree::FinalizedBlockRuntimeKnown { tree, .. } = &background.tree {
                         let runtime = &tree.output_finalized_async_user_data();
@@ -1794,11 +1823,14 @@ async fn run_background<TPlat: PlatformRef>(
                     },
                 );
             }
+
             WakeUpReason::ToBackground(Some(ToBackground::IsNearHeadOfChainHeuristic {
                 result_tx,
             })) => {
-                // The runtime service adds a delay between the moment a best block is reported by the
-                // sync service and the moment it is reported by the runtime service.
+                // Foreground wants to query whether we are at the head of the chain.
+
+                // The runtime service adds a delay between the moment a best block is reported by
+                // the sync service and the moment it is reported by the runtime service.
                 // Because of this, any "far from head of chain" to "near head of chain" transition
                 // must take that delay into account. The other way around ("near" to "far") is
                 // unaffected.
@@ -1809,17 +1841,19 @@ async fn run_background<TPlat: PlatformRef>(
                     continue;
                 }
 
-                // If the sync service is near, report the result of `is_near_head_of_chain_heuristic()`
-                // when called at the latest best block that the runtime service reported through its API,
-                // to make sure that we don't report "near" while having reported only blocks that were
-                // far.
+                // If the sync service is near, report the result of
+                // `is_near_head_of_chain_heuristic()` when called at the latest best block that
+                // the runtime service reported through its API, to make sure that we don't report
+                // "near" while having reported only blocks that were far.
                 let _ = result_tx.send(background.best_near_head_of_chain);
             }
+
             WakeUpReason::ToBackground(Some(ToBackground::UnpinBlock {
                 result_tx,
                 subscription_id,
                 block_hash,
             })) => {
+                // Foreground wants a block unpinned.
                 if let Tree::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions,
                     pinned_blocks,
@@ -1853,11 +1887,14 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let _ = result_tx.send(Ok(()));
             }
+
             WakeUpReason::ToBackground(Some(ToBackground::PinnedBlockRuntimeAccess {
                 result_tx,
                 subscription_id,
                 block_hash,
             })) => {
+                // Foreground wants to access the runtime of a pinned block.
+
                 let pinned_block = {
                     if let Tree::FinalizedBlockRuntimeKnown {
                         all_blocks_subscriptions,
@@ -1896,7 +1933,10 @@ async fn run_background<TPlat: PlatformRef>(
                     block_state_root_hash: pinned_block.state_trie_root_hash,
                 })));
             }
+
             WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
+                // Sync service has reported a new block.
+
                 log::debug!(
                     target: &log_target,
                     "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
@@ -1972,10 +2012,13 @@ async fn run_background<TPlat: PlatformRef>(
                 background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
+
             WakeUpReason::Notification(Some(sync_service::Notification::Finalized {
                 hash,
                 best_block_hash,
             })) => {
+                // Sync service has reported a finalized block.
+
                 log::debug!(
                     target: &log_target,
                     "Worker <= InputFinalized(hash={}, best={})",
@@ -2020,9 +2063,12 @@ async fn run_background<TPlat: PlatformRef>(
 
                 background.must_update_tree_and_notify_subscribers = true;
             }
+
             WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
                 hash,
             })) => {
+                // Sync service has reported a change in the best block.
+
                 log::debug!(
                     target: &log_target,
                     "Worker <= BestBlockChanged(hash={})",
@@ -2067,6 +2113,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
+
             WakeUpReason::RuntimeDownloadFinished(
                 async_op_id,
                 Ok((
@@ -2076,6 +2123,8 @@ async fn run_background<TPlat: PlatformRef>(
                     closest_ancestor_excluding,
                 )),
             ) => {
+                // A runtime has successfully finished downloading.
+
                 // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
                 background.best_near_head_of_chain = true;
 
@@ -2141,7 +2190,10 @@ async fn run_background<TPlat: PlatformRef>(
                 background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
+
             WakeUpReason::RuntimeDownloadFinished(async_op_id, Err(error)) => {
+                // A runtime download has failed.
+
                 let concerned_blocks = match &background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                         either::Left(tree.async_op_blocks(async_op_id))
