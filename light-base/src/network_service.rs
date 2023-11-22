@@ -137,9 +137,6 @@ pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground>,
 
-    /// Event notified when the [`NetworkService`] is destroyed.
-    on_service_killed: event_listener::Event,
-
     /// Dummy to hold the `TPlat` type.
     marker: core::marker::PhantomData<TPlat>,
 }
@@ -196,62 +193,51 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             chain_ids.push(chain_id);
         }
 
-        let on_service_killed = event_listener::Event::new();
-
         let (messages_tx, messages_rx) = async_channel::bounded(32);
         let messages_rx = Box::pin(messages_rx);
 
         // Spawn main task that processes the network service.
         let (tasks_messages_tx, tasks_messages_rx) = async_channel::bounded(32);
-        let task = Box::pin(
-            background_task(BackgroundTask {
-                randomness: rand_chacha::ChaCha20Rng::from_seed({
-                    let mut seed = [0; 32];
-                    config.platform.fill_random_bytes(&mut seed);
-                    seed
-                }),
-                identify_agent_version: config.identify_agent_version,
-                tasks_messages_tx,
-                tasks_messages_rx: Box::pin(tasks_messages_rx),
-                peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
-                    basic_peering_strategy::Config {
-                        randomness_seed: {
-                            let mut seed = [0; 32];
-                            config.platform.fill_random_bytes(&mut seed);
-                            seed
-                        },
-                        peers_capacity: 50, // TODO: ?
-                        chains_capacity: network.chains().count(),
+        let task = Box::pin(background_task(BackgroundTask {
+            randomness: rand_chacha::ChaCha20Rng::from_seed({
+                let mut seed = [0; 32];
+                config.platform.fill_random_bytes(&mut seed);
+                seed
+            }),
+            identify_agent_version: config.identify_agent_version,
+            tasks_messages_tx,
+            tasks_messages_rx: Box::pin(tasks_messages_rx),
+            peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
+                basic_peering_strategy::Config {
+                    randomness_seed: {
+                        let mut seed = [0; 32];
+                        config.platform.fill_random_bytes(&mut seed);
+                        seed
                     },
-                ),
-                network,
-                connections_open_pool_size: config.connections_open_pool_size,
-                connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
-                num_recent_connection_opening: 0,
-                next_recent_connection_restore: None,
-                platform: config.platform.clone(),
-                open_gossip_links: BTreeMap::new(),
-                event_pending_send: None,
-                event_senders: either::Left(Vec::new()),
-                pending_new_subscriptions: Vec::new(),
-                important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
-                messages_rx,
-                blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(
-                    8,
-                    Default::default(),
-                ),
-                storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-                next_discovery_period: Duration::from_secs(5),
-                next_discovery: Box::pin(config.platform.sleep(Duration::from_secs(5))),
-                kademlia_find_node_requests: HashMap::with_capacity_and_hasher(
-                    2,
-                    Default::default(),
-                ),
-            })
-            .or(on_service_killed.listen()),
-        );
+                    peers_capacity: 50, // TODO: ?
+                    chains_capacity: network.chains().count(),
+                },
+            ),
+            network,
+            connections_open_pool_size: config.connections_open_pool_size,
+            connections_open_pool_restore_delay: config.connections_open_pool_restore_delay,
+            num_recent_connection_opening: 0,
+            next_recent_connection_restore: None,
+            platform: config.platform.clone(),
+            open_gossip_links: BTreeMap::new(),
+            event_pending_send: None,
+            event_senders: either::Left(Vec::new()),
+            pending_new_subscriptions: Vec::new(),
+            important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+            messages_rx,
+            blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
+            next_discovery_period: Duration::from_secs(5),
+            next_discovery: Box::pin(config.platform.sleep(Duration::from_secs(5))),
+            kademlia_find_node_requests: HashMap::with_capacity_and_hasher(2, Default::default()),
+        }));
 
         config
             .platform
@@ -263,7 +249,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         let final_network_service = Arc::new(NetworkService {
             log_chain_names,
             messages_tx,
-            on_service_killed,
             marker: core::marker::PhantomData,
         });
 
@@ -691,12 +676,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .await
             .unwrap();
         rx.await.unwrap().into_iter()
-    }
-}
-
-impl<TPlat: PlatformRef> Drop for NetworkService<TPlat> {
-    fn drop(&mut self) {
-        self.on_service_killed.notify(usize::max_value());
     }
 }
 
