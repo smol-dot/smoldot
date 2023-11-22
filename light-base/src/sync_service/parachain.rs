@@ -259,41 +259,16 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 };
 
                 async {
-                    match self.from_foreground.next().await {
-                        Some(msg) => WakeUpReason::ForegroundMessage(msg),
-                        None => WakeUpReason::ForegroundClosed,
-                    }
-                }
-                .or(async {
                     if let Some(subscribe_future) = subscribe_future {
                         WakeUpReason::NewSubscription(subscribe_future.await)
                     } else {
                         future::pending().await
                     }
-                })
+                }
                 .or(async {
-                    if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
-                        next_start_parahead_fetch.as_mut().await;
-                        *next_start_parahead_fetch = Box::pin(future::pending());
-                        WakeUpReason::StartParaheadFetch
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .or(async {
-                    if let Some(in_progress_paraheads) = in_progress_paraheads {
-                        if !in_progress_paraheads.is_empty() {
-                            let (async_op_id, parahead_result) =
-                                in_progress_paraheads.next().await.unwrap();
-                            WakeUpReason::ParaheadFetchFinished {
-                                async_op_id,
-                                parahead_result,
-                            }
-                        } else {
-                            future::pending().await
-                        }
-                    } else {
-                        future::pending().await
+                    match self.from_foreground.next().await {
+                        Some(msg) => WakeUpReason::ForegroundMessage(msg),
+                        None => WakeUpReason::ForegroundClosed,
                     }
                 })
                 .or(async {
@@ -318,6 +293,31 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                             }
                         } else {
                             WakeUpReason::MustSubscribeNetworkEvents
+                        }
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    if let Some(next_start_parahead_fetch) = next_start_parahead_fetch {
+                        next_start_parahead_fetch.as_mut().await;
+                        *next_start_parahead_fetch = Box::pin(future::pending());
+                        WakeUpReason::StartParaheadFetch
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    if let Some(in_progress_paraheads) = in_progress_paraheads {
+                        if !in_progress_paraheads.is_empty() {
+                            let (async_op_id, parahead_result) =
+                                in_progress_paraheads.next().await.unwrap();
+                            WakeUpReason::ParaheadFetchFinished {
+                                async_op_id,
+                                parahead_result,
+                            }
+                        } else {
+                            future::pending().await
                         }
                     } else {
                         future::pending().await
