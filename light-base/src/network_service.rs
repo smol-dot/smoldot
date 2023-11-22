@@ -231,6 +231,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         );
 
         // Spawn main task that processes the network service.
+        let (tasks_messages_tx, tasks_messages_rx) = async_channel::bounded(32);
         let task = Box::pin(
             background_task(BackgroundTask {
                 randomness: rand_chacha::ChaCha20Rng::from_seed({
@@ -239,7 +240,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     seed
                 }),
                 identify_agent_version: config.identify_agent_version,
-                messages_tx: messages_tx.clone(),
+                tasks_messages_tx,
+                tasks_messages_rx: Box::pin(tasks_messages_rx),
                 peering_strategy: basic_peering_strategy::BasicPeeringStrategy::new(
                     basic_peering_strategy::Config {
                         randomness_seed: {
@@ -813,10 +815,6 @@ enum ToBackground {
         chain_id: ChainId,
         sender: async_channel::Sender<Event>,
     },
-    ConnectionMessage {
-        connection_id: service::ConnectionId,
-        message: service::ConnectionToCoordinator,
-    },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
         target: PeerId, // TODO: takes by value because of future longevity issue
@@ -898,7 +896,13 @@ struct BackgroundTask<TPlat: PlatformRef> {
     identify_agent_version: String,
 
     /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground>,
+    tasks_messages_tx:
+        async_channel::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
+
+    /// Channel to receive messages destined to the background task.
+    tasks_messages_rx: Pin<
+        Box<async_channel::Receiver<(service::ConnectionId, service::ConnectionToCoordinator)>>,
+    >,
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<
@@ -1007,6 +1011,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             NextRecentConnectionRestore,
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
+            MessageFromConnection {
+                connection_id: service::ConnectionId,
+                message: service::ConnectionToCoordinator,
+            },
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -1017,6 +1025,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
         let wake_up_reason = {
             let message_received =
                 async { WakeUpReason::Message(task.messages_rx.next().await.unwrap()) };
+            let message_from_task_received = async {
+                let (connection_id, message) = task.tasks_messages_rx.next().await.unwrap();
+                WakeUpReason::MessageFromConnection {
+                    connection_id,
+                    message,
+                }
+            };
             let service_event = async {
                 if let Some(event) = (task.event_pending_send.is_none()
                     && task.pending_new_subscriptions.is_empty())
@@ -1121,6 +1136,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             };
 
             message_received
+                .or(message_from_task_received)
                 .or(service_event)
                 .or(next_recent_connection_restore)
                 .or(finished_sending_event)
@@ -1194,10 +1210,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }));
                 }
             }
-            WakeUpReason::Message(ToBackground::ConnectionMessage {
+            WakeUpReason::MessageFromConnection {
                 connection_id,
                 message,
-            }) => {
+            } => {
                 task.network
                     .inject_connection_message(connection_id, message);
             }
@@ -2204,7 +2220,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 connection_id,
                                 connection_task,
                                 coordinator_to_connection_rx,
-                                task.messages_tx.clone(),
+                                task.tasks_messages_tx.clone(),
                             ),
                         );
                     }
@@ -2261,7 +2277,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 connection_id,
                                 connection_task,
                                 coordinator_to_connection_rx,
-                                task.messages_tx.clone(),
+                                task.tasks_messages_tx.clone(),
                             ),
                         );
                     }
