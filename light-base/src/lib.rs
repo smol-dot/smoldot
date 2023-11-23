@@ -1083,67 +1083,64 @@ fn start_services<TPlat: platform::PlatformRef>(
     network_identify_agent_version: String,
 ) -> ChainServices<TPlat> {
     // The network service is responsible for connecting to the peer-to-peer network.
-    let (_, network_service) = network_service::NetworkService::new(network_service::Config {
+    let network_service = network_service::NetworkService::new(network_service::Config {
         platform: platform.clone(),
         identify_agent_version: network_identify_agent_version,
         connections_open_pool_size: 5,
         connections_open_pool_restore_delay: Duration::from_secs(1),
-        chains: vec![network_service::ConfigChain {
-            log_name: log_name.clone(),
-            num_out_slots: 4,
-            grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
-                chain_information,
-            } = &config
-            {
-                if matches!(
-                    chain_information.as_ref().finality,
-                    chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ) {
-                    Some(chain_information.as_ref().finalized_block_header.number)
-                } else {
-                    None
-                }
-            } else {
-                // Parachains never use GrandPa.
-                None
-            },
-            genesis_block_hash: header::hash_from_scale_encoded_header(
-                &genesis_block_scale_encoded_header,
-            ),
-            best_block: match &config {
-                StartServicesChainTy::RelayChain { chain_information } => (
-                    chain_information.as_ref().finalized_block_header.number,
-                    chain_information
-                        .as_ref()
-                        .finalized_block_header
-                        .hash(block_number_bytes),
-                ),
-                StartServicesChainTy::Parachain {
-                    finalized_block_header,
-                    ..
-                } => {
-                    if let Ok(decoded) = header::decode(finalized_block_header, block_number_bytes)
-                    {
-                        (
-                            decoded.number,
-                            header::hash_from_scale_encoded_header(finalized_block_header),
-                        )
-                    } else {
-                        (
-                            0,
-                            header::hash_from_scale_encoded_header(
-                                &genesis_block_scale_encoded_header,
-                            ),
-                        )
-                    }
-                }
-            },
-            fork_id,
-            block_number_bytes,
-        }],
+        chains_capacity: 1,
     });
 
-    let network_service = network_service.into_iter().next().unwrap();
+    let network_service = network_service.add_chain(network_service::ConfigChain {
+        log_name: log_name.clone(),
+        num_out_slots: 4,
+        grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
+            chain_information,
+        } = &config
+        {
+            if matches!(
+                chain_information.as_ref().finality,
+                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+            ) {
+                Some(chain_information.as_ref().finalized_block_header.number)
+            } else {
+                None
+            }
+        } else {
+            // Parachains never use GrandPa.
+            None
+        },
+        genesis_block_hash: header::hash_from_scale_encoded_header(
+            &genesis_block_scale_encoded_header,
+        ),
+        best_block: match &config {
+            StartServicesChainTy::RelayChain { chain_information } => (
+                chain_information.as_ref().finalized_block_header.number,
+                chain_information
+                    .as_ref()
+                    .finalized_block_header
+                    .hash(block_number_bytes),
+            ),
+            StartServicesChainTy::Parachain {
+                finalized_block_header,
+                ..
+            } => {
+                if let Ok(decoded) = header::decode(finalized_block_header, block_number_bytes) {
+                    (
+                        decoded.number,
+                        header::hash_from_scale_encoded_header(finalized_block_header),
+                    )
+                } else {
+                    (
+                        0,
+                        header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
+                    )
+                }
+            }
+        },
+        fork_id,
+        block_number_bytes,
+    });
 
     let (sync_service, runtime_service) = match config {
         StartServicesChainTy::Parachain {

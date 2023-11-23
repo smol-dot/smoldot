@@ -78,8 +78,8 @@ pub struct Config<TPlat> {
     /// Value sent back for the agent version when receiving an identification request.
     pub identify_agent_version: String,
 
-    /// List of chains to connect to. Chains are later referred to by their index in this list.
-    pub chains: Vec<ConfigChain>,
+    /// Capacity to allocate for the list of chains.
+    pub chains_capacity: usize,
 
     /// Maximum number of connections that the service can open simultaneously. After this value
     /// has been reached, a new connection can be opened after each
@@ -133,24 +133,17 @@ pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel connected to the background service.
     messages_tx: async_channel::Sender<ToBackground>,
 
-    /// Dummy to hold the `TPlat` type.
-    marker: core::marker::PhantomData<TPlat>,
+    /// See [`Config::platform`].
+    platform: TPlat,
 }
 
 impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
-    ///
-    /// Returns the networking service, plus a list of receivers on which events are pushed.
-    /// All of these receivers must be polled regularly to prevent the networking service from
-    /// slowing down.
-    pub fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<Arc<NetworkServiceChain<TPlat>>>) {
+    pub fn new(config: Config<TPlat>) -> Arc<Self> {
         let (main_messages_tx, main_messages_rx) = async_channel::bounded(4);
 
-        let mut chains = Vec::with_capacity(config.chains.len());
-        let mut messages_rx = stream::SelectAll::new();
-
-        let mut network = service::ChainNetwork::new(service::Config {
-            chains_capacity: config.chains.len(),
+        let network = service::ChainNetwork::new(service::Config {
+            chains_capacity: config.chains_capacity,
             connections_capacity: 32,
             handshake_timeout: Duration::from_secs(8),
             randomness_seed: {
@@ -159,53 +152,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 seed
             },
         });
-
-        for chain in config.chains {
-            let (tx, rx) = async_channel::bounded(32);
-            let rx = Box::pin(rx);
-
-            // TODO: can panic in case of duplicate chain, how do we handle that?
-            let chain_id = network
-                .add_chain(service::ChainConfig {
-                    grandpa_protocol_config: chain.grandpa_protocol_finalized_block_height.map(
-                        |commit_finalized_height| service::GrandpaState {
-                            commit_finalized_height,
-                            round_number: 1,
-                            set_id: 0,
-                        },
-                    ),
-                    fork_id: chain.fork_id.clone(),
-                    block_number_bytes: chain.block_number_bytes,
-                    best_hash: chain.best_block.1,
-                    best_number: chain.best_block.0,
-                    genesis_hash: chain.genesis_block_hash,
-                    role: Role::Light,
-                    allow_inbound_block_requests: false,
-                    user_data: Chain {
-                        log_name: chain.log_name.clone(),
-                        block_number_bytes: chain.block_number_bytes,
-                        num_out_slots: chain.num_out_slots,
-                    },
-                })
-                .unwrap();
-
-            messages_rx.push(
-                Box::pin(
-                    rx.map(move |msg| (chain_id, msg))
-                        .chain(stream::once(future::ready((
-                            chain_id,
-                            ToBackgroundChain::RemoveChain,
-                        )))),
-                ) as Pin<Box<_>>,
-            );
-
-            chains.push(Arc::new(NetworkServiceChain {
-                _keep_alive_messages_tx: main_messages_tx.clone(),
-                log_name: chain.log_name,
-                messages_tx: tx.clone(),
-                marker: core::marker::PhantomData,
-            }));
-        }
 
         // Spawn main task that processes the network service.
         let (tasks_messages_tx, tasks_messages_rx) = async_channel::bounded(32);
@@ -226,7 +172,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                         seed
                     },
                     peers_capacity: 50, // TODO: ?
-                    chains_capacity: network.chains().count(),
+                    chains_capacity: config.chains_capacity,
                 },
             ),
             network,
@@ -241,7 +187,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             pending_new_subscriptions: Vec::new(),
             important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
             main_messages_rx: Box::pin(main_messages_rx),
-            messages_rx,
+            messages_rx: stream::SelectAll::new(),
             blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
@@ -258,12 +204,63 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 log::debug!(target: "network", "Shutdown")
             });
 
-        let final_network_service = Arc::new(NetworkService {
+        Arc::new(NetworkService {
             messages_tx: main_messages_tx,
-            marker: core::marker::PhantomData,
+            platform: config.platform,
+        })
+    }
+
+    /// Adds a chain to the list of chains that the network service connects to.
+    ///
+    /// Returns an object representing the chain and that allows interacting with it. If all
+    /// references to [`NetworkServiceChain`] are destroyed, the network service automatically
+    /// purges that chain.
+    pub fn add_chain(&self, config: ConfigChain) -> Arc<NetworkServiceChain<TPlat>> {
+        let log_name = config.log_name.clone();
+
+        let (messages_tx, messages_rx) = async_channel::bounded(32);
+
+        // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
+        self.platform.spawn_task("add-chain-message-send".into(), {
+            let config = service::ChainConfig {
+                grandpa_protocol_config: config.grandpa_protocol_finalized_block_height.map(
+                    |commit_finalized_height| service::GrandpaState {
+                        commit_finalized_height,
+                        round_number: 1,
+                        set_id: 0,
+                    },
+                ),
+                fork_id: config.fork_id.clone(),
+                block_number_bytes: config.block_number_bytes,
+                best_hash: config.best_block.1,
+                best_number: config.best_block.0,
+                genesis_hash: config.genesis_block_hash,
+                role: Role::Light,
+                allow_inbound_block_requests: false,
+                user_data: Chain {
+                    log_name: config.log_name.clone(),
+                    block_number_bytes: config.block_number_bytes,
+                    num_out_slots: config.num_out_slots,
+                },
+            };
+
+            let messages_tx = self.messages_tx.clone();
+            async move {
+                let _ = messages_tx
+                    .send(ToBackground::AddChain {
+                        messages_rx,
+                        config,
+                    })
+                    .await;
+            }
         });
 
-        (final_network_service, chains)
+        Arc::new(NetworkServiceChain {
+            _keep_alive_messages_tx: self.messages_tx.clone(),
+            log_name,
+            messages_tx,
+            marker: core::marker::PhantomData,
+        })
     }
 }
 
@@ -748,7 +745,12 @@ impl CallProofRequestError {
     }
 }
 
-enum ToBackground {}
+enum ToBackground {
+    AddChain {
+        messages_rx: async_channel::Receiver<ToBackgroundChain>,
+        config: service::ChainConfig<Chain>,
+    },
+}
 
 enum ToBackgroundChain {
     RemoveChain,
@@ -1097,6 +1099,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             };
 
             message_for_chain_received
+                .or(message_received)
                 .or(message_from_task_received)
                 .or(service_event)
                 .or(next_recent_connection_restore)
@@ -1110,7 +1113,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // End the task.
                 return;
             }
-            WakeUpReason::Message(msg) => match msg {},
+            WakeUpReason::Message(ToBackground::AddChain {
+                messages_rx,
+                config,
+            }) => {
+                // TODO: can panic in case of duplicate chain, how do we handle that?
+                let chain_id = task.network.add_chain(config).unwrap();
+
+                task.messages_rx
+                    .push(Box::pin(
+                        messages_rx
+                            .map(move |msg| (chain_id, msg))
+                            .chain(stream::once(future::ready((
+                                chain_id,
+                                ToBackgroundChain::RemoveChain,
+                            )))),
+                    ) as Pin<Box<_>>);
+            }
             WakeUpReason::EventSendersReady => {
                 // Dispatch the pending event, if any to the various senders.
 
