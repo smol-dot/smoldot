@@ -47,7 +47,7 @@ use alloc::{
     sync::Arc,
     vec::{self, Vec},
 };
-use core::{cmp, mem, pin::Pin, time::Duration};
+use core::{cmp, mem, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
@@ -241,6 +241,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     log_name: config.log_name.clone(),
                     block_number_bytes: config.block_number_bytes,
                     num_out_slots: config.num_out_slots,
+                    num_references: NonZeroUsize::new(1).unwrap(),
                 },
             };
 
@@ -922,6 +923,9 @@ struct BackgroundTask<TPlat: PlatformRef> {
 struct Chain {
     log_name: String,
 
+    // TODO: this field is a hack due to the fact that `add_chain` can't be `async`; should eventually be fixed after a lib.rs refactor
+    num_references: NonZeroUsize,
+
     /// See [`ConfigChain::block_number_bytes`].
     // TODO: redundant with ChainNetwork? since we might not need to know this in the future i'm reluctant to add a getter to ChainNetwork
     block_number_bytes: usize,
@@ -1117,8 +1121,18 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 messages_rx,
                 config,
             }) => {
-                // TODO: can panic in case of duplicate chain, how do we handle that?
-                let chain_id = task.network.add_chain(config).unwrap();
+                // TODO: this is not a completely clean way of handling duplicate chains, because the existing chain might have a different best block and role and all ; also, multiple sync services will call set_best_block and set_finalized_block
+                let chain_id = match task.network.add_chain(config) {
+                    Ok(id) => id,
+                    Err(service::AddChainError::Duplicate { existing_identical }) => {
+                        task.network[existing_identical].num_references = task.network
+                            [existing_identical]
+                            .num_references
+                            .checked_add(1)
+                            .unwrap();
+                        existing_identical
+                    }
+                };
 
                 task.messages_rx
                     .push(Box::pin(
@@ -1206,6 +1220,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .inject_connection_message(connection_id, message);
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::RemoveChain) => {
+                if let Some(new_ref) =
+                    NonZeroUsize::new(task.network[chain_id].num_references.get() - 1)
+                {
+                    task.network[chain_id].num_references = new_ref;
+                    continue;
+                }
+
                 for peer_id in task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
