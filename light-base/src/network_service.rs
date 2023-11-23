@@ -50,7 +50,7 @@ use alloc::{
 use core::{cmp, mem, pin::Pin, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
-use futures_util::{future, StreamExt as _};
+use futures_util::{future, stream, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools as _;
 use rand_chacha::rand_core::SeedableRng as _;
@@ -130,9 +130,6 @@ pub struct ConfigChain {
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
-    /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground>,
-
     /// Dummy to hold the `TPlat` type.
     marker: core::marker::PhantomData<TPlat>,
 }
@@ -144,10 +141,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
     pub fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<Arc<NetworkServiceChain<TPlat>>>) {
-        let (messages_tx, messages_rx) = async_channel::bounded(32);
-        let messages_rx = Box::pin(messages_rx);
-
         let mut chains = Vec::with_capacity(config.chains.len());
+        let mut messages_rx = stream::SelectAll::new();
 
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
@@ -161,6 +156,9 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         });
 
         for chain in config.chains {
+            let (tx, rx) = async_channel::bounded(32);
+            let rx = Box::pin(rx);
+
             // TODO: can panic in case of duplicate chain, how do we handle that?
             let chain_id = network
                 .add_chain(service::ChainConfig {
@@ -186,10 +184,19 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 })
                 .unwrap();
 
+            messages_rx.push(
+                Box::pin(
+                    rx.map(move |msg| (chain_id, msg))
+                        .chain(stream::once(future::ready((
+                            chain_id,
+                            ToBackgroundChain::RemoveChain,
+                        )))),
+                ) as Pin<Box<_>>,
+            );
+
             chains.push(Arc::new(NetworkServiceChain {
                 log_name: chain.log_name,
-                messages_tx: messages_tx.clone(),
-                chain_id,
+                messages_tx: tx.clone(),
                 marker: core::marker::PhantomData,
             }));
         }
@@ -245,7 +252,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             });
 
         let final_network_service = Arc::new(NetworkService {
-            messages_tx,
             marker: core::marker::PhantomData,
         });
 
@@ -257,11 +263,8 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Logging name of the chain.
     log_name: String,
 
-    /// Identifier of the chain according to the background service.
-    chain_id: ChainId,
-
     /// Channel to send messages to the background task.
-    messages_tx: async_channel::Sender<ToBackground>,
+    messages_tx: async_channel::Sender<ToBackgroundChain>,
 
     /// Dummy to hold the `TPlat` type.
     marker: core::marker::PhantomData<TPlat>,
@@ -293,10 +296,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
         let _ = self
             .messages_tx
-            .send(ToBackground::Subscribe {
-                chain_id: self.chain_id,
-                sender: tx,
-            })
+            .send(ToBackgroundChain::Subscribe { sender: tx })
             .await
             .unwrap();
 
@@ -314,9 +314,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::StartBlocksRequest {
+            .send(ToBackgroundChain::StartBlocksRequest {
                 target: target.clone(),
-                chain_id: self.chain_id,
                 config,
                 timeout,
                 result: tx,
@@ -383,9 +382,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::StartWarpSyncRequest {
+            .send(ToBackgroundChain::StartWarpSyncRequest {
                 target: target.clone(),
-                chain_id: self.chain_id,
                 begin_hash,
                 timeout,
                 result: tx,
@@ -424,8 +422,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
     pub async fn set_local_best_block(&self, best_hash: [u8; 32], best_number: u64) {
         self.messages_tx
-            .send(ToBackground::SetLocalBestBlock {
-                chain_id: self.chain_id,
+            .send(ToBackgroundChain::SetLocalBestBlock {
                 best_hash,
                 best_number,
             })
@@ -435,10 +432,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
     pub async fn set_local_grandpa_state(&self, grandpa_state: service::GrandpaState) {
         self.messages_tx
-            .send(ToBackground::SetLocalGrandpaState {
-                chain_id: self.chain_id,
-                grandpa_state,
-            })
+            .send(ToBackgroundChain::SetLocalGrandpaState { grandpa_state })
             .await
             .unwrap();
     }
@@ -454,9 +448,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::StartStorageProofRequest {
+            .send(ToBackgroundChain::StartStorageProofRequest {
                 target: target.clone(),
-                chain_id: self.chain_id,
                 config: codec::StorageProofRequestConfig {
                     block_hash: config.block_hash,
                     keys: config
@@ -511,9 +504,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::StartCallProofRequest {
+            .send(ToBackgroundChain::StartCallProofRequest {
                 target: target.clone(),
-                chain_id: self.chain_id,
                 config: codec::CallProofRequestConfig {
                     block_hash: config.block_hash,
                     method: config.method.into_owned().into(),
@@ -569,8 +561,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::AnnounceTransaction {
-                chain_id: self.chain_id,
+            .send(ToBackgroundChain::AnnounceTransaction {
                 transaction: transaction.to_vec(), // TODO: ovheread
                 result: tx,
             })
@@ -590,9 +581,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::SendBlockAnnounce {
-                target: target.clone(), // TODO: overhead
-                chain_id: self.chain_id,
+            .send(ToBackgroundChain::SendBlockAnnounce {
+                target: target.clone(),                              // TODO: overhead
                 scale_encoded_header: scale_encoded_header.to_vec(), // TODO: overhead
                 is_best,
                 result: tx,
@@ -614,8 +604,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         important_nodes: bool,
     ) {
         self.messages_tx
-            .send(ToBackground::Discover {
-                chain_id: self.chain_id,
+            .send(ToBackgroundChain::Discover {
                 // TODO: overhead
                 list: list
                     .into_iter()
@@ -642,10 +631,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
-            .send(ToBackground::DiscoveredNodes {
-                chain_id: self.chain_id,
-                result: tx,
-            })
+            .send(ToBackgroundChain::DiscoveredNodes { result: tx })
             .await
             .unwrap();
 
@@ -660,10 +646,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
         let (tx, rx) = oneshot::channel();
         self.messages_tx
-            .send(ToBackground::PeersList {
-                chain_id: self.chain_id,
-                result: tx,
-            })
+            .send(ToBackgroundChain::PeersList { result: tx })
             .await
             .unwrap();
         rx.await.unwrap().into_iter()
@@ -753,15 +736,14 @@ impl CallProofRequestError {
     }
 }
 
-enum ToBackground {
+enum ToBackgroundChain {
+    RemoveChain,
     Subscribe {
-        chain_id: ChainId,
         sender: async_channel::Sender<Event>,
     },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
         target: PeerId, // TODO: takes by value because of future longevity issue
-        chain_id: ChainId,
         config: codec::BlocksRequestConfig,
         timeout: Duration,
         result: oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
@@ -769,7 +751,6 @@ enum ToBackground {
     // TODO: serialize the request before sending over channel
     StartWarpSyncRequest {
         target: PeerId,
-        chain_id: ChainId,
         begin_hash: [u8; 32],
         timeout: Duration,
         result:
@@ -777,7 +758,6 @@ enum ToBackground {
     },
     // TODO: serialize the request before sending over channel
     StartStorageProofRequest {
-        chain_id: ChainId,
         target: PeerId,
         config: codec::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
@@ -785,44 +765,36 @@ enum ToBackground {
     },
     // TODO: serialize the request before sending over channel
     StartCallProofRequest {
-        chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: codec::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
         timeout: Duration,
         result: oneshot::Sender<Result<service::EncodedMerkleProof, CallProofRequestError>>,
     },
     SetLocalBestBlock {
-        chain_id: ChainId,
         best_hash: [u8; 32],
         best_number: u64,
     },
     SetLocalGrandpaState {
-        chain_id: ChainId,
         grandpa_state: service::GrandpaState,
     },
     AnnounceTransaction {
-        chain_id: ChainId,
         transaction: Vec<u8>,
         result: oneshot::Sender<Vec<PeerId>>,
     },
     SendBlockAnnounce {
         target: PeerId,
-        chain_id: ChainId,
         scale_encoded_header: Vec<u8>,
         is_best: bool,
         result: oneshot::Sender<Result<(), QueueNotificationError>>,
     },
     Discover {
-        chain_id: ChainId,
         list: vec::IntoIter<(PeerId, vec::IntoIter<Multiaddr>)>,
         important_nodes: bool,
     },
     DiscoveredNodes {
-        chain_id: ChainId,
         result: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
     },
     PeersList {
-        chain_id: ChainId,
         result: oneshot::Sender<Vec<PeerId>>,
     },
 }
@@ -895,7 +867,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
     pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
 
-    messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
+    messages_rx:
+        stream::SelectAll<Pin<Box<dyn stream::Stream<Item = (ChainId, ToBackgroundChain)> + Send>>>,
 
     blocks_requests: HashMap<
         service::SubstreamId,
@@ -952,7 +925,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         enum WakeUpReason {
             ForegroundClosed,
-            Message(ToBackground),
+            Message(ChainId, ToBackgroundChain),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
             NextRecentConnectionRestore,
@@ -972,10 +945,16 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
         let wake_up_reason = {
             let message_received = async {
-                task.messages_rx
-                    .next()
-                    .await
-                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+                if !task.messages_rx.is_empty() {
+                    let (chain_id, message) = task
+                        .messages_rx
+                        .next()
+                        .await
+                        .unwrap_or_else(|| unreachable!());
+                    WakeUpReason::Message(chain_id, message)
+                } else {
+                    future::pending().await
+                }
             };
             let message_from_task_received = async {
                 let (connection_id, message) = task.tasks_messages_rx.next().await.unwrap();
@@ -1181,16 +1160,36 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .inject_connection_message(connection_id, message);
             }
-            WakeUpReason::Message(ToBackground::Subscribe { chain_id, sender }) => {
+            WakeUpReason::Message(chain_id, ToBackgroundChain::RemoveChain) => {
+                for peer_id in task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    task.network
+                        .gossip_close(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .unwrap();
+                }
+
+                task.network.remove_chain(chain_id).unwrap();
+            }
+            WakeUpReason::Message(chain_id, ToBackgroundChain::Subscribe { sender }) => {
                 task.pending_new_subscriptions.push((chain_id, sender));
             }
-            WakeUpReason::Message(ToBackground::StartBlocksRequest {
-                target,
+            WakeUpReason::Message(
                 chain_id,
-                config,
-                timeout,
-                result,
-            }) => {
+                ToBackgroundChain::StartBlocksRequest {
+                    target,
+                    config,
+                    timeout,
+                    result,
+                },
+            ) => {
                 match task
                     .network
                     .start_blocks_request(&target, chain_id, config.clone(), timeout)
@@ -1226,13 +1225,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::Message(ToBackground::StartWarpSyncRequest {
-                target,
+            WakeUpReason::Message(
                 chain_id,
-                begin_hash,
-                timeout,
-                result,
-            }) => {
+                ToBackgroundChain::StartWarpSyncRequest {
+                    target,
+                    begin_hash,
+                    timeout,
+                    result,
+                },
+            ) => {
                 match task
                     .network
                     .start_grandpa_warp_sync_request(&target, chain_id, begin_hash, timeout)
@@ -1250,13 +1251,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::Message(ToBackground::StartStorageProofRequest {
+            WakeUpReason::Message(
                 chain_id,
-                target,
-                config,
-                timeout,
-                result,
-            }) => {
+                ToBackgroundChain::StartStorageProofRequest {
+                    target,
+                    config,
+                    timeout,
+                    result,
+                },
+            ) => {
                 match task.network.start_storage_proof_request(
                     &target,
                     chain_id,
@@ -1282,13 +1285,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 };
             }
-            WakeUpReason::Message(ToBackground::StartCallProofRequest {
+            WakeUpReason::Message(
                 chain_id,
-                target,
-                config,
-                timeout,
-                result,
-            }) => {
+                ToBackgroundChain::StartCallProofRequest {
+                    target,
+                    config,
+                    timeout,
+                    result,
+                },
+            ) => {
                 match task.network.start_call_proof_request(
                     &target,
                     chain_id,
@@ -1315,18 +1320,20 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 };
             }
-            WakeUpReason::Message(ToBackground::SetLocalBestBlock {
+            WakeUpReason::Message(
                 chain_id,
-                best_hash,
-                best_number,
-            }) => {
+                ToBackgroundChain::SetLocalBestBlock {
+                    best_hash,
+                    best_number,
+                },
+            ) => {
                 task.network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
             }
-            WakeUpReason::Message(ToBackground::SetLocalGrandpaState {
+            WakeUpReason::Message(
                 chain_id,
-                grandpa_state,
-            }) => {
+                ToBackgroundChain::SetLocalGrandpaState { grandpa_state },
+            ) => {
                 log::debug!(
                     target: "network",
                     "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
@@ -1340,11 +1347,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .gossip_broadcast_grandpa_state_and_update(chain_id, grandpa_state);
             }
-            WakeUpReason::Message(ToBackground::AnnounceTransaction {
+            WakeUpReason::Message(
                 chain_id,
-                transaction,
-                result,
-            }) => {
+                ToBackgroundChain::AnnounceTransaction {
+                    transaction,
+                    result,
+                },
+            ) => {
                 // TODO: keep track of which peer knows about which transaction, and don't send it again
 
                 let peers_to_send = task
@@ -1380,13 +1389,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 let _ = result.send(peers_to_send);
             }
-            WakeUpReason::Message(ToBackground::SendBlockAnnounce {
-                target,
+            WakeUpReason::Message(
                 chain_id,
-                scale_encoded_header,
-                is_best,
-                result,
-            }) => {
+                ToBackgroundChain::SendBlockAnnounce {
+                    target,
+                    scale_encoded_header,
+                    is_best,
+                    result,
+                },
+            ) => {
                 // TODO: log who the announce was sent to
                 let _ = result.send(task.network.gossip_send_block_announce(
                     &target,
@@ -1395,11 +1406,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     is_best,
                 ));
             }
-            WakeUpReason::Message(ToBackground::Discover {
+            WakeUpReason::Message(
                 chain_id,
-                list,
-                important_nodes,
-            }) => {
+                ToBackgroundChain::Discover {
+                    list,
+                    important_nodes,
+                },
+            ) => {
                 for (peer_id, addrs) in list {
                     if important_nodes {
                         task.important_nodes.insert(peer_id.clone());
@@ -1418,7 +1431,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::Message(ToBackground::DiscoveredNodes { chain_id, result }) => {
+            WakeUpReason::Message(chain_id, ToBackgroundChain::DiscoveredNodes { result }) => {
                 // TODO: consider returning Vec<u8>s for the addresses?
                 let _ = result.send(
                     task.peering_strategy
@@ -1434,7 +1447,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect::<Vec<_>>(),
                 );
             }
-            WakeUpReason::Message(ToBackground::PeersList { chain_id, result }) => {
+            WakeUpReason::Message(chain_id, ToBackgroundChain::PeersList { result }) => {
                 let _ = result.send(
                     task.network
                         .gossip_connected_peers(
