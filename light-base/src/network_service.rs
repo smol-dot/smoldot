@@ -32,9 +32,13 @@
 //! the service. The public API only allows emitting requests and notifications towards the
 //! already-connected nodes.
 //!
+//! After a [`NetworkService`] is created, one can add chains using [`NetworkService::add_chain`].
+//! If all references to a [`NetworkServiceChain`] are destroyed, the chain is automatically
+//! purged.
+//!
 //! An important part of the API is the list of channel receivers of [`Event`] returned by
-//! [`NetworkService::new`]. These channels inform the foreground about updates to the network
-//! connectivity.
+//! [`NetworkServiceChain::subscribe`]. These channels inform the foreground about updates to the
+//! network connectivity.
 
 use crate::platform::{self, address_parse, PlatformRef};
 
@@ -97,7 +101,7 @@ pub struct Config<TPlat> {
 ///
 /// Note that this configuration is intentionally missing a field containing the bootstrap
 /// nodes of the chain. Bootstrap nodes are supposed to be added afterwards by calling
-/// [`NetworkService::discover`].
+/// [`NetworkServiceChain::discover`].
 pub struct ConfigChain {
     /// Name of the chain, for logging purposes.
     pub log_name: String,
@@ -114,7 +118,7 @@ pub struct ConfigChain {
     pub genesis_block_hash: [u8; 32],
 
     /// Number and hash of the current best block. Can later be updated with
-    /// [`NetworkService::set_local_best_block`].
+    /// [`NetworkServiceChain::set_local_best_block`].
     pub best_block: (u64, [u8; 32]),
 
     /// Optional identifier to insert into the networking protocol names. Used to differentiate
@@ -294,7 +298,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     ///
     /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
     /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
-    /// [`NetworkService::subscribe`] again to obtain a new `Receiver`.
+    /// [`NetworkServiceChain::subscribe`] again to obtain a new `Receiver`.
     ///
     /// # Panic
     ///
@@ -503,7 +507,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
     /// Sends a call proof request to the given peer.
     ///
-    /// See also [`NetworkService::call_proof_request`].
+    /// See also [`NetworkServiceChain::call_proof_request`].
     // TODO: more docs
     pub async fn call_proof_request(
         self: Arc<Self>,
@@ -633,8 +637,8 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// the network.
     ///
     /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
-    /// that a node that has been added through [`NetworkService::discover`] will later be
-    /// returned by [`NetworkService::discovered_nodes`].
+    /// that a node that has been added through [`NetworkServiceChain::discover`] will later be
+    /// returned by [`NetworkServiceChain::discovered_nodes`].
     pub async fn discovered_nodes(
         &self,
     ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
@@ -690,7 +694,7 @@ pub enum Event {
     },
 }
 
-/// Error returned by [`NetworkService::blocks_request`].
+/// Error returned by [`NetworkServiceChain::blocks_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
     /// No established connection with the target.
@@ -700,7 +704,7 @@ pub enum BlocksRequestError {
     Request(service::BlocksRequestError),
 }
 
-/// Error returned by [`NetworkService::grandpa_warp_sync_request`].
+/// Error returned by [`NetworkServiceChain::grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum WarpSyncRequestError {
     /// No established connection with the target.
@@ -710,7 +714,7 @@ pub enum WarpSyncRequestError {
     Request(service::GrandpaWarpSyncRequestError),
 }
 
-/// Error returned by [`NetworkService::storage_proof_request`].
+/// Error returned by [`NetworkServiceChain::storage_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageProofRequestError {
     /// No established connection with the target.
@@ -722,7 +726,7 @@ pub enum StorageProofRequestError {
     Request(service::StorageProofRequestError),
 }
 
-/// Error returned by [`NetworkService::call_proof_request`].
+/// Error returned by [`NetworkServiceChain::call_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum CallProofRequestError {
     /// No established connection with the target.
@@ -880,7 +884,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
         Pin<Box<dyn future::Future<Output = Vec<(ChainId, async_channel::Sender<Event>)>> + Send>>,
     >,
 
-    /// Whenever [`NetworkService::subscribe`] is called, the new sender is added to this list.
+    /// Whenever [`NetworkServiceChain::subscribe`] is called, the new sender is added to this list.
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
     pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
 
