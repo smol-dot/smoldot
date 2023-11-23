@@ -130,6 +130,9 @@ pub struct ConfigChain {
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
+    /// Channel connected to the background service.
+    messages_tx: async_channel::Sender<ToBackground>,
+
     /// Dummy to hold the `TPlat` type.
     marker: core::marker::PhantomData<TPlat>,
 }
@@ -141,6 +144,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
     pub fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<Arc<NetworkServiceChain<TPlat>>>) {
+        let (main_messages_tx, main_messages_rx) = async_channel::bounded(4);
+
         let mut chains = Vec::with_capacity(config.chains.len());
         let mut messages_rx = stream::SelectAll::new();
 
@@ -195,6 +200,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             );
 
             chains.push(Arc::new(NetworkServiceChain {
+                _keep_alive_messages_tx: main_messages_tx.clone(),
                 log_name: chain.log_name,
                 messages_tx: tx.clone(),
                 marker: core::marker::PhantomData,
@@ -234,6 +240,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
             important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
+            main_messages_rx: Box::pin(main_messages_rx),
             messages_rx,
             blocks_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
@@ -252,6 +259,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             });
 
         let final_network_service = Arc::new(NetworkService {
+            messages_tx: main_messages_tx,
             marker: core::marker::PhantomData,
         });
 
@@ -260,6 +268,10 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 }
 
 pub struct NetworkServiceChain<TPlat: PlatformRef> {
+    /// Copy of [`NetworkService::messages_tx`]. Used in order to maintain the network service
+    /// background task alive.
+    _keep_alive_messages_tx: async_channel::Sender<ToBackground>,
+
     /// Logging name of the chain.
     log_name: String,
 
@@ -736,6 +748,8 @@ impl CallProofRequestError {
     }
 }
 
+enum ToBackground {}
+
 enum ToBackgroundChain {
     RemoveChain,
     Subscribe {
@@ -867,6 +881,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
     pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
 
+    main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
+
     messages_rx:
         stream::SelectAll<Pin<Box<dyn stream::Stream<Item = (ChainId, ToBackgroundChain)> + Send>>>,
 
@@ -925,7 +941,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
         enum WakeUpReason {
             ForegroundClosed,
-            Message(ChainId, ToBackgroundChain),
+            Message(ToBackground),
+            MessageForChain(ChainId, ToBackgroundChain),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
             NextRecentConnectionRestore,
@@ -945,13 +962,19 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
         let wake_up_reason = {
             let message_received = async {
+                task.main_messages_rx
+                    .next()
+                    .await
+                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
+            };
+            let message_for_chain_received = async {
                 if !task.messages_rx.is_empty() {
                     let (chain_id, message) = task
                         .messages_rx
                         .next()
                         .await
                         .unwrap_or_else(|| unreachable!());
-                    WakeUpReason::Message(chain_id, message)
+                    WakeUpReason::MessageForChain(chain_id, message)
                 } else {
                     future::pending().await
                 }
@@ -1073,7 +1096,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 WakeUpReason::StartDiscovery
             };
 
-            message_received
+            message_for_chain_received
                 .or(message_from_task_received)
                 .or(service_event)
                 .or(next_recent_connection_restore)
@@ -1087,6 +1110,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // End the task.
                 return;
             }
+            WakeUpReason::Message(msg) => match msg {},
             WakeUpReason::EventSendersReady => {
                 // Dispatch the pending event, if any to the various senders.
 
@@ -1160,7 +1184,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .inject_connection_message(connection_id, message);
             }
-            WakeUpReason::Message(chain_id, ToBackgroundChain::RemoveChain) => {
+            WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::RemoveChain) => {
                 for peer_id in task
                     .network
                     .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
@@ -1178,10 +1202,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 task.network.remove_chain(chain_id).unwrap();
             }
-            WakeUpReason::Message(chain_id, ToBackgroundChain::Subscribe { sender }) => {
+            WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::Subscribe { sender }) => {
                 task.pending_new_subscriptions.push((chain_id, sender));
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::StartBlocksRequest {
                     target,
@@ -1225,7 +1249,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::StartWarpSyncRequest {
                     target,
@@ -1251,7 +1275,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::StartStorageProofRequest {
                     target,
@@ -1285,7 +1309,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 };
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::StartCallProofRequest {
                     target,
@@ -1320,7 +1344,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 };
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::SetLocalBestBlock {
                     best_hash,
@@ -1330,7 +1354,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::SetLocalGrandpaState { grandpa_state },
             ) => {
@@ -1347,7 +1371,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 task.network
                     .gossip_broadcast_grandpa_state_and_update(chain_id, grandpa_state);
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::AnnounceTransaction {
                     transaction,
@@ -1389,7 +1413,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 let _ = result.send(peers_to_send);
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::SendBlockAnnounce {
                     target,
@@ -1406,7 +1430,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     is_best,
                 ));
             }
-            WakeUpReason::Message(
+            WakeUpReason::MessageForChain(
                 chain_id,
                 ToBackgroundChain::Discover {
                     list,
@@ -1431,7 +1455,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
             }
-            WakeUpReason::Message(chain_id, ToBackgroundChain::DiscoveredNodes { result }) => {
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::DiscoveredNodes { result },
+            ) => {
                 // TODO: consider returning Vec<u8>s for the addresses?
                 let _ = result.send(
                     task.peering_strategy
@@ -1447,7 +1474,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect::<Vec<_>>(),
                 );
             }
-            WakeUpReason::Message(chain_id, ToBackgroundChain::PeersList { result }) => {
+            WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::PeersList { result }) => {
                 let _ = result.send(
                     task.network
                         .gossip_connected_peers(
