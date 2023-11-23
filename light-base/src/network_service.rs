@@ -1129,6 +1129,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 ToBackgroundChain::RemoveChain,
                             )))),
                     ) as Pin<Box<_>>);
+
+                log::debug!(target: "network", "Chains <= AddChain(id={})", task.network[chain_id].log_name);
             }
             WakeUpReason::EventSendersReady => {
                 // Dispatch the pending event, if any to the various senders.
@@ -1219,6 +1221,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .unwrap();
                 }
 
+                log::debug!(target: "network", "Chains <= RemoveChain(id={})", task.network[chain_id].log_name);
                 task.network.remove_chain(chain_id).unwrap();
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::Subscribe { sender }) => {
