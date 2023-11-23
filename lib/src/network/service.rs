@@ -712,7 +712,7 @@ where
             )
             .any(|(_, connection_id)| {
                 let state = self.inner.connection_state(*connection_id);
-                !state.shutting_down
+                state.established && !state.shutting_down
             })
         {
             if self
@@ -745,7 +745,18 @@ where
                     .insert((peer_index, chain_id, kind));
                 debug_assert!(_was_inserted);
             }
-        } else {
+        }
+
+        if !self
+            .connections_by_peer_id
+            .range(
+                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
+            )
+            .any(|(_, connection_id)| {
+                let state = self.inner.connection_state(*connection_id);
+                !state.shutting_down
+            })
+        {
             // Note that that `PeerId` might already be desired towards a different chain, in
             // which case it is already present in `unconnected_desired`.
             self.unconnected_desired.insert(peer_index);
@@ -1265,7 +1276,8 @@ where
                             )
                             .count()
                             != 0
-                            && !self
+                        {
+                            if !self
                                 .connections_by_peer_id
                                 .range(
                                     (peer_index, ConnectionId::min_value())
@@ -1275,25 +1287,38 @@ where
                                     let state = self.inner.connection_state(*connection_id);
                                     !state.shutting_down
                                 })
-                        {
-                            self.unconnected_desired.insert(peer_index);
-                            for (_, _, chain_index) in self.gossip_desired_peers.range(
-                                (
-                                    peer_index,
-                                    GossipKind::ConsensusTransactions,
-                                    usize::min_value(),
+                            {
+                                self.unconnected_desired.insert(peer_index);
+                            }
+                            if !self
+                                .connections_by_peer_id
+                                .range(
+                                    (peer_index, ConnectionId::min_value())
+                                        ..=(peer_index, ConnectionId::max_value()),
                                 )
-                                    ..=(
+                                .any(|(_, connection_id)| {
+                                    let state = self.inner.connection_state(*connection_id);
+                                    state.established && !state.shutting_down
+                                })
+                            {
+                                for (_, _, chain_index) in self.gossip_desired_peers.range(
+                                    (
                                         peer_index,
                                         GossipKind::ConsensusTransactions,
-                                        usize::max_value(),
-                                    ),
-                            ) {
-                                self.connected_unopened_gossip_desired.remove(&(
-                                    peer_index,
-                                    ChainId(*chain_index),
-                                    GossipKind::ConsensusTransactions,
-                                ));
+                                        usize::min_value(),
+                                    )
+                                        ..=(
+                                            peer_index,
+                                            GossipKind::ConsensusTransactions,
+                                            usize::max_value(),
+                                        ),
+                                ) {
+                                    self.connected_unopened_gossip_desired.remove(&(
+                                        peer_index,
+                                        ChainId(*chain_index),
+                                        GossipKind::ConsensusTransactions,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -2141,7 +2166,7 @@ where
                                 chain_index,
                                 GossipKind::ConsensusTransactions,
                                 peer_index,
-                            )) && !self
+                            )) && self
                                 .connections_by_peer_id
                                 .range(
                                     (peer_index, ConnectionId::min_value())
@@ -2149,7 +2174,7 @@ where
                                 )
                                 .any(|(_, connection_id)| {
                                     let state = self.inner.connection_state(*connection_id);
-                                    !state.shutting_down
+                                    state.established && !state.shutting_down
                                 })
                             {
                                 debug_assert!(self
@@ -2159,7 +2184,7 @@ where
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::Open,
+                                            NotificationsSubstreamState::Pending,
                                             SubstreamId::min_value(),
                                         )
                                             ..=(
