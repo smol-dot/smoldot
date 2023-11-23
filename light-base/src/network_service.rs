@@ -1223,6 +1223,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                 log::debug!(target: "network", "Chains <= RemoveChain(id={})", task.network[chain_id].log_name);
                 task.network.remove_chain(chain_id).unwrap();
+                task.peering_strategy.remove_chain_peers(&chain_id);
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::Subscribe { sender }) => {
                 task.pending_new_subscriptions.push((chain_id, sender));
