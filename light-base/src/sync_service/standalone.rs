@@ -53,8 +53,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     block_number_bytes: usize,
     runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
     mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_id: network_service::ChainId,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
@@ -110,7 +109,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         log_target,
         from_network_service: None,
         network_service,
-        network_chain_id,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
             0,
             util::SipHasherBuild::new({
@@ -424,7 +422,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 }
                 task.from_network_service = Some(Box::pin(
                     // As documented, `subscribe().await` is expected to return quickly.
-                    task.network_service.subscribe(task.network_chain_id).await,
+                    task.network_service.subscribe().await,
                 ));
             }
 
@@ -434,7 +432,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // For some reason, first building the future then executing it solves a borrow
                 // checker error.
                 let fut = task.network_service.set_local_best_block(
-                    network_chain_id,
                     task.sync.best_block_hash(),
                     task.sync.best_block_number(),
                 );
@@ -462,14 +459,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 if let Some(set_id) = grandpa_set_id {
                     let commit_finalized_height = task.sync.finalized_block_header().number;
                     task.network_service
-                        .set_local_grandpa_state(
-                            network_chain_id,
-                            network::service::GrandpaState {
-                                set_id,
-                                round_number: 1, // TODO:
-                                commit_finalized_height,
-                            },
-                        )
+                        .set_local_grandpa_state(network::service::GrandpaState {
+                            set_id,
+                            round_number: 1, // TODO:
+                            commit_finalized_height,
+                        })
                         .await;
                 }
 
@@ -677,7 +671,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
                 let block_request = task.network_service.clone().blocks_request(
                     peer_id,
-                    task.network_chain_id,
                     network::codec::BlocksRequestConfig {
                         start: if let Some(first_block_hash) = first_block_hash {
                             network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
@@ -732,7 +725,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
                 let grandpa_request = task.network_service.clone().grandpa_warp_sync_request(
                     peer_id,
-                    task.network_chain_id,
                     sync_start_block_hash,
                     // The timeout needs to be long enough to potentially download the maximum
                     // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
@@ -767,7 +759,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                 let storage_request = task.network_service.clone().storage_proof_request(
-                    task.network_chain_id,
                     peer_id,
                     network::codec::StorageProofRequestConfig {
                         block_hash,
@@ -813,12 +804,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let call_proof_request = {
                     // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
                     let network_service = task.network_service.clone();
-                    let network_chain_id = task.network_chain_id;
                     let parameter_vectored = parameter_vectored.clone();
                     let function_name = function_name.clone();
                     async move {
                         let rq = network_service.call_proof_request(
-                            network_chain_id,
                             peer_id,
                             network::codec::CallProofRequestConfig {
                                 block_hash,
@@ -929,11 +918,8 @@ struct Task<TPlat: PlatformRef> {
     warp_sync_taking_long_time_warning:
         future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
 
-    /// Network service. Used to send out requests to peers.
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    /// Index within the network service of the chain we are interested in. Must be indicated to
-    /// the network service whenever a request is started.
-    network_chain_id: network_service::ChainId,
+    /// Chain of the network service. Used to send out requests to peers.
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// Events coming from the networking service. `None` if not subscribed yet.
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
 
@@ -1178,7 +1164,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                                 .clone()
                                 .send_block_announce(
                                     source_peer_id,
-                                    self.network_chain_id,
                                     &scale_encoded_header,
                                     is_new_best,
                                 )

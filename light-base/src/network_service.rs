@@ -130,10 +130,6 @@ pub struct ConfigChain {
 }
 
 pub struct NetworkService<TPlat: PlatformRef> {
-    /// Names of the various chains the network service connects to. Used only for logging
-    /// purposes.
-    log_chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
-
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackground>,
 
@@ -147,10 +143,11 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Returns the networking service, plus a list of receivers on which events are pushed.
     /// All of these receivers must be polled regularly to prevent the networking service from
     /// slowing down.
-    pub fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<ChainId>) {
-        let mut log_chain_names =
-            hashbrown::HashMap::with_capacity_and_hasher(config.chains.len(), Default::default());
-        let mut chain_ids = Vec::with_capacity(config.chains.len());
+    pub fn new(config: Config<TPlat>) -> (Arc<Self>, Vec<Arc<NetworkServiceChain<TPlat>>>) {
+        let (messages_tx, messages_rx) = async_channel::bounded(32);
+        let messages_rx = Box::pin(messages_rx);
+
+        let mut chains = Vec::with_capacity(config.chains.len());
 
         let mut network = service::ChainNetwork::new(service::Config {
             chains_capacity: config.chains.len(),
@@ -189,12 +186,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 })
                 .unwrap();
 
-            log_chain_names.insert(chain_id, chain.log_name);
-            chain_ids.push(chain_id);
+            chains.push(Arc::new(NetworkServiceChain {
+                log_name: chain.log_name,
+                messages_tx: messages_tx.clone(),
+                chain_id,
+                marker: core::marker::PhantomData,
+            }));
         }
-
-        let (messages_tx, messages_rx) = async_channel::bounded(32);
-        let messages_rx = Box::pin(messages_rx);
 
         // Spawn main task that processes the network service.
         let (tasks_messages_tx, tasks_messages_rx) = async_channel::bounded(32);
@@ -247,14 +245,29 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             });
 
         let final_network_service = Arc::new(NetworkService {
-            log_chain_names,
             messages_tx,
             marker: core::marker::PhantomData,
         });
 
-        (final_network_service, chain_ids)
+        (final_network_service, chains)
     }
+}
 
+pub struct NetworkServiceChain<TPlat: PlatformRef> {
+    /// Logging name of the chain.
+    log_name: String,
+
+    /// Identifier of the chain according to the background service.
+    chain_id: ChainId,
+
+    /// Channel to send messages to the background task.
+    messages_tx: async_channel::Sender<ToBackground>,
+
+    /// Dummy to hold the `TPlat` type.
+    marker: core::marker::PhantomData<TPlat>,
+}
+
+impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// Subscribes to the networking events that happen on the given chain.
     ///
     /// Calling this function returns a `Receiver` that receives events about the chain.
@@ -275,15 +288,13 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// Panics if the given [`ChainId`] is invalid.
     ///
     // TODO: consider not killing the background until the channel is destroyed, as that would be a more sensical behaviour
-    pub async fn subscribe(&self, chain_id: ChainId) -> async_channel::Receiver<Event> {
-        assert!(self.log_chain_names.contains_key(&chain_id));
-
+    pub async fn subscribe(&self) -> async_channel::Receiver<Event> {
         let (tx, rx) = async_channel::bounded(128);
 
         let _ = self
             .messages_tx
             .send(ToBackground::Subscribe {
-                chain_id,
+                chain_id: self.chain_id,
                 sender: tx,
             })
             .await
@@ -297,7 +308,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId,
-        chain_id: ChainId,
         config: codec::BlocksRequestConfig,
         timeout: Duration,
     ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
@@ -306,7 +316,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self.messages_tx
             .send(ToBackground::StartBlocksRequest {
                 target: target.clone(),
-                chain_id,
+                chain_id: self.chain_id,
                 config,
                 timeout,
                 result: tx,
@@ -322,7 +332,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     blocks.len(),
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
@@ -337,7 +347,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => BlocksRequest(chain={}, error={:?})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     err
                 );
             }
@@ -367,7 +377,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn grandpa_warp_sync_request(
         self: Arc<Self>,
         target: PeerId,
-        chain_id: ChainId,
         begin_hash: [u8; 32],
         timeout: Duration,
     ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
@@ -376,7 +385,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self.messages_tx
             .send(ToBackground::StartWarpSyncRequest {
                 target: target.clone(),
-                chain_id,
+                chain_id: self.chain_id,
                 begin_hash,
                 timeout,
                 result: tx,
@@ -394,7 +403,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => WarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     decoded.fragments.len(),
                     decoded.is_finished,
                 );
@@ -404,7 +413,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => WarpSyncRequest(chain={}, error={:?})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     err,
                 );
             }
@@ -413,15 +422,10 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         result
     }
 
-    pub async fn set_local_best_block(
-        &self,
-        chain_id: ChainId,
-        best_hash: [u8; 32],
-        best_number: u64,
-    ) {
+    pub async fn set_local_best_block(&self, best_hash: [u8; 32], best_number: u64) {
         self.messages_tx
             .send(ToBackground::SetLocalBestBlock {
-                chain_id,
+                chain_id: self.chain_id,
                 best_hash,
                 best_number,
             })
@@ -429,14 +433,10 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             .unwrap();
     }
 
-    pub async fn set_local_grandpa_state(
-        &self,
-        chain_id: ChainId,
-        grandpa_state: service::GrandpaState,
-    ) {
+    pub async fn set_local_grandpa_state(&self, grandpa_state: service::GrandpaState) {
         self.messages_tx
             .send(ToBackground::SetLocalGrandpaState {
-                chain_id,
+                chain_id: self.chain_id,
                 grandpa_state,
             })
             .await
@@ -447,7 +447,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn storage_proof_request(
         self: Arc<Self>,
-        chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
         timeout: Duration,
@@ -457,7 +456,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self.messages_tx
             .send(ToBackground::StartStorageProofRequest {
                 target: target.clone(),
-                chain_id,
+                chain_id: self.chain_id,
                 config: codec::StorageProofRequestConfig {
                     block_hash: config.block_hash,
                     keys: config
@@ -481,7 +480,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => StorageProofRequest(chain={}, total_size={})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     BytesDisplay(u64::try_from(decoded.len()).unwrap()),
                 );
             }
@@ -490,7 +489,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => StorageProofRequest(chain={}, error={:?})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     err
                 );
             }
@@ -505,7 +504,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     // TODO: more docs
     pub async fn call_proof_request(
         self: Arc<Self>,
-        chain_id: ChainId,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
@@ -515,7 +513,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self.messages_tx
             .send(ToBackground::StartCallProofRequest {
                 target: target.clone(),
-                chain_id,
+                chain_id: self.chain_id,
                 config: codec::CallProofRequestConfig {
                     block_hash: config.block_hash,
                     method: config.method.into_owned().into(),
@@ -540,7 +538,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => CallProofRequest({}, total_size: {})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     BytesDisplay(u64::try_from(decoded.len()).unwrap())
                 );
             }
@@ -549,7 +547,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     target: "network",
                     "Connections({}) => CallProofRequest({}, {})",
                     target,
-                    self.log_chain_names[&chain_id],
+                    self.log_name,
                     err
                 );
             }
@@ -567,16 +565,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// networking is inherently unreliable, successfully sending a transaction to a peer doesn't
     /// necessarily mean that the remote has received it. In practice, however, the likelihood of
     /// a transaction not being received are extremely low. This can be considered as known flaw.
-    pub async fn announce_transaction(
-        self: Arc<Self>,
-        chain_id: ChainId,
-        transaction: &[u8],
-    ) -> Vec<PeerId> {
+    pub async fn announce_transaction(self: Arc<Self>, transaction: &[u8]) -> Vec<PeerId> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
             .send(ToBackground::AnnounceTransaction {
-                chain_id,
+                chain_id: self.chain_id,
                 transaction: transaction.to_vec(), // TODO: ovheread
                 result: tx,
             })
@@ -590,7 +584,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     pub async fn send_block_announce(
         self: Arc<Self>,
         target: &PeerId,
-        chain_id: ChainId,
         scale_encoded_header: &[u8],
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
@@ -599,7 +592,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
         self.messages_tx
             .send(ToBackground::SendBlockAnnounce {
                 target: target.clone(), // TODO: overhead
-                chain_id,
+                chain_id: self.chain_id,
                 scale_encoded_header: scale_encoded_header.to_vec(), // TODO: overhead
                 is_best,
                 result: tx,
@@ -617,13 +610,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// and should have additional logging.
     pub async fn discover(
         &self,
-        chain_id: ChainId,
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
         important_nodes: bool,
     ) {
         self.messages_tx
             .send(ToBackground::Discover {
-                chain_id,
+                chain_id: self.chain_id,
                 // TODO: overhead
                 list: list
                     .into_iter()
@@ -646,13 +638,12 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// returned by [`NetworkService::discovered_nodes`].
     pub async fn discovered_nodes(
         &self,
-        chain_id: ChainId,
     ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
         let (tx, rx) = oneshot::channel();
 
         self.messages_tx
             .send(ToBackground::DiscoveredNodes {
-                chain_id,
+                chain_id: self.chain_id,
                 result: tx,
             })
             .await
@@ -666,11 +657,11 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
-    pub async fn peers_list(&self, chain_id: ChainId) -> impl Iterator<Item = PeerId> {
+    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
         let (tx, rx) = oneshot::channel();
         self.messages_tx
             .send(ToBackground::PeersList {
-                chain_id,
+                chain_id: self.chain_id,
                 result: tx,
             })
             .await
