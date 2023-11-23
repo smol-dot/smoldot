@@ -219,6 +219,10 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// Because we use a `SipHasher`, this hashmap isn't created in the `new` function (as this
     /// function is `const`) but lazily the first time it is needed.
     chains_by_key: Option<HashMap<ChainKey, RunningChain<TPlat>, util::SipHasherBuild>>,
+
+    /// All chains share a single networking service created lazily the first time that it
+    /// is used.
+    network_service: Option<Arc<network_service::NetworkService<TPlat>>>,
 }
 
 struct PublicApiChain<TChain> {
@@ -353,6 +357,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             platform,
             public_api_chains: slab::Slab::new(),
             chains_by_key: None,
+            network_service: None,
         }
     }
 
@@ -720,6 +725,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     start_services(
                         log_name.clone(),
                         &self.platform,
+                        &mut self.network_service,
                         runtime_code_hint,
                         genesis_block_header,
                         usize::from(chain_spec.block_number_bytes()),
@@ -1075,6 +1081,7 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
 fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
+    network_service: &mut Option<Arc<network_service::NetworkService<TPlat>>>,
     runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     block_number_bytes: usize,
@@ -1082,16 +1089,17 @@ fn start_services<TPlat: platform::PlatformRef>(
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
 ) -> ChainServices<TPlat> {
-    // The network service is responsible for connecting to the peer-to-peer network.
-    let network_service = network_service::NetworkService::new(network_service::Config {
-        platform: platform.clone(),
-        identify_agent_version: network_identify_agent_version,
-        connections_open_pool_size: 5,
-        connections_open_pool_restore_delay: Duration::from_secs(1),
-        chains_capacity: 1,
+    let network_service = network_service.get_or_insert_with(|| {
+        network_service::NetworkService::new(network_service::Config {
+            platform: platform.clone(),
+            identify_agent_version: network_identify_agent_version,
+            connections_open_pool_size: 5,
+            connections_open_pool_restore_delay: Duration::from_secs(1),
+            chains_capacity: 1,
+        })
     });
 
-    let network_service = network_service.add_chain(network_service::ConfigChain {
+    let network_service_chain = network_service.add_chain(network_service::ConfigChain {
         log_name: log_name.clone(),
         num_out_slots: 4,
         grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
@@ -1158,7 +1166,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 platform: platform.clone(),
                 log_name: log_name.clone(),
                 block_number_bytes,
-                network_service: network_service.clone(),
+                network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
                         finalized_block_header,
@@ -1194,7 +1202,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 log_name: log_name.clone(),
                 block_number_bytes,
                 platform: platform.clone(),
-                network_service: network_service.clone(),
+                network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::RelayChain(
                     sync_service::ConfigRelayChain {
                         chain_information: chain_information.clone(),
@@ -1234,7 +1242,7 @@ fn start_services<TPlat: platform::PlatformRef>(
             platform: platform.clone(),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
-            network_service: network_service.clone(),
+            network_service: network_service_chain.clone(),
             max_pending_transactions: NonZeroU32::new(64).unwrap(),
             max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
             max_concurrent_validations: NonZeroU32::new(2).unwrap(),
@@ -1242,7 +1250,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     ));
 
     ChainServices {
-        network_service,
+        network_service: network_service_chain,
         runtime_service,
         sync_service,
         transactions_service,
