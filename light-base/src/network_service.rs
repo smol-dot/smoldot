@@ -97,7 +97,7 @@ pub struct Config<TPlat> {
     pub connections_open_pool_restore_delay: Duration,
 }
 
-/// See [`Config::chains`].
+/// See [`NetworkService::add_chain`].
 ///
 /// Note that this configuration is intentionally missing a field containing the bootstrap
 /// nodes of the chain. Bootstrap nodes are supposed to be added afterwards by calling
