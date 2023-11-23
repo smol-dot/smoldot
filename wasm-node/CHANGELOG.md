@@ -12,6 +12,7 @@
 - Fix panic when the runtime of a chain provides consensus information that is inconsistent with the information found in the finalized block. ([#1317](https://github.com/smol-dot/smoldot/pull/1317))
 - Incoming notification substreams are now properly when accepted when a peer doesn't have a slot or gets a slot later on. ([#1369](https://github.com/smol-dot/smoldot/pull/1369))
 - Fix panic when `chainHead_unstable_follow` is called too many times. ([#1392](https://github.com/smol-dot/smoldot/pull/1392))
+- Fix panic when opening a gossiping link to a peer that we were previously connected to. ([#1395](https://github.com/smol-dot/smoldot/pull/1395))
 
 ## 2.0.10 - 2023-11-17
 
