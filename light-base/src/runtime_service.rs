@@ -108,11 +108,11 @@ pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
-    /// See [`Config::sync_service`].
-    sync_service: Arc<sync_service::SyncService<TPlat>>,
+    /// Configuration of the background task. Used to restart the background task if necessary.
+    background_task_config: BackgroundTaskConfig<TPlat>,
 
     /// Sender to send messages to the background task.
-    to_background: async_channel::Sender<ToBackground<TPlat>>,
+    to_background: Mutex<async_channel::Sender<ToBackground<TPlat>>>,
 }
 
 impl<TPlat: PlatformRef> RuntimeService<TPlat> {
@@ -121,38 +121,38 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
+        let background_task_config = BackgroundTaskConfig {
+            log_target: log_target.clone(),
+            platform: config.platform.clone(),
+            sync_service: config.sync_service,
+            genesis_block_scale_encoded_header: config.genesis_block_scale_encoded_header,
+        };
+
         // Spawns a task that runs in the background and updates the content of the mutex.
         let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
-            let sync_service = config.sync_service.clone();
-            let platform = config.platform.clone();
             let (tx, rx) = async_channel::bounded(16);
             let tx_weak = tx.downgrade();
             to_background = tx;
+            let background_task_config = background_task_config.clone();
             async move {
-                run_background(
-                    log_target.clone(),
-                    platform,
-                    sync_service,
-                    config.genesis_block_scale_encoded_header,
-                    rx,
-                    tx_weak,
-                )
-                .await;
+                run_background(background_task_config, rx, tx_weak).await;
                 log::debug!(target: &log_target, "Shutdown");
             }
         });
 
         RuntimeService {
-            sync_service: config.sync_service,
-            to_background,
+            background_task_config,
+            to_background: Mutex::new(to_background),
         }
     }
 
     /// Calls [`sync_service::SyncService::block_number_bytes`] on the sync service associated to
     /// this runtime service.
     pub fn block_number_bytes(&self) -> usize {
-        self.sync_service.block_number_bytes()
+        self.background_task_config
+            .sync_service
+            .block_number_bytes()
     }
 
     /// Subscribes to the state of the chain: the current state and the new blocks.
@@ -179,16 +179,22 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         buffer_size: usize,
         max_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll<TPlat> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let _ = self
-            .to_background
-            .send(ToBackground::SubscribeAll(ToBackgroundSubscribeAll {
-                result_tx,
-                buffer_size,
-                max_pinned_blocks,
-            }))
-            .await;
-        result_rx.await.unwrap()
+        loop {
+            let (result_tx, result_rx) = oneshot::channel();
+            let _ = self
+                .send_message_or_restart_service(ToBackground::SubscribeAll(
+                    ToBackgroundSubscribeAll {
+                        result_tx,
+                        buffer_size,
+                        max_pinned_blocks,
+                    },
+                ))
+                .await;
+
+            if let Ok(subscribe_all) = result_rx.await {
+                break subscribe_all;
+            }
+        }
     }
 
     /// Unpins a block after it has been reported by a subscription.
@@ -205,13 +211,26 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
             .to_background
+            .lock()
+            .await
             .send(ToBackground::UnpinBlock {
                 result_tx,
                 subscription_id,
                 block_hash,
             })
             .await;
-        result_rx.await.unwrap().unwrap()
+        match result_rx.await {
+            Ok(Ok(())) => {
+                // Background task has indicated success.
+            }
+            Err(_) => {
+                // Background task has crashed. Subscription is stale. Function has no effect.
+            }
+            Ok(Err(_)) => {
+                // Background task has indicated that the block has already been unpinned.
+                panic!()
+            }
+        }
     }
 
     /// Returns the storage value and Merkle value of the `:code` key of the finalized block.
@@ -225,10 +244,12 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         let _ = self
             .to_background
+            .lock()
+            .await
             .send(ToBackground::FinalizedRuntimeStorageMerkleValues { result_tx })
             .await;
 
-        result_rx.await.unwrap()
+        result_rx.await.unwrap_or(None)
     }
 
     /// Lock the runtime service and prepare a call to a runtime entry point.
@@ -253,6 +274,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
         let _ = self
             .to_background
+            .lock()
+            .await
             .send(ToBackground::PinnedBlockRuntimeAccess {
                 result_tx,
                 subscription_id,
@@ -260,7 +283,17 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             })
             .await;
 
-        result_rx.await.unwrap().unwrap()
+        match result_rx.await {
+            Ok(Err(())) => {
+                // Background service indicates that the block isn't pinned.
+                panic!()
+            }
+            Ok(Ok(outcome)) => outcome,
+            Err(_) => {
+                // Background service has crashed. This means that the subscription is obsolete.
+                Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)
+            }
+        }
     }
 
     /// Lock the runtime service and prepare a call to a runtime entry point.
@@ -281,7 +314,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         block_state_trie_root_hash: [u8; 32],
     ) -> RuntimeAccess<TPlat> {
         RuntimeAccess {
-            sync_service: self.sync_service.clone(),
+            sync_service: self.background_task_config.sync_service.clone(),
             hash: block_hash,
             runtime: pinned_runtime_id.0,
             block_number,
@@ -299,12 +332,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) -> PinnedRuntimeId {
+    ) -> Result<PinnedRuntimeId, CompileAndPinRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
-            .to_background
-            .send(ToBackground::CompileAndPinRuntime {
+            .send_message_or_restart_service(ToBackground::CompileAndPinRuntime {
                 result_tx,
                 storage_code,
                 storage_heap_pages,
@@ -313,7 +345,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             })
             .await;
 
-        PinnedRuntimeId(result_rx.await.unwrap())
+        Ok(PinnedRuntimeId(
+            result_rx
+                .await
+                .map_err(|_| CompileAndPinRuntimeError::Crash)?,
+        ))
     }
 
     /// Un-pins a previously-pinned runtime.
@@ -336,9 +372,44 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         let (result_tx, result_rx) = oneshot::channel();
         let _ = self
             .to_background
+            .lock()
+            .await
             .send(ToBackground::IsNearHeadOfChainHeuristic { result_tx })
             .await;
-        result_rx.await.unwrap()
+        result_rx.await.unwrap_or(false)
+    }
+
+    /// Sends a message to the background task. Restarts the background task if it has crashed.
+    async fn send_message_or_restart_service(&self, message: ToBackground<TPlat>) {
+        let mut lock = self.to_background.lock().await;
+
+        if lock.is_closed() {
+            let (tx, rx) = async_channel::bounded(16);
+            let tx_weak = tx.downgrade();
+            *lock = tx;
+
+            self.background_task_config.platform.spawn_task(
+                self.background_task_config.log_target.clone().into(),
+                {
+                    let background_task_config = self.background_task_config.clone();
+                    async move {
+                        // Sleep for a bit in order to avoid infinite loops of repeated crashes.
+                        background_task_config
+                            .platform
+                            .sleep(Duration::from_secs(2))
+                            .await;
+                        let log_target = background_task_config.log_target.clone();
+                        log::debug!(target: &log_target, "Restart");
+                        run_background(background_task_config, rx, tx_weak).await;
+                        log::debug!(target: &log_target, "Shutdown");
+                    }
+                },
+            );
+        }
+
+        // Note that the background task might have crashed again at this point already, and thus
+        // errors are not impossible.
+        let _ = lock.send(message).await;
     }
 }
 
@@ -794,6 +865,14 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
 }
 
+/// Error potentially returned by [`RuntimeService::compile_and_pin_runtime`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum CompileAndPinRuntimeError {
+    /// Background service has crashed while compiling this runtime. The crash might however not
+    /// necessarily be caused by the runtime compilation.
+    Crash,
+}
+
 /// Message towards the background task.
 enum ToBackground<TPlat: PlatformRef> {
     SubscribeAll(ToBackgroundSubscribeAll<TPlat>),
@@ -860,11 +939,16 @@ struct Block {
     scale_encoded_header: Vec<u8>,
 }
 
-async fn run_background<TPlat: PlatformRef>(
+#[derive(Clone)]
+struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     genesis_block_scale_encoded_header: Vec<u8>,
+}
+
+async fn run_background<TPlat: PlatformRef>(
+    config: BackgroundTaskConfig<TPlat>,
     to_background: async_channel::Receiver<ToBackground<TPlat>>,
     to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
 ) {
@@ -879,9 +963,9 @@ async fn run_background<TPlat: PlatformRef>(
             let node_index = tree.input_insert_block(
                 Block {
                     hash: header::hash_from_scale_encoded_header(
-                        &genesis_block_scale_encoded_header,
+                        &config.genesis_block_scale_encoded_header,
                     ),
-                    scale_encoded_header: genesis_block_scale_encoded_header,
+                    scale_encoded_header: config.genesis_block_scale_encoded_header,
                 },
                 None,
                 false,
@@ -893,13 +977,13 @@ async fn run_background<TPlat: PlatformRef>(
         };
 
         Background {
-            log_target: log_target.clone(),
-            platform: platform.clone(),
-            sync_service: sync_service.clone(),
+            log_target: config.log_target.clone(),
+            platform: config.platform.clone(),
+            sync_service: config.sync_service.clone(),
             to_background: Box::pin(to_background.clone()),
             to_background_tx: to_background_tx.clone(),
             next_subscription_id: 0,
-            best_near_head_of_chain: sync_service.is_near_head_of_chain_heuristic().await,
+            best_near_head_of_chain: config.sync_service.is_near_head_of_chain_heuristic().await,
             tree,
             must_update_tree_and_notify_subscribers: true,
             runtimes: slab::Slab::with_capacity(2),
@@ -1413,10 +1497,10 @@ async fn run_background<TPlat: PlatformRef>(
                 // doesn't become full before the execution of the runtime service resumes.
                 // Note that this `await` freezes the entire runtime service background task,
                 // but the sync service guarantees that `subscribe_all` returns very quickly.
-                let subscription = sync_service.subscribe_all(32, true).await;
+                let subscription = background.sync_service.subscribe_all(32, true).await;
 
                 log::debug!(
-                    target: &log_target,
+                    target: &background.log_target,
                     "Worker <= Reset(finalized_block: {})",
                     HashDisplay(&header::hash_from_scale_encoded_header(
                         &subscription.finalized_block_scale_encoded_header
@@ -1476,7 +1560,7 @@ async fn run_background<TPlat: PlatformRef>(
                         match &runtime.runtime {
                             Ok(runtime) => {
                                 log::info!(
-                                    target: &log_target,
+                                    target: &background.log_target,
                                     "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
                                     runtime.runtime_spec.decode().spec_version,
                                     BytesDisplay(storage_code_len)
@@ -1484,7 +1568,7 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             Err(error) => {
                                 log::warn!(
-                                    target: &log_target,
+                                    target: &background.log_target,
                                     "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
                                     This indicates an incompatibility between smoldot and the chain.",
                                     BytesDisplay(storage_code_len),
@@ -1494,7 +1578,7 @@ async fn run_background<TPlat: PlatformRef>(
                         }
 
                         log::debug!(
-                            target: &log_target,
+                            target: &background.log_target,
                             "Worker => RuntimeKnown(finalized_hash={})",
                             HashDisplay(&finalized_block_hash)
                         );
@@ -1533,7 +1617,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                                     let same_runtime_as_parent = same_runtime_as_parent(
                                         &block.scale_encoded_header,
-                                        sync_service.block_number_bytes(),
+                                        background.sync_service.block_number_bytes(),
                                     );
                                     let _ = tree.input_insert_block(
                                         Block {
@@ -1582,7 +1666,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                                     let same_runtime_as_parent = same_runtime_as_parent(
                                         &block.scale_encoded_header,
-                                        sync_service.block_number_bytes(),
+                                        background.sync_service.block_number_bytes(),
                                     );
                                     let _ = tree.input_insert_block(
                                         Block {
@@ -1841,7 +1925,11 @@ async fn run_background<TPlat: PlatformRef>(
                 // unaffected.
 
                 // If the sync service is far from the head, the runtime service is also far.
-                if !sync_service.is_near_head_of_chain_heuristic().await {
+                if !background
+                    .sync_service
+                    .is_near_head_of_chain_heuristic()
+                    .await
+                {
                     let _ = result_tx.send(false);
                     continue;
                 }
@@ -1944,7 +2032,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // Sync service has reported a new block.
 
                 log::debug!(
-                    target: &log_target,
+                    target: &background.log_target,
                     "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
                     HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
                     HashDisplay(&new_block.parent_hash),
@@ -1963,7 +2051,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let same_runtime_as_parent = same_runtime_as_parent(
                     &new_block.scale_encoded_header,
-                    sync_service.block_number_bytes(),
+                    background.sync_service.block_number_bytes(),
                 );
 
                 match &mut background.tree {
@@ -2026,7 +2114,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // Sync service has reported a finalized block.
 
                 log::debug!(
-                    target: &log_target,
+                    target: &background.log_target,
                     "Worker <= InputFinalized(hash={}, best={})",
                     HashDisplay(&hash), HashDisplay(&best_block_hash)
                 );
@@ -2076,7 +2164,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // Sync service has reported a change in the best block.
 
                 log::debug!(
-                    target: &log_target,
+                    target: &background.log_target,
                     "Worker <= BestBlockChanged(hash={})",
                     HashDisplay(&hash)
                 );
@@ -2214,14 +2302,14 @@ async fn run_background<TPlat: PlatformRef>(
                 .to_string();
 
                 log::debug!(
-                    target: &log_target,
+                    target: &background.log_target,
                     "Worker <= FailedDownload(blocks=[{}], error={:?})",
                     concerned_blocks,
                     error
                 );
                 if !error.is_network_problem() {
                     log::warn!(
-                        target: &log_target,
+                        target: &background.log_target,
                         "Failed to download :code and :heappages of blocks {}: {}",
                         concerned_blocks,
                         error
