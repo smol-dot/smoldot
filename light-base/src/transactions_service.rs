@@ -193,7 +193,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
-    ) -> async_channel::Receiver<TransactionStatus> {
+    ) -> TransactionWatcher {
         let (updates_report, rx) = async_channel::bounded(channel_size);
 
         self.to_background
@@ -204,7 +204,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             .await
             .unwrap();
 
-        rx
+        TransactionWatcher { rx }
     }
 
     /// Similar to [`TransactionsService::submit_and_watch_transaction`], but doesn't return any
@@ -217,6 +217,21 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             })
             .await
             .unwrap();
+    }
+}
+
+/// Returned by [`TransactionsService::submit_and_watch_transaction`].
+#[pin_project::pin_project]
+pub struct TransactionWatcher {
+    #[pin]
+    rx: async_channel::Receiver<TransactionStatus>,
+}
+
+impl TransactionWatcher {
+    /// Returns the next status update of the transaction.
+    pub async fn next(self: pin::Pin<&mut Self>) -> Option<TransactionStatus> {
+        let mut this = self.project();
+        this.rx.next().await
     }
 }
 
