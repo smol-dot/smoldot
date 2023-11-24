@@ -265,6 +265,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::ValidateError(_),
                                 ),
                                 true,
+                            )
+                            | (
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Crashed,
+                                ),
+                                true,
                             ) => {
                                 subscription.send_notification(methods::ServerToClient::author_extrinsicUpdate {
                                     subscription: (&subscription_id).into(),
@@ -315,6 +321,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Error {
                                     error: error.to_string().into(),
+                                },
+                            }).await,
+                            (
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Crashed,
+                                ),
+                                false,
+                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::TransactionWatchEvent::Error {
+                                    error: "transactions service has crashed".into(),
                                 },
                             }).await,
 

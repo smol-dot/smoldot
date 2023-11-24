@@ -204,7 +204,10 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             .await
             .unwrap();
 
-        TransactionWatcher { rx }
+        TransactionWatcher {
+            rx,
+            has_yielded_drop_reason: false,
+        }
     }
 
     /// Similar to [`TransactionsService::submit_and_watch_transaction`], but doesn't return any
@@ -223,15 +226,38 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
 /// Returned by [`TransactionsService::submit_and_watch_transaction`].
 #[pin_project::pin_project]
 pub struct TransactionWatcher {
+    /// Channel connected to the background task.
     #[pin]
     rx: async_channel::Receiver<TransactionStatus>,
+    /// `true` if a [`TransactionStatus::Dropped`] has already been yielded.
+    has_yielded_drop_reason: bool,
 }
 
 impl TransactionWatcher {
     /// Returns the next status update of the transaction.
+    ///
+    /// The last event is always a [`TransactionStatus::Dropped`], and then `None` is yielded
+    /// repeatedly forever.
     pub async fn next(self: pin::Pin<&mut Self>) -> Option<TransactionStatus> {
         let mut this = self.project();
-        this.rx.next().await
+        if *this.has_yielded_drop_reason {
+            debug_assert!(this.rx.is_closed() || this.rx.next().await.is_none());
+            return None;
+        }
+
+        match this.rx.next().await {
+            Some(update) => {
+                if matches!(update, TransactionStatus::Dropped(_)) {
+                    debug_assert!(!*this.has_yielded_drop_reason);
+                    *this.has_yielded_drop_reason = true;
+                }
+                Some(update)
+            }
+            None => {
+                *this.has_yielded_drop_reason = true;
+                Some(TransactionStatus::Dropped(DropReason::Crashed))
+            }
+        }
     }
 }
 
@@ -286,6 +312,9 @@ pub enum DropReason {
 
     /// Transaction has been dropped because we have failed to validate it.
     ValidateError(ValidateTransactionError),
+
+    /// Transaction service background task has crashed.
+    Crashed,
 }
 
 /// Failed to check the validity of a transaction.
