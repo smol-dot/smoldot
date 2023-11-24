@@ -180,9 +180,8 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     ///
     /// Must pass as parameter the SCALE-encoded transaction.
     ///
-    /// The return value of this method is a channel which will receive updates on the state
-    /// of the transaction. The channel is closed when no new update is expected or if it becomes
-    /// full.
+    /// The return value of this method is an object receives updates on the state of the
+    /// transaction.
     ///
     /// > **Note**: Dropping the value returned does not cancel sending out the transaction.
     ///
