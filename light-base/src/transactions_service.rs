@@ -207,6 +207,7 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         TransactionWatcher {
             rx,
             has_yielded_drop_reason: false,
+            _dummy_keep_alive: self.to_background.clone(),
         }
     }
 
@@ -231,6 +232,9 @@ pub struct TransactionWatcher {
     rx: async_channel::Receiver<TransactionStatus>,
     /// `true` if a [`TransactionStatus::Dropped`] has already been yielded.
     has_yielded_drop_reason: bool,
+    /// Dummy copy of [`TransactionsService::to_background`] that guarantees that the background
+    /// stays alive.
+    _dummy_keep_alive: async_channel::Sender<ToBackground>,
 }
 
 impl TransactionWatcher {
