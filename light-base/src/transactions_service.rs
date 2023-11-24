@@ -79,7 +79,6 @@ use alloc::{
 };
 use core::{
     cmp, iter,
-    marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
     pin,
     time::Duration,
@@ -134,11 +133,12 @@ pub struct Config<TPlat: PlatformRef> {
 }
 
 /// See [the module-level documentation](..).
-pub struct TransactionsService<TPlat> {
+pub struct TransactionsService<TPlat: PlatformRef> {
     /// Sending messages to the background task.
-    to_background: async_channel::Sender<ToBackground>,
+    to_background: async_lock::Mutex<async_channel::Sender<ToBackground>>,
 
-    platform: PhantomData<fn() -> TPlat>,
+    /// Configuration of the background task. Used in order to restart it if necessary.
+    background_task_config: BackgroundTaskConfig<TPlat>,
 }
 
 impl<TPlat: PlatformRef> TransactionsService<TPlat> {
@@ -147,20 +147,24 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = async_channel::bounded(8);
 
-        let task = Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
+        let background_task_config = BackgroundTaskConfig {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             network_service: config.network_service,
-            from_foreground: Box::pin(from_foreground),
             max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
             max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
                 .unwrap_or(usize::max_value()),
             max_concurrent_validations: usize::try_from(config.max_concurrent_validations.get())
                 .unwrap_or(usize::max_value()),
-        }));
+        };
+
+        let task = Box::pin(background_task::<TPlat>(
+            background_task_config.clone(),
+            from_foreground,
+        ));
 
         config
             .platform
@@ -170,8 +174,8 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             });
 
         TransactionsService {
-            to_background,
-            platform: PhantomData,
+            to_background: async_lock::Mutex::new(to_background),
+            background_task_config,
         }
     }
 
@@ -180,9 +184,8 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     ///
     /// Must pass as parameter the SCALE-encoded transaction.
     ///
-    /// The return value of this method is a channel which will receive updates on the state
-    /// of the transaction. The channel is closed when no new update is expected or if it becomes
-    /// full.
+    /// The return value of this method is an object receives updates on the state of the
+    /// transaction.
     ///
     /// > **Note**: Dropping the value returned does not cancel sending out the transaction.
     ///
@@ -193,30 +196,98 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
-    ) -> async_channel::Receiver<TransactionStatus> {
+    ) -> TransactionWatcher {
         let (updates_report, rx) = async_channel::bounded(channel_size);
 
-        self.to_background
-            .send(ToBackground::SubmitTransaction {
-                transaction_bytes,
-                updates_report: Some(updates_report),
-            })
-            .await
-            .unwrap();
+        self.send_to_background(ToBackground::SubmitTransaction {
+            transaction_bytes,
+            updates_report: Some(updates_report),
+        })
+        .await;
 
-        rx
+        TransactionWatcher {
+            rx,
+            has_yielded_drop_reason: false,
+            _dummy_keep_alive: self.to_background.lock().await.clone(),
+        }
     }
 
     /// Similar to [`TransactionsService::submit_and_watch_transaction`], but doesn't return any
     /// channel.
     pub async fn submit_transaction(&self, transaction_bytes: Vec<u8>) {
-        self.to_background
-            .send(ToBackground::SubmitTransaction {
-                transaction_bytes,
-                updates_report: None,
-            })
-            .await
-            .unwrap();
+        self.send_to_background(ToBackground::SubmitTransaction {
+            transaction_bytes,
+            updates_report: None,
+        })
+        .await;
+    }
+
+    async fn send_to_background(&self, message: ToBackground) {
+        let mut lock = self.to_background.lock().await;
+
+        if lock.is_closed() {
+            let log_target = self.background_task_config.log_target.clone();
+            let (tx, rx) = async_channel::bounded(8);
+            let platform = self.background_task_config.platform.clone();
+            let task = background_task(self.background_task_config.clone(), rx);
+            self.background_task_config.platform.spawn_task(
+                log_target.clone().into(),
+                async move {
+                    // Sleep for a bit in order to avoid potential infinite loops
+                    // of repeated crashing.
+                    platform.sleep(Duration::from_secs(2)).await;
+                    log::debug!(target: &log_target, "Restart");
+                    task.await;
+                    log::debug!(target: &log_target, "Shutdown");
+                },
+            );
+            *lock = tx;
+        }
+
+        // Note that the background task might have crashed already at this point, so errors can
+        // be expected.
+        let _ = lock.send(message).await;
+    }
+}
+
+/// Returned by [`TransactionsService::submit_and_watch_transaction`].
+#[pin_project::pin_project]
+pub struct TransactionWatcher {
+    /// Channel connected to the background task.
+    #[pin]
+    rx: async_channel::Receiver<TransactionStatus>,
+    /// `true` if a [`TransactionStatus::Dropped`] has already been yielded.
+    has_yielded_drop_reason: bool,
+    /// Dummy copy of [`TransactionsService::to_background`] that guarantees that the background
+    /// stays alive.
+    _dummy_keep_alive: async_channel::Sender<ToBackground>,
+}
+
+impl TransactionWatcher {
+    /// Returns the next status update of the transaction.
+    ///
+    /// The last event is always a [`TransactionStatus::Dropped`], and then `None` is yielded
+    /// repeatedly forever.
+    pub async fn next(self: pin::Pin<&mut Self>) -> Option<TransactionStatus> {
+        let mut this = self.project();
+        if *this.has_yielded_drop_reason {
+            debug_assert!(this.rx.is_closed() || this.rx.next().await.is_none());
+            return None;
+        }
+
+        match this.rx.next().await {
+            Some(update) => {
+                if matches!(update, TransactionStatus::Dropped(_)) {
+                    debug_assert!(!*this.has_yielded_drop_reason);
+                    *this.has_yielded_drop_reason = true;
+                }
+                Some(update)
+            }
+            None => {
+                *this.has_yielded_drop_reason = true;
+                Some(TransactionStatus::Dropped(DropReason::Crashed))
+            }
+        }
     }
 }
 
@@ -271,6 +342,9 @@ pub enum DropReason {
 
     /// Transaction has been dropped because we have failed to validate it.
     ValidateError(ValidateTransactionError),
+
+    /// Transaction service background task has crashed.
+    Crashed,
 }
 
 /// Failed to check the validity of a transaction.
@@ -304,23 +378,27 @@ enum ToBackground {
     },
 }
 
-/// Configuration for [`background_task`̀].
+/// Configuration for [`background_task`].
+#[derive(Clone)]
 struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    from_foreground: pin::Pin<Box<async_channel::Receiver<ToBackground>>>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
     max_concurrent_validations: usize,
 }
 
 /// Background task running in parallel of the front service.
-async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TPlat>) {
+async fn background_task<TPlat: PlatformRef>(
+    config: BackgroundTaskConfig<TPlat>,
+    from_foreground: async_channel::Receiver<ToBackground>,
+) {
     let transactions_capacity = cmp::min(8, config.max_pending_transactions);
     let blocks_capacity = 32;
+    let mut from_foreground = pin::pin!(from_foreground);
 
     let mut worker = Worker {
         platform: config.platform,
@@ -363,7 +441,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
             // Because `runtime_service.subscribe_all()` might take a long time (potentially
             // forever), we need to process messages coming from the foreground in parallel.
-            let from_foreground = &mut config.from_foreground;
+            let from_foreground = &mut from_foreground;
             let messages_process = async move {
                 loop {
                     match from_foreground.next().await {
@@ -695,9 +773,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                             future::pending().await
                         }
                     })
-                    .or(async {
-                        WakeUpReason::ForegroundMessage(config.from_foreground.next().await)
-                    })
+                    .or(async { WakeUpReason::ForegroundMessage(from_foreground.next().await) })
                     .await
             };
 
