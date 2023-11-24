@@ -37,7 +37,7 @@ use super::{
 };
 
 use alloc::{borrow::Cow, sync::Arc};
-use core::{pin::Pin, str, time::Duration};
+use core::{panic, pin::Pin, str, time::Duration};
 use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
 use std::{
@@ -138,7 +138,9 @@ impl PlatformRef for Arc<DefaultPlatform> {
         _task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
     ) {
-        self.tasks_executor.spawn(task).detach();
+        self.tasks_executor
+            .spawn(panic::AssertUnwindSafe(task).catch_unwind())
+            .detach();
     }
 
     fn client_name(&self) -> Cow<str> {
