@@ -206,10 +206,7 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
 
     /// Access to the network, and identifier of the chain from the point of view of the network
     /// service.
-    pub network_service: (
-        Arc<network_service::NetworkService<TPlat>>,
-        network_service::ChainId,
-    ),
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,

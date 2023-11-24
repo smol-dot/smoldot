@@ -161,6 +161,39 @@ where
         }
     }
 
+    /// Removes all the chain assignments for the given chain.
+    ///
+    /// If a peer isn't assigned to any chain anymore and doesn't have any connected address,
+    /// all of its addresses are also removed from the collection.
+    pub fn remove_chain_peers(&mut self, chain: &TChainId) {
+        let Some(chain_index) = self.chains_indices.remove(chain) else {
+            // Chain didn't exist.
+            return;
+        };
+        self.chains.remove(chain_index);
+
+        let chain_peers = {
+            let mut in_chain_and_after_chain = self.peers_chains_by_state.split_off(&(
+                chain_index,
+                PeerChainState::Assignable,
+                usize::min_value(),
+            ));
+            let mut after_chain = in_chain_and_after_chain.split_off(&(
+                chain_index + 1,
+                PeerChainState::Assignable,
+                usize::min_value(),
+            ));
+            self.peers_chains_by_state.append(&mut after_chain);
+            in_chain_and_after_chain
+        };
+
+        for (_, _, peer_id_index) in chain_peers {
+            let _was_in = self.peers_chains.remove(&(peer_id_index, chain_index));
+            debug_assert!(_was_in.is_some());
+            self.try_clean_up_peer_id(peer_id_index);
+        }
+    }
+
     /// Inserts a chain-peer combination to the collection, indicating that the given peer belongs
     /// to the given chain.
     ///

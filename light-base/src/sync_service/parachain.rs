@@ -49,8 +49,7 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
     from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_id: network_service::ChainId,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
     ParachainBackgroundTask {
         log_target,
@@ -60,7 +59,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         parachain_id,
         from_network_service: None,
         network_service,
-        network_chain_id,
         sync_sources: sources::AllForksSources::new(
             40,
             header::decode(&finalized_block_header, block_number_bytes)
@@ -115,12 +113,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     parachain_id: u32,
 
     /// Networking service connected to the peer-to-peer network of the parachain.
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-
-    /// Index of the chain within the associated network service.
-    ///
-    /// Used to filter events from [`ParachainBackgroundTask::from_network_service`].
-    network_chain_id: network_service::ChainId,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Events coming from the networking service. `None` if not subscribed yet.
     from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
@@ -535,11 +528,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                         header::decode(finalized_parahead, self.block_number_bytes)
                                     {
                                         self.network_service
-                                            .set_local_best_block(
-                                                self.network_chain_id,
-                                                parahash,
-                                                header.number,
-                                            )
+                                            .set_local_best_block(parahash, header.number)
                                             .await;
                                     }
 
@@ -616,11 +605,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                             self.block_number_bytes,
                                         ) {
                                             self.network_service
-                                                .set_local_best_block(
-                                                    self.network_chain_id,
-                                                    parahash,
-                                                    header.number,
-                                                )
+                                                .set_local_best_block(parahash, header.number)
                                                 .await;
                                         }
 
@@ -1222,7 +1207,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     self.sync_sources_map.clear();
                     self.from_network_service = Some(Box::pin(
                         // As documented, `subscribe().await` is expected to return quickly.
-                        self.network_service.subscribe(self.network_chain_id).await,
+                        self.network_service.subscribe().await,
                     ));
                 }
 

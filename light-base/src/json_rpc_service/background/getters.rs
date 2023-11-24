@@ -183,8 +183,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         let response = crate::database::encode_database(
-            &self.network_service.0,
-            self.network_service.1,
+            &self.network_service,
             &self.sync_service,
             &self.runtime_service,
             &self.genesis_block_hash,

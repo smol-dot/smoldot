@@ -82,8 +82,7 @@ pub struct DatabaseContentRuntimeCodeHint {
 /// The returned string is guaranteed to not exceed `max_size` bytes. A truncated or invalid
 /// database is intentionally returned if `max_size` is too low to fit all the information.
 pub async fn encode_database<TPlat: platform::PlatformRef>(
-    network_service: &network_service::NetworkService<TPlat>,
-    network_service_chain_id: network_service::ChainId,
+    network_service: &network_service::NetworkServiceChain<TPlat>,
     sync_service: &sync_service::SyncService<TPlat>,
     runtime_service: &runtime_service::RuntimeService<TPlat>,
     genesis_block_hash: &[u8; 32],
@@ -102,7 +101,7 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
             serde_json::from_str(&encoded).unwrap()
         }),
         nodes: network_service
-            .discovered_nodes(network_service_chain_id)
+            .discovered_nodes()
             .await
             .map(|(peer_id, addrs)| {
                 (

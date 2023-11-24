@@ -501,7 +501,10 @@ where
                             SubstreamId::max_value(),
                         ),
                 )
-                .find(|(_, _, direction, _, _)| matches!(*direction, SubstreamDirection::Out))
+                .find(|(_, _, direction, state, _)| {
+                    matches!(*direction, SubstreamDirection::Out)
+                        && matches!(*state, NotificationsSubstreamState::Open)
+                })
                 .is_some()
             {
                 return Err(RemoveChainError::InUse);
