@@ -147,20 +147,24 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = async_channel::bounded(8);
 
-        let task = Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
-            log_target: log_target.clone(),
-            platform: config.platform.clone(),
-            sync_service: config.sync_service,
-            runtime_service: config.runtime_service,
-            network_service: config.network_service,
-            from_foreground: Box::pin(from_foreground),
-            max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
+        let task = Box::pin(background_task::<TPlat>(
+            BackgroundTaskConfig {
+                log_target: log_target.clone(),
+                platform: config.platform.clone(),
+                sync_service: config.sync_service,
+                runtime_service: config.runtime_service,
+                network_service: config.network_service,
+                max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
+                    .unwrap_or(usize::max_value()),
+                max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
+                    .unwrap_or(usize::max_value()),
+                max_concurrent_validations: usize::try_from(
+                    config.max_concurrent_validations.get(),
+                )
                 .unwrap_or(usize::max_value()),
-            max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
-                .unwrap_or(usize::max_value()),
-            max_concurrent_validations: usize::try_from(config.max_concurrent_validations.get())
-                .unwrap_or(usize::max_value()),
-        }));
+            },
+            from_foreground,
+        ));
 
         config
             .platform
@@ -358,16 +362,19 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
-    from_foreground: pin::Pin<Box<async_channel::Receiver<ToBackground>>>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
     max_concurrent_validations: usize,
 }
 
 /// Background task running in parallel of the front service.
-async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TPlat>) {
+async fn background_task<TPlat: PlatformRef>(
+    config: BackgroundTaskConfig<TPlat>,
+    from_foreground: async_channel::Receiver<ToBackground>,
+) {
     let transactions_capacity = cmp::min(8, config.max_pending_transactions);
     let blocks_capacity = 32;
+    let mut from_foreground = pin::pin!(from_foreground);
 
     let mut worker = Worker {
         platform: config.platform,
@@ -410,7 +417,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
             // Because `runtime_service.subscribe_all()` might take a long time (potentially
             // forever), we need to process messages coming from the foreground in parallel.
-            let from_foreground = &mut config.from_foreground;
+            let from_foreground = &mut from_foreground;
             let messages_process = async move {
                 loop {
                     match from_foreground.next().await {
@@ -742,9 +749,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                             future::pending().await
                         }
                     })
-                    .or(async {
-                        WakeUpReason::ForegroundMessage(config.from_foreground.next().await)
-                    })
+                    .or(async { WakeUpReason::ForegroundMessage(from_foreground.next().await) })
                     .await
             };
 
