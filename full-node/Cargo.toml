@@ -21,7 +21,7 @@ ctrlc = "3.4.0"
 derive_more = "0.99.17"
 directories = "5.0.1"
 either = { version = "1.9.0", default-features = false }
-event-listener = "3.0.0"
+event-listener = "4.0.0"
 fnv = { version = "1.0.7", default-features = false }
 futures-channel = "0.3.27"
 futures-lite = { version = "2.0.0", default-features = false, features = ["alloc"] }
