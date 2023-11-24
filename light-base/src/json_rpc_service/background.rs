@@ -907,7 +907,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 code_merkle_value,
                 code_closest_ancestor_excluding,
             )
-            .await;
+            .await
+            .map_err(|err| match err {
+                runtime_service::CompileAndPinRuntimeError::Crash => {
+                    RuntimeCallError::RuntimeServiceCrash
+                }
+            })?;
 
         let precall = self
             .runtime_service
@@ -1174,6 +1179,8 @@ enum RuntimeCallError {
     },
     /// Runtime called a forbidden host function.
     ForbiddenHostCall,
+    /// Runtime service has crashed while compiling the runtime.
+    RuntimeServiceCrash,
 }
 
 #[derive(Debug)]

@@ -332,7 +332,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) -> PinnedRuntimeId {
+    ) -> Result<PinnedRuntimeId, CompileAndPinRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -345,17 +345,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             })
             .await;
 
-        PinnedRuntimeId(result_rx.await.unwrap_or_else(|_| {
-            Arc::new(Runtime {
-                runtime: Err(RuntimeError::Crash),
-                // The fields below are never used and thus can be set to `None`.
-                // TODO: this is true but dangerous ^ maybe ensure that through compile-time stuff
-                runtime_code: None,
-                heap_pages: None,
-                code_merkle_value: None,
-                closest_ancestor_excluding: None,
-            })
-        }))
+        Ok(PinnedRuntimeId(
+            result_rx
+                .await
+                .map_err(|_| CompileAndPinRuntimeError::Crash)?,
+        ))
     }
 
     /// Un-pins a previously-pinned runtime.
@@ -863,7 +857,13 @@ pub enum RuntimeError {
     /// Error while compiling the runtime.
     #[display(fmt = "{_0}")]
     Build(executor::host::NewErr),
-    /// A crash happened while the runtime was being built (but was not necessarily caused by it).
+}
+
+/// Error potentially returned by [`RuntimeService::compile_and_pin_runtime`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum CompileAndPinRuntimeError {
+    /// Background service has crashed while compiling this runtime. The crash might however not
+    /// necessarily be caused by the runtime compilation.
     Crash,
 }
 
