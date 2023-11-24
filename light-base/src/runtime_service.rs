@@ -393,7 +393,13 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 {
                     let background_task_config = self.background_task_config.clone();
                     async move {
+                        // Sleep for a bit in order to avoid infinite loops of repeated crashes.
+                        background_task_config
+                            .platform
+                            .sleep(Duration::from_secs(2))
+                            .await;
                         let log_target = background_task_config.log_target.clone();
+                        log::debug!(target: &log_target, "Restart");
                         run_background(background_task_config, rx, tx_weak).await;
                         log::debug!(target: &log_target, "Shutdown");
                     }
