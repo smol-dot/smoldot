@@ -228,10 +228,15 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         if lock.is_closed() {
             let log_target = self.background_task_config.log_target.clone();
             let (tx, rx) = async_channel::bounded(8);
+            let platform = self.background_task_config.platform.clone();
             let task = background_task(self.background_task_config.clone(), rx);
             self.background_task_config.platform.spawn_task(
                 log_target.clone().into(),
                 async move {
+                    // Sleep for a bit in order to avoid potential infinite loops
+                    // of repeated crashing.
+                    platform.sleep(Duration::from_secs(2)).await;
+                    log::debug!(target: &log_target, "Restart");
                     task.await;
                     log::debug!(target: &log_target, "Shutdown");
                 },
