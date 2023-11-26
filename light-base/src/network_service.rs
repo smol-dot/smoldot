@@ -1249,6 +1249,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     debug_assert!(_was_in.is_some());
                 }
 
+                // TODO: this is O(n)
+                task.kademlia_find_node_requests
+                    .retain(|_, c| *c != chain_id);
+
                 log::debug!(target: "network", "Chains <= RemoveChain(id={})", task.network[chain_id].log_name);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
