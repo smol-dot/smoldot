@@ -1597,10 +1597,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 {
                     log::debug!(target: "network", "Connections({}, {}) => HandshakePeerIdMismatch(actual={})", expected_peer_id, remote_addr, peer_id);
 
-                    task.peering_strategy
-                        .remove_address(expected_peer_id, remote_addr.as_ref());
-                    // TODO: if Bob says that its address is the same as Alice's, and we try to connect to both Alice and Bob, then the Bob connection will reach this path and set Alice's address as connected even though it's already connected; this will later cause a state mismatch when disconnecting
-                    let _ = task.peering_strategy.insert_or_set_connected_address(
+                    let _was_in = task
+                        .peering_strategy
+                        .decrease_address_connections_and_remove_if_zero(
+                            expected_peer_id,
+                            remote_addr.as_ref(),
+                        );
+                    debug_assert!(_was_in.is_ok());
+                    let _ = task.peering_strategy.increase_address_connections(
                         &peer_id,
                         remote_addr.into_bytes().to_vec(),
                         10,
@@ -1629,7 +1633,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 task.peering_strategy
-                    .disconnect_addr(&peer_id, &address)
+                    .decrease_address_connections(&peer_id, &address)
                     .unwrap();
                 let address = Multiaddr::from_bytes(address).unwrap();
                 log::debug!(target: "network", "Connections({}, {}) => Shutdown(handshake_finished={handshake_finished:?})", peer_id, address);
@@ -2160,7 +2164,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.num_recent_connection_opening.saturating_sub(1);
             }
             WakeUpReason::CanStartConnect(expected_peer_id) => {
-                let Some(multiaddr) = task.peering_strategy.addr_to_connected(&expected_peer_id)
+                let Some(multiaddr) = task
+                    .peering_strategy
+                    .pick_address_and_add_connection(&expected_peer_id)
                 else {
                     // There is no address for that peer in the address book.
                     task.network.gossip_remove_desired_all(
@@ -2194,8 +2200,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         // Address is in an invalid format.
                         let _was_in = task
                             .peering_strategy
-                            .remove_address(&expected_peer_id, &addr);
-                        debug_assert!(_was_in);
+                            .decrease_address_connections_and_remove_if_zero(
+                                &expected_peer_id,
+                                &addr,
+                            );
+                        debug_assert!(_was_in.is_ok());
                         continue;
                     }
                 };
@@ -2217,8 +2226,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     // Address is in an invalid format or isn't supported by the platform.
                     let _was_in = task
                         .peering_strategy
-                        .remove_address(&expected_peer_id, multiaddr.as_ref());
-                    debug_assert!(_was_in);
+                        .decrease_address_connections_and_remove_if_zero(
+                            &expected_peer_id,
+                            multiaddr.as_ref(),
+                        );
+                    debug_assert!(_was_in.is_ok());
                     continue;
                 };
 

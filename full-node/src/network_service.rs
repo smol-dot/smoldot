@@ -836,12 +836,16 @@ async fn background_task(mut inner: Inner) {
                             .log_callback
                             .log(LogLevel::Debug, format!("connected-peer-id-mismatch; expected_peer_id={}; actual_peer_id={}; address={}", expected_peer_id, peer_id, remote_addr));
 
-                            inner
+                            let _was_in = inner
                                 .peering_strategy
-                                .remove_address(expected_peer_id, remote_addr.as_ref());
+                                .decrease_address_connections_and_remove_if_zero(
+                                    expected_peer_id,
+                                    remote_addr.as_ref(),
+                                );
+                            debug_assert!(_was_in.is_ok());
                             if let basic_peering_strategy::InsertAddressResult::Inserted {
                                 address_removed: Some(addr_rm),
-                            } = inner.peering_strategy.insert_or_set_connected_address(
+                            } = inner.peering_strategy.increase_address_connections(
                                 &peer_id,
                                 remote_addr.into_bytes().to_owned(),
                                 10, // TODO: constant
@@ -870,7 +874,7 @@ async fn background_task(mut inner: Inner) {
                         if let Some(expected_peer_id) = expected_peer_id {
                             inner
                                 .peering_strategy
-                                .disconnect_addr(&expected_peer_id, &address)
+                                .decrease_address_connections(&expected_peer_id, &address)
                                 .unwrap();
                             let address = Multiaddr::from_bytes(&address).unwrap();
                             inner.log_callback.log(
@@ -887,7 +891,7 @@ async fn background_task(mut inner: Inner) {
                     } => {
                         inner
                             .peering_strategy
-                            .disconnect_addr(&peer_id, &address)
+                            .decrease_address_connections(&peer_id, &address)
                             .unwrap();
                         let address = Multiaddr::from_bytes(&address).unwrap();
                         inner.log_callback.log(
@@ -1410,7 +1414,10 @@ async fn background_task(mut inner: Inner) {
 
                 inner.num_pending_out_attempts += 1;
 
-                let Some(multiaddr) = inner.peering_strategy.addr_to_connected(&peer_id) else {
+                let Some(multiaddr) = inner
+                    .peering_strategy
+                    .pick_address_and_add_connection(&peer_id)
+                else {
                     // There is no address for that peer in the address book.
                     inner.network.gossip_remove_desired_all(
                         &peer_id,
@@ -1441,8 +1448,10 @@ async fn background_task(mut inner: Inner) {
                                 peer_id, multiaddr
                             ),
                         );
-                        let _was_in = inner.peering_strategy.remove_address(&peer_id, &multiaddr);
-                        debug_assert!(_was_in);
+                        let _was_in = inner
+                            .peering_strategy
+                            .decrease_address_connections_and_remove_if_zero(&peer_id, &multiaddr);
+                        debug_assert!(_was_in.is_ok());
                         continue;
                     }
                 };
@@ -1462,8 +1471,11 @@ async fn background_task(mut inner: Inner) {
                         );
                         let _was_in = inner
                             .peering_strategy
-                            .remove_address(&peer_id, multiaddr.as_ref());
-                        debug_assert!(_was_in);
+                            .decrease_address_connections_and_remove_if_zero(
+                                &peer_id,
+                                multiaddr.as_ref(),
+                            );
+                        debug_assert!(_was_in.is_ok());
                         continue;
                     }
                 };

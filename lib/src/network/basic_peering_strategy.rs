@@ -39,12 +39,12 @@
 //!
 //! Each network identity that is associated with at least one chain is associated with zero or
 //! more addresses. It is not possible to insert addresses to peers that aren't associated to at
-//! least one chain. Each address is either "connected" or "disconnected".
+//! least one chain. The number of active connections of each address is also tracked.
 //!
 //! There exists a limit to the number of peers per chain and the number of addresses per peer,
 //! guaranteeing that the data structure only uses a bounded amount of memory. If these limits
-//! are reached, peers and addresses are removed randomly. Peers that have a slot and addresses
-//! in the "connected" state are never removed.
+//! are reached, peers and addresses are removed randomly. Peers that have a slot and at least one
+//! connected address are never removed.
 //!
 
 use crate::util;
@@ -70,9 +70,9 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
     /// Contains all the keys of [`BasicPeeringStrategy::peer_ids`] indexed differently.
     peer_ids_indices: hashbrown::HashMap<PeerId, usize, util::SipHasherBuild>,
 
-    /// List of all known addresses, indexed by `peer_id_index`. The addresses are not intended
-    /// to be in a particular order.
-    addresses: BTreeMap<(usize, Vec<u8>), AddressState>,
+    /// List of all known addresses, indexed by `peer_id_index`, with the number of connections to
+    /// each address. The addresses are not intended to be in a particular order.
+    addresses: BTreeMap<(usize, Vec<u8>), u32>,
 
     /// List of all chains throughout the collection.
     ///
@@ -96,12 +96,6 @@ pub struct BasicPeeringStrategy<TChainId, TInstant> {
 
     /// Random number generator used to select peers to assign slots to and remove addresses/peers.
     randomness: ChaCha20Rng,
-}
-
-#[derive(Debug)]
-enum AddressState {
-    Connected,
-    Disconnected,
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
@@ -338,51 +332,43 @@ where
 
     /// Inserts a new address for the given peer.
     ///
+    /// If the address wasn't known yet, its number of connections is set to zero.
+    ///
     /// If the peer doesn't belong to any chain (see [`BasicPeeringStrategy::insert_chain_peer`]),
-    /// then this function has no effect, unless the peer has a connected address. This is to
-    /// avoid accidentally collecting addresses for peers that will never be removed and create a
-    /// memory leak. For this reason, you most likely want to call
+    /// then this function has no effect, unless the peer has at least one connected address. This
+    /// is to avoid accidentally collecting addresses for peers that will never be removed and
+    /// create a memory leak. For this reason, you most likely want to call
     /// [`BasicPeeringStrategy::insert_chain_peer`] before calling this function.
     ///
     /// A maximum number of addresses that are maintained for this peer must be passed as
-    /// parameter. If this number is exceeded, an address in the "not connected" state (other than
+    /// parameter. If this number is exceeded, an address with zero connections (other than
     /// the one passed as parameter) is randomly removed.
-    ///
-    /// If an address is inserted, it is in the "not connected" state.
     pub fn insert_address(
         &mut self,
         peer_id: &PeerId,
         address: Vec<u8>,
         max_addresses: usize,
     ) -> InsertAddressResult {
-        self.insert_address_inner(
-            peer_id,
-            address,
-            max_addresses,
-            AddressState::Disconnected,
-            false,
-        )
+        self.insert_address_inner(peer_id, address, max_addresses, 0, false)
     }
 
-    /// Similar to [`BasicPeeringStrategy::insert_address`], except that the address, if it is
-    /// inserted, is directly in the "connected" state. If the address is already known, switches
-    /// it to the "connected" state.
+    /// Increases the number of connections of the given address. If the address isn't known, it
+    /// is inserted.
     ///
     /// > **Note**: Use this function if you establish a connection and accidentally reach a
     /// >           certain [`PeerId`].
-    pub fn insert_or_set_connected_address(
+    ///
+    /// # Panic
+    ///
+    /// Panics if the number of connections is equal to `u32::max_value()`.
+    ///
+    pub fn increase_address_connections(
         &mut self,
         peer_id: &PeerId,
         address: Vec<u8>,
         max_addresses: usize,
     ) -> InsertAddressResult {
-        self.insert_address_inner(
-            peer_id,
-            address,
-            max_addresses,
-            AddressState::Connected,
-            true,
-        )
+        self.insert_address_inner(peer_id, address, max_addresses, 1, true)
     }
 
     fn insert_address_inner(
@@ -390,8 +376,8 @@ where
         peer_id: &PeerId,
         address: Vec<u8>,
         max_addresses: usize,
-        initial_state: AddressState,
-        update_if_present: bool,
+        initial_num_connections: u32,
+        increase_if_present: bool,
     ) -> InsertAddressResult {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             return InsertAddressResult::UnknownPeer;
@@ -399,7 +385,7 @@ where
 
         match self.addresses.entry((peer_id_index, address.clone())) {
             btree_map::Entry::Vacant(entry) => {
-                entry.insert(initial_state);
+                entry.insert(initial_num_connections);
 
                 let address_removed = {
                     let num_addresses = self
@@ -411,9 +397,7 @@ where
                         // TODO: is it a good idea to choose the address randomly to remove? maybe there should be a sorting system with best addresses first?
                         self.addresses
                             .range((peer_id_index, Vec::new())..=(peer_id_index + 1, Vec::new()))
-                            .filter(|((_, a), s)| {
-                                matches!(s, AddressState::Disconnected) && *a != address
-                            })
+                            .filter(|((_, a), n)| **n == 0 && *a != address)
                             .choose(&mut self.randomness)
                             .map(|((_, a), _)| a.clone())
                     } else {
@@ -429,35 +413,15 @@ where
                 InsertAddressResult::Inserted { address_removed }
             }
             btree_map::Entry::Occupied(entry) => {
-                if update_if_present {
-                    *entry.into_mut() = initial_state;
+                let entry = entry.into_mut();
+                if increase_if_present {
+                    *entry = entry
+                        .checked_add(1)
+                        .unwrap_or_else(|| panic!("overflow in number of connections"));
                 }
 
-                InsertAddressResult::Duplicate
+                InsertAddressResult::AlreadyKnown
             }
-        }
-    }
-
-    /// Removes an address.
-    ///
-    /// Works on both "not connected" and "connected" addresses.
-    ///
-    /// Returns `true` if an address was removed, or `false` if the address wasn't known.
-    pub fn remove_address(&mut self, peer_id: &PeerId, address: &[u8]) -> bool {
-        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
-            // If the `PeerId` is unknown, it means it doesn't have an address anyway.
-            return false;
-        };
-
-        if self
-            .addresses
-            .remove(&(peer_id_index, address.to_owned()))
-            .is_some()
-        {
-            self.try_clean_up_peer_id(peer_id_index);
-            true
-        } else {
-            false
         }
     }
 
@@ -670,53 +634,84 @@ where
         }
     }
 
-    /// Picks an address from the list whose state is "not connected", and switches it to
-    /// "connected". Returns `None` if no such address is available.
-    pub fn addr_to_connected(&mut self, peer_id: &PeerId) -> Option<&[u8]> {
+    /// Picks an address from the list with zero connections, and sets the number of connections
+    /// to one. Returns `None` if no such address is available.
+    pub fn pick_address_and_add_connection(&mut self, peer_id: &PeerId) -> Option<&[u8]> {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it doesn't have any address.
             return None;
         };
 
         // TODO: could be optimized further by removing filter() and adjusting the set
-        if let Some(((_, address), state)) = self
+        if let Some(((_, address), num_connections)) = self
             .addresses
             .range_mut((peer_id_index, Vec::new())..(peer_id_index + 1, Vec::new()))
-            .filter(|(_, state)| matches!(state, AddressState::Disconnected))
+            .filter(|(_, num_connections)| **num_connections == 0)
             .choose(&mut self.randomness)
         {
-            *state = AddressState::Connected;
+            *num_connections = 1;
             return Some(address);
         }
 
         None
     }
 
-    /// Marks the given address as "disconnected".
+    /// Removes one connection from the given address.
     ///
-    /// Has no effect if the address isn't known to the data structure, or if it was not in the
-    /// "connected" state.
-    pub fn disconnect_addr(
+    /// Returns an error if the address isn't known to the data structure, or if there was no
+    /// connection.
+    pub fn decrease_address_connections(
         &mut self,
         peer_id: &PeerId,
         address: &[u8],
-    ) -> Result<(), DisconnectAddrError> {
+    ) -> Result<(), DecreaseAddressConnectionsError> {
+        self.decrease_address_connections_inner(peer_id, address, false)
+    }
+
+    /// Removes one connection from the given address. If this decreases the number of connections
+    /// from one to zero, the address is removed entirely.
+    ///
+    /// Returns an error if the address isn't known to the data structure, or if there was no
+    /// connection.
+    pub fn decrease_address_connections_and_remove_if_zero(
+        &mut self,
+        peer_id: &PeerId,
+        address: &[u8],
+    ) -> Result<(), DecreaseAddressConnectionsError> {
+        self.decrease_address_connections_inner(peer_id, address, true)
+    }
+
+    fn decrease_address_connections_inner(
+        &mut self,
+        peer_id: &PeerId,
+        address: &[u8],
+        remove_if_reaches_zero: bool,
+    ) -> Result<(), DecreaseAddressConnectionsError> {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
             // If the `PeerId` is unknown, it means it doesn't have any address.
-            return Err(DisconnectAddrError::UnknownAddress);
+            return Err(DecreaseAddressConnectionsError::UnknownAddress);
         };
 
-        let Some(addr) = self.addresses.get_mut(&(peer_id_index, address.to_owned())) else {
-            return Err(DisconnectAddrError::UnknownAddress);
+        let Some(num_connections) = self.addresses.get_mut(&(peer_id_index, address.to_owned()))
+        else {
+            return Err(DecreaseAddressConnectionsError::UnknownAddress);
         };
 
-        match addr {
-            s @ AddressState::Connected => *s = AddressState::Disconnected,
-            AddressState::Disconnected => return Err(DisconnectAddrError::NotConnected),
+        if *num_connections == 0 {
+            return Err(DecreaseAddressConnectionsError::NotConnected);
+        }
+
+        *num_connections -= 1;
+
+        if *num_connections != 0 {
+            return Ok(());
+        }
+
+        if remove_if_reaches_zero {
+            self.addresses.remove(&(peer_id_index, address.to_owned()));
         }
 
         self.try_clean_up_peer_id(peer_id_index);
-
         Ok(())
     }
 
@@ -786,7 +781,7 @@ where
         if self
             .addresses
             .range((peer_id_index, Vec::new())..(peer_id_index + 1, Vec::new()))
-            .any(|(_, state)| matches!(state, AddressState::Connected))
+            .any(|(_, num_connections)| *num_connections >= 1)
         {
             return;
         }
@@ -809,10 +804,10 @@ where
 
 /// See [`BasicPeeringStrategy::disconnect_addr`].
 #[derive(Debug, derive_more::Display)]
-pub enum DisconnectAddrError {
+pub enum DecreaseAddressConnectionsError {
     /// Address isn't known to the collection.
     UnknownAddress,
-    /// The address was not in the "connected" state.
+    /// The address didn't have any connection.
     NotConnected,
 }
 
@@ -842,7 +837,7 @@ pub enum InsertChainPeerResult {
 }
 
 /// See [`BasicPeeringStrategy::insert_address`] and
-/// [`BasicPeeringStrategy::insert_or_set_connected_address`].
+/// [`BasicPeeringStrategy::increase_address_connections`].
 pub enum InsertAddressResult {
     /// Address has been successfully inserted.
     Inserted {
@@ -850,8 +845,8 @@ pub enum InsertAddressResult {
         /// removed. If so, this contains the address.
         address_removed: Option<Vec<u8>>,
     },
-    /// Address was already inserted.
-    Duplicate,
+    /// Address was already known.
+    AlreadyKnown,
     /// The peer isn't associated to any chain, and as such the address was not inserted.
     UnknownPeer,
 }
@@ -1070,7 +1065,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            bps.insert_or_set_connected_address(&peer_id, Vec::new(), usize::max_value()),
+            bps.increase_address_connections(&peer_id, Vec::new(), usize::max_value()),
             InsertAddressResult::Inserted {
                 address_removed: None
             }
@@ -1087,7 +1082,7 @@ mod tests {
         bps.unassign_slot_and_remove_chain_peer(&0, &peer_id);
         assert_eq!(bps.peer_addresses(&peer_id).count(), 2);
 
-        bps.disconnect_addr(&peer_id, &[]).unwrap();
+        bps.decrease_address_connections(&peer_id, &[]).unwrap();
         assert_eq!(bps.peer_addresses(&peer_id).count(), 0);
     }
 
