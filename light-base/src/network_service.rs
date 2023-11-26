@@ -1244,7 +1244,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             service::GossipKind::ConsensusTransactions,
                         )
                         .unwrap();
+
+                    let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id));
+                    debug_assert!(_was_in.is_some());
                 }
+
+                // TODO: this is O(n)
+                task.kademlia_find_node_requests
+                    .retain(|_, c| *c != chain_id);
 
                 log::debug!(target: "network", "Chains <= RemoveChain(id={})", task.network[chain_id].log_name);
                 task.network.remove_chain(chain_id).unwrap();
