@@ -802,7 +802,7 @@ where
     }
 }
 
-/// See [`BasicPeeringStrategy::disconnect_addr`].
+/// See [`BasicPeeringStrategy::decrease_address_connections`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecreaseAddressConnectionsError {
     /// Address isn't known to the collection.
