@@ -528,6 +528,40 @@ define_methods! {
     network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
 }
 
+impl<'a> ServerToClient<'a> {
+    /// Returns the subscription identifier stored in the request.
+    pub fn subscription(&self) -> &Cow<'a, str> {
+        match self {
+            ServerToClient::author_extrinsicUpdate { subscription, .. } => subscription,
+            ServerToClient::chain_finalizedHead { subscription, .. } => subscription,
+            ServerToClient::chain_newHead { subscription, .. } => subscription,
+            ServerToClient::chain_allHead { subscription, .. } => subscription,
+            ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
+            ServerToClient::state_storage { subscription, .. } => subscription,
+            ServerToClient::chainHead_unstable_followEvent { subscription, .. } => subscription,
+            ServerToClient::transaction_unstable_watchEvent { subscription, .. } => subscription,
+            ServerToClient::network_unstable_event { subscription, .. } => subscription,
+        }
+    }
+
+    /// Modifies the subscription identifier stored in the request.
+    pub fn set_subscription(&mut self, new_value: Cow<'a, str>) {
+        let sub = match self {
+            ServerToClient::author_extrinsicUpdate { subscription, .. } => subscription,
+            ServerToClient::chain_finalizedHead { subscription, .. } => subscription,
+            ServerToClient::chain_newHead { subscription, .. } => subscription,
+            ServerToClient::chain_allHead { subscription, .. } => subscription,
+            ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
+            ServerToClient::state_storage { subscription, .. } => subscription,
+            ServerToClient::chainHead_unstable_followEvent { subscription, .. } => subscription,
+            ServerToClient::transaction_unstable_watchEvent { subscription, .. } => subscription,
+            ServerToClient::network_unstable_event { subscription, .. } => subscription,
+        };
+
+        *sub = new_value;
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
