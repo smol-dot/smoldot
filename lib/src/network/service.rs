@@ -2418,7 +2418,8 @@ where
 
                     // Check whether a substream with the same protocol already exists with that
                     // peer, and if so deny the request.
-                    // TODO: consider accepting anyway if asked_to_leave is true
+                    // Note that substreams with `asked_to_leave` equal to `true` are ignored when
+                    // searching, as in this case it's not a protocol violation.
                     if self
                         .notification_substreams_by_peer_id
                         .range(
@@ -2429,19 +2430,22 @@ where
                                 NotificationsSubstreamState::min_value(),
                                 SubstreamId::min_value(),
                             )
-                                ..=(
+                                ..(
                                     substream_protocol,
                                     peer_index,
                                     SubstreamDirection::In,
-                                    NotificationsSubstreamState::max_value(),
-                                    SubstreamId::max_value(),
+                                    NotificationsSubstreamState::Open {
+                                        asked_to_leave: true,
+                                    },
+                                    SubstreamId::min_value(),
                                 ),
                         )
                         .next()
                         .is_some()
                     {
                         self.inner.reject_in_notifications(substream_id);
-                        self.substreams.remove(&substream_id);
+                        let _was_removed = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_removed.is_some());
                         continue;
                     }
 
