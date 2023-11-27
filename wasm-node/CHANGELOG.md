@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Increase the rate at which connections are opened to 10 per second, with a pool of 8 simultaneous connections openings.
+
 ## 2.0.12 - 2023-11-27
 
 ### Fixed
