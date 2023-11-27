@@ -16,6 +16,7 @@
 - Fix panic when opening a gossiping link to a peer that we were previously connected to. ([#1395](https://github.com/smol-dot/smoldot/pull/1395))
 - Fix panic when the discovery system finds same address attributed to two different peers. ([#1412](https://github.com/smol-dot/smoldot/pull/1412))
 - Fix sending a block announce handshake when accepting an inbound transactions or grandpa substream in some rare situations.
+- Fix automatically refusing inbound notification substreams if a different inbound substream of the same protocol existed on the same connection, even when that other substream has been closed.
 
 ## 2.0.10 - 2023-11-17
 

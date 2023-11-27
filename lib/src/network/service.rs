@@ -2437,7 +2437,7 @@ where
                         NotificationsProtocol::BlockAnnounces { chain_index },
                         peer_index, // TODO: cloning overhead :-/
                         SubstreamDirection::In,
-                        NotificationsSubstreamState::Open,
+                        NotificationsSubstreamState::Pending,
                         substream_id,
                     ));
                     debug_assert!(_was_in);
@@ -2607,8 +2607,30 @@ where
                 collection::Event::NotificationsInClose { substream_id, .. } => {
                     // An incoming notifications substream has been closed.
                     // Nothing to do except clean up the local state.
-                    let _was_in = self.substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
+                    let Some(substream_info) = self.substreams.remove(&substream_id) else {
+                        unreachable!()
+                    };
+                    // Notification substreams can only happen on connections after their
+                    // handshake phase is finished, therefore their `PeerId` is known.
+                    let peer_index = *self.inner[substream_info.connection_id]
+                        .peer_index
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
+                    let Some(protocol) = substream_info.protocol else {
+                        // Substream concerns a chain that has since then been removed.
+                        continue;
+                    };
+                    let Protocol::Notifications(protocol) = protocol else {
+                        unreachable!()
+                    };
+                    let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                        protocol,
+                        peer_index, // TODO: cloning overhead :-/
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open,
+                        substream_id,
+                    ));
+                    debug_assert!(_was_in);
                 }
 
                 collection::Event::PingOutSuccess { .. } => {
