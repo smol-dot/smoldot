@@ -4,6 +4,10 @@
 
 ## 2.0.12 - 2023-11-27
 
+### Fixed
+
+- Fix panic in network service when all chains are removed. ([#1422](https://github.com/smol-dot/smoldot/pull/1422))
+
 ## 2.0.11 - 2023-11-27
 
 ### Changed
