@@ -332,7 +332,7 @@ impl SubstreamDirection {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum NotificationsSubstreamState {
     Pending,
-    Open,
+    Open { asked_to_leave: bool },
 }
 
 impl NotificationsSubstreamState {
@@ -341,7 +341,21 @@ impl NotificationsSubstreamState {
     }
 
     fn max_value() -> Self {
-        NotificationsSubstreamState::Open
+        NotificationsSubstreamState::Open {
+            asked_to_leave: true,
+        }
+    }
+
+    fn open_min_value() -> Self {
+        NotificationsSubstreamState::Open {
+            asked_to_leave: false,
+        }
+    }
+
+    fn open_max_value() -> Self {
+        NotificationsSubstreamState::Open {
+            asked_to_leave: true,
+        }
     }
 }
 
@@ -473,20 +487,20 @@ where
                         protocol,
                         PeerIndex(usize::min_value()),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::Pending,
+                        NotificationsSubstreamState::min_value(),
                         SubstreamId::min_value(),
                     )
                         ..=(
                             protocol,
                             PeerIndex(usize::max_value()),
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::Open,
+                            NotificationsSubstreamState::max_value(),
                             SubstreamId::max_value(),
                         ),
                 )
                 .find(|(_, _, direction, state, _)| {
                     matches!(*direction, SubstreamDirection::Out)
-                        && matches!(*state, NotificationsSubstreamState::Open)
+                        && matches!(*state, NotificationsSubstreamState::Open { .. })
                 })
                 .is_some()
             {
@@ -562,7 +576,20 @@ where
                         let _was_in = self.substreams.remove(&substream_id);
                         debug_assert!(_was_in.is_some());
                     }
-                    (SubstreamDirection::In, NotificationsSubstreamState::Open) => {
+                    (
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: true,
+                        },
+                    ) => {
+                        self.substreams.get_mut(&substream_id).unwrap().protocol = None;
+                    }
+                    (
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: false,
+                        },
+                    ) => {
                         self.inner
                             .start_close_in_notifications(substream_id, Duration::from_secs(5));
                         // TODO: arbitrary timeout ^
@@ -1730,7 +1757,9 @@ where
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::Open,
+                                            NotificationsSubstreamState::Open {
+                                                asked_to_leave: false,
+                                            },
                                             substream_id,
                                         ));
                                     debug_assert!(_was_inserted);
@@ -1860,7 +1889,7 @@ where
                                                     },
                                                     peer_index,
                                                     SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::Open,
+                                                    NotificationsSubstreamState::open_min_value(),
                                                     SubstreamId::min_value(),
                                                 )
                                                     ..=(
@@ -1869,7 +1898,8 @@ where
                                                         },
                                                         peer_index,
                                                         SubstreamDirection::Out,
-                                                        NotificationsSubstreamState::Open,
+                                                        NotificationsSubstreamState::open_max_value(
+                                                        ),
                                                         SubstreamId::max_value(),
                                                     ),
                                             )
@@ -1970,14 +2000,14 @@ where
                                         NotificationsProtocol::BlockAnnounces { chain_index },
                                         peer_index,
                                         SubstreamDirection::Out,
-                                        NotificationsSubstreamState::Open,
+                                        NotificationsSubstreamState::open_min_value(),
                                         SubstreamId::min_value()
                                     )
                                         ..=(
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::Open,
+                                            NotificationsSubstreamState::open_max_value(),
                                             SubstreamId::max_value()
                                         )
                                 )
@@ -2047,7 +2077,9 @@ where
                                 substream_protocol,
                                 peer_index,
                                 SubstreamDirection::Out,
-                                NotificationsSubstreamState::Open,
+                                NotificationsSubstreamState::Open {
+                                    asked_to_leave: false,
+                                },
                                 substream_id,
                             ));
                             debug_assert!(_was_inserted);
@@ -2120,7 +2152,9 @@ where
                         substream_protocol,
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::Open,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: false,
+                        },
                         substream_id,
                     ));
                     debug_assert!(_was_in);
@@ -2157,7 +2191,7 @@ where
                                             NotificationsProtocol::BlockAnnounces { chain_index },
                                             peer_index,
                                             SubstreamDirection::Out,
-                                            NotificationsSubstreamState::Pending,
+                                            NotificationsSubstreamState::min_value(),
                                             SubstreamId::min_value(),
                                         )
                                             ..=(
@@ -2166,7 +2200,7 @@ where
                                                 },
                                                 peer_index,
                                                 SubstreamDirection::Out,
-                                                NotificationsSubstreamState::Open,
+                                                NotificationsSubstreamState::max_value(),
                                                 SubstreamId::max_value(),
                                             ),
                                     )
@@ -2369,7 +2403,9 @@ where
                             substream_protocol,
                             peer_index,
                             SubstreamDirection::In,
-                            NotificationsSubstreamState::Open,
+                            NotificationsSubstreamState::Open {
+                                asked_to_leave: false,
+                            },
                             substream_id,
                         ));
                         self.inner.accept_in_notifications(
@@ -2488,7 +2524,6 @@ where
                     // Check whether there is an open outgoing block announces substream, as this
                     // means that we are "gossip-connected". If not, then the notification is
                     // silently discarded.
-                    // TODO: cloning of the peer_id
                     if self
                         .notification_substreams_by_peer_id
                         .range(
@@ -2496,14 +2531,14 @@ where
                                 NotificationsProtocol::BlockAnnounces { chain_index },
                                 peer_index,
                                 SubstreamDirection::Out,
-                                NotificationsSubstreamState::Open,
+                                NotificationsSubstreamState::open_min_value(),
                                 collection::SubstreamId::min_value(),
                             )
                                 ..=(
                                     NotificationsProtocol::BlockAnnounces { chain_index },
                                     peer_index,
                                     SubstreamDirection::Out,
-                                    NotificationsSubstreamState::Open,
+                                    NotificationsSubstreamState::open_max_value(),
                                     collection::SubstreamId::max_value(),
                                 ),
                         )
@@ -2623,14 +2658,26 @@ where
                     let Protocol::Notifications(protocol) = protocol else {
                         unreachable!()
                     };
-                    let _was_in = self.notification_substreams_by_peer_id.remove(&(
+
+                    let _was_in1 = self.notification_substreams_by_peer_id.remove(&(
                         protocol,
-                        peer_index, // TODO: cloning overhead :-/
+                        peer_index,
                         SubstreamDirection::In,
-                        NotificationsSubstreamState::Open,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: false,
+                        },
                         substream_id,
                     ));
-                    debug_assert!(_was_in);
+                    let _was_in2 = self.notification_substreams_by_peer_id.remove(&(
+                        protocol,
+                        peer_index,
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: true,
+                        },
+                        substream_id,
+                    ));
+                    debug_assert!(_was_in1 || _was_in2);
                 }
 
                 collection::Event::PingOutSuccess { .. } => {
@@ -3135,7 +3182,7 @@ where
                     },
                     PeerIndex(usize::min_value()),
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::Open,
+                    NotificationsSubstreamState::open_min_value(),
                     SubstreamId::min_value(),
                 )
                     ..=(
@@ -3144,12 +3191,13 @@ where
                         },
                         PeerIndex(usize::max_value()),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::Open,
+                        NotificationsSubstreamState::open_max_value(),
                         SubstreamId::max_value(),
                     ),
             )
             .filter(move |(_, _, d, s, _)| {
-                *d == SubstreamDirection::Out && *s == NotificationsSubstreamState::Open
+                *d == SubstreamDirection::Out
+                    && matches!(*s, NotificationsSubstreamState::Open { .. })
             })
             .map(|(_, peer_index, _, _, _)| &self.peers[peer_index.0])
     }
@@ -3275,7 +3323,9 @@ where
                 protocol,
                 peer_index,
                 SubstreamDirection::In,
-                NotificationsSubstreamState::Open,
+                NotificationsSubstreamState::Open {
+                    asked_to_leave: false,
+                },
                 in_substream_id,
             ));
             debug_assert!(_was_inserted);
@@ -3540,7 +3590,7 @@ where
                     *p == NotificationsProtocol::Grandpa {
                         chain_index: chain_id.0,
                     } && *d == SubstreamDirection::Out
-                        && *s == NotificationsSubstreamState::Open
+                        && matches!(*s, NotificationsSubstreamState::Open { .. })
                 })
         {
             match self.inner.queue_notification(*substream_id, packet.clone()) {
@@ -3660,14 +3710,14 @@ where
                     NotificationsProtocol::BlockAnnounces { chain_index },
                     peer_index,
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::Open,
+                    NotificationsSubstreamState::open_min_value(),
                     SubstreamId::min_value(),
                 )
                     ..=(
                         NotificationsProtocol::BlockAnnounces { chain_index },
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::Open,
+                        NotificationsSubstreamState::open_max_value(),
                         SubstreamId::max_value(),
                     ),
             )
@@ -3686,14 +3736,14 @@ where
                         protocol,
                         peer_index,
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::Open,
+                        NotificationsSubstreamState::open_min_value(),
                         SubstreamId::min_value(),
                     )
                         ..=(
                             protocol,
                             peer_index,
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::Open,
+                            NotificationsSubstreamState::open_max_value(),
                             SubstreamId::max_value(),
                         ),
                 )
