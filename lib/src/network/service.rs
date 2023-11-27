@@ -526,11 +526,10 @@ where
                         PeerIndex(usize::max_value()),
                     ),
             )
-            // TODO: optimize to not Clone? is that possible?
-            .map(|(_, _, peer_index)| self.peers[peer_index.0].clone())
+            .map(|(_, _, peer_index)| *peer_index)
             .collect::<Vec<_>>();
         for desired in desired {
-            self.gossip_remove_desired(chain_id, &desired, GossipKind::ConsensusTransactions);
+            self.gossip_remove_desired_inner(chain_id, desired, GossipKind::ConsensusTransactions);
         }
 
         // Close any notifications substream of the chain.
@@ -791,6 +790,15 @@ where
             return false;
         };
 
+        self.gossip_remove_desired_inner(chain_id, peer_index, kind)
+    }
+
+    fn gossip_remove_desired_inner(
+        &mut self,
+        chain_id: ChainId,
+        peer_index: PeerIndex,
+        kind: GossipKind,
+    ) -> bool {
         if !self
             .gossip_desired_peers_by_chain
             .remove(&(chain_id.0, kind, peer_index))
