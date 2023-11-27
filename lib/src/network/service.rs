@@ -890,18 +890,33 @@ where
         self.try_clean_up_peer(peer_index);
     }
 
+    /// Returns the list of gossip-desired peers for the given chain, in no specific order.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ChainId`] is invalid.
+    ///
+    pub fn gossip_desired_iter(
+        &self,
+        chain_id: ChainId,
+        kind: GossipKind,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        self.gossip_desired_peers_by_chain
+            .range(
+                (chain_id.0, kind, PeerIndex(usize::min_value()))
+                    ..=(chain_id.0, kind, PeerIndex(usize::max_value())),
+            )
+            .map(|(_, _, peer_index)| &self.peers[peer_index.0])
+    }
+
     /// Returns the number of gossip-desired peers for the given chain.
     ///
     /// # Panic
     ///
     /// Panics if the given [`ChainId`] is invalid.
     ///
-    pub fn gossip_desired_num(&mut self, chain_id: ChainId, kind: GossipKind) -> usize {
-        // TODO: O(n), optimize
-        self.gossip_desired_peers_by_chain
-            .iter()
-            .filter(|(c, k, _)| *c == chain_id.0 && *k == kind)
-            .count()
+    pub fn gossip_desired_num(&self, chain_id: ChainId, kind: GossipKind) -> usize {
+        self.gossip_desired_iter(chain_id, kind).count()
     }
 
     /// Returns the list of [`PeerId`]s that are desired (for any chain) but for which no
