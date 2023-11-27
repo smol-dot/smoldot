@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.11 - 2023-11-27
+
 ### Changed
 
 - A single networking service is now shared between all chains. This means that the same connection (such as a WebSocket or WebRTC connection) can now be used to open multiple block announces substreams for multiple different chains. ([#1398](https://github.com/smol-dot/smoldot/pull/1398))
