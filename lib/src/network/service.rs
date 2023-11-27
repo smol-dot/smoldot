@@ -1697,11 +1697,13 @@ where
                     return Some(Event::RequestInCancel { substream_id });
                 }
 
+                // TODO: this whole block of code is too complex
                 collection::Event::NotificationsOutResult {
                     substream_id,
                     result,
                 } => {
                     // Outgoing notifications substream has finished opening.
+                    // TODO: this if is pretty hacky
                     let substream_info = if result.is_ok() {
                         self.substreams
                             .get(&substream_id)
@@ -1734,6 +1736,7 @@ where
                     // The behaviour is very specific to the protocol.
                     match substream_protocol {
                         NotificationsProtocol::BlockAnnounces { chain_index } => {
+                            // Parse the handshake to check whether it's correct.
                             let result = match &result {
                                 Ok(handshake) => {
                                     match codec::decode_block_announces_handshake(
@@ -1928,6 +1931,7 @@ where
                                         GossipKind::ConsensusTransactions,
                                     ));
 
+                                    // TODO: pretty hacky
                                     if let GossipConnectError::HandshakeDecode(_)
                                     | GossipConnectError::GenesisMismatch { .. } = error
                                     {
@@ -1935,57 +1939,120 @@ where
                                         self.substreams.remove(&substream_id).unwrap();
                                     }
 
-                                    for substream_id in self
-                                        .notification_substreams_by_peer_id
-                                        .range(
-                                            (
-                                                NotificationsProtocol::Transactions { chain_index },
-                                                peer_index,
-                                                SubstreamDirection::Out,
-                                                NotificationsSubstreamState::min_value(),
-                                                SubstreamId::min_value(),
+                                    // Close all the notification substreams of that chain.
+                                    for other_protocol in [
+                                        NotificationsProtocol::BlockAnnounces { chain_index },
+                                        NotificationsProtocol::Transactions { chain_index },
+                                        NotificationsProtocol::Grandpa { chain_index },
+                                    ] {
+                                        for (substream_id, direction, state) in self
+                                            .notification_substreams_by_peer_id
+                                            .range(
+                                                (
+                                                    other_protocol,
+                                                    peer_index,
+                                                    SubstreamDirection::min_value(),
+                                                    NotificationsSubstreamState::min_value(),
+                                                    SubstreamId::min_value(),
+                                                )
+                                                    ..=(
+                                                        other_protocol,
+                                                        peer_index,
+                                                        SubstreamDirection::max_value(),
+                                                        NotificationsSubstreamState::max_value(),
+                                                        SubstreamId::max_value(),
+                                                    ),
                                             )
-                                                ..=(
-                                                    NotificationsProtocol::Transactions {
-                                                        chain_index,
+                                            .map(|(_, _, dir, state, s)| (*s, *dir, *state))
+                                            .collect::<Vec<_>>()
+                                        {
+                                            match (direction, state) {
+                                                (SubstreamDirection::Out, _) => {
+                                                    self.inner
+                                                        .close_out_notifications(substream_id);
+
+                                                    let _was_in = self
+                                                        .notification_substreams_by_peer_id
+                                                        .remove(&(
+                                                            other_protocol,
+                                                            peer_index,
+                                                            direction,
+                                                            state,
+                                                            substream_id,
+                                                        ));
+                                                    debug_assert!(_was_in);
+                                                    let _was_in =
+                                                        self.substreams.remove(&substream_id);
+                                                    debug_assert!(_was_in.is_some());
+                                                }
+                                                (
+                                                    SubstreamDirection::In,
+                                                    NotificationsSubstreamState::Pending,
+                                                ) => {
+                                                    self.inner
+                                                        .reject_in_notifications(substream_id);
+
+                                                    let _was_in = self
+                                                        .notification_substreams_by_peer_id
+                                                        .remove(&(
+                                                            other_protocol,
+                                                            peer_index,
+                                                            direction,
+                                                            state,
+                                                            substream_id,
+                                                        ));
+                                                    debug_assert!(_was_in);
+                                                    let _was_in =
+                                                        self.substreams.remove(&substream_id);
+                                                    debug_assert!(_was_in.is_some());
+                                                }
+                                                (
+                                                    SubstreamDirection::In,
+                                                    NotificationsSubstreamState::Open {
+                                                        asked_to_leave: false,
                                                     },
-                                                    peer_index,
-                                                    SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::max_value(),
-                                                    SubstreamId::max_value(),
-                                                ),
-                                        )
-                                        .map(|(_, _, _, _, s)| *s)
-                                        .collect::<Vec<_>>()
-                                    {
-                                        self.inner.close_out_notifications(substream_id);
-                                    }
+                                                ) => {
+                                                    self.inner.start_close_in_notifications(
+                                                        substream_id,
+                                                        Duration::from_secs(5),
+                                                    ); // TODO: arbitrary constant
 
-                                    for substream_id in self
-                                        .notification_substreams_by_peer_id
-                                        .range(
-                                            (
-                                                NotificationsProtocol::Grandpa { chain_index },
-                                                peer_index,
-                                                SubstreamDirection::Out,
-                                                NotificationsSubstreamState::min_value(),
-                                                SubstreamId::min_value(),
-                                            )
-                                                ..=(
-                                                    NotificationsProtocol::Grandpa { chain_index },
-                                                    peer_index,
-                                                    SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::max_value(),
-                                                    SubstreamId::max_value(),
-                                                ),
-                                        )
-                                        .map(|(_, _, _, _, s)| *s)
-                                        .collect::<Vec<_>>()
-                                    {
-                                        self.inner.close_out_notifications(substream_id);
+                                                    let _was_removed = self
+                                                        .notification_substreams_by_peer_id
+                                                        .remove(&(
+                                                            other_protocol,
+                                                            peer_index,
+                                                            SubstreamDirection::In,
+                                                            NotificationsSubstreamState::Open {
+                                                                asked_to_leave: false,
+                                                            },
+                                                            substream_id,
+                                                        ));
+                                                    debug_assert!(_was_removed);
+                                                    let _was_inserted = self
+                                                        .notification_substreams_by_peer_id
+                                                        .insert((
+                                                            other_protocol,
+                                                            peer_index,
+                                                            SubstreamDirection::In,
+                                                            NotificationsSubstreamState::Open {
+                                                                asked_to_leave: true,
+                                                            },
+                                                            substream_id,
+                                                        ));
+                                                    debug_assert!(_was_inserted);
+                                                }
+                                                (
+                                                    SubstreamDirection::In,
+                                                    NotificationsSubstreamState::Open {
+                                                        asked_to_leave: true,
+                                                    },
+                                                ) => {
+                                                    // Nothing to do.
+                                                }
+                                            }
+                                        }
                                     }
-
-                                    // TODO: also close the ingoing ba+tx+gp substreams
 
                                     return Some(Event::GossipOpenFailed {
                                         peer_id: self.peers[peer_index.0].clone(),
