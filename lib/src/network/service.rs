@@ -3229,7 +3229,7 @@ where
                     },
                     PeerIndex(usize::min_value()),
                     SubstreamDirection::Out,
-                    NotificationsSubstreamState::open_min_value(),
+                    NotificationsSubstreamState::min_value(),
                     SubstreamId::min_value(),
                 )
                     ..=(
@@ -3238,7 +3238,7 @@ where
                         },
                         PeerIndex(usize::max_value()),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::open_max_value(),
+                        NotificationsSubstreamState::max_value(),
                         SubstreamId::max_value(),
                     ),
             )
