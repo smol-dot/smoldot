@@ -749,11 +749,15 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 *current_finalized_block = finalized_hash;
                 *finalized_heads_subscriptions_stale = true;
 
+                debug_assert!(pruned_blocks
+                    .iter()
+                    .all(|hash| pinned_blocks.contains_key(hash)));
+
                 // Add the pruned and finalized blocks to the LRU cache. The least-recently used
                 // entries in the cache are unpinned and no longer tracked.
                 //
                 // An important detail here is that the newly-finalized block is added to the list
-                // at the end, in order to guaranteed that it doesn't get removed. This is
+                // at the end, in order to guarantee that it doesn't get removed. This is
                 // necessary in order to guarantee that the current finalized (and current best,
                 // if the best block is also the finalized block) remains pinned until at least
                 // a different block gets finalized.
