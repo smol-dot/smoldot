@@ -2030,9 +2030,11 @@ where
                             // Note that in the situation where the connection is shutting down,
                             // we don't re-open the substream on a different connection, but
                             // that's ok as the block announces substream should be closed soon.
-                            if result.is_err()
-                                && !self.inner.connection_state(connection_id).shutting_down
-                            {
+                            if result.is_err() {
+                                if self.inner.connection_state(connection_id).shutting_down {
+                                    continue;
+                                }
+
                                 let new_substream_id = self.inner.open_out_notifications(
                                     connection_id,
                                     codec::encode_protocol_name_string(match substream_protocol {
@@ -2062,7 +2064,6 @@ where
                                         substream_protocol,
                                     ),
                                 );
-
                                 let _was_inserted =
                                     self.notification_substreams_by_peer_id.insert((
                                         substream_protocol,
@@ -2072,7 +2073,6 @@ where
                                         new_substream_id,
                                     ));
                                 debug_assert!(_was_inserted);
-
                                 let _prev_value = self.substreams.insert(
                                     new_substream_id,
                                     SubstreamInfo {
@@ -2081,7 +2081,6 @@ where
                                     },
                                 );
                                 debug_assert!(_prev_value.is_none());
-
                                 continue;
                             }
 
