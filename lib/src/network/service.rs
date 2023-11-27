@@ -487,14 +487,14 @@ where
                         protocol,
                         PeerIndex(usize::min_value()),
                         SubstreamDirection::Out,
-                        NotificationsSubstreamState::min_value(),
+                        NotificationsSubstreamState::open_min_value(),
                         SubstreamId::min_value(),
                     )
                         ..=(
                             protocol,
                             PeerIndex(usize::max_value()),
                             SubstreamDirection::Out,
-                            NotificationsSubstreamState::max_value(),
+                            NotificationsSubstreamState::open_max_value(),
                             SubstreamId::max_value(),
                         ),
                 )
