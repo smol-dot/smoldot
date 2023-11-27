@@ -1398,33 +1398,20 @@ where
                                     request_max_size: None,
                                 },
                                 Protocol::Ping => collection::InboundTy::Ping,
-                                Protocol::Notifications(
-                                    NotificationsProtocol::BlockAnnounces { .. },
-                                ) => {
-                                    collection::InboundTy::Notifications {
-                                        max_handshake_size: 1024 * 1024, // TODO: arbitrary
-                                    }
-                                }
-                                Protocol::Notifications(NotificationsProtocol::Transactions {
-                                    ..
-                                }) => collection::InboundTy::Notifications {
-                                    max_handshake_size: 4,
-                                },
                                 Protocol::Notifications(NotificationsProtocol::Grandpa {
                                     chain_index,
                                 }) if self.chains[chain_index]
                                     .grandpa_protocol_config
-                                    .is_some() =>
+                                    .is_none() =>
                                 {
-                                    collection::InboundTy::Notifications {
-                                        max_handshake_size: 4,
-                                    }
-                                }
-                                Protocol::Notifications(NotificationsProtocol::Grandpa {
-                                    ..
-                                }) => {
                                     self.inner.reject_inbound(substream_id);
                                     continue;
+                                }
+                                Protocol::Notifications(p) => {
+                                    collection::InboundTy::Notifications {
+                                        max_handshake_size: self
+                                            .notifications_protocol_max_handshake_size(p),
+                                    }
                                 }
                                 Protocol::Sync { chain_index }
                                     if self.chains[chain_index].allow_inbound_block_requests =>
@@ -1748,81 +1735,31 @@ where
                                         ));
                                     debug_assert!(_was_inserted);
 
-                                    if self
-                                        .notification_substreams_by_peer_id
-                                        .range(
-                                            (
-                                                NotificationsProtocol::Transactions { chain_index },
-                                                peer_index,
-                                                SubstreamDirection::Out,
-                                                NotificationsSubstreamState::min_value(),
-                                                SubstreamId::min_value(),
-                                            )
-                                                ..=(
-                                                    NotificationsProtocol::Transactions {
-                                                        chain_index,
-                                                    },
-                                                    peer_index,
-                                                    SubstreamDirection::Out,
-                                                    NotificationsSubstreamState::max_value(),
-                                                    SubstreamId::max_value(),
-                                                ),
+                                    for other_protocol in
+                                        iter::once(NotificationsProtocol::Transactions {
+                                            chain_index,
+                                        })
+                                        .chain(
+                                            self.chains[chain_index]
+                                                .grandpa_protocol_config
+                                                .is_some()
+                                                .then(|| NotificationsProtocol::Grandpa {
+                                                    chain_index,
+                                                }),
                                         )
-                                        .next()
-                                        .is_none()
                                     {
-                                        let new_substream_id = self.inner.open_out_notifications(
-                                            connection_id,
-                                            codec::encode_protocol_name_string(
-                                                codec::ProtocolName::Transactions {
-                                                    genesis_hash: self.chains[chain_index]
-                                                        .genesis_hash,
-                                                    fork_id: self.chains[chain_index]
-                                                        .fork_id
-                                                        .as_deref(),
-                                                },
-                                            ),
-                                            Duration::from_secs(10), // TODO: arbitrary
-                                            Vec::new(),
-                                            128, // TODO: arbitrary
-                                        );
-
-                                        self.substreams.insert(
-                                            new_substream_id,
-                                            SubstreamInfo {
-                                                connection_id,
-                                                protocol: Some(Protocol::Notifications(
-                                                    NotificationsProtocol::Transactions {
-                                                        chain_index,
-                                                    },
-                                                )),
-                                            },
-                                        );
-
-                                        self.notification_substreams_by_peer_id.insert((
-                                            NotificationsProtocol::Transactions { chain_index },
-                                            peer_index,
-                                            SubstreamDirection::Out,
-                                            NotificationsSubstreamState::Pending,
-                                            new_substream_id,
-                                        ));
-                                    }
-
-                                    if self.chains[chain_index].grandpa_protocol_config.is_some()
-                                        && self
+                                        if self
                                             .notification_substreams_by_peer_id
                                             .range(
                                                 (
-                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                    other_protocol,
                                                     peer_index,
                                                     SubstreamDirection::Out,
                                                     NotificationsSubstreamState::min_value(),
                                                     SubstreamId::min_value(),
                                                 )
                                                     ..=(
-                                                        NotificationsProtocol::Grandpa {
-                                                            chain_index,
-                                                        },
+                                                        other_protocol,
                                                         peer_index,
                                                         SubstreamDirection::Out,
                                                         NotificationsSubstreamState::max_value(),
@@ -1830,22 +1767,43 @@ where
                                                     ),
                                             )
                                             .next()
-                                            .is_none()
-                                    {
+                                            .is_some()
+                                        {
+                                            continue;
+                                        }
+
                                         let new_substream_id = self.inner.open_out_notifications(
                                             connection_id,
                                             codec::encode_protocol_name_string(
-                                                codec::ProtocolName::Grandpa {
-                                                    genesis_hash: self.chains[chain_index]
-                                                        .genesis_hash,
-                                                    fork_id: self.chains[chain_index]
-                                                        .fork_id
-                                                        .as_deref(),
+                                                match other_protocol {
+                                                    NotificationsProtocol::Transactions {
+                                                        chain_index,
+                                                    } => codec::ProtocolName::Transactions {
+                                                        genesis_hash: self.chains[chain_index]
+                                                            .genesis_hash,
+                                                        fork_id: self.chains[chain_index]
+                                                            .fork_id
+                                                            .as_deref(),
+                                                    },
+                                                    NotificationsProtocol::Grandpa {
+                                                        chain_index,
+                                                    } => codec::ProtocolName::Grandpa {
+                                                        genesis_hash: self.chains[chain_index]
+                                                            .genesis_hash,
+                                                        fork_id: self.chains[chain_index]
+                                                            .fork_id
+                                                            .as_deref(),
+                                                    },
+                                                    _ => unreachable!(),
                                                 },
                                             ),
-                                            Duration::from_secs(10), // TODO: arbitrary
-                                            self.chains[chain_index].role.scale_encoding().to_vec(),
-                                            1024 * 1024, // TODO: arbitrary
+                                            self.notifications_protocol_handshake_timeout(
+                                                other_protocol,
+                                            ),
+                                            self.notifications_protocol_handshake(other_protocol),
+                                            self.notifications_protocol_max_handshake_size(
+                                                other_protocol,
+                                            ),
                                         );
 
                                         self.substreams.insert(
@@ -1853,13 +1811,13 @@ where
                                             SubstreamInfo {
                                                 connection_id,
                                                 protocol: Some(Protocol::Notifications(
-                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                    other_protocol,
                                                 )),
                                             },
                                         );
 
                                         self.notification_substreams_by_peer_id.insert((
-                                            NotificationsProtocol::Grandpa { chain_index },
+                                            other_protocol,
                                             peer_index,
                                             SubstreamDirection::Out,
                                             NotificationsSubstreamState::Pending,
@@ -2054,15 +2012,13 @@ where
                                         }
                                         _ => unreachable!(),
                                     }),
-                                    Duration::from_secs(10), // TODO: arbitrary
-                                    match substream_protocol {
-                                        NotificationsProtocol::Transactions { .. } => Vec::new(),
-                                        NotificationsProtocol::Grandpa { .. } => {
-                                            self.chains[chain_index].role.scale_encoding().to_vec()
-                                        }
-                                        _ => unreachable!(),
-                                    },
-                                    1024 * 1024, // TODO: arbitrary
+                                    self.notifications_protocol_handshake_timeout(
+                                        substream_protocol,
+                                    ),
+                                    self.notifications_protocol_handshake(substream_protocol),
+                                    self.notifications_protocol_max_handshake_size(
+                                        substream_protocol,
+                                    ),
                                 );
 
                                 let _was_inserted =
@@ -2274,58 +2230,38 @@ where
                         // The transactions and Grandpa protocols are tied to the block announces
                         // substream. If there is a block announce substream with the peer, we try
                         // to reopen these two substreams.
-                        NotificationsProtocol::Transactions { chain_index } => {
+                        NotificationsProtocol::Transactions { .. }
+                        | NotificationsProtocol::Grandpa { .. } => {
                             let new_substream_id = self.inner.open_out_notifications(
                                 connection_id,
-                                codec::encode_protocol_name_string(
-                                    codec::ProtocolName::Transactions {
-                                        genesis_hash: self.chains[chain_index].genesis_hash,
-                                        fork_id: self.chains[chain_index].fork_id.as_deref(),
-                                    },
-                                ),
-                                Duration::from_secs(10), // TODO: arbitrary
-                                Vec::new(),
-                                1024 * 1024, // TODO: arbitrary
-                            );
-                            self.substreams.insert(
-                                new_substream_id,
-                                SubstreamInfo {
-                                    connection_id,
-                                    protocol: Some(Protocol::Notifications(
-                                        NotificationsProtocol::Transactions { chain_index },
-                                    )),
-                                },
-                            );
-                            self.notification_substreams_by_peer_id.insert((
-                                NotificationsProtocol::Transactions { chain_index },
-                                peer_index,
-                                SubstreamDirection::Out,
-                                NotificationsSubstreamState::Pending,
-                                new_substream_id,
-                            ));
-                        }
-                        NotificationsProtocol::Grandpa { chain_index } => {
-                            let new_substream_id = self.inner.open_out_notifications(
-                                connection_id,
-                                codec::encode_protocol_name_string(codec::ProtocolName::Grandpa {
-                                    genesis_hash: self.chains[chain_index].genesis_hash,
-                                    fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                codec::encode_protocol_name_string(match substream_protocol {
+                                    NotificationsProtocol::Transactions { chain_index } => {
+                                        codec::ProtocolName::Transactions {
+                                            genesis_hash: self.chains[chain_index].genesis_hash,
+                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                        }
+                                    }
+                                    NotificationsProtocol::Grandpa { chain_index } => {
+                                        codec::ProtocolName::Grandpa {
+                                            genesis_hash: self.chains[chain_index].genesis_hash,
+                                            fork_id: self.chains[chain_index].fork_id.as_deref(),
+                                        }
+                                    }
+                                    _ => unreachable!(),
                                 }),
-                                Duration::from_secs(10), // TODO: arbitrary
-                                self.chains[chain_index].role.scale_encoding().to_vec(),
-                                1024 * 1024, // TODO: arbitrary
+                                self.notifications_protocol_handshake_timeout(substream_protocol),
+                                self.notifications_protocol_handshake(substream_protocol),
+                                self.notifications_protocol_max_handshake_size(substream_protocol),
                             );
                             self.substreams.insert(
                                 new_substream_id,
                                 SubstreamInfo {
                                     connection_id,
-                                    protocol: Some(Protocol::Notifications(
-                                        NotificationsProtocol::Grandpa { chain_index },
-                                    )),
+                                    protocol: Some(Protocol::Notifications(substream_protocol)),
                                 },
                             );
                             self.notification_substreams_by_peer_id.insert((
-                                NotificationsProtocol::Grandpa { chain_index },
+                                substream_protocol,
                                 peer_index,
                                 SubstreamDirection::Out,
                                 NotificationsSubstreamState::Pending,
@@ -2430,37 +2366,16 @@ where
                         .is_some()
                     {
                         self.notification_substreams_by_peer_id.insert((
-                            substream_protocol.try_into().unwrap(),
+                            substream_protocol,
                             peer_index,
                             SubstreamDirection::In,
                             NotificationsSubstreamState::Open,
                             substream_id,
                         ));
-                        let handshake = match substream_protocol {
-                            NotificationsProtocol::BlockAnnounces { .. } => {
-                                codec::encode_block_announces_handshake(
-                                    codec::BlockAnnouncesHandshakeRef {
-                                        best_hash: &self.chains[chain_index].best_hash,
-                                        best_number: self.chains[chain_index].best_number,
-                                        role: self.chains[chain_index].role,
-                                        genesis_hash: &self.chains[chain_index].genesis_hash,
-                                    },
-                                    self.chains[chain_index].block_number_bytes,
-                                )
-                                .fold(Vec::new(), |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                })
-                            }
-                            NotificationsProtocol::Grandpa { .. } => {
-                                self.chains[chain_index].role.scale_encoding().to_vec()
-                            }
-                            NotificationsProtocol::Transactions { .. } => Vec::new(),
-                        };
                         self.inner.accept_in_notifications(
                             substream_id,
-                            handshake,
-                            1024 * 1024, // TODO: ?!
+                            self.notifications_protocol_handshake(substream_protocol),
+                            self.notifications_protocol_max_notification_size(substream_protocol),
                         );
                         continue;
                     }
@@ -3292,20 +3207,6 @@ where
             })
             .ok_or(())?;
 
-        let handshake = codec::encode_block_announces_handshake(
-            codec::BlockAnnouncesHandshakeRef {
-                best_hash: &chain_info.best_hash,
-                best_number: chain_info.best_number,
-                role: chain_info.role,
-                genesis_hash: &chain_info.genesis_hash,
-            },
-            self.chains[chain_id.0].block_number_bytes,
-        )
-        .fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        });
-
         for (protocol, in_substream_id) in [
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
@@ -3358,17 +3259,25 @@ where
             ));
             debug_assert!(_was_inserted);
 
-            self.inner
-                .accept_in_notifications(in_substream_id, handshake.clone(), 1024 * 1024)
-            // TODO: constant
+            self.inner.accept_in_notifications(
+                in_substream_id,
+                self.notifications_protocol_handshake(protocol),
+                self.notifications_protocol_max_notification_size(protocol),
+            )
         }
 
         let substream_id = self.inner.open_out_notifications(
             connection_id,
             protocol_name,
-            Duration::from_secs(10), // TODO: arbitrary
-            handshake,
-            1024 * 1024, // TODO: arbitrary
+            self.notifications_protocol_handshake_timeout(NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            }),
+            self.notifications_protocol_handshake(NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            }),
+            self.notifications_protocol_max_handshake_size(NotificationsProtocol::BlockAnnounces {
+                chain_index: chain_id.0,
+            }),
         );
 
         let _prev_value = self.substreams.insert(
@@ -3903,6 +3812,62 @@ where
         let peer_id = self.peers.remove(peer_index.0);
         let _was_in = self.peers_by_peer_id.remove(&peer_id);
         debug_assert_eq!(_was_in, Some(peer_index));
+    }
+
+    /// Returns the maximum allowed size (in bytes) of the handshake of the given protocol.
+    fn notifications_protocol_max_handshake_size(&self, protocol: NotificationsProtocol) -> usize {
+        // TODO: these numbers are arbitrary, must be made to match Substrate
+        match protocol {
+            NotificationsProtocol::BlockAnnounces { .. } => 64 * 1024,
+            NotificationsProtocol::Transactions { .. } => 4,
+            NotificationsProtocol::Grandpa { .. } => 32,
+        }
+    }
+
+    /// Returns the maximum allowed size (in bytes) of a notification of the given protocol.
+    fn notifications_protocol_max_notification_size(
+        &self,
+        _protocol: NotificationsProtocol,
+    ) -> usize {
+        // TODO: this number is arbitrary, must be made to match Substrate
+        1024 * 1024 // TODO:
+    }
+
+    /// Returns the timeout allowed for the remote to send back the handshake of the given
+    /// protocol.
+    fn notifications_protocol_handshake_timeout(
+        &self,
+        _protocol: NotificationsProtocol,
+    ) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    /// Builds the handshake to send to the remote when opening a notifications protocol.
+    fn notifications_protocol_handshake(&self, protocol: NotificationsProtocol) -> Vec<u8> {
+        let handshake = match protocol {
+            NotificationsProtocol::BlockAnnounces { chain_index } => {
+                codec::encode_block_announces_handshake(
+                    codec::BlockAnnouncesHandshakeRef {
+                        best_hash: &self.chains[chain_index].best_hash,
+                        best_number: self.chains[chain_index].best_number,
+                        role: self.chains[chain_index].role,
+                        genesis_hash: &self.chains[chain_index].genesis_hash,
+                    },
+                    self.chains[chain_index].block_number_bytes,
+                )
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                })
+            }
+            NotificationsProtocol::Transactions { .. } => Vec::new(),
+            NotificationsProtocol::Grandpa { chain_index } => {
+                self.chains[chain_index].role.scale_encoding().to_vec()
+            }
+        };
+
+        debug_assert!(handshake.len() <= self.notifications_protocol_max_handshake_size(protocol));
+        handshake
     }
 }
 

@@ -15,6 +15,7 @@
 - Fix panic when `chainHead_unstable_follow` is called too many times. ([#1392](https://github.com/smol-dot/smoldot/pull/1392))
 - Fix panic when opening a gossiping link to a peer that we were previously connected to. ([#1395](https://github.com/smol-dot/smoldot/pull/1395))
 - Fix panic when the discovery system finds same address attributed to two different peers. ([#1412](https://github.com/smol-dot/smoldot/pull/1412))
+- Fix sending a block announce handshake when accepting an inbound transactions or grandpa substream in some rare situations.
 
 ## 2.0.10 - 2023-11-17
 
