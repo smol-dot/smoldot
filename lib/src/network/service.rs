@@ -346,6 +346,16 @@ enum SubstreamDirection {
     Out,
 }
 
+impl SubstreamDirection {
+    fn min_value() -> Self {
+        SubstreamDirection::In
+    }
+
+    fn max_value() -> Self {
+        SubstreamDirection::Out
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum NotificationsSubstreamState {
     Pending,
@@ -550,15 +560,15 @@ where
                     (
                         protocol,
                         PeerIndex(usize::min_value()),
-                        SubstreamDirection::In,
-                        NotificationsSubstreamState::Pending,
+                        SubstreamDirection::min_value(),
+                        NotificationsSubstreamState::min_value(),
                         SubstreamId::min_value(),
                     )
                         ..=(
                             protocol,
                             PeerIndex(usize::max_value()),
-                            SubstreamDirection::Out,
-                            NotificationsSubstreamState::Open,
+                            SubstreamDirection::max_value(),
+                            NotificationsSubstreamState::max_value(),
                             SubstreamId::max_value(),
                         ),
                 )
