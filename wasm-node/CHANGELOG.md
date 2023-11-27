@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The order in which smoldot connects to peers is now random rather than depending on the peer.
+
 ## 2.0.12 - 2023-11-27
 
 ### Fixed
