@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix panic in network service when all chains are removed.
+
 ## 2.0.11 - 2023-11-27
 
 ### Changed

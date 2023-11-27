@@ -978,16 +978,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
             };
             let message_for_chain_received = async {
-                if !task.messages_rx.is_empty() {
-                    let (chain_id, message) = task
-                        .messages_rx
-                        .next()
-                        .await
-                        .unwrap_or_else(|| unreachable!());
-                    WakeUpReason::MessageForChain(chain_id, message)
-                } else {
+                // Note that when the last entry of `messages_rx` yields `None`, `messages_rx`
+                // itself will yield `None`. For this reason, we can't use
+                // `task.messages_rx.is_empty()` to determine whether `messages_rx` will
+                // yield `None`.
+                let Some((chain_id, message)) = task.messages_rx.next().await else {
                     future::pending().await
-                }
+                };
+                WakeUpReason::MessageForChain(chain_id, message)
             };
             let message_from_task_received = async {
                 let (connection_id, message) = task.tasks_messages_rx.next().await.unwrap();
