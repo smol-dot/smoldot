@@ -18,6 +18,7 @@
 - Fix sending a block announce handshake when accepting an inbound transactions or grandpa substream in some rare situations.
 - Fix automatically refusing inbound notification substreams if a different inbound substream of the same protocol existed on the same connection, even when that other substream has been closed.
 - Inbound notification substreams opened by the remote and that are no longer wanted are now forcefully closed if the remote doesn't close them gracefully.
+- Fix panic when a connection is shutting down after the notification substreams of that connection were opened in an unconventional order.
 
 ## 2.0.10 - 2023-11-17
 

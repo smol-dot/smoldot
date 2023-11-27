@@ -1710,17 +1710,15 @@ where
                     } else {
                         self.substreams.remove(&substream_id).unwrap()
                     };
-
                     let connection_id = substream_info.connection_id;
                     let peer_index = *self.inner[connection_id]
                         .peer_index
                         .as_ref()
                         .unwrap_or_else(|| unreachable!());
-
-                    // All outgoing substream attempts are cancelled when a chain is removed, as
-                    // such `protocol` can't be `None`.
                     let Some(Protocol::Notifications(substream_protocol)) = substream_info.protocol
                     else {
+                        // All outgoing substream attempts are cancelled when a chain is removed,
+                        // as such `protocol` can't be `None`.
                         unreachable!();
                     };
 
@@ -2026,9 +2024,12 @@ where
                                 .is_some());
 
                             // If the substream failed to open, we simply try again.
-                            // Trying agains means that we might be hammering the remote with
+                            // Trying again means that we might be hammering the remote with
                             // substream requests, however as of the writing of this text this is
                             // necessary in order to bypass an issue in Substrate.
+                            // Note that in the situation where the connection is shutting down,
+                            // we don't re-open the substream on a different connection, but
+                            // that's ok as the block announces substream should be closed soon.
                             if result.is_err()
                                 && !self.inner.connection_state(connection_id).shutting_down
                             {
@@ -2337,6 +2338,13 @@ where
                         // to reopen these two substreams.
                         NotificationsProtocol::Transactions { .. }
                         | NotificationsProtocol::Grandpa { .. } => {
+                            // Don't actually try to reopen if the connection is shutting down.
+                            // Note that we don't try to reopen on a different connection, as the
+                            // block announces substream will very soon be closed too anyway.
+                            if self.inner.connection_state(connection_id).shutting_down {
+                                continue;
+                            }
+
                             let new_substream_id = self.inner.open_out_notifications(
                                 connection_id,
                                 codec::encode_protocol_name_string(match substream_protocol {
