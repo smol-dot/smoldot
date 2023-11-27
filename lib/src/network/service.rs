@@ -171,6 +171,18 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     /// Underlying data structure.
     inner: collection::Network<ConnectionInfo<TConn>, TNow>,
 
+    /// List of all chains that have been added.
+    // TODO: shrink to fit from time to time
+    chains: slab::Slab<Chain<TChain>>,
+
+    /// Chains indexed by genesis hash and fork ID.
+    ///
+    /// Contains the same number of entries as [`ChainNetwork::chains`]. The values are `usize`s
+    /// that are indices into [`ChainNetwork::chains`].
+    // TODO: shrink to fit from time to time
+    chains_by_protocol_info:
+        hashbrown::HashMap<([u8; 32], Option<String>), usize, fnv::FnvBuildHasher>,
+
     /// List of all known network identities. The `usize` in [`PeerIndex`] refers to an index
     /// within this list.
     // TODO: shrink to fit from time to time
@@ -180,35 +192,8 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     // TODO: shrink to fit from time to time
     peers_by_peer_id: hashbrown::HashMap<PeerId, PeerIndex, SipHasherBuild>,
 
-    /// List of all chains that have been added.
-    // TODO: shrink to fit from time to time
-    chains: slab::Slab<Chain<TChain>>,
-
-    /// All the substreams of [`ChainNetwork::inner`], with info attached to them.
-    // TODO: add a substream user data to `collection::Network` instead
-    // TODO: shrink to fit from time to time
-    substreams: hashbrown::HashMap<SubstreamId, SubstreamInfo, fnv::FnvBuildHasher>,
-
     /// Connections indexed by the value in [`ConnectionInfo::peer_index`].
     connections_by_peer_id: BTreeSet<(PeerIndex, collection::ConnectionId)>,
-
-    /// All the outbound notification substreams, indexed by protocol, `PeerId`, and state.
-    // TODO: unclear whether PeerId should come before or after the state, same for direction/state
-    notification_substreams_by_peer_id: BTreeSet<(
-        NotificationsProtocol,
-        PeerIndex,
-        SubstreamDirection,
-        NotificationsSubstreamState,
-        collection::SubstreamId,
-    )>,
-
-    /// Chains indexed by genesis hash and fork ID.
-    ///
-    /// Contains the same number of entries as [`ChainNetwork::chains`]. The values are `usize`s
-    /// that are indices into [`ChainNetwork::chains`].
-    // TODO: shrink to fit from time to time
-    chains_by_protocol_info:
-        hashbrown::HashMap<([u8; 32], Option<String>), usize, fnv::FnvBuildHasher>,
 
     /// List of peers that have been marked as desired. Can include peers not connected to the
     /// local node yet.
@@ -233,6 +218,21 @@ pub struct ChainNetwork<TChain, TConn, TNow> {
     // TODO: shrink to fit from time to time
     opened_gossip_undesired:
         hashbrown::HashSet<(ChainId, PeerIndex, GossipKind), fnv::FnvBuildHasher>,
+
+    /// All the substreams of [`ChainNetwork::inner`], with info attached to them.
+    // TODO: add a substream user data to `collection::Network` instead
+    // TODO: shrink to fit from time to time
+    substreams: hashbrown::HashMap<SubstreamId, SubstreamInfo, fnv::FnvBuildHasher>,
+
+    /// All the outbound notification substreams, indexed by protocol, `PeerId`, and state.
+    // TODO: unclear whether PeerId should come before or after the state, same for direction/state
+    notification_substreams_by_peer_id: BTreeSet<(
+        NotificationsProtocol,
+        PeerIndex,
+        SubstreamDirection,
+        NotificationsSubstreamState,
+        collection::SubstreamId,
+    )>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
