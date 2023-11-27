@@ -3303,12 +3303,9 @@ where
             return Err(OpenGossipError::AlreadyOpened);
         }
 
-        let protocol_name =
-            codec::encode_protocol_name_string(codec::ProtocolName::BlockAnnounces {
-                genesis_hash: chain_info.genesis_hash,
-                fork_id: chain_info.fork_id.as_deref(),
-            });
-
+        // Choose the connection on which to open the substream.
+        // This is done ahead of time, as we don't want to do anything before potentially
+        // returning an error.
         // TODO: this is O(n) but is it really a problem? you're only supposed to have max 1 or 2 connections per PeerId
         let connection_id = self
             .connections_by_peer_id
@@ -3323,6 +3320,7 @@ where
             })
             .ok_or(OpenGossipError::NoConnection)?;
 
+        // Accept inbound substreams.
         for (protocol, in_substream_id) in [
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
@@ -3384,9 +3382,13 @@ where
             )
         }
 
+        // Open the block announces substream.
         let substream_id = self.inner.open_out_notifications(
             connection_id,
-            protocol_name,
+            codec::encode_protocol_name_string(codec::ProtocolName::BlockAnnounces {
+                genesis_hash: chain_info.genesis_hash,
+                fork_id: chain_info.fork_id.as_deref(),
+            }),
             self.notifications_protocol_handshake_timeout(NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
             }),
@@ -3397,7 +3399,6 @@ where
                 chain_index: chain_id.0,
             }),
         );
-
         let _prev_value = self.substreams.insert(
             substream_id,
             SubstreamInfo {
@@ -3410,7 +3411,6 @@ where
             },
         );
         debug_assert!(_prev_value.is_none());
-
         let _was_inserted = self.notification_substreams_by_peer_id.insert((
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
@@ -3422,6 +3422,7 @@ where
         ));
         debug_assert!(_was_inserted);
 
+        // Update the desired peers tracking.
         if !self
             .gossip_desired_peers
             .contains(&(peer_index, kind, chain_id.0))
@@ -3433,7 +3434,6 @@ where
             ));
             debug_assert!(_was_inserted);
         }
-
         self.connected_unopened_gossip_desired
             .remove(&(peer_index, chain_id, kind));
 
