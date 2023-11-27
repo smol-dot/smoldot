@@ -1999,6 +1999,8 @@ where
 
                         NotificationsProtocol::Transactions { chain_index }
                         | NotificationsProtocol::Grandpa { chain_index } => {
+                            // TODO: doesn't check the handshakes
+
                             // This can only happen if we have a block announces substream with
                             // that peer, otherwise the substream opening attempt should have
                             // been cancelled.
