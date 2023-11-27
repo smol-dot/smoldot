@@ -296,9 +296,7 @@ struct SubstreamInfo {
 enum Protocol {
     Identify,
     Ping,
-    BlockAnnounces { chain_index: usize },
-    Transactions { chain_index: usize },
-    Grandpa { chain_index: usize },
+    Notifications(NotificationsProtocol),
     Sync { chain_index: usize },
     LightUnknown { chain_index: usize },
     LightStorage { chain_index: usize },
@@ -313,31 +311,6 @@ enum NotificationsProtocol {
     BlockAnnounces { chain_index: usize },
     Transactions { chain_index: usize },
     Grandpa { chain_index: usize },
-}
-
-impl TryFrom<Protocol> for NotificationsProtocol {
-    type Error = ();
-
-    fn try_from(value: Protocol) -> Result<Self, Self::Error> {
-        match value {
-            Protocol::BlockAnnounces { chain_index } => {
-                Ok(NotificationsProtocol::BlockAnnounces { chain_index })
-            }
-            Protocol::Transactions { chain_index } => {
-                Ok(NotificationsProtocol::Transactions { chain_index })
-            }
-            Protocol::Grandpa { chain_index } => Ok(NotificationsProtocol::Grandpa { chain_index }),
-            Protocol::Identify => Err(()),
-            Protocol::Ping => Err(()),
-            Protocol::Sync { .. } => Err(()),
-            Protocol::LightUnknown { .. } => Err(()),
-            Protocol::LightStorage { .. } => Err(()),
-            Protocol::LightCall { .. } => Err(()),
-            Protocol::Kad { .. } => Err(()),
-            Protocol::SyncWarp { .. } => Err(()),
-            Protocol::State { .. } => Err(()),
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -608,9 +581,13 @@ where
         // TODO: how to do request-responses in non-O(n) time?
         for (_, substream) in &mut self.substreams {
             match substream.protocol {
-                Some(Protocol::BlockAnnounces { chain_index })
-                | Some(Protocol::Transactions { chain_index })
-                | Some(Protocol::Grandpa { chain_index })
+                Some(Protocol::Notifications(NotificationsProtocol::BlockAnnounces {
+                    chain_index,
+                }))
+                | Some(Protocol::Notifications(NotificationsProtocol::Transactions {
+                    chain_index,
+                }))
+                | Some(Protocol::Notifications(NotificationsProtocol::Grandpa { chain_index }))
                 | Some(Protocol::Sync { chain_index })
                 | Some(Protocol::LightUnknown { chain_index })
                 | Some(Protocol::LightStorage { chain_index })
@@ -1421,26 +1398,31 @@ where
                                     request_max_size: None,
                                 },
                                 Protocol::Ping => collection::InboundTy::Ping,
-                                Protocol::BlockAnnounces { .. } => {
+                                Protocol::Notifications(
+                                    NotificationsProtocol::BlockAnnounces { .. },
+                                ) => {
                                     collection::InboundTy::Notifications {
                                         max_handshake_size: 1024 * 1024, // TODO: arbitrary
                                     }
                                 }
-                                Protocol::Transactions { .. } => {
-                                    collection::InboundTy::Notifications {
-                                        max_handshake_size: 4,
-                                    }
-                                }
-                                Protocol::Grandpa { chain_index }
-                                    if self.chains[chain_index]
-                                        .grandpa_protocol_config
-                                        .is_some() =>
+                                Protocol::Notifications(NotificationsProtocol::Transactions {
+                                    ..
+                                }) => collection::InboundTy::Notifications {
+                                    max_handshake_size: 4,
+                                },
+                                Protocol::Notifications(NotificationsProtocol::Grandpa {
+                                    chain_index,
+                                }) if self.chains[chain_index]
+                                    .grandpa_protocol_config
+                                    .is_some() =>
                                 {
                                     collection::InboundTy::Notifications {
                                         max_handshake_size: 4,
                                     }
                                 }
-                                Protocol::Grandpa { .. } => {
+                                Protocol::Notifications(NotificationsProtocol::Grandpa {
+                                    ..
+                                }) => {
                                     self.inner.reject_inbound(substream_id);
                                     continue;
                                 }
@@ -1603,10 +1585,7 @@ where
                         ),
 
                         // The protocols below aren't request-response protocols.
-                        Some(Protocol::Ping)
-                        | Some(Protocol::BlockAnnounces { .. })
-                        | Some(Protocol::Transactions { .. })
-                        | Some(Protocol::Grandpa { .. }) => unreachable!(),
+                        Some(Protocol::Ping) | Some(Protocol::Notifications(_)) => unreachable!(),
                     };
 
                     return Some(Event::RequestResult {
@@ -1715,8 +1694,7 @@ where
 
                     // All outgoing substream attempts are cancelled when a chain is removed, as
                     // such `protocol` can't be `None`.
-                    let Some(Ok(substream_protocol)) =
-                        substream_info.protocol.map(NotificationsProtocol::try_from)
+                    let Some(Protocol::Notifications(substream_protocol)) = substream_info.protocol
                     else {
                         unreachable!();
                     };
@@ -1813,9 +1791,11 @@ where
                                             new_substream_id,
                                             SubstreamInfo {
                                                 connection_id,
-                                                protocol: Some(Protocol::Transactions {
-                                                    chain_index,
-                                                }),
+                                                protocol: Some(Protocol::Notifications(
+                                                    NotificationsProtocol::Transactions {
+                                                        chain_index,
+                                                    },
+                                                )),
                                             },
                                         );
 
@@ -1872,7 +1852,9 @@ where
                                             new_substream_id,
                                             SubstreamInfo {
                                                 connection_id,
-                                                protocol: Some(Protocol::Grandpa { chain_index }),
+                                                protocol: Some(Protocol::Notifications(
+                                                    NotificationsProtocol::Grandpa { chain_index },
+                                                )),
                                             },
                                         );
 
@@ -2172,8 +2154,7 @@ where
 
                     // All outgoing substream attempts are cancelled when a chain is removed, as
                     // such `protocol` can't be `None`.
-                    let Some(Ok(substream_protocol)) =
-                        substream_info.protocol.map(NotificationsProtocol::try_from)
+                    let Some(Protocol::Notifications(substream_protocol)) = substream_info.protocol
                     else {
                         unreachable!();
                     };
@@ -2310,7 +2291,9 @@ where
                                 new_substream_id,
                                 SubstreamInfo {
                                     connection_id,
-                                    protocol: Some(Protocol::Transactions { chain_index }),
+                                    protocol: Some(Protocol::Notifications(
+                                        NotificationsProtocol::Transactions { chain_index },
+                                    )),
                                 },
                             );
                             self.notification_substreams_by_peer_id.insert((
@@ -2336,7 +2319,9 @@ where
                                 new_substream_id,
                                 SubstreamInfo {
                                     connection_id,
-                                    protocol: Some(Protocol::Grandpa { chain_index }),
+                                    protocol: Some(Protocol::Notifications(
+                                        NotificationsProtocol::Grandpa { chain_index },
+                                    )),
                                 },
                             );
                             self.notification_substreams_by_peer_id.insert((
@@ -2384,6 +2369,9 @@ where
                         self.substreams.remove(&substream_id);
                         continue;
                     };
+                    let Protocol::Notifications(substream_protocol) = substream_protocol else {
+                        unreachable!()
+                    };
 
                     // Check whether a substream with the same protocol already exists with that
                     // peer, and if so deny the request.
@@ -2391,14 +2379,14 @@ where
                         .notification_substreams_by_peer_id
                         .range(
                             (
-                                substream_protocol.try_into().unwrap(),
+                                substream_protocol,
                                 peer_index,
                                 SubstreamDirection::In,
                                 NotificationsSubstreamState::min_value(),
                                 SubstreamId::min_value(),
                             )
                                 ..=(
-                                    substream_protocol.try_into().unwrap(),
+                                    substream_protocol,
                                     peer_index,
                                     SubstreamDirection::In,
                                     NotificationsSubstreamState::max_value(),
@@ -2414,13 +2402,9 @@ where
                     }
 
                     // Find the `chain_index`.
-                    let (Protocol::BlockAnnounces { chain_index }
-                    | Protocol::Transactions { chain_index }
-                    | Protocol::Grandpa { chain_index }) = substream_protocol
-                    else {
-                        // Any other protocol isn't a notifications protocol.
-                        unreachable!()
-                    };
+                    let (NotificationsProtocol::BlockAnnounces { chain_index }
+                    | NotificationsProtocol::Transactions { chain_index }
+                    | NotificationsProtocol::Grandpa { chain_index }) = substream_protocol;
 
                     // If an outgoing block announces notifications protocol (either pending or
                     // fully open) exists, accept the substream immediately.
@@ -2453,7 +2437,7 @@ where
                             substream_id,
                         ));
                         let handshake = match substream_protocol {
-                            Protocol::BlockAnnounces { .. } => {
+                            NotificationsProtocol::BlockAnnounces { .. } => {
                                 codec::encode_block_announces_handshake(
                                     codec::BlockAnnouncesHandshakeRef {
                                         best_hash: &self.chains[chain_index].best_hash,
@@ -2468,11 +2452,10 @@ where
                                     a
                                 })
                             }
-                            Protocol::Grandpa { .. } => {
+                            NotificationsProtocol::Grandpa { .. } => {
                                 self.chains[chain_index].role.scale_encoding().to_vec()
                             }
-                            Protocol::Transactions { .. } => Vec::new(),
-                            _ => unreachable!(),
+                            NotificationsProtocol::Transactions { .. } => Vec::new(),
                         };
                         self.inner.accept_in_notifications(
                             substream_id,
@@ -2484,7 +2467,10 @@ where
 
                     // It is forbidden to cold-open a substream other than the block announces
                     // substream.
-                    if !matches!(substream_protocol, Protocol::BlockAnnounces { .. }) {
+                    if !matches!(
+                        substream_protocol,
+                        NotificationsProtocol::BlockAnnounces { .. }
+                    ) {
                         self.inner.reject_in_notifications(substream_id);
                         self.substreams.remove(&substream_id);
                         continue;
@@ -2492,7 +2478,7 @@ where
 
                     // Update the local state and return the event.
                     self.notification_substreams_by_peer_id.insert((
-                        NotificationsProtocol::BlockAnnounces { chain_index },
+                        substream_protocol,
                         peer_index,
                         SubstreamDirection::In,
                         NotificationsSubstreamState::Pending,
@@ -2524,7 +2510,9 @@ where
                     // except for block announce substreams. Additionally, when a chain is removed,
                     // all its pending block announce substreams are rejected. Therefore, this
                     // event can only happen for block announce substreams.
-                    let Some(Protocol::BlockAnnounces { chain_index }) = substream_info.protocol
+                    let Some(Protocol::Notifications(NotificationsProtocol::BlockAnnounces {
+                        chain_index,
+                    })) = substream_info.protocol
                     else {
                         unreachable!()
                     };
@@ -2562,21 +2550,17 @@ where
                             // Ignore the notification.
                             continue;
                         }
-                        Some(Protocol::BlockAnnounces { chain_index }) => chain_index,
-                        Some(Protocol::Transactions { chain_index }) => chain_index,
-                        Some(Protocol::Grandpa { chain_index }) => chain_index,
+                        Some(Protocol::Notifications(NotificationsProtocol::BlockAnnounces {
+                            chain_index,
+                        })) => chain_index,
+                        Some(Protocol::Notifications(NotificationsProtocol::Transactions {
+                            chain_index,
+                        })) => chain_index,
+                        Some(Protocol::Notifications(NotificationsProtocol::Grandpa {
+                            chain_index,
+                        })) => chain_index,
                         // Other protocols are not notification protocols.
-                        Some(
-                            Protocol::Identify
-                            | Protocol::Ping
-                            | Protocol::Sync { .. }
-                            | Protocol::LightUnknown { .. }
-                            | Protocol::LightStorage { .. }
-                            | Protocol::LightCall { .. }
-                            | Protocol::Kad { .. }
-                            | Protocol::SyncWarp { .. }
-                            | Protocol::State { .. },
-                        ) => unreachable!(),
+                        Some(_) => unreachable!(),
                     };
                     let connection_info = &self.inner[substream_info.connection_id];
                     // Notification substreams can only happen on connections after their
@@ -2616,7 +2600,9 @@ where
 
                     // Decode the notification and return an event.
                     match substream_info.protocol {
-                        Some(Protocol::BlockAnnounces { .. }) => {
+                        Some(Protocol::Notifications(NotificationsProtocol::BlockAnnounces {
+                            ..
+                        })) => {
                             if let Err(err) = codec::decode_block_announce(
                                 &notification,
                                 self.chains[chain_index].block_number_bytes,
@@ -2636,10 +2622,14 @@ where
                                 },
                             });
                         }
-                        Some(Protocol::Transactions { .. }) => {
+                        Some(Protocol::Notifications(NotificationsProtocol::Transactions {
+                            ..
+                        })) => {
                             // TODO: not implemented
                         }
-                        Some(Protocol::Grandpa { .. }) => {
+                        Some(Protocol::Notifications(NotificationsProtocol::Grandpa {
+                            ..
+                        })) => {
                             let decoded_notif = match codec::decode_grandpa_notification(
                                 &notification,
                                 self.chains[chain_index].block_number_bytes,
@@ -2969,21 +2959,21 @@ where
             let protocol_name = match protocol {
                 Protocol::Identify => codec::ProtocolName::Identify,
                 Protocol::Ping => codec::ProtocolName::Ping,
-                Protocol::BlockAnnounces { chain_index } => {
+                Protocol::Notifications(NotificationsProtocol::BlockAnnounces { chain_index }) => {
                     let chain_info = &self.chains[chain_index];
                     codec::ProtocolName::BlockAnnounces {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
-                Protocol::Transactions { chain_index } => {
+                Protocol::Notifications(NotificationsProtocol::Transactions { chain_index }) => {
                     let chain_info = &self.chains[chain_index];
                     codec::ProtocolName::Transactions {
                         genesis_hash: chain_info.genesis_hash,
                         fork_id: chain_info.fork_id.as_deref(),
                     }
                 }
-                Protocol::Grandpa { chain_index } => {
+                Protocol::Notifications(NotificationsProtocol::Grandpa { chain_index }) => {
                     let chain_info = &self.chains[chain_index];
                     codec::ProtocolName::Grandpa {
                         genesis_hash: chain_info.genesis_hash,
@@ -3385,9 +3375,11 @@ where
             substream_id,
             SubstreamInfo {
                 connection_id,
-                protocol: Some(Protocol::BlockAnnounces {
-                    chain_index: chain_id.0,
-                }),
+                protocol: Some(Protocol::Notifications(
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                )),
             },
         );
         debug_assert!(_prev_value.is_none());
@@ -3788,30 +3780,30 @@ where
             codec::ProtocolName::BlockAnnounces {
                 genesis_hash,
                 fork_id,
-            } => Protocol::BlockAnnounces {
+            } => Protocol::Notifications(NotificationsProtocol::BlockAnnounces {
                 chain_index: *self
                     .chains_by_protocol_info
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
-            },
+            }),
             codec::ProtocolName::Transactions {
                 genesis_hash,
                 fork_id,
-            } => Protocol::Transactions {
+            } => Protocol::Notifications(NotificationsProtocol::Transactions {
                 chain_index: *self
                     .chains_by_protocol_info
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
-            },
+            }),
             codec::ProtocolName::Grandpa {
                 genesis_hash,
                 fork_id,
-            } => Protocol::Grandpa {
+            } => Protocol::Notifications(NotificationsProtocol::Grandpa {
                 chain_index: *self
                     .chains_by_protocol_info
                     .get(&(genesis_hash, fork_id.map(|fork_id| fork_id.to_owned())))
                     .ok_or(())?,
-            },
+            }),
             codec::ProtocolName::Sync {
                 genesis_hash,
                 fork_id,
