@@ -3141,18 +3141,17 @@ where
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
-    // TODO: proper error
     pub fn gossip_open(
         &mut self,
         chain_id: ChainId,
         target: &PeerId,
         kind: GossipKind,
-    ) -> Result<(), ()> {
+    ) -> Result<(), OpenGossipError> {
         let GossipKind::ConsensusTransactions = kind;
 
         let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
             // If the `PeerId` is unknown, then we also don't have any connection to it.
-            return Err(());
+            return Err(OpenGossipError::NoConnection);
         };
 
         let chain_info = &self.chains[chain_id.0];
@@ -3184,7 +3183,7 @@ where
             .next()
             .is_some()
         {
-            return Err(());
+            return Err(OpenGossipError::AlreadyOpened);
         }
 
         let protocol_name =
@@ -3205,7 +3204,7 @@ where
                 let state = self.inner.connection_state(*connection_id);
                 state.established && !state.shutting_down
             })
-            .ok_or(())?;
+            .ok_or(OpenGossipError::NoConnection)?;
 
         for (protocol, in_substream_id) in [
             NotificationsProtocol::BlockAnnounces {
@@ -3341,18 +3340,21 @@ where
         chain_id: ChainId,
         peer_id: &PeerId,
         kind: GossipKind,
-    ) -> Result<(), ()> {
-        // TODO: proper return value
+    ) -> Result<(), CloseGossipError> {
         let GossipKind::ConsensusTransactions = kind;
 
         let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
             // If the `PeerId` is unknown, then we also don't have any gossip link to it.
-            return Err(());
+            return Err(CloseGossipError::NotOpen);
         };
 
         // An `assert!` is necessary because we don't actually access the chain information
         // anywhere, but still want to panic if the chain is invalid.
         assert!(self.chains.contains(chain_id.0));
+
+        // Track whether this function closed anything in order to know whether to return an
+        // error at the end.
+        let mut has_closed_something = false;
 
         // Reject inbound requests, if any.
         if let Some(substream_id) = self
@@ -3380,6 +3382,8 @@ where
             .next()
             .map(|(_, _, _, _, substream_id)| *substream_id)
         {
+            has_closed_something = true;
+
             self.inner.reject_in_notifications(substream_id);
 
             let _was_in = self.notification_substreams_by_peer_id.remove(&(
@@ -3438,6 +3442,8 @@ where
                 .next()
                 .map(|(_, _, _, state, substream_id)| (*substream_id, *state))
             {
+                has_closed_something = true;
+
                 self.inner.close_out_notifications(substream_id);
 
                 let _was_in = self.notification_substreams_by_peer_id.remove(&(
@@ -3457,7 +3463,11 @@ where
             }
         }
 
-        Ok(())
+        if has_closed_something {
+            Ok(())
+        } else {
+            Err(CloseGossipError::NotOpen)
+        }
     }
 
     /// Update the state of the local node with regards to GrandPa rounds.
@@ -4152,6 +4162,22 @@ pub enum ProtocolError {
     /// Error while decoding a received blocks request.
     #[display(fmt = "Error while decoding a received blocks request: {_0}")]
     BadBlocksRequest(codec::DecodeBlockRequestError),
+}
+
+/// Error potentially returned by [`ChainNetwork::gossip_open`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum OpenGossipError {
+    /// No healthy established connection is available to open the link.
+    NoConnection,
+    /// There already is a pending or fully opened gossip link with the given peer.
+    AlreadyOpened,
+}
+
+/// Error potentially returned by [`ChainNetwork::gossip_close`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum CloseGossipError {
+    /// There exists no outgoing nor ingoing attempt at a gossip link.
+    NotOpen,
 }
 
 /// Error potentially returned when starting a request.
