@@ -2235,38 +2235,94 @@ where
                                 NotificationsProtocol::Transactions { chain_index },
                                 NotificationsProtocol::Grandpa { chain_index },
                             ] {
-                                for (substream_state, substream_id) in self
+                                for (substream_direction, substream_state, substream_id) in self
                                     .notification_substreams_by_peer_id
                                     .range(
                                         (
                                             proto,
                                             peer_index,
-                                            SubstreamDirection::Out,
+                                            SubstreamDirection::min_value(),
                                             NotificationsSubstreamState::min_value(),
                                             SubstreamId::min_value(),
                                         )
                                             ..=(
                                                 proto,
                                                 peer_index,
-                                                SubstreamDirection::Out,
+                                                SubstreamDirection::max_value(),
                                                 NotificationsSubstreamState::max_value(),
                                                 SubstreamId::max_value(),
                                             ),
                                     )
-                                    .map(|(_, _, _, state, substream_id)| (*state, *substream_id))
+                                    .map(|(_, _, direction, state, substream_id)| {
+                                        (*direction, *state, *substream_id)
+                                    })
                                     .collect::<Vec<_>>()
                                 {
-                                    self.inner.close_out_notifications(substream_id);
-                                    self.substreams.remove(&substream_id);
-                                    self.notification_substreams_by_peer_id.remove(&(
-                                        proto,
-                                        peer_index,
-                                        SubstreamDirection::Out,
-                                        substream_state,
-                                        substream_id,
-                                    ));
+                                    match (substream_direction, substream_state) {
+                                        (SubstreamDirection::Out, _) => {
+                                            self.inner.close_out_notifications(substream_id);
+                                            let _was_removed =
+                                                self.notification_substreams_by_peer_id.remove(&(
+                                                    proto,
+                                                    peer_index,
+                                                    SubstreamDirection::Out,
+                                                    substream_state,
+                                                    substream_id,
+                                                ));
+                                            debug_assert!(_was_removed);
+                                            self.substreams.remove(&substream_id);
+                                        }
+                                        (
+                                            SubstreamDirection::In,
+                                            NotificationsSubstreamState::Pending,
+                                        ) => {
+                                            // Inbound notification substreams are always accepted
+                                            // or rejected immediately when a gossip link is open.
+                                            unreachable!()
+                                        }
+                                        (
+                                            SubstreamDirection::In,
+                                            NotificationsSubstreamState::Open {
+                                                asked_to_leave: true,
+                                            },
+                                        ) => {
+                                            // Nothing to do.
+                                        }
+                                        (
+                                            SubstreamDirection::In,
+                                            NotificationsSubstreamState::Open {
+                                                asked_to_leave: false,
+                                            },
+                                        ) => {
+                                            self.inner.start_close_in_notifications(
+                                                substream_id,
+                                                Duration::from_secs(5), // TODO: arbitrary constant
+                                            );
+                                            let _was_removed =
+                                                self.notification_substreams_by_peer_id.remove(&(
+                                                    proto,
+                                                    peer_index,
+                                                    SubstreamDirection::In,
+                                                    NotificationsSubstreamState::Open {
+                                                        asked_to_leave: false,
+                                                    },
+                                                    substream_id,
+                                                ));
+                                            debug_assert!(_was_removed);
+                                            let _was_inserted =
+                                                self.notification_substreams_by_peer_id.insert((
+                                                    proto,
+                                                    peer_index,
+                                                    SubstreamDirection::In,
+                                                    NotificationsSubstreamState::Open {
+                                                        asked_to_leave: true,
+                                                    },
+                                                    substream_id,
+                                                ));
+                                            debug_assert!(_was_inserted);
+                                        }
+                                    }
                                 }
-                                // TODO: also close inbound substreams
                             }
 
                             return Some(Event::GossipDisconnected {
