@@ -17,6 +17,7 @@
 - Fix panic when the discovery system finds same address attributed to two different peers. ([#1412](https://github.com/smol-dot/smoldot/pull/1412))
 - Fix sending a block announce handshake when accepting an inbound transactions or grandpa substream in some rare situations.
 - Fix automatically refusing inbound notification substreams if a different inbound substream of the same protocol existed on the same connection, even when that other substream has been closed.
+- Inbound notification substreams opened by the remote and that are no longer wanted are now forcefully closed if the remote doesn't close them gracefully.
 
 ## 2.0.10 - 2023-11-17
 

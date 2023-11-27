@@ -3475,60 +3475,7 @@ where
         // error at the end.
         let mut has_closed_something = false;
 
-        // Reject inbound requests, if any.
-        if let Some(substream_id) = self
-            .notification_substreams_by_peer_id
-            .range(
-                (
-                    NotificationsProtocol::BlockAnnounces {
-                        chain_index: chain_id.0,
-                    },
-                    peer_index,
-                    SubstreamDirection::In,
-                    NotificationsSubstreamState::Pending,
-                    SubstreamId::min_value(),
-                )
-                    ..=(
-                        NotificationsProtocol::BlockAnnounces {
-                            chain_index: chain_id.0,
-                        },
-                        peer_index,
-                        SubstreamDirection::In,
-                        NotificationsSubstreamState::Pending,
-                        SubstreamId::max_value(),
-                    ),
-            )
-            .next()
-            .map(|(_, _, _, _, substream_id)| *substream_id)
-        {
-            has_closed_something = true;
-
-            self.inner.reject_in_notifications(substream_id);
-
-            let _was_in = self.notification_substreams_by_peer_id.remove(&(
-                NotificationsProtocol::BlockAnnounces {
-                    chain_index: chain_id.0,
-                },
-                peer_index,
-                SubstreamDirection::In,
-                NotificationsSubstreamState::Pending,
-                substream_id,
-            ));
-            debug_assert!(_was_in);
-
-            let _was_in = self.substreams.remove(&substream_id);
-            debug_assert!(_was_in.is_some());
-
-            self.opened_gossip_undesired.remove(&(
-                chain_id,
-                peer_index,
-                GossipKind::ConsensusTransactions,
-            ));
-
-            // TODO: debug_assert that there's no inbound tx/gp substream?
-        }
-
-        // Close outbound substreams, if any.
+        // Close all substreams, pending or open.
         for protocol in [
             NotificationsProtocol::BlockAnnounces {
                 chain_index: chain_id.0,
@@ -3540,13 +3487,13 @@ where
                 chain_index: chain_id.0,
             },
         ] {
-            if let Some((substream_id, state)) = self
+            for (substream_id, direction, state) in self
                 .notification_substreams_by_peer_id
                 .range(
                     (
                         protocol,
                         peer_index,
-                        SubstreamDirection::Out,
+                        SubstreamDirection::In,
                         NotificationsSubstreamState::min_value(),
                         SubstreamId::min_value(),
                     )
@@ -3558,29 +3505,88 @@ where
                             SubstreamId::max_value(),
                         ),
                 )
-                .next()
-                .map(|(_, _, _, state, substream_id)| (*substream_id, *state))
+                .map(|(_, _, dir, state, sub_id)| (*sub_id, *dir, *state))
+                .collect::<Vec<_>>()
             {
                 has_closed_something = true;
 
-                self.inner.close_out_notifications(substream_id);
+                match (direction, state) {
+                    (SubstreamDirection::Out, _) => {
+                        self.inner.close_out_notifications(substream_id);
 
-                let _was_in = self.notification_substreams_by_peer_id.remove(&(
-                    protocol,
-                    peer_index,
-                    SubstreamDirection::Out,
-                    state,
-                    substream_id,
-                ));
-                debug_assert!(_was_in);
+                        let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                            protocol,
+                            peer_index,
+                            direction,
+                            state,
+                            substream_id,
+                        ));
+                        debug_assert!(_was_in);
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
+                    (SubstreamDirection::In, NotificationsSubstreamState::Pending) => {
+                        self.inner.reject_in_notifications(substream_id);
 
-                let _was_in = self.substreams.remove(&substream_id);
-                debug_assert!(_was_in.is_some());
+                        let _was_in = self.notification_substreams_by_peer_id.remove(&(
+                            protocol,
+                            peer_index,
+                            direction,
+                            state,
+                            substream_id,
+                        ));
+                        debug_assert!(_was_in);
+                        let _was_in = self.substreams.remove(&substream_id);
+                        debug_assert!(_was_in.is_some());
+                    }
+                    (
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: false,
+                        },
+                    ) => {
+                        self.inner
+                            .start_close_in_notifications(substream_id, Duration::from_secs(5)); // TODO: arbitrary constant
 
-                // TODO: close tx and gp as well
-                // TODO: doesn't close inbound substreams
+                        let _was_removed = self.notification_substreams_by_peer_id.remove(&(
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Open {
+                                asked_to_leave: false,
+                            },
+                            substream_id,
+                        ));
+                        debug_assert!(_was_removed);
+                        let _was_inserted = self.notification_substreams_by_peer_id.insert((
+                            protocol,
+                            peer_index,
+                            SubstreamDirection::In,
+                            NotificationsSubstreamState::Open {
+                                asked_to_leave: true,
+                            },
+                            substream_id,
+                        ));
+                        debug_assert!(_was_inserted);
+                    }
+                    (
+                        SubstreamDirection::In,
+                        NotificationsSubstreamState::Open {
+                            asked_to_leave: true,
+                        },
+                    ) => {
+                        // Nothing to do.
+                    }
+                }
             }
         }
+
+        // Desired peers tracking update.
+        self.opened_gossip_undesired.remove(&(
+            chain_id,
+            peer_index,
+            GossipKind::ConsensusTransactions,
+        ));
 
         if has_closed_something {
             Ok(())
