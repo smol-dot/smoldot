@@ -843,7 +843,7 @@ async fn background_task(mut inner: Inner) {
                                     remote_addr.as_ref(),
                                 );
                             debug_assert!(_was_in.is_ok());
-                            if let basic_peering_strategy::InsertAddressResult::Inserted {
+                            if let basic_peering_strategy::InsertAddressConnectionsResult::Inserted {
                                 address_removed: Some(addr_rm),
                             } = inner.peering_strategy.increase_address_connections(
                                 &peer_id,
