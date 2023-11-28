@@ -142,7 +142,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 
     config.platform.clone().spawn_task(
         format!("{}-legacy-state-subscriptions", config.log_target).into(),
-        Box::pin(run(Task {
+        run(Task {
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
             best_block_report: Vec::with_capacity(4),
@@ -192,7 +192,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                 32,
                 Default::default(),
             ),
-        })),
+        }),
     );
 
     requests_tx
@@ -520,7 +520,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.storage_query_in_progress = true;
                 task.platform.spawn_task(
                     format!("{}-storage-subscriptions-fetch", task.log_target).into(),
-                    Box::pin({
+                    {
                         let block_hash = *current_best_block;
                         let sync_service = task.sync_service.clone();
                         let requests_tx = task.requests_tx.clone();
@@ -547,7 +547,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                     .await;
                             }
                         }
-                    }),
+                    },
                 );
             }
         }
