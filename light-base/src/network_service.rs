@@ -57,6 +57,7 @@ use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools as _;
+use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     header,
@@ -1003,7 +1004,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     WakeUpReason::NetworkEvent(event)
                 } else if let Some(start_connect) = {
                     let x = (task.num_recent_connection_opening < task.connections_open_pool_size)
-                        .then(|| task.network.unconnected_desired().next().cloned())
+                        .then(|| {
+                            task.network
+                                .unconnected_desired()
+                                .choose(&mut task.randomness)
+                                .cloned()
+                        })
                         .flatten();
                     x
                 } {
@@ -1012,7 +1018,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let x = task
                         .network
                         .connected_unopened_gossip_desired()
-                        .next()
+                        .choose(&mut task.randomness)
                         .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
                     x
                 } {
