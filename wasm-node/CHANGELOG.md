@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.13 - 2023-11-28
+
 ### Changed
 
 - The order in which smoldot connects to peers is now random rather than depending on the peer. ([#1424](https://github.com/smol-dot/smoldot/pull/1424))
