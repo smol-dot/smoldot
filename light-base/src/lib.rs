@@ -869,7 +869,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     network_service.discover(known_nodes, false).await;
                     network_service.discover(bootstrap_nodes, true).await;
                 }
-                .boxed()
             });
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even

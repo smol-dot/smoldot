@@ -79,7 +79,7 @@ pub(crate) fn init(max_log_level: u32) {
     // the node.
     platform::PLATFORM_REF.spawn_task(
         "memory-printer".into(),
-        Box::pin(async move {
+        async move {
             let mut previous_read_bytes = 0;
             let mut previous_sent_bytes = 0;
             let interval = 60;
@@ -117,7 +117,7 @@ pub(crate) fn init(max_log_level: u32) {
                     BytesDisplay(avg_up)
                 );
             }
-        }),
+        },
     );
 }
 
