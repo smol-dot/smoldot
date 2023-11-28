@@ -1093,8 +1093,8 @@ fn start_services<TPlat: platform::PlatformRef>(
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
             identify_agent_version: network_identify_agent_version,
-            connections_open_pool_size: 5,
-            connections_open_pool_restore_delay: Duration::from_secs(1),
+            connections_open_pool_size: 8,
+            connections_open_pool_restore_delay: Duration::from_millis(100),
             chains_capacity: 1,
         })
     });

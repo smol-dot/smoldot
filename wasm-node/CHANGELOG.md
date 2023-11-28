@@ -5,6 +5,7 @@
 ### Changed
 
 - The order in which smoldot connects to peers is now random rather than depending on the peer. ([#1424](https://github.com/smol-dot/smoldot/pull/1424))
+- Increase the rate at which connections are opened to 10 per second, with a pool of 8 simultaneous connections openings. ([#1425](https://github.com/smol-dot/smoldot/pull/1425))
 
 ## 2.0.12 - 2023-11-27
 
