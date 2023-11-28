@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fix panic when disconnecting from a peer whose identity didn't match the identity that was expected when connecting to it.
+- Fix panic when disconnecting from a peer whose identity didn't match the identity that was expected when connecting to it. ([#1431](https://github.com/smol-dot/smoldot/pull/1431))
 
 ## 2.0.12 - 2023-11-27
 
