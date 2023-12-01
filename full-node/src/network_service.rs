@@ -1522,7 +1522,11 @@ async fn background_task(mut inner: Inner) {
             );
         }
 
-        let message = {
+        enum WakeUpReason {
+            Message(ToBackground),
+        }
+
+        let wake_up_reason = {
             let foreground_msg = async { Some(inner.to_background_rx.next().await) };
             let sending_done = async {
                 if let either::Right(sending) = &mut inner.event_senders {
@@ -1535,17 +1539,17 @@ async fn background_task(mut inner: Inner) {
             };
 
             match foreground_msg.or(sending_done).await {
-                Some(msg) => msg.unwrap(),
+                Some(msg) => WakeUpReason::Message(msg.unwrap()),
                 None => continue,
             }
         };
 
-        match message {
-            ToBackground::FromConnectionTask {
+        match wake_up_reason {
+            WakeUpReason::Message(ToBackground::FromConnectionTask {
                 connection_id,
                 opaque_message,
                 ..
-            } => {
+            }) => {
                 if let Some(opaque_message) = opaque_message {
                     inner
                         .network
@@ -1553,11 +1557,11 @@ async fn background_task(mut inner: Inner) {
                 }
             }
 
-            ToBackground::IncomingConnection {
+            WakeUpReason::Message(ToBackground::IncomingConnection {
                 socket,
                 multiaddr,
                 when_accepted,
-            } => {
+            }) => {
                 let (tx, rx) = channel::bounded(16); // TODO: ?!
 
                 let (connection_id, connection_task) = inner.network.add_single_stream_connection(
@@ -1582,7 +1586,7 @@ async fn background_task(mut inner: Inner) {
                 )));
             }
 
-            ToBackground::StartKademliaDiscoveries { when_done } => {
+            WakeUpReason::Message(ToBackground::StartKademliaDiscoveries { when_done }) => {
                 for chain_id in inner.network.chains().collect::<Vec<_>>() {
                     let random_peer_id =
                         PeerId::from_public_key(&peer_id::PublicKey::Ed25519(rand::random()));
@@ -1620,18 +1624,18 @@ async fn background_task(mut inner: Inner) {
                 let _ = when_done.send(());
             }
 
-            ToBackground::ForegroundShutdown => {
+            WakeUpReason::Message(ToBackground::ForegroundShutdown) => {
                 // TODO: do a clean shutdown of all the connections
                 return;
             }
 
-            ToBackground::ForegroundAnnounceBlock {
+            WakeUpReason::Message(ToBackground::ForegroundAnnounceBlock {
                 target,
                 chain_id,
                 scale_encoded_header,
                 is_best,
                 result_tx,
-            } => {
+            }) => {
                 let _ = result_tx.send(inner.network.gossip_send_block_announce(
                     &target,
                     chain_id,
@@ -1639,21 +1643,21 @@ async fn background_task(mut inner: Inner) {
                     is_best,
                 ));
             }
-            ToBackground::ForegroundSetLocalBestBlock {
+            WakeUpReason::Message(ToBackground::ForegroundSetLocalBestBlock {
                 chain_id,
                 best_hash,
                 best_number,
-            } => {
+            }) => {
                 inner
                     .network
                     .set_chain_local_best_block(chain_id, best_hash, best_number);
             }
-            ToBackground::ForegroundBlocksRequest {
+            WakeUpReason::Message(ToBackground::ForegroundBlocksRequest {
                 target,
                 chain_id,
                 config,
                 result_tx,
-            } => {
+            }) => {
                 match inner.network.start_blocks_request(
                     &target,
                     chain_id,
@@ -1669,13 +1673,13 @@ async fn background_task(mut inner: Inner) {
                     }
                 }
             }
-            ToBackground::ForegroundGetNumConnections { result_tx } => {
+            WakeUpReason::Message(ToBackground::ForegroundGetNumConnections { result_tx }) => {
                 let _ = result_tx.send(inner.network.num_connections());
             }
-            ToBackground::ForegroundGetNumPeers {
+            WakeUpReason::Message(ToBackground::ForegroundGetNumPeers {
                 chain_id,
                 result_tx,
-            } => {
+            }) => {
                 // TODO: optimize?
                 let _ = result_tx.send(
                     inner
@@ -1687,7 +1691,7 @@ async fn background_task(mut inner: Inner) {
                         .count(),
                 );
             }
-            ToBackground::ForegroundGetNumTotalPeers { result_tx } => {
+            WakeUpReason::Message(ToBackground::ForegroundGetNumTotalPeers { result_tx }) => {
                 // TODO: optimize?
                 let total = inner
                     .network
