@@ -246,8 +246,6 @@ struct Inner {
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
 
-    process_network_service_events: bool,
-
     /// Channel for the various tasks to send messages to the background task.
     to_background_rx: channel::Receiver<ToBackground>,
 
@@ -357,7 +355,6 @@ impl NetworkService {
             num_pending_out_attempts: 0,
             to_background_rx,
             to_background_tx: to_background_tx.clone(),
-            process_network_service_events: true,
             tasks_executor: config.tasks_executor,
             log_callback: config.log_callback.clone(),
             network,
@@ -809,7 +806,7 @@ async fn background_task(mut inner: Inner) {
             inner.network[connection_id].send(message).await.unwrap();
         }
 
-        if inner.process_network_service_events && matches!(inner.event_senders, either::Left(_)) {
+        if matches!(inner.event_senders, either::Left(_)) {
             let event = loop {
                 let inner_event = match inner.network.next_event() {
                     Some(ev) => ev,
@@ -965,8 +962,6 @@ async fn background_task(mut inner: Inner) {
                                     &peer_id,
                                     service::GossipKind::ConsensusTransactions,
                                 ); // TODO: what is the return value?
-
-                                inner.process_network_service_events = true;
                             }
                         }
                     }
@@ -1026,8 +1021,6 @@ async fn background_task(mut inner: Inner) {
                             );
                         }
 
-                        inner.process_network_service_events = true;
-
                         break Some(Event::Disconnected { chain_id, peer_id });
                     }
                     service::Event::GossipOpenFailed {
@@ -1071,8 +1064,6 @@ async fn background_task(mut inner: Inner) {
                                 Instant::now() + Duration::from_secs(15),
                             );
                         }
-
-                        inner.process_network_service_events = true;
                     }
                     service::Event::GossipInDesired {
                         chain_id,
@@ -1327,16 +1318,12 @@ async fn background_task(mut inner: Inner) {
                                 peer_id
                             ),
                         );
-                        inner.process_network_service_events = true;
                     }
                 }
             };
 
             // Dispatch the event to the various senders.
             if let Some(event) = event {
-                // Continue processing events.
-                inner.process_network_service_events = true;
-
                 // We check this before generating an event.
                 let either::Left(mut event_senders) = inner.event_senders else {
                     unreachable!()
@@ -1503,8 +1490,6 @@ async fn background_task(mut inner: Inner) {
                     rx,
                     inner.to_background_tx.clone(),
                 )));
-
-                inner.process_network_service_events = true;
             }
         }
 
@@ -1566,8 +1551,6 @@ async fn background_task(mut inner: Inner) {
                         .network
                         .inject_connection_message(connection_id, opaque_message);
                 }
-
-                inner.process_network_service_events = true;
             }
 
             ToBackground::IncomingConnection {
@@ -1597,8 +1580,6 @@ async fn background_task(mut inner: Inner) {
                     rx,
                     inner.to_background_tx.clone(),
                 )));
-
-                inner.process_network_service_events = true;
             }
 
             ToBackground::StartKademliaDiscoveries { when_done } => {
@@ -1637,8 +1618,6 @@ async fn background_task(mut inner: Inner) {
                 }
 
                 let _ = when_done.send(());
-
-                inner.process_network_service_events = true;
             }
 
             ToBackground::ForegroundShutdown => {
