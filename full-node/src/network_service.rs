@@ -163,10 +163,6 @@ pub struct NetworkService {
 }
 
 enum ToBackground {
-    FromConnectionTask {
-        connection_id: service::ConnectionId,
-        opaque_message: Option<service::ConnectionToCoordinator>,
-    },
     IncomingConnection {
         socket: TcpStream,
         multiaddr: Multiaddr,
@@ -202,6 +198,7 @@ enum ToBackground {
     },
     ForegroundShutdown,
 }
+
 struct Inner {
     /// Value provided through [`Config::identify_agent_version`].
     identify_agent_version: String,
@@ -246,11 +243,20 @@ struct Inner {
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
 
-    /// Channel for the various tasks to send messages to the background task.
+    /// Channel for the frontend to send messages to the background task.
     to_background_rx: channel::Receiver<ToBackground>,
 
-    /// Sending side of [`Inner::to_background_rx`].
-    to_background_tx: channel::Sender<ToBackground>,
+    /// Channel where connections send messages destined to the coordinator.
+    from_connections_rx: channel::Receiver<(
+        service::ConnectionId,
+        Option<service::ConnectionToCoordinator>,
+    )>,
+
+    /// Sending side of [`Inner::from_connections_rx`].
+    from_connections_tx: channel::Sender<(
+        service::ConnectionId,
+        Option<service::ConnectionToCoordinator>,
+    )>,
 
     /// List of all block requests that have been started but not finished yet.
     blocks_requests: HashMap<
@@ -346,7 +352,8 @@ impl NetworkService {
             chain_names.insert(chain_id, chain.log_name);
         }
 
-        let (to_background_tx, to_background_rx) = channel::bounded(64);
+        let (to_background_tx, to_background_rx) = channel::bounded(16);
+        let (from_connections_tx, from_connections_rx) = channel::bounded(64);
         let foreground_shutdown = event_listener::Event::new();
 
         let local_peer_id =
@@ -361,7 +368,8 @@ impl NetworkService {
             event_pending_send: None,
             num_pending_out_attempts: 0,
             to_background_rx,
-            to_background_tx: to_background_tx.clone(),
+            from_connections_rx,
+            from_connections_tx,
             tasks_executor: config.tasks_executor,
             log_callback: config.log_callback.clone(),
             network,
@@ -772,6 +780,11 @@ async fn background_task(mut inner: Inner) {
         enum WakeUpReason {
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
+            FromConnectionTask {
+                connection_id: service::ConnectionId,
+                // TODO: this Option is weird
+                message: Option<service::ConnectionToCoordinator>,
+            },
             EventSendersReady,
             CanAssignSlot(PeerId, ChainId),
             CanStartConnect(PeerId),
@@ -875,6 +888,13 @@ async fn background_task(mut inner: Inner) {
                 cmp::min(inner.next_discovery_period * 2, Duration::from_secs(120));
             WakeUpReason::StartKademliaDiscoveries
         })
+        .or(async {
+            let (connection_id, message) = inner.from_connections_rx.next().await.unwrap();
+            WakeUpReason::FromConnectionTask {
+                connection_id,
+                message,
+            }
+        })
         .await;
 
         match wake_up_reason {
@@ -892,15 +912,14 @@ async fn background_task(mut inner: Inner) {
                 inner.network[connection_id].send(message).await.unwrap();
             }
 
-            WakeUpReason::Message(ToBackground::FromConnectionTask {
+            WakeUpReason::FromConnectionTask {
                 connection_id,
-                opaque_message,
-                ..
-            }) => {
-                if let Some(opaque_message) = opaque_message {
+                message,
+            } => {
+                if let Some(message) = message {
                     inner
                         .network
-                        .inject_connection_message(connection_id, opaque_message);
+                        .inject_connection_message(connection_id, message);
                 }
             }
 
@@ -929,7 +948,7 @@ async fn background_task(mut inner: Inner) {
                     connection_id,
                     connection_task,
                     rx,
-                    inner.to_background_tx.clone(),
+                    inner.from_connections_tx.clone(),
                 )));
             }
 
@@ -1747,7 +1766,7 @@ async fn background_task(mut inner: Inner) {
                     connection_id,
                     connection_task,
                     rx,
-                    inner.to_background_tx.clone(),
+                    inner.from_connections_tx.clone(),
                 )));
             }
 
