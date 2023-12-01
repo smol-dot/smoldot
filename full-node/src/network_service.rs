@@ -218,6 +218,9 @@ struct Inner {
         Pin<Box<dyn Future<Output = Vec<channel::Sender<Event>>> + Send>>,
     >,
 
+    /// Event about to be sent on the senders of [`Inner::event_senders`].
+    event_pending_send: Option<Event>,
+
     /// Identity of the local node.
     noise_key: service::NoiseKey,
 
@@ -352,6 +355,7 @@ impl NetworkService {
             local_peer_id: local_peer_id.clone(),
             identify_agent_version: config.identify_agent_version,
             event_senders: either::Left(event_senders),
+            event_pending_send: None,
             num_pending_out_attempts: 0,
             to_background_rx,
             to_background_tx: to_background_tx.clone(),
@@ -807,546 +811,6 @@ async fn background_task(mut inner: Inner) {
         }
 
         if matches!(inner.event_senders, either::Left(_)) {
-            let event = loop {
-                let inner_event = match inner.network.next_event() {
-                    Some(ev) => ev,
-                    None => break None,
-                };
-
-                match inner_event {
-                    service::Event::HandshakeFinished {
-                        id,
-                        expected_peer_id,
-                        peer_id,
-                        ..
-                    } => {
-                        inner.num_pending_out_attempts -= 1;
-
-                        let remote_addr = Multiaddr::from_bytes(
-                            inner.network.connection_remote_addr(id).to_owned(),
-                        )
-                        .unwrap(); // TODO: review this unwrap
-                        if let Some(expected_peer_id) =
-                            expected_peer_id.as_ref().filter(|p| **p != peer_id)
-                        {
-                            inner
-                            .log_callback
-                            .log(LogLevel::Debug, format!("connected-peer-id-mismatch; expected_peer_id={}; actual_peer_id={}; address={}", expected_peer_id, peer_id, remote_addr));
-
-                            let _was_in = inner
-                                .peering_strategy
-                                .decrease_address_connections_and_remove_if_zero(
-                                    expected_peer_id,
-                                    remote_addr.as_ref(),
-                                );
-                            debug_assert!(_was_in.is_ok());
-                            if let basic_peering_strategy::InsertAddressConnectionsResult::Inserted {
-                                address_removed: Some(addr_rm),
-                            } = inner.peering_strategy.increase_address_connections(
-                                &peer_id,
-                                remote_addr.into_bytes().to_owned(),
-                                10, // TODO: constant
-                            ) {
-                                let addr_rm = Multiaddr::from_bytes(addr_rm).unwrap();
-                                inner.log_callback.log(
-                                    LogLevel::Debug,
-                                    format!(
-                                        "address-purged; peer_id={}; address={}",
-                                        peer_id, addr_rm
-                                    ),
-                                );
-                            }
-                        } else {
-                            inner
-                                .log_callback
-                                .log(LogLevel::Debug, format!("connected; peer_id={}", peer_id));
-                        }
-                    }
-                    service::Event::PreHandshakeDisconnected {
-                        address,
-                        expected_peer_id,
-                        ..
-                    } => {
-                        inner.num_pending_out_attempts -= 1;
-                        if let Some(expected_peer_id) = expected_peer_id {
-                            inner
-                                .peering_strategy
-                                .decrease_address_connections(&expected_peer_id, &address)
-                                .unwrap();
-                            let address = Multiaddr::from_bytes(&address).unwrap();
-                            inner.log_callback.log(
-                                LogLevel::Debug,
-                                format!(
-                                    "disconnected; handshake-finished=false; peer_id={}; address={}",
-                                    expected_peer_id, address
-                                ),
-                            );
-                        }
-                    }
-                    service::Event::Disconnected {
-                        address, peer_id, ..
-                    } => {
-                        inner
-                            .peering_strategy
-                            .decrease_address_connections(&peer_id, &address)
-                            .unwrap();
-                        let address = Multiaddr::from_bytes(&address).unwrap();
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "disconnected; handshake-finished=true; peer_id={}; address={}",
-                                peer_id, address
-                            ),
-                        );
-                    }
-                    service::Event::BlockAnnounce {
-                        chain_id,
-                        peer_id,
-                        announce,
-                    } => {
-                        let decoded = announce.decode();
-                        let header_hash =
-                            header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
-                        match header::decode(
-                            decoded.scale_encoded_header,
-                            inner.network.block_number_bytes(chain_id),
-                        ) {
-                            Ok(decoded_header) => {
-                                let mut _jaeger_span =
-                                    inner.jaeger_service.block_announce_receive_span(
-                                        &inner.local_peer_id,
-                                        &peer_id,
-                                        decoded_header.number,
-                                        &decoded_header
-                                            .hash(inner.network.block_number_bytes(chain_id)),
-                                    );
-
-                                inner.log_callback.log(LogLevel::Debug, format!(
-                                    "block-announce; peer_id={}; chain={}; hash={}; number={}; is_best={:?}",
-                                    peer_id, inner.network[chain_id].log_name, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
-                                ));
-
-                                break Some(Event::BlockAnnounce {
-                                    chain_id,
-                                    peer_id,
-                                    is_best: decoded.is_best,
-                                    scale_encoded_header: decoded.scale_encoded_header.to_owned(), // TODO: somewhat wasteful to copy here, could pass the entire announce
-                                });
-                            }
-                            Err(error) => {
-                                inner.log_callback.log(LogLevel::Warn, format!(
-                                    "block-announce-bad-header; peer_id={}; chain={}; hash={}; is_best={:?}; error={}",
-                                    peer_id, inner.network[chain_id].log_name, HashDisplay(&header_hash), decoded.is_best, error
-                                ));
-
-                                if inner.network.gossip_remove_desired(
-                                    chain_id,
-                                    &peer_id,
-                                    service::GossipKind::ConsensusTransactions,
-                                ) {
-                                    inner.peering_strategy.unassign_slot_and_ban(
-                                        &chain_id,
-                                        &peer_id,
-                                        Instant::now() + Duration::from_secs(10),
-                                    );
-                                    inner.log_callback.log(
-                                        LogLevel::Debug,
-                                        format!(
-                                            "slot-unassigned; peer_id={}; chain={}",
-                                            peer_id, inner.network[chain_id].log_name
-                                        ),
-                                    );
-                                }
-                                let _ = inner.network.gossip_close(
-                                    chain_id,
-                                    &peer_id,
-                                    service::GossipKind::ConsensusTransactions,
-                                ); // TODO: what is the return value?
-                            }
-                        }
-                    }
-                    service::Event::GossipConnected {
-                        peer_id,
-                        chain_id,
-                        best_number,
-                        best_hash,
-                        ..
-                    } => {
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                            "chain-connected; peer_id={}; chain={}; best_number={}; best_hash={}",
-                            peer_id,
-                            inner.network[chain_id].log_name,
-                            best_number,
-                            HashDisplay(&best_hash),
-                        ),
-                        );
-                        break Some(Event::Connected {
-                            peer_id,
-                            chain_id,
-                            best_block_number: best_number,
-                            best_block_hash: best_hash,
-                        });
-                    }
-                    service::Event::GossipDisconnected {
-                        peer_id, chain_id, ..
-                    } => {
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "chain-disconnected; peer_id={}; chain={}",
-                                peer_id, inner.network[chain_id].log_name
-                            ),
-                        );
-
-                        // Note that peer doesn't necessarily have an out slot, as this event
-                        // might happen as a result of an inbound gossip connection.
-                        inner.peering_strategy.unassign_slot_and_ban(
-                            &chain_id,
-                            &peer_id,
-                            Instant::now() + Duration::from_secs(10),
-                        );
-                        if inner.network.gossip_remove_desired(
-                            chain_id,
-                            &peer_id,
-                            service::GossipKind::ConsensusTransactions,
-                        ) {
-                            inner.log_callback.log(
-                                LogLevel::Debug,
-                                format!(
-                                    "slot-unassigned; peer_id={}; chain={}",
-                                    peer_id, inner.network[chain_id].log_name
-                                ),
-                            );
-                        }
-
-                        break Some(Event::Disconnected { chain_id, peer_id });
-                    }
-                    service::Event::GossipOpenFailed {
-                        chain_id,
-                        peer_id,
-                        error,
-                        ..
-                    } => {
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "chain-connect-attempt-failed; peer_id={}; chain={}; error={}",
-                                peer_id, inner.network[chain_id].log_name, error
-                            ),
-                        );
-
-                        // Note that peer doesn't necessarily have an out slot, as this event
-                        // might happen as a result of an inbound gossip connection.
-                        if inner.network.gossip_remove_desired(
-                            chain_id,
-                            &peer_id,
-                            service::GossipKind::ConsensusTransactions,
-                        ) {
-                            inner.log_callback.log(
-                                LogLevel::Debug,
-                                format!(
-                                    "slot-unassigned; peer_id={}; chain={}",
-                                    peer_id, inner.network[chain_id].log_name
-                                ),
-                            );
-                        }
-
-                        if let service::GossipConnectError::GenesisMismatch { .. } = error {
-                            inner
-                                .peering_strategy
-                                .unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
-                        } else {
-                            inner.peering_strategy.unassign_slot_and_ban(
-                                &chain_id,
-                                &peer_id,
-                                Instant::now() + Duration::from_secs(15),
-                            );
-                        }
-                    }
-                    service::Event::GossipInDesired {
-                        chain_id,
-                        peer_id,
-                        kind: service::GossipKind::ConsensusTransactions,
-                    } => {
-                        // TODO: log this
-                        // TODO: arbitrary constant
-                        // The networking state machine guarantees that `GossipInDesired`
-                        // can't happen if we are already opening an out slot, which we do
-                        // immediately.
-                        // TODO: add debug_assert! ^
-                        if inner
-                            .network
-                            .opened_gossip_undesired_by_chain(chain_id)
-                            .count()
-                            < 25
-                        {
-                            inner
-                                .network
-                                .gossip_open(
-                                    chain_id,
-                                    &peer_id,
-                                    service::GossipKind::ConsensusTransactions,
-                                )
-                                .unwrap();
-                        } else {
-                            inner
-                                .network
-                                .gossip_close(
-                                    chain_id,
-                                    &peer_id,
-                                    service::GossipKind::ConsensusTransactions,
-                                )
-                                .unwrap();
-                        }
-                    }
-                    service::Event::GossipInDesiredCancel { .. } => {
-                        // All `GossipInDesired` are immediately accepted or rejected, meaning
-                        // that this event can't happen.
-                        unreachable!()
-                    }
-                    service::Event::RequestResult {
-                        substream_id,
-                        response: service::RequestResult::Blocks(response),
-                    } => {
-                        let _ = inner
-                            .blocks_requests
-                            .remove(&substream_id)
-                            .unwrap()
-                            .send(response.map_err(BlocksRequestError::Request));
-                    }
-                    service::Event::RequestResult {
-                        substream_id,
-                        response: service::RequestResult::KademliaFindNode(Ok(nodes)),
-                    } => {
-                        let chain_id = inner
-                            .kademlia_find_nodes_requests
-                            .remove(&substream_id)
-                            .unwrap();
-
-                        for (peer_id, addrs) in nodes {
-                            let mut valid_addrs = Vec::with_capacity(addrs.len());
-                            for addr in addrs {
-                                match Multiaddr::from_bytes(addr) {
-                                    Ok(a) => valid_addrs.push(a),
-                                    Err((error, addr)) => {
-                                        inner.log_callback.log(
-                                            LogLevel::Debug,
-                                            format!(
-                                                "discovery-invalid-address; error={error}, addr={}",
-                                                hex::encode(&addr)
-                                            ),
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            if !valid_addrs.is_empty() {
-                                // Note that we must call this function before `insert_address`,
-                                // as documented in `basic_peering_strategy`.
-                                if let basic_peering_strategy::InsertChainPeerResult::Inserted {
-                                    peer_removed: Some(peer_removed),
-                                } = inner.peering_strategy.insert_chain_peer(
-                                    chain_id,
-                                    peer_id.clone(),
-                                    100, // TODO: constant
-                                ) {
-                                    inner.log_callback.log(
-                                        LogLevel::Debug,
-                                        format!(
-                                            "peer-forgotten; peer_id={}; chain={}",
-                                            peer_removed, inner.network[chain_id].log_name
-                                        ),
-                                    );
-                                }
-                            }
-
-                            for addr in valid_addrs {
-                                inner.log_callback.log(
-                                    LogLevel::Debug,
-                                    format!(
-                                        "discovered; chain={}; peer_id={peer_id}; address={addr}",
-                                        inner.network[chain_id].log_name
-                                    ),
-                                );
-
-                                match inner
-                                    .peering_strategy
-                                     .insert_address(&peer_id, addr.into_bytes(), 10) // TODO: constant
-                                    {
-                                        basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
-                                            let addr_rm = Multiaddr::from_bytes(addr_rm).unwrap();
-                                            inner
-                                                .log_callback
-                                                .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
-                                        }
-                                        basic_peering_strategy::InsertAddressResult::UnknownPeer => unreachable!(),
-                                        _ => {}
-                                    }
-                            }
-                        }
-                    }
-                    service::Event::RequestResult {
-                        substream_id,
-                        response: service::RequestResult::KademliaFindNode(Err(error)),
-                    } => {
-                        let chain_id = inner
-                            .kademlia_find_nodes_requests
-                            .remove(&substream_id)
-                            .unwrap();
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "discovery-error; chain={}; error={}",
-                                inner.network[chain_id].log_name, error
-                            ),
-                        );
-                    }
-                    service::Event::RequestResult { .. } => {
-                        // We never start a request of any other kind.
-                        unreachable!()
-                    }
-                    service::Event::RequestInCancel { .. } => {
-                        // Requests are answered immediately, and thus cancelling events can't happen.
-                        unreachable!()
-                    }
-                    service::Event::IdentifyRequestIn {
-                        peer_id,
-                        substream_id,
-                    } => {
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!("identify-request; peer_id={}", peer_id),
-                        );
-                        inner
-                            .network
-                            .respond_identify(substream_id, &inner.identify_agent_version);
-                    }
-                    service::Event::BlocksRequestIn {
-                        peer_id,
-                        chain_id,
-                        config,
-                        substream_id,
-                    } => {
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "incoming-blocks-request; peer_id={}; chain={}",
-                                peer_id, inner.network[chain_id].log_name
-                            ),
-                        );
-                        let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
-                            &inner.local_peer_id,
-                            &peer_id,
-                            config.desired_count.get(),
-                            if let (1, codec::BlocksRequestConfigStart::Hash(block_hash)) =
-                                (config.desired_count.get(), &config.start)
-                            {
-                                Some(block_hash)
-                            } else {
-                                None
-                            },
-                        );
-
-                        // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
-                        let response = blocks_request_response(
-                            &inner.network[chain_id].database,
-                            inner.network.block_number_bytes(chain_id),
-                            config,
-                        )
-                        .await;
-                        inner.network.respond_blocks(
-                            substream_id,
-                            match response {
-                                Ok(b) => Some(b),
-                                Err(error) => {
-                                    inner.log_callback.log(
-                                        LogLevel::Warn,
-                                        format!("incoming-blocks-request-error; error={}", error),
-                                    );
-                                    None
-                                }
-                            },
-                        );
-                    }
-                    service::Event::GrandpaNeighborPacket {
-                        chain_id,
-                        peer_id,
-                        state,
-                    } => {
-                        inner.log_callback.log(LogLevel::Debug, format!(
-                            "grandpa-neighbor-packet; peer_id={}; chain={}; round_number={}; set_id={}; commit_finalized_height={}",
-                            peer_id,
-                            inner.network[chain_id].log_name,
-                            state.round_number,
-                            state.set_id,
-                            state.commit_finalized_height,
-                        ));
-                        // TODO: report to the sync state machine
-                    }
-                    service::Event::GrandpaCommitMessage {
-                        chain_id,
-                        peer_id,
-                        message,
-                    } => {
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "grandpa-commit-message; peer_id={}; chain={}; target_hash={}",
-                                peer_id,
-                                inner.network[chain_id].log_name,
-                                HashDisplay(message.decode().message.target_hash),
-                            ),
-                        );
-                    }
-                    service::Event::ProtocolError { peer_id, error } => {
-                        inner.log_callback.log(
-                            LogLevel::Warn,
-                            format!("protocol-error; peer_id={}; error={}", peer_id, error),
-                        );
-                        inner.peering_strategy.unassign_slots_and_ban(
-                            &peer_id,
-                            Instant::now() + Duration::from_secs(5),
-                        );
-                        // TODO: log chain names?
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "all-slots-unassigned; reason=no-address; peer_id={}",
-                                peer_id
-                            ),
-                        );
-                    }
-                }
-            };
-
-            // Dispatch the event to the various senders.
-            if let Some(event) = event {
-                // We check this before generating an event.
-                let either::Left(mut event_senders) = inner.event_senders else {
-                    unreachable!()
-                };
-
-                inner.event_senders = either::Right(Box::pin(async move {
-                    // This little `if` avoids having to do `event.clone()` if we don't have to.
-                    if event_senders.len() == 1 {
-                        let _ = event_senders[0].send(event).await;
-                    } else {
-                        for sender in event_senders.iter_mut() {
-                            // For simplicity we don't get rid of closed senders because senders
-                            // aren't supposed to close, and that leaving closed senders in the
-                            // list doesn't have any consequence other than one extra iteration
-                            // every time.
-                            let _ = sender.send(event.clone()).await;
-                        }
-                    }
-
-                    event_senders
-                }));
-            }
-
             // TODO: doc
             for chain_id in inner.network.chains().collect::<Vec<_>>() {
                 loop {
@@ -1523,12 +987,28 @@ async fn background_task(mut inner: Inner) {
         }
 
         enum WakeUpReason {
+            NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
             EventSendersReady,
         }
 
         let wake_up_reason =
             async { WakeUpReason::Message(inner.to_background_rx.next().await.unwrap()) }
+                .or({
+                    let event_senders_ready = matches!(inner.event_senders, either::Left(_));
+                    let event_pending_send = &inner.event_pending_send;
+                    let network = &mut inner.network;
+                    async move {
+                        if let Some(event) = (event_senders_ready && event_pending_send.is_none())
+                            .then(move || network.next_event())
+                            .flatten()
+                        {
+                            WakeUpReason::NetworkEvent(event)
+                        } else {
+                            future::pending().await
+                        }
+                    }
+                })
                 .or(async {
                     if let either::Right(sending) = &mut inner.event_senders {
                         let event_senders = sending.await;
@@ -1706,7 +1186,532 @@ async fn background_task(mut inner: Inner) {
             }
 
             WakeUpReason::EventSendersReady => {
-                // Nothing to do.
+                // Dispatch the pending event, if any, to the various senders.
+
+                // We made sure that the senders were ready before generating an event.
+                let either::Left(event_senders) = &mut inner.event_senders else {
+                    unreachable!()
+                };
+
+                if let Some(event_to_dispatch) = inner.event_pending_send.take() {
+                    let mut event_senders = mem::take(event_senders);
+                    inner.event_senders = either::Right(Box::pin(async move {
+                        // Elements in `event_senders` are removed one by one and inserted
+                        // back if the channel is still open.
+                        for index in (0..event_senders.len()).rev() {
+                            let event_sender = event_senders.swap_remove(index);
+                            if event_sender.send(event_to_dispatch.clone()).await.is_err() {
+                                continue;
+                            }
+
+                            event_senders.push(event_sender);
+                        }
+                        event_senders
+                    }));
+                }
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
+                id,
+                expected_peer_id,
+                peer_id,
+                ..
+            }) => {
+                inner.num_pending_out_attempts -= 1;
+
+                let remote_addr =
+                    Multiaddr::from_bytes(inner.network.connection_remote_addr(id).to_owned())
+                        .unwrap(); // TODO: review this unwrap
+                if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
+                {
+                    inner
+                    .log_callback
+                    .log(LogLevel::Debug, format!("connected-peer-id-mismatch; expected_peer_id={}; actual_peer_id={}; address={}", expected_peer_id, peer_id, remote_addr));
+
+                    let _was_in = inner
+                        .peering_strategy
+                        .decrease_address_connections_and_remove_if_zero(
+                            expected_peer_id,
+                            remote_addr.as_ref(),
+                        );
+                    debug_assert!(_was_in.is_ok());
+                    if let basic_peering_strategy::InsertAddressConnectionsResult::Inserted {
+                        address_removed: Some(addr_rm),
+                    } = inner.peering_strategy.increase_address_connections(
+                        &peer_id,
+                        remote_addr.into_bytes().to_owned(),
+                        10, // TODO: constant
+                    ) {
+                        let addr_rm = Multiaddr::from_bytes(addr_rm).unwrap();
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("address-purged; peer_id={}; address={}", peer_id, addr_rm),
+                        );
+                    }
+                } else {
+                    inner
+                        .log_callback
+                        .log(LogLevel::Debug, format!("connected; peer_id={}", peer_id));
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                address,
+                expected_peer_id,
+                ..
+            }) => {
+                inner.num_pending_out_attempts -= 1;
+                if let Some(expected_peer_id) = expected_peer_id {
+                    inner
+                        .peering_strategy
+                        .decrease_address_connections(&expected_peer_id, &address)
+                        .unwrap();
+                    let address = Multiaddr::from_bytes(&address).unwrap();
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "disconnected; handshake-finished=false; peer_id={}; address={}",
+                            expected_peer_id, address
+                        ),
+                    );
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::Disconnected {
+                address, peer_id, ..
+            }) => {
+                inner
+                    .peering_strategy
+                    .decrease_address_connections(&peer_id, &address)
+                    .unwrap();
+                let address = Multiaddr::from_bytes(&address).unwrap();
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "disconnected; handshake-finished=true; peer_id={}; address={}",
+                        peer_id, address
+                    ),
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
+                chain_id,
+                peer_id,
+                announce,
+            }) => {
+                let decoded = announce.decode();
+                let header_hash =
+                    header::hash_from_scale_encoded_header(decoded.scale_encoded_header);
+                match header::decode(
+                    decoded.scale_encoded_header,
+                    inner.network.block_number_bytes(chain_id),
+                ) {
+                    Ok(decoded_header) => {
+                        let mut _jaeger_span = inner.jaeger_service.block_announce_receive_span(
+                            &inner.local_peer_id,
+                            &peer_id,
+                            decoded_header.number,
+                            &decoded_header.hash(inner.network.block_number_bytes(chain_id)),
+                        );
+
+                        inner.log_callback.log(LogLevel::Debug, format!(
+                            "block-announce; peer_id={}; chain={}; hash={}; number={}; is_best={:?}",
+                            peer_id, inner.network[chain_id].log_name, HashDisplay(&header_hash), decoded_header.number, decoded.is_best
+                        ));
+
+                        debug_assert!(inner.event_pending_send.is_none());
+                        inner.event_pending_send = Some(Event::BlockAnnounce {
+                            chain_id,
+                            peer_id,
+                            is_best: decoded.is_best,
+                            scale_encoded_header: decoded.scale_encoded_header.to_owned(), // TODO: somewhat wasteful to copy here, could pass the entire announce
+                        });
+                    }
+                    Err(error) => {
+                        inner.log_callback.log(LogLevel::Warn, format!(
+                            "block-announce-bad-header; peer_id={}; chain={}; hash={}; is_best={:?}; error={}",
+                            peer_id, inner.network[chain_id].log_name, HashDisplay(&header_hash), decoded.is_best, error
+                        ));
+
+                        if inner.network.gossip_remove_desired(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        ) {
+                            inner.peering_strategy.unassign_slot_and_ban(
+                                &chain_id,
+                                &peer_id,
+                                Instant::now() + Duration::from_secs(10),
+                            );
+                            inner.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "slot-unassigned; peer_id={}; chain={}",
+                                    peer_id, inner.network[chain_id].log_name
+                                ),
+                            );
+                        }
+                        let _ = inner.network.gossip_close(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        ); // TODO: what is the return value?
+                    }
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipConnected {
+                peer_id,
+                chain_id,
+                best_number,
+                best_hash,
+                ..
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "chain-connected; peer_id={}; chain={}; best_number={}; best_hash={}",
+                        peer_id,
+                        inner.network[chain_id].log_name,
+                        best_number,
+                        HashDisplay(&best_hash),
+                    ),
+                );
+                debug_assert!(inner.event_pending_send.is_none());
+                inner.event_pending_send = Some(Event::Connected {
+                    peer_id,
+                    chain_id,
+                    best_block_number: best_number,
+                    best_block_hash: best_hash,
+                });
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipDisconnected {
+                peer_id,
+                chain_id,
+                ..
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "chain-disconnected; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
+                    ),
+                );
+
+                // Note that peer doesn't necessarily have an out slot, as this event
+                // might happen as a result of an inbound gossip connection.
+                inner.peering_strategy.unassign_slot_and_ban(
+                    &chain_id,
+                    &peer_id,
+                    Instant::now() + Duration::from_secs(10),
+                );
+                if inner.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "slot-unassigned; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+                }
+
+                debug_assert!(inner.event_pending_send.is_none());
+                inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipOpenFailed {
+                chain_id,
+                peer_id,
+                error,
+                ..
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "chain-connect-attempt-failed; peer_id={}; chain={}; error={}",
+                        peer_id, inner.network[chain_id].log_name, error
+                    ),
+                );
+
+                // Note that peer doesn't necessarily have an out slot, as this event
+                // might happen as a result of an inbound gossip connection.
+                if inner.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "slot-unassigned; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+                }
+
+                if let service::GossipConnectError::GenesisMismatch { .. } = error {
+                    inner
+                        .peering_strategy
+                        .unassign_slot_and_remove_chain_peer(&chain_id, &peer_id);
+                } else {
+                    inner.peering_strategy.unassign_slot_and_ban(
+                        &chain_id,
+                        &peer_id,
+                        Instant::now() + Duration::from_secs(15),
+                    );
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipInDesired {
+                chain_id,
+                peer_id,
+                kind: service::GossipKind::ConsensusTransactions,
+            }) => {
+                // TODO: log this
+                // TODO: arbitrary constant
+                // The networking state machine guarantees that `GossipInDesired`
+                // can't happen if we are already opening an out slot, which we do
+                // immediately.
+                // TODO: add debug_assert! ^
+                if inner
+                    .network
+                    .opened_gossip_undesired_by_chain(chain_id)
+                    .count()
+                    < 25
+                {
+                    inner
+                        .network
+                        .gossip_open(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .unwrap();
+                } else {
+                    inner
+                        .network
+                        .gossip_close(
+                            chain_id,
+                            &peer_id,
+                            service::GossipKind::ConsensusTransactions,
+                        )
+                        .unwrap();
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::GossipInDesiredCancel { .. }) => {
+                // All `GossipInDesired` are immediately accepted or rejected, meaning
+                // that this event can't happen.
+                unreachable!()
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::Blocks(response),
+            }) => {
+                let _ = inner
+                    .blocks_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(BlocksRequestError::Request));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::KademliaFindNode(Ok(nodes)),
+            }) => {
+                let chain_id = inner
+                    .kademlia_find_nodes_requests
+                    .remove(&substream_id)
+                    .unwrap();
+
+                for (peer_id, addrs) in nodes {
+                    let mut valid_addrs = Vec::with_capacity(addrs.len());
+                    for addr in addrs {
+                        match Multiaddr::from_bytes(addr) {
+                            Ok(a) => valid_addrs.push(a),
+                            Err((error, addr)) => {
+                                inner.log_callback.log(
+                                    LogLevel::Debug,
+                                    format!(
+                                        "discovery-invalid-address; error={error}, addr={}",
+                                        hex::encode(&addr)
+                                    ),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    if !valid_addrs.is_empty() {
+                        // Note that we must call this function before `insert_address`,
+                        // as documented in `basic_peering_strategy`.
+                        if let basic_peering_strategy::InsertChainPeerResult::Inserted {
+                            peer_removed: Some(peer_removed),
+                        } = inner.peering_strategy.insert_chain_peer(
+                            chain_id,
+                            peer_id.clone(),
+                            100, // TODO: constant
+                        ) {
+                            inner.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "peer-forgotten; peer_id={}; chain={}",
+                                    peer_removed, inner.network[chain_id].log_name
+                                ),
+                            );
+                        }
+                    }
+
+                    for addr in valid_addrs {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "discovered; chain={}; peer_id={peer_id}; address={addr}",
+                                inner.network[chain_id].log_name
+                            ),
+                        );
+
+                        match inner
+                            .peering_strategy
+                             .insert_address(&peer_id, addr.into_bytes(), 10) // TODO: constant
+                            {
+                                basic_peering_strategy::InsertAddressResult::Inserted { address_removed: Some(addr_rm) } => {
+                                    let addr_rm = Multiaddr::from_bytes(addr_rm).unwrap();
+                                    inner
+                                        .log_callback
+                                        .log(LogLevel::Debug, format!("address-purged; peer_id={}; address={}", peer_id, addr_rm));
+                                }
+                                basic_peering_strategy::InsertAddressResult::UnknownPeer => unreachable!(),
+                                _ => {}
+                            }
+                    }
+                }
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::KademliaFindNode(Err(error)),
+            }) => {
+                let chain_id = inner
+                    .kademlia_find_nodes_requests
+                    .remove(&substream_id)
+                    .unwrap();
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "discovery-error; chain={}; error={}",
+                        inner.network[chain_id].log_name, error
+                    ),
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult { .. }) => {
+                // We never start a request of any other kind.
+                unreachable!()
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestInCancel { .. }) => {
+                // Requests are answered immediately, and thus cancelling events can't happen.
+                unreachable!()
+            }
+            WakeUpReason::NetworkEvent(service::Event::IdentifyRequestIn {
+                peer_id,
+                substream_id,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!("identify-request; peer_id={}", peer_id),
+                );
+                inner
+                    .network
+                    .respond_identify(substream_id, &inner.identify_agent_version);
+            }
+            WakeUpReason::NetworkEvent(service::Event::BlocksRequestIn {
+                peer_id,
+                chain_id,
+                config,
+                substream_id,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "incoming-blocks-request; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
+                    ),
+                );
+                let mut _jaeger_span = inner.jaeger_service.incoming_block_request_span(
+                    &inner.local_peer_id,
+                    &peer_id,
+                    config.desired_count.get(),
+                    if let (1, codec::BlocksRequestConfigStart::Hash(block_hash)) =
+                        (config.desired_count.get(), &config.start)
+                    {
+                        Some(block_hash)
+                    } else {
+                        None
+                    },
+                );
+
+                // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
+                let response = blocks_request_response(
+                    &inner.network[chain_id].database,
+                    inner.network.block_number_bytes(chain_id),
+                    config,
+                )
+                .await;
+                inner.network.respond_blocks(
+                    substream_id,
+                    match response {
+                        Ok(b) => Some(b),
+                        Err(error) => {
+                            inner.log_callback.log(
+                                LogLevel::Warn,
+                                format!("incoming-blocks-request-error; error={}", error),
+                            );
+                            None
+                        }
+                    },
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::GrandpaNeighborPacket {
+                chain_id,
+                peer_id,
+                state,
+            }) => {
+                inner.log_callback.log(LogLevel::Debug, format!(
+                    "grandpa-neighbor-packet; peer_id={}; chain={}; round_number={}; set_id={}; commit_finalized_height={}",
+                    peer_id,
+                    inner.network[chain_id].log_name,
+                    state.round_number,
+                    state.set_id,
+                    state.commit_finalized_height,
+                ));
+                // TODO: report to the sync state machine
+            }
+            WakeUpReason::NetworkEvent(service::Event::GrandpaCommitMessage {
+                chain_id,
+                peer_id,
+                message,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "grandpa-commit-message; peer_id={}; chain={}; target_hash={}",
+                        peer_id,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(message.decode().message.target_hash),
+                    ),
+                );
+            }
+            WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
+                inner.log_callback.log(
+                    LogLevel::Warn,
+                    format!("protocol-error; peer_id={}; error={}", peer_id, error),
+                );
+                inner
+                    .peering_strategy
+                    .unassign_slots_and_ban(&peer_id, Instant::now() + Duration::from_secs(5));
+                // TODO: log chain names?
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "all-slots-unassigned; reason=no-address; peer_id={}",
+                        peer_id
+                    ),
+                );
             }
         }
     }
