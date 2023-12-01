@@ -32,6 +32,7 @@ use crate::{database_thread, jaeger_service, LogCallback, LogLevel};
 use core::{cmp, future::Future, mem, pin::Pin, task::Poll, time::Duration};
 use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
+use futures_util::stream::{self, SelectAll};
 use hashbrown::HashMap;
 use smol::{
     channel, future,
@@ -163,11 +164,6 @@ pub struct NetworkService {
 }
 
 enum ToBackground {
-    IncomingConnection {
-        socket: TcpStream,
-        multiaddr: Multiaddr,
-        when_accepted: Instant,
-    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_id: ChainId,
@@ -236,6 +232,9 @@ struct Inner {
     /// This counter is used to limit the number of simultaneous connection attempts, as some
     /// ISPs/cloud providers don't like seeing too many dialing connections at the same time.
     num_pending_out_attempts: usize,
+
+    /// Stream of incoming connections.
+    incoming_connections: SelectAll<Pin<Box<dyn Stream<Item = (TcpStream, SocketAddr)> + Send>>>,
 
     /// See [`Config::tasks_executor`].
     tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
@@ -360,36 +359,9 @@ impl NetworkService {
             peer_id::PublicKey::Ed25519(*config.noise_key.libp2p_public_ed25519_key())
                 .into_peer_id();
 
-        // Initialize the inner network service.
-        let mut inner = Inner {
-            local_peer_id: local_peer_id.clone(),
-            identify_agent_version: config.identify_agent_version,
-            event_senders: either::Left(event_senders),
-            event_pending_send: None,
-            num_pending_out_attempts: 0,
-            to_background_rx,
-            from_connections_rx,
-            from_connections_tx,
-            tasks_executor: config.tasks_executor,
-            log_callback: config.log_callback.clone(),
-            network,
-            noise_key: config.noise_key,
-            peering_strategy,
-            blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                50, // TODO: ?
-                Default::default(),
-            ),
-            kademlia_find_nodes_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                4,
-                Default::default(),
-            ),
-            jaeger_service: config.jaeger_service.clone(),
-            next_discovery: smol::Timer::after(Duration::from_secs(1)),
-            next_discovery_period: Duration::from_secs(1),
-        };
-
         // For each listening address in the configuration, create a background task dedicated to
         // listening on that address.
+        let mut incoming_connections = SelectAll::new();
         for listen_address in config.listen_addresses {
             // Try to parse the requested address and create the corresponding listening socket.
             let tcp_listener: smol::net::TcpListener = {
@@ -422,78 +394,61 @@ impl NetworkService {
                 }
             };
 
-            // Spawn a background task dedicated to this listener.
-            (inner.tasks_executor)(Box::pin({
-                let to_background_tx = to_background_tx.clone();
-                let log_callback = config.log_callback.clone();
-                let mut on_foreground_shutdown = foreground_shutdown.listen();
+            // Add a task dedicated to this listener.
+            let log_callback = config.log_callback.clone();
+            incoming_connections.push(Box::pin(stream::unfold(tcp_listener, move |tcp_listener| {
+                let log_callback = log_callback.clone();
                 async move {
                     loop {
-                        let Some(accept_result) = future::or(
-                            async {
-                                (&mut on_foreground_shutdown).await;
-                                None
-                            },
-                            async { Some(tcp_listener.accept().await) },
-                        )
-                        .await
-                        else {
-                            break;
-                        };
-
-                        let when_accepted = Instant::now();
-
-                        let (socket, addr) = match accept_result {
-                            Ok(v) => v,
+                        match tcp_listener.accept().await {
+                            Ok((socket, socket_addr)) => {
+                                break Some(((socket, socket_addr), tcp_listener))
+                            }
                             Err(error) => {
-                                // Errors here can happen if the accept failed, for example if no
-                                // file descriptor is available.
-                                // A wait is added in order to avoid having a busy-loop failing to
-                                // accept connections.
+                                // Errors here can happen if the accept failed, for example
+                                // if no file descriptor is available.
+                                // A wait is added in order to avoid having a busy-loop
+                                // failing to accept connections.
                                 log_callback.log(
                                     LogLevel::Warn,
                                     format!("tcp-accept-error; error={}", error),
                                 );
                                 smol::Timer::after(Duration::from_secs(2)).await;
-                                continue;
                             }
-                        };
-
-                        // The Nagle algorithm, implemented in the kernel, consists in buffering the
-                        // data to be sent out and waiting a bit before actually sending it out, in
-                        // order to potentially merge multiple writes in a row into one packet. In
-                        // the implementation below, it is guaranteed that the buffer in `WithBuffers`
-                        // is filled with as much data as possible before the operating system gets
-                        // involved. As such, we disable the Nagle algorithm, in order to avoid adding
-                        // an artificial delay to all sends.
-                        let _ = socket.set_nodelay(true);
-
-                        let multiaddr = [
-                            match addr.ip() {
-                                IpAddr::V4(ip) => Protocol::<&[u8]>::Ip4(ip.octets()),
-                                IpAddr::V6(ip) => Protocol::Ip6(ip.octets()),
-                            },
-                            Protocol::Tcp(addr.port()),
-                        ]
-                        .into_iter()
-                        .collect::<Multiaddr>();
-
-                        log_callback.log(
-                            LogLevel::Debug,
-                            format!("incoming-connection; multiaddr={}", multiaddr),
-                        );
-
-                        let _ = to_background_tx
-                            .send(ToBackground::IncomingConnection {
-                                socket,
-                                multiaddr,
-                                when_accepted,
-                            })
-                            .await;
+                        }
                     }
                 }
-            }))
+            })) as Pin<Box<_>>);
         }
+
+        // Initialize the inner network service.
+        let mut inner = Inner {
+            local_peer_id: local_peer_id.clone(),
+            identify_agent_version: config.identify_agent_version,
+            event_senders: either::Left(event_senders),
+            event_pending_send: None,
+            num_pending_out_attempts: 0,
+            to_background_rx,
+            from_connections_rx,
+            from_connections_tx,
+            tasks_executor: config.tasks_executor,
+            log_callback: config.log_callback.clone(),
+            network,
+            noise_key: config.noise_key,
+            peering_strategy,
+            blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                50, // TODO: ?
+                Default::default(),
+            ),
+            kademlia_find_nodes_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                4,
+                Default::default(),
+            ),
+            jaeger_service: config.jaeger_service.clone(),
+            next_discovery: smol::Timer::after(Duration::from_secs(1)),
+            next_discovery_period: Duration::from_secs(1),
+            incoming_connections,
+        };
 
         // Spawn a task that sends a "shutdown" message whenever the service shuts down.
         (inner.tasks_executor)({
@@ -778,6 +733,10 @@ fn run(mut inner: Inner) {
 async fn background_task(mut inner: Inner) {
     loop {
         enum WakeUpReason {
+            IncomingConnection {
+                socket: TcpStream,
+                socket_addr: SocketAddr,
+            },
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
             FromConnectionTask {
@@ -895,6 +854,15 @@ async fn background_task(mut inner: Inner) {
                 message,
             }
         })
+        .or(async {
+            let Some((socket, socket_addr)) = inner.incoming_connections.next().await else {
+                future::pending().await
+            };
+            WakeUpReason::IncomingConnection {
+                socket,
+                socket_addr,
+            }
+        })
         .await;
 
         match wake_up_reason {
@@ -923,15 +891,38 @@ async fn background_task(mut inner: Inner) {
                 }
             }
 
-            WakeUpReason::Message(ToBackground::IncomingConnection {
+            WakeUpReason::IncomingConnection {
                 socket,
-                multiaddr,
-                when_accepted,
-            }) => {
+                socket_addr,
+            } => {
+                // The Nagle algorithm, implemented in the kernel, consists in buffering the
+                // data to be sent out and waiting a bit before actually sending it out, in
+                // order to potentially merge multiple writes in a row into one packet. In
+                // the implementation below, it is guaranteed that the buffer in `WithBuffers`
+                // is filled with as much data as possible before the operating system gets
+                // involved. As such, we disable the Nagle algorithm, in order to avoid adding
+                // an artificial delay to all sends.
+                let _ = socket.set_nodelay(true);
+
+                let multiaddr = [
+                    match socket_addr.ip() {
+                        IpAddr::V4(ip) => Protocol::<&[u8]>::Ip4(ip.octets()),
+                        IpAddr::V6(ip) => Protocol::Ip6(ip.octets()),
+                    },
+                    Protocol::Tcp(socket_addr.port()),
+                ]
+                .into_iter()
+                .collect::<Multiaddr>();
+
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!("incoming-connection; multiaddr={}", multiaddr),
+                );
+
                 let (tx, rx) = channel::bounded(16); // TODO: ?!
 
                 let (connection_id, connection_task) = inner.network.add_single_stream_connection(
-                    when_accepted,
+                    Instant::now(),
                     service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
                         is_initiator: false,
                         noise_key: &inner.noise_key,
