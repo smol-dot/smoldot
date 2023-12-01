@@ -1155,7 +1155,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(target: "network", "Chains <= AddChain(id={})", task.network[chain_id].log_name);
             }
             WakeUpReason::EventSendersReady => {
-                // Dispatch the pending event, if any to the various senders.
+                // Dispatch the pending event, if any, to the various senders.
 
                 // We made sure that the senders were ready before generating an event.
                 let either::Left(event_senders) = &mut task.event_senders else {
