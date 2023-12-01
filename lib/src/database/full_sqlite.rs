@@ -1342,7 +1342,7 @@ fn insert_storage<'a>(
         .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_temporary_node_statement = database
-        .prepare_cached("INSERT INTO temp_newly_inserted_trie_nodes(node_hash) VALUES(?)")
+        .prepare_cached("INSERT OR IGNORE INTO temp_newly_inserted_trie_nodes(node_hash) VALUES(?)")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_node_storage_statement = database
         .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
