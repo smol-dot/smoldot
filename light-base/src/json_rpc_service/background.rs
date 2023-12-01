@@ -72,10 +72,8 @@ struct Background<TPlat: PlatformRef> {
     system_version: String,
 
     /// See [`StartConfig::network_service`].
-    network_service: (
-        Arc<network_service::NetworkService<TPlat>>,
-        network_service::ChainId,
-    ),
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+
     /// See [`StartConfig::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`StartConfig::runtime_service`].
@@ -680,12 +678,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 match PeerId::from_bytes(peer_id_bytes) {
                     Ok(peer_id) => {
                         self.network_service
-                            .0
-                            .discover(
-                                self.network_service.1,
-                                iter::once((peer_id, iter::once(addr))),
-                                false,
-                            )
+                            .discover(iter::once((peer_id, iter::once(addr))), false)
                             .await;
                         request.respond(methods::Response::sudo_unstable_p2pDiscover(()));
                     }
@@ -914,7 +907,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 code_merkle_value,
                 code_closest_ancestor_excluding,
             )
-            .await;
+            .await
+            .map_err(|err| match err {
+                runtime_service::CompileAndPinRuntimeError::Crash => {
+                    RuntimeCallError::RuntimeServiceCrash
+                }
+            })?;
 
         let precall = self
             .runtime_service
@@ -1181,6 +1179,8 @@ enum RuntimeCallError {
     },
     /// Runtime called a forbidden host function.
     ForbiddenHostCall,
+    /// Runtime service has crashed while compiling the runtime.
+    RuntimeServiceCrash,
 }
 
 #[derive(Debug)]

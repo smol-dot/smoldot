@@ -37,7 +37,7 @@ use super::{
 };
 
 use alloc::{borrow::Cow, sync::Arc};
-use core::{pin::Pin, str, time::Duration};
+use core::{panic, pin::Pin, str, time::Duration};
 use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
 use std::{
@@ -138,7 +138,19 @@ impl PlatformRef for Arc<DefaultPlatform> {
         _task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
     ) {
-        self.tasks_executor.spawn(task).detach();
+        // In order to make sure that the execution threads don't stop if there are still
+        // tasks to execute, we hold a copy of the `Arc<DefaultPlatform>` inside of the task until
+        // it is finished.
+        let _dummy_keep_alive = self.clone();
+        self.tasks_executor
+            .spawn(
+                panic::AssertUnwindSafe(async move {
+                    task.await;
+                    drop(_dummy_keep_alive);
+                })
+                .catch_unwind(),
+            )
+            .detach();
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -290,3 +302,28 @@ pub struct Stream(
 );
 
 type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;
+
+#[cfg(test)]
+mod tests {
+    use super::{DefaultPlatform, PlatformRef as _};
+
+    #[test]
+    fn tasks_run_indefinitely() {
+        let platform_destroyed = event_listener::Event::new();
+        let (tx, mut rx) = futures_channel::oneshot::channel();
+
+        {
+            let platform = DefaultPlatform::new("".to_string(), "".to_string());
+            let when_platform_destroyed = platform_destroyed.listen();
+            platform.spawn_task("".into(), async move {
+                when_platform_destroyed.await;
+                tx.send(()).unwrap();
+            })
+        }
+
+        // The platform is destroyed, but the task must still be running.
+        assert!(matches!(rx.try_recv(), Ok(None)));
+        platform_destroyed.notify(usize::max_value());
+        assert!(matches!(smol::block_on(rx), Ok(())));
+    }
+}

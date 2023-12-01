@@ -2,8 +2,28 @@
 
 ## Unreleased
 
+## 2.0.13 - 2023-11-28
+
 ### Changed
 
+- The order in which smoldot connects to peers is now random rather than depending on the peer. ([#1424](https://github.com/smol-dot/smoldot/pull/1424))
+- Increase the rate at which connections are opened to 10 per second, with a pool of 8 simultaneous connections openings. ([#1425](https://github.com/smol-dot/smoldot/pull/1425))
+
+### Fixed
+
+- Fix panic when disconnecting from a peer whose identity didn't match the identity that was expected when connecting to it. ([#1431](https://github.com/smol-dot/smoldot/pull/1431))
+
+## 2.0.12 - 2023-11-27
+
+### Fixed
+
+- Fix panic in network service when all chains are removed. ([#1422](https://github.com/smol-dot/smoldot/pull/1422))
+
+## 2.0.11 - 2023-11-27
+
+### Changed
+
+- A single networking service is now shared between all chains. This means that the same connection (such as a WebSocket or WebRTC connection) can now be used to open multiple block announces substreams for multiple different chains. ([#1398](https://github.com/smol-dot/smoldot/pull/1398))
 - Addresses that are not supported by the host platform are now ignored during the discovery process. For example, TCP/IP connections are ignored while in a browser. This avoids populating the address book with peers that we know we can't connect to anyway. ([#1359](https://github.com/smol-dot/smoldot/pull/1359), [#1360](https://github.com/smol-dot/smoldot/pull/1360))
 - Smoldot will no longer try to connect to the same address over and over again. ([#1358](https://github.com/smol-dot/smoldot/pull/1358))
 
@@ -11,6 +31,13 @@
 
 - Fix panic when the runtime of a chain provides consensus information that is inconsistent with the information found in the finalized block. ([#1317](https://github.com/smol-dot/smoldot/pull/1317))
 - Incoming notification substreams are now properly when accepted when a peer doesn't have a slot or gets a slot later on. ([#1369](https://github.com/smol-dot/smoldot/pull/1369))
+- Fix panic when `chainHead_unstable_follow` is called too many times. ([#1392](https://github.com/smol-dot/smoldot/pull/1392))
+- Fix panic when opening a gossiping link to a peer that we were previously connected to. ([#1395](https://github.com/smol-dot/smoldot/pull/1395))
+- Fix panic when the discovery system finds same address attributed to two different peers. ([#1412](https://github.com/smol-dot/smoldot/pull/1412))
+- Fix sending a block announce handshake when accepting an inbound transactions or grandpa substream in some rare situations. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
+- Fix automatically refusing inbound notification substreams if a different inbound substream of the same protocol existed on the same connection, even when that other substream has been closed. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
+- Inbound notification substreams opened by the remote and that are no longer wanted are now forcefully closed if the remote doesn't close them gracefully. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
+- Fix panic when a connection is shutting down after the notification substreams of that connection were opened in an unconventional order. ((#1417)[https://github.com/smol-dot/smoldot/pull/1417])
 
 ## 2.0.10 - 2023-11-17
 

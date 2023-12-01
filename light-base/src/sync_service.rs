@@ -60,11 +60,7 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (
-        Arc<network_service::NetworkService<TPlat>>,
-        network_service::ChainId,
-    ),
-
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// Extra fields depending on whether the chain is a relay chain or a parachain.
     pub chain_type: ConfigChainType<TPlat>,
 }
@@ -137,9 +133,7 @@ pub struct SyncService<TPlat: PlatformRef> {
     platform: TPlat,
 
     /// See [`Config::network_service`].
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    /// See [`Config::network_service`].
-    network_chain_id: network_service::ChainId,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
 }
@@ -161,8 +155,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.relay_chain_block_number_bytes,
                 config_parachain.para_id,
                 from_foreground,
-                config.network_service.0.clone(),
-                config.network_service.1,
+                config.network_service.clone(),
             )),
             ConfigChainType::RelayChain(config_relay_chain) => {
                 Box::pin(standalone::start_standalone_chain(
@@ -172,8 +165,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config.block_number_bytes,
                     config_relay_chain.runtime_code_hint,
                     from_foreground,
-                    config.network_service.0.clone(),
-                    config.network_service.1,
+                    config.network_service.clone(),
                 ))
             }
         };
@@ -188,8 +180,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         SyncService {
             to_background,
             platform: config.platform,
-            network_service: config.network_service.0,
-            network_chain_id: config.network_service.1,
+            network_service: config.network_service,
             block_number_bytes: config.block_number_bytes,
         }
     }
@@ -343,12 +334,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(
-                    target,
-                    self.network_chain_id,
-                    request_config.clone(),
-                    timeout_per_request,
-                )
+                .blocks_request(target, request_config.clone(), timeout_per_request)
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
@@ -382,19 +368,14 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         // TODO: better peers selection ; don't just take the first
         for target in self
             .network_service
-            .peers_list(self.network_chain_id)
+            .peers_list()
             .await
             .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
         {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(
-                    target,
-                    self.network_chain_id,
-                    request_config.clone(),
-                    timeout_per_request,
-                )
+                .blocks_request(target, request_config.clone(), timeout_per_request)
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
@@ -572,7 +553,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .storage_proof_request(
-                    self.network_chain_id,
                     target,
                     codec::StorageProofRequestConfig {
                         block_hash: *block_hash,
@@ -816,12 +796,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let result = self
                 .network_service
                 .clone()
-                .call_proof_request(
-                    self.network_chain_id,
-                    target,
-                    config.clone(),
-                    timeout_per_request,
-                )
+                .call_proof_request(target, config.clone(), timeout_per_request)
                 .await;
 
             match result {

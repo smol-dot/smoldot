@@ -142,7 +142,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
 
     config.platform.clone().spawn_task(
         format!("{}-legacy-state-subscriptions", config.log_target).into(),
-        Box::pin(run(Task {
+        run(Task {
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
             best_block_report: Vec::with_capacity(4),
@@ -192,7 +192,7 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                 32,
                 Default::default(),
             ),
-        })),
+        }),
     );
 
     requests_tx
@@ -520,7 +520,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.storage_query_in_progress = true;
                 task.platform.spawn_task(
                     format!("{}-storage-subscriptions-fetch", task.log_target).into(),
-                    Box::pin({
+                    {
                         let block_hash = *current_best_block;
                         let sync_service = task.sync_service.clone();
                         let requests_tx = task.requests_tx.clone();
@@ -547,7 +547,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                     .await;
                             }
                         }
-                    }),
+                    },
                 );
             }
         }
@@ -749,11 +749,15 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 *current_finalized_block = finalized_hash;
                 *finalized_heads_subscriptions_stale = true;
 
+                debug_assert!(pruned_blocks
+                    .iter()
+                    .all(|hash| pinned_blocks.contains_key(hash)));
+
                 // Add the pruned and finalized blocks to the LRU cache. The least-recently used
                 // entries in the cache are unpinned and no longer tracked.
                 //
                 // An important detail here is that the newly-finalized block is added to the list
-                // at the end, in order to guaranteed that it doesn't get removed. This is
+                // at the end, in order to guarantee that it doesn't get removed. This is
                 // necessary in order to guarantee that the current finalized (and current best,
                 // if the best block is also the finalized block) remains pinned until at least
                 // a different block gets finalized.
@@ -1294,11 +1298,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let runtime_service = task.runtime_service.clone();
                 task.subscription = Subscription::Pending(Box::pin(async move {
                     runtime_service
-                        .subscribe_all(
-                            "json-rpc-blocks-cache",
-                            32,
-                            NonZeroUsize::new(usize::max_value()).unwrap(),
-                        )
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await
                 }));
             }

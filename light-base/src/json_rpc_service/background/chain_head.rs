@@ -98,7 +98,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     "Rejected `chainHead_unstable_follow` subscription due to limit reached."
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ApplicationDefined(
-                    -32100,
+                    -32800,
                     "Maximum number of `chainHead_unstable_follow` subscriptions reached",
                 ));
                 return;
@@ -114,7 +114,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let events = if with_runtime {
             let subscribe_all = self
                 .runtime_service
-                .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
+                .subscribe_all(32, NonZeroUsize::new(32).unwrap())
                 .await;
             let id = subscribe_all.new_blocks.id();
             either::Left((subscribe_all, id))

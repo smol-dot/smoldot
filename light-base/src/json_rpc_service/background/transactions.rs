@@ -24,7 +24,6 @@ use crate::transactions_service;
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
 use core::pin;
 use futures_lite::future;
-use futures_util::StreamExt as _;
 use smoldot::json_rpc::{methods, service};
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -108,7 +107,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                     loop {
                         let status_update = match future::or(
-                            async { Some(transaction_updates.next().await) },
+                            async { Some(transaction_updates.as_mut().next().await) },
                             async { subscription.wait_until_stale().await; None }
                         ).await {
                             Some(Some(status)) => status,
@@ -266,6 +265,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::ValidateError(_),
                                 ),
                                 true,
+                            )
+                            | (
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Crashed,
+                                ),
+                                true,
                             ) => {
                                 subscription.send_notification(methods::ServerToClient::author_extrinsicUpdate {
                                     subscription: (&subscription_id).into(),
@@ -316,6 +321,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Error {
                                     error: error.to_string().into(),
+                                },
+                            }).await,
+                            (
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Crashed,
+                                ),
+                                false,
+                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::TransactionWatchEvent::Error {
+                                    error: "transactions service has crashed".into(),
                                 },
                             }).await,
 

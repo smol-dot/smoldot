@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::ToBackground;
 use crate::platform::{PlatformRef, SubstreamDirection};
 
 use alloc::{boxed::Box, string::String};
@@ -32,7 +31,10 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     connection_id: service::ConnectionId,
     connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
-    connection_to_coordinator: async_channel::Sender<ToBackground>,
+    connection_to_coordinator: async_channel::Sender<(
+        service::ConnectionId,
+        service::ConnectionToCoordinator,
+    )>,
 ) {
     // We need to pin the receiver, as the type doesn't implement `Unpin`.
     let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
@@ -102,12 +104,9 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
 
             debug_assert!(message_sending.is_none());
             if let Some(message) = message {
-                message_sending.set(Some(connection_to_coordinator.send(
-                    super::ToBackground::ConnectionMessage {
-                        connection_id,
-                        message,
-                    },
-                )));
+                message_sending.set(Some(
+                    connection_to_coordinator.send((connection_id, message)),
+                ));
             }
         }
 
@@ -202,7 +201,10 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
     mut coordinator_to_connection: async_channel::Receiver<service::CoordinatorToConnection>,
-    connection_to_coordinator: async_channel::Sender<ToBackground>,
+    connection_to_coordinator: async_channel::Sender<(
+        service::ConnectionId,
+        service::ConnectionToCoordinator,
+    )>,
 ) {
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
     // at a time. `None` if no message is being sent.
@@ -372,12 +374,9 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                     connection_task = task_update;
                     debug_assert!(message_sending.is_none());
                     if let Some(message) = message {
-                        message_sending.set(Some(connection_to_coordinator.send(
-                            super::ToBackground::ConnectionMessage {
-                                connection_id,
-                                message,
-                            },
-                        )));
+                        message_sending.set(Some(
+                            connection_to_coordinator.send((connection_id, message)),
+                        ));
                     }
                 } else {
                     log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");

@@ -87,7 +87,6 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, ops, pin, time::Duration};
-use futures_util::FutureExt as _;
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -219,6 +218,10 @@ pub struct Client<TPlat: platform::PlatformRef, TChain = ()> {
     /// Because we use a `SipHasher`, this hashmap isn't created in the `new` function (as this
     /// function is `const`) but lazily the first time it is needed.
     chains_by_key: Option<HashMap<ChainKey, RunningChain<TPlat>, util::SipHasherBuild>>,
+
+    /// All chains share a single networking service created lazily the first time that it
+    /// is used.
+    network_service: Option<Arc<network_service::NetworkService<TPlat>>>,
 }
 
 struct PublicApiChain<TChain> {
@@ -278,8 +281,7 @@ struct RunningChain<TPlat: platform::PlatformRef> {
 }
 
 struct ChainServices<TPlat: platform::PlatformRef> {
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_service_chain_id: network_service::ChainId,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
@@ -289,7 +291,6 @@ impl<TPlat: platform::PlatformRef> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
-            network_service_chain_id: self.network_service_chain_id,
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
@@ -355,6 +356,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             platform,
             public_api_chains: slab::Slab::new(),
             chains_by_key: None,
+            network_service: None,
         }
     }
 
@@ -722,6 +724,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     start_services(
                         log_name.clone(),
                         &self.platform,
+                        &mut self.network_service,
                         runtime_code_hint,
                         genesis_block_header,
                         usize::from(chain_spec.block_number_bytes()),
@@ -861,16 +864,10 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
         self.platform
             .spawn_task("network-service-add-initial-topology".into(), {
                 let network_service = services.network_service.clone();
-                let network_service_chain_id = services.network_service_chain_id;
                 async move {
-                    network_service
-                        .discover(network_service_chain_id, known_nodes, false)
-                        .await;
-                    network_service
-                        .discover(network_service_chain_id, bootstrap_nodes, true)
-                        .await;
+                    network_service.discover(known_nodes, false).await;
+                    network_service.discover(bootstrap_nodes, true).await;
                 }
-                .boxed()
             });
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
@@ -897,10 +894,7 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
             service_starter.start(json_rpc_service::StartConfig {
                 platform: self.platform.clone(),
                 sync_service: services.sync_service.clone(),
-                network_service: (
-                    services.network_service.clone(),
-                    services.network_service_chain_id,
-                ),
+                network_service: services.network_service.clone(),
                 transactions_service: services.transactions_service.clone(),
                 runtime_service: services.runtime_service.clone(),
                 chain_spec: &chain_spec,
@@ -1085,6 +1079,7 @@ enum StartServicesChainTy<'a, TPlat: platform::PlatformRef> {
 fn start_services<TPlat: platform::PlatformRef>(
     log_name: String,
     platform: &TPlat,
+    network_service: &mut Option<Arc<network_service::NetworkService<TPlat>>>,
     runtime_code_hint: Option<database::DatabaseContentRuntimeCodeHint>,
     genesis_block_scale_encoded_header: Vec<u8>,
     block_number_bytes: usize,
@@ -1092,70 +1087,66 @@ fn start_services<TPlat: platform::PlatformRef>(
     config: StartServicesChainTy<'_, TPlat>,
     network_identify_agent_version: String,
 ) -> ChainServices<TPlat> {
-    // The network service is responsible for connecting to the peer-to-peer network.
-    let (network_service, network_service_chain_ids) =
+    let network_service = network_service.get_or_insert_with(|| {
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
             identify_agent_version: network_identify_agent_version,
-            connections_open_pool_size: 5,
-            connections_open_pool_restore_delay: Duration::from_secs(1),
-            chains: vec![network_service::ConfigChain {
-                log_name: log_name.clone(),
-                num_out_slots: 4,
-                grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
-                    chain_information,
-                } = &config
-                {
-                    if matches!(
-                        chain_information.as_ref().finality,
-                        chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                    ) {
-                        Some(chain_information.as_ref().finalized_block_header.number)
-                    } else {
-                        None
-                    }
-                } else {
-                    // Parachains never use GrandPa.
-                    None
-                },
-                genesis_block_hash: header::hash_from_scale_encoded_header(
-                    &genesis_block_scale_encoded_header,
-                ),
-                best_block: match &config {
-                    StartServicesChainTy::RelayChain { chain_information } => (
-                        chain_information.as_ref().finalized_block_header.number,
-                        chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .hash(block_number_bytes),
-                    ),
-                    StartServicesChainTy::Parachain {
-                        finalized_block_header,
-                        ..
-                    } => {
-                        if let Ok(decoded) =
-                            header::decode(finalized_block_header, block_number_bytes)
-                        {
-                            (
-                                decoded.number,
-                                header::hash_from_scale_encoded_header(finalized_block_header),
-                            )
-                        } else {
-                            (
-                                0,
-                                header::hash_from_scale_encoded_header(
-                                    &genesis_block_scale_encoded_header,
-                                ),
-                            )
-                        }
-                    }
-                },
-                fork_id,
-                block_number_bytes,
-            }],
-        });
+            connections_open_pool_size: 8,
+            connections_open_pool_restore_delay: Duration::from_millis(100),
+            chains_capacity: 1,
+        })
+    });
 
-    let network_service_chain_id = network_service_chain_ids.into_iter().next().unwrap();
+    let network_service_chain = network_service.add_chain(network_service::ConfigChain {
+        log_name: log_name.clone(),
+        num_out_slots: 4,
+        grandpa_protocol_finalized_block_height: if let StartServicesChainTy::RelayChain {
+            chain_information,
+        } = &config
+        {
+            if matches!(
+                chain_information.as_ref().finality,
+                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
+            ) {
+                Some(chain_information.as_ref().finalized_block_header.number)
+            } else {
+                None
+            }
+        } else {
+            // Parachains never use GrandPa.
+            None
+        },
+        genesis_block_hash: header::hash_from_scale_encoded_header(
+            &genesis_block_scale_encoded_header,
+        ),
+        best_block: match &config {
+            StartServicesChainTy::RelayChain { chain_information } => (
+                chain_information.as_ref().finalized_block_header.number,
+                chain_information
+                    .as_ref()
+                    .finalized_block_header
+                    .hash(block_number_bytes),
+            ),
+            StartServicesChainTy::Parachain {
+                finalized_block_header,
+                ..
+            } => {
+                if let Ok(decoded) = header::decode(finalized_block_header, block_number_bytes) {
+                    (
+                        decoded.number,
+                        header::hash_from_scale_encoded_header(finalized_block_header),
+                    )
+                } else {
+                    (
+                        0,
+                        header::hash_from_scale_encoded_header(&genesis_block_scale_encoded_header),
+                    )
+                }
+            }
+        },
+        fork_id,
+        block_number_bytes,
+    });
 
     let (sync_service, runtime_service) = match config {
         StartServicesChainTy::Parachain {
@@ -1173,7 +1164,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 platform: platform.clone(),
                 log_name: log_name.clone(),
                 block_number_bytes,
-                network_service: (network_service.clone(), network_service_chain_id),
+                network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::Parachain(
                     sync_service::ConfigParachain {
                         finalized_block_header,
@@ -1209,7 +1200,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                 log_name: log_name.clone(),
                 block_number_bytes,
                 platform: platform.clone(),
-                network_service: (network_service.clone(), network_service_chain_id),
+                network_service: network_service_chain.clone(),
                 chain_type: sync_service::ConfigChainType::RelayChain(
                     sync_service::ConfigRelayChain {
                         chain_information: chain_information.clone(),
@@ -1249,7 +1240,7 @@ fn start_services<TPlat: platform::PlatformRef>(
             platform: platform.clone(),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
-            network_service: (network_service.clone(), network_service_chain_id),
+            network_service: network_service_chain.clone(),
             max_pending_transactions: NonZeroU32::new(64).unwrap(),
             max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
             max_concurrent_validations: NonZeroU32::new(2).unwrap(),
@@ -1257,8 +1248,7 @@ fn start_services<TPlat: platform::PlatformRef>(
     ));
 
     ChainServices {
-        network_service,
-        network_service_chain_id,
+        network_service: network_service_chain,
         runtime_service,
         sync_service,
         transactions_service,

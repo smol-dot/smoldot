@@ -131,6 +131,17 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     ///
     /// The `Future` must be run until it yields a value.
+    ///
+    /// Implementers should be aware of the fact that polling the `Future` might panic (never
+    /// intentionally, but in case of a bug). Many tasks can be restarted if they panic, and
+    /// implementers are encouraged to absorb the panics that happen when polling. If a panic
+    /// happens, the `Future` that has panicked must never be polled again.
+    ///
+    /// > **Note**: Ideally, the `task` parameter would require the `UnwindSafe` trait.
+    /// >           Unfortunately, at the time of writing of this comment, it is extremely
+    /// >           difficult if not impossible to implement this trait on `Future`s. It is for
+    /// >           the same reason that the `std::thread::spawn` function of the standard library
+    /// >           doesn't require its parameter to implement `UnwindSafe`.
     fn spawn_task(
         &self,
         task_name: Cow<str>,
