@@ -1420,12 +1420,13 @@ fn insert_storage<'a>(
             insertions(node_hash, copy_from_base, copy_from_relative_key) AS (
                 SELECT node_hash, node_hash, X'' FROM temp_pending_parent_copies
                 UNION ALL
-                SELECT insertions.node_hash, COALESCE(trie_node_child.hash, trie_node_storage.node_hash), CAST(COALESCE(trie_node_child.child_num, X'') || trie_node.partial_key || insertions.copy_from_relative_key AS BLOB)
+                SELECT insertions.node_hash, COALESCE(temp_newly_inserted_trie_nodes_parent.node_hash, temp_newly_inserted_trie_nodes_ref.node_hash), CAST(COALESCE(trie_node_child.child_num, X'') || trie_node.partial_key || insertions.copy_from_relative_key AS BLOB)
                     FROM insertions
-                    JOIN temp_newly_inserted_trie_nodes ON temp_newly_inserted_trie_nodes.node_hash = insertions.copy_from_base
                     JOIN trie_node ON trie_node.hash = insertions.copy_from_base
                     LEFT JOIN trie_node_child ON trie_node_child.child_hash = insertions.copy_from_base
+                    LEFT JOIN temp_newly_inserted_trie_nodes AS temp_newly_inserted_trie_nodes_parent ON temp_newly_inserted_trie_nodes_parent.node_hash = trie_node_child.hash
                     LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = insertions.copy_from_base
+                    LEFT JOIN temp_newly_inserted_trie_nodes AS temp_newly_inserted_trie_nodes_ref ON temp_newly_inserted_trie_nodes_ref.node_hash = trie_node_storage.node_hash
                     WHERE insertions.copy_from_base IS NOT NULL
             ),
             node_with_key(node_hash, search_node_hash, search_remain) AS (
