@@ -890,6 +890,8 @@ async fn background_task(mut inner: Inner) {
                 let event_senders = sending.await;
                 inner.event_senders = either::Left(event_senders);
                 WakeUpReason::EventSendersReady
+            } else if inner.event_pending_send.is_some() {
+                WakeUpReason::EventSendersReady
             } else {
                 future::pending().await
             }
