@@ -838,40 +838,12 @@ async fn background_task(mut inner: Inner) {
             }
         }
 
-        // TODO: doc
-        loop {
-            let Some((peer_id, chain_id)) = inner
-                .network
-                .connected_unopened_gossip_desired()
-                .next()
-                .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
-            else {
-                break;
-            };
-
-            inner
-                .network
-                .gossip_open(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                )
-                .unwrap();
-
-            inner.log_callback.log(
-                LogLevel::Debug,
-                format!(
-                    "gossip-open; peer_id={}; chain={}",
-                    peer_id, &inner.network[chain_id].log_name
-                ),
-            );
-        }
-
         enum WakeUpReason {
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
             EventSendersReady,
             CanStartConnect(PeerId),
+            CanOpenGossip(PeerId, ChainId),
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -898,6 +870,12 @@ async fn background_task(mut inner: Inner) {
                                 connection_id,
                                 message,
                             }
+                        } else if let Some((peer_id, chain_id)) = network
+                            .connected_unopened_gossip_desired()
+                            .next()
+                            .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
+                        {
+                            WakeUpReason::CanOpenGossip(peer_id, chain_id)
                         } else if let Some(peer_id) = (*num_pending_out_attempts < 16)
                             .then(|| network.unconnected_desired().next().cloned())
                             .flatten()
@@ -1719,6 +1697,25 @@ async fn background_task(mut inner: Inner) {
                     rx,
                     inner.to_background_tx.clone(),
                 )));
+            }
+
+            WakeUpReason::CanOpenGossip(peer_id, chain_id) => {
+                inner
+                    .network
+                    .gossip_open(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .unwrap();
+
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "gossip-open; peer_id={}; chain={}",
+                        peer_id, &inner.network[chain_id].log_name
+                    ),
+                );
             }
         }
     }
