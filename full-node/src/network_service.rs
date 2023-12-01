@@ -798,18 +798,6 @@ fn run(mut inner: Inner) {
 
 async fn background_task(mut inner: Inner) {
     loop {
-        // Pull messages that the coordinator has generated in destination to the various
-        // connections.
-        while let Some((connection_id, message)) = inner.network.pull_message_to_connection() {
-            // Note that it is critical for the sending to not take too long here, in order to not
-            // block the process of the network service.
-            // In particular, if sending the message to the connection is blocked due to sending
-            // a message on the connection-to-coordinator channel, this will result in a deadlock.
-            // For this reason, the connection task is always ready to immediately accept a message
-            // on the coordinator-to-connection channel.
-            inner.network[connection_id].send(message).await.unwrap();
-        }
-
         if matches!(inner.event_senders, either::Left(_)) {
             // TODO: doc
             for chain_id in inner.network.chains().collect::<Vec<_>>() {
@@ -990,6 +978,10 @@ async fn background_task(mut inner: Inner) {
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
             EventSendersReady,
+            MessageToConnection {
+                connection_id: service::ConnectionId,
+                message: service::CoordinatorToConnection,
+            },
         }
 
         let wake_up_reason =
@@ -1000,10 +992,17 @@ async fn background_task(mut inner: Inner) {
                     let network = &mut inner.network;
                     async move {
                         if let Some(event) = (event_senders_ready && event_pending_send.is_none())
-                            .then(move || network.next_event())
+                            .then(|| network.next_event())
                             .flatten()
                         {
                             WakeUpReason::NetworkEvent(event)
+                        } else if let Some((connection_id, message)) =
+                            network.pull_message_to_connection()
+                        {
+                            WakeUpReason::MessageToConnection {
+                                connection_id,
+                                message,
+                            }
                         } else {
                             future::pending().await
                         }
@@ -1021,6 +1020,20 @@ async fn background_task(mut inner: Inner) {
                 .await;
 
         match wake_up_reason {
+            WakeUpReason::MessageToConnection {
+                connection_id,
+                message,
+            } => {
+                // Note that it is critical for the sending to not take too long here, in order to
+                // not block the process of the network service.
+                // In particular, if sending the message to the connection is blocked due to
+                // sending a message on the connection-to-coordinator channel, this will result
+                // in a deadlock.
+                // For this reason, the connection task is always ready to immediately accept a
+                // message on the coordinator-to-connection channel.
+                inner.network[connection_id].send(message).await.unwrap();
+            }
+
             WakeUpReason::Message(ToBackground::FromConnectionTask {
                 connection_id,
                 opaque_message,
