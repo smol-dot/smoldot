@@ -172,9 +172,6 @@ enum ToBackground {
         multiaddr: Multiaddr,
         when_accepted: Instant,
     },
-    StartKademliaDiscoveries {
-        when_done: oneshot::Sender<()>,
-    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_id: ChainId,
@@ -261,6 +258,12 @@ struct Inner {
         oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
         fnv::FnvBuildHasher,
     >,
+
+    /// When to start the next discovery process.
+    next_discovery: smol::Timer,
+
+    /// Time between [`Inner::next_discovery`] and the follow-up discovery.
+    next_discovery_period: Duration,
 
     /// List of Kademlia discovery operations that have been started but not finished yet.
     kademlia_find_nodes_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
@@ -373,6 +376,8 @@ impl NetworkService {
                 Default::default(),
             ),
             jaeger_service: config.jaeger_service.clone(),
+            next_discovery: smol::Timer::after(Duration::from_secs(1)),
+            next_discovery_period: Duration::from_secs(1),
         };
 
         // For each listening address in the configuration, create a background task dedicated to
@@ -493,40 +498,6 @@ impl NetworkService {
                     .await;
             })
         });
-
-        // Spawn task starts a discovery request at a periodic interval.
-        // This is done through a separate task due to ease of implementation.
-        (inner.tasks_executor)(Box::pin({
-            let to_background_tx = to_background_tx.clone();
-            let mut on_foreground_shutdown = foreground_shutdown.listen();
-            async move {
-                let mut next_discovery = Duration::from_secs(1);
-
-                loop {
-                    let still_alive = future::race(
-                        async {
-                            smol::Timer::after(next_discovery).await;
-                            true
-                        },
-                        async {
-                            (&mut on_foreground_shutdown).await;
-                            false
-                        },
-                    )
-                    .await;
-                    if !still_alive {
-                        break;
-                    }
-
-                    next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
-                    let (when_done, when_done_rx) = oneshot::channel();
-                    let _ = to_background_tx
-                        .send(ToBackground::StartKademliaDiscoveries { when_done })
-                        .await;
-                    let _ = when_done_rx.await;
-                }
-            }
-        }));
 
         // Build the final network service.
         let network_service = Arc::new(NetworkService {
@@ -805,6 +776,7 @@ async fn background_task(mut inner: Inner) {
             CanAssignSlot(PeerId, ChainId),
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
+            StartKademliaDiscoveries,
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -896,6 +868,13 @@ async fn background_task(mut inner: Inner) {
                 future::pending().await
             }
         })
+        .or(async {
+            (&mut inner.next_discovery).await;
+            inner.next_discovery = smol::Timer::after(inner.next_discovery_period);
+            inner.next_discovery_period =
+                cmp::min(inner.next_discovery_period * 2, Duration::from_secs(120));
+            WakeUpReason::StartKademliaDiscoveries
+        })
         .await;
 
         match wake_up_reason {
@@ -954,7 +933,7 @@ async fn background_task(mut inner: Inner) {
                 )));
             }
 
-            WakeUpReason::Message(ToBackground::StartKademliaDiscoveries { when_done }) => {
+            WakeUpReason::StartKademliaDiscoveries => {
                 for chain_id in inner.network.chains().collect::<Vec<_>>() {
                     let random_peer_id =
                         PeerId::from_public_key(&peer_id::PublicKey::Ed25519(rand::random()));
@@ -988,8 +967,6 @@ async fn background_task(mut inner: Inner) {
                         // TODO: log message
                     }
                 }
-
-                let _ = when_done.send(());
             }
 
             WakeUpReason::Message(ToBackground::ForegroundShutdown) => {
