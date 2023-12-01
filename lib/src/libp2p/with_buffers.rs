@@ -235,7 +235,7 @@ where
                     }
                 },
                 SocketProj::Resolved(mut socket) => {
-                    if !*this.read_closed {
+                    if !*this.read_closed && *this.read_buffer_valid < this.read_buffer.len() {
                         let read_result = AsyncRead::poll_read(
                             socket.as_mut(),
                             cx,
