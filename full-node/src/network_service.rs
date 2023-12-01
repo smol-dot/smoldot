@@ -798,50 +798,11 @@ fn run(mut inner: Inner) {
 
 async fn background_task(mut inner: Inner) {
     loop {
-        if matches!(inner.event_senders, either::Left(_)) {
-            // TODO: doc
-            for chain_id in inner.network.chains().collect::<Vec<_>>() {
-                loop {
-                    // TODO: 25 is an arbitrary constant, make configurable
-                    if inner
-                        .network
-                        .gossip_desired_num(chain_id, service::GossipKind::ConsensusTransactions)
-                        >= 25
-                    {
-                        break;
-                    }
-
-                    let peer_id = match inner.peering_strategy.pick_assignable_peer(&chain_id, &Instant::now()) {
-                        basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
-                            peer_id.clone()
-                        }
-                        basic_peering_strategy::AssignablePeer::AllPeersBanned { .. }  // TODO: handle `AllPeersBanned` by waking up when a ban expires
-                        | basic_peering_strategy::AssignablePeer::NoPeer => break,
-                    };
-
-                    inner.peering_strategy.assign_slot(&chain_id, &peer_id);
-
-                    inner.log_callback.log(
-                        LogLevel::Debug,
-                        format!(
-                            "slot-assigned; peer_id={}; chain={}",
-                            peer_id, inner.network[chain_id].log_name
-                        ),
-                    );
-
-                    inner.network.gossip_insert_desired(
-                        chain_id,
-                        peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    );
-                }
-            }
-        }
-
         enum WakeUpReason {
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
             EventSendersReady,
+            CanAssignSlot(PeerId, ChainId),
             CanStartConnect(PeerId),
             CanOpenGossip(PeerId, ChainId),
             MessageToConnection {
@@ -850,52 +811,90 @@ async fn background_task(mut inner: Inner) {
             },
         }
 
-        let wake_up_reason =
-            async { WakeUpReason::Message(inner.to_background_rx.next().await.unwrap()) }
-                .or({
-                    let event_senders_ready = matches!(inner.event_senders, either::Left(_));
-                    let event_pending_send = &inner.event_pending_send;
-                    let network = &mut inner.network;
-                    let num_pending_out_attempts = &inner.num_pending_out_attempts;
-                    async move {
-                        if let Some(event) = (event_senders_ready && event_pending_send.is_none())
-                            .then(|| network.next_event())
-                            .flatten()
-                        {
-                            WakeUpReason::NetworkEvent(event)
-                        } else if let Some((connection_id, message)) =
-                            network.pull_message_to_connection()
-                        {
-                            WakeUpReason::MessageToConnection {
-                                connection_id,
-                                message,
+        let wake_up_reason = async {
+            WakeUpReason::Message(inner.to_background_rx.next().await.unwrap())
+        }
+        .or({
+            let event_senders_ready = matches!(inner.event_senders, either::Left(_));
+            let event_pending_send = &inner.event_pending_send;
+            let network = &mut inner.network;
+            let peering_strategy = &mut inner.peering_strategy;
+            let num_pending_out_attempts = &inner.num_pending_out_attempts;
+            async move {
+                if let Some(event) = (event_senders_ready && event_pending_send.is_none())
+                    .then(|| network.next_event())
+                    .flatten()
+                {
+                    WakeUpReason::NetworkEvent(event)
+                } else if let Some((connection_id, message)) = network.pull_message_to_connection()
+                {
+                    WakeUpReason::MessageToConnection {
+                        connection_id,
+                        message,
+                    }
+                } else if let Some((peer_id, chain_id)) = network
+                    .connected_unopened_gossip_desired()
+                    .next()
+                    .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
+                {
+                    WakeUpReason::CanOpenGossip(peer_id, chain_id)
+                } else if let Some(peer_id) = (*num_pending_out_attempts < 16)
+                    .then(|| network.unconnected_desired().next().cloned())
+                    .flatten()
+                {
+                    WakeUpReason::CanStartConnect(peer_id)
+                } else {
+                    'search: loop {
+                        let mut earlier_unban = None;
+
+                        for chain_id in network.chains().collect::<Vec<_>>() {
+                            if network.gossip_desired_num(
+                                chain_id,
+                                service::GossipKind::ConsensusTransactions,
+                            ) >= 25
+                            // TODO: constant
+                            {
+                                continue;
                             }
-                        } else if let Some((peer_id, chain_id)) = network
-                            .connected_unopened_gossip_desired()
-                            .next()
-                            .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id))
-                        {
-                            WakeUpReason::CanOpenGossip(peer_id, chain_id)
-                        } else if let Some(peer_id) = (*num_pending_out_attempts < 16)
-                            .then(|| network.unconnected_desired().next().cloned())
-                            .flatten()
-                        {
-                            WakeUpReason::CanStartConnect(peer_id)
+
+                            match peering_strategy.pick_assignable_peer(&chain_id, &Instant::now())
+                            {
+                                basic_peering_strategy::AssignablePeer::Assignable(peer_id) => {
+                                    break 'search WakeUpReason::CanAssignSlot(
+                                        peer_id.clone(),
+                                        chain_id,
+                                    )
+                                }
+                                basic_peering_strategy::AssignablePeer::AllPeersBanned {
+                                    next_unban,
+                                } => {
+                                    if earlier_unban.as_ref().map_or(true, |b| b > next_unban) {
+                                        earlier_unban = Some(next_unban.clone());
+                                    }
+                                }
+                                basic_peering_strategy::AssignablePeer::NoPeer => continue,
+                            }
+                        }
+
+                        if let Some(earlier_unban) = earlier_unban {
+                            smol::Timer::at(earlier_unban).await;
                         } else {
-                            future::pending().await
+                            future::pending::<()>().await;
                         }
                     }
-                })
-                .or(async {
-                    if let either::Right(sending) = &mut inner.event_senders {
-                        let event_senders = sending.await;
-                        inner.event_senders = either::Left(event_senders);
-                        WakeUpReason::EventSendersReady
-                    } else {
-                        future::pending().await
-                    }
-                })
-                .await;
+                }
+            }
+        })
+        .or(async {
+            if let either::Right(sending) = &mut inner.event_senders {
+                let event_senders = sending.await;
+                inner.event_senders = either::Left(event_senders);
+                WakeUpReason::EventSendersReady
+            } else {
+                future::pending().await
+            }
+        })
+        .await;
 
         match wake_up_reason {
             WakeUpReason::MessageToConnection {
@@ -1602,6 +1601,24 @@ async fn background_task(mut inner: Inner) {
                         "all-slots-unassigned; reason=no-address; peer_id={}",
                         peer_id
                     ),
+                );
+            }
+
+            WakeUpReason::CanAssignSlot(peer_id, chain_id) => {
+                inner.peering_strategy.assign_slot(&chain_id, &peer_id);
+
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "slot-assigned; peer_id={}; chain={}",
+                        peer_id, inner.network[chain_id].log_name
+                    ),
+                );
+
+                inner.network.gossip_insert_desired(
+                    chain_id,
+                    peer_id,
+                    service::GossipKind::ConsensusTransactions,
                 );
             }
 
