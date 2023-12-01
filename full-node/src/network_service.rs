@@ -1681,17 +1681,23 @@ async fn background_task(mut inner: Inner) {
                         &peer_id,
                         service::GossipKind::ConsensusTransactions,
                     );
-                    inner
+                    for (chain_id, what_happened) in inner
                         .peering_strategy
-                        .unassign_slots_and_ban(&peer_id, Instant::now() + Duration::from_secs(10));
-                    // TODO: log chain names?
-                    inner.log_callback.log(
-                        LogLevel::Debug,
-                        format!(
-                            "all-slots-unassigned; reason=no-address; peer_id={}",
-                            peer_id
-                        ),
-                    );
+                        .unassign_slots_and_ban(&peer_id, Instant::now() + Duration::from_secs(10))
+                    {
+                        if matches!(
+                            what_happened,
+                            basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
+                        ) {
+                            inner.log_callback.log(
+                                LogLevel::Debug,
+                                format!(
+                                    "slot-unassigned; peer_id={}; chain={}; reason=no-address",
+                                    peer_id, inner.network[*chain_id].log_name
+                                ),
+                            );
+                        }
+                    }
                     continue;
                 };
 
