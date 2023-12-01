@@ -1171,7 +1171,7 @@ async fn background_task(mut inner: Inner) {
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "slot-unassigned; peer_id={}; chain={}",
+                                "slot-unassigned; peer_id={}; chain={}; reason=disconnected",
                                 peer_id, inner.network[chain_id].log_name
                             ),
                         );
@@ -1245,7 +1245,7 @@ async fn background_task(mut inner: Inner) {
                             inner.log_callback.log(
                                 LogLevel::Debug,
                                 format!(
-                                    "slot-unassigned; peer_id={}; chain={}",
+                                    "slot-unassigned; peer_id={}; chain={}; reason=bad-block-announce",
                                     peer_id, inner.network[chain_id].log_name
                                 ),
                             );
@@ -1311,7 +1311,7 @@ async fn background_task(mut inner: Inner) {
                     inner.log_callback.log(
                         LogLevel::Debug,
                         format!(
-                            "slot-unassigned; peer_id={}; chain={}",
+                            "slot-unassigned; peer_id={}; chain={}; reason=gossip-disconnected",
                             peer_id, inner.network[chain_id].log_name
                         ),
                     );
@@ -1344,7 +1344,7 @@ async fn background_task(mut inner: Inner) {
                     inner.log_callback.log(
                         LogLevel::Debug,
                         format!(
-                            "slot-unassigned; peer_id={}; chain={}",
+                            "slot-unassigned; peer_id={}; chain={}; reason=gossip-open-failed",
                             peer_id, inner.network[chain_id].log_name
                         ),
                     );
