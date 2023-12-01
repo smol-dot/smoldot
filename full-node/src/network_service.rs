@@ -1524,25 +1524,21 @@ async fn background_task(mut inner: Inner) {
 
         enum WakeUpReason {
             Message(ToBackground),
+            EventSendersReady,
         }
 
-        let wake_up_reason = {
-            let foreground_msg = async { Some(inner.to_background_rx.next().await) };
-            let sending_done = async {
-                if let either::Right(sending) = &mut inner.event_senders {
-                    let event_senders = sending.await;
-                    inner.event_senders = either::Left(event_senders);
-                    None
-                } else {
-                    future::pending().await
-                }
-            };
-
-            match foreground_msg.or(sending_done).await {
-                Some(msg) => WakeUpReason::Message(msg.unwrap()),
-                None => continue,
-            }
-        };
+        let wake_up_reason =
+            async { WakeUpReason::Message(inner.to_background_rx.next().await.unwrap()) }
+                .or(async {
+                    if let either::Right(sending) = &mut inner.event_senders {
+                        let event_senders = sending.await;
+                        inner.event_senders = either::Left(event_senders);
+                        WakeUpReason::EventSendersReady
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .await;
 
         match wake_up_reason {
             WakeUpReason::Message(ToBackground::FromConnectionTask {
@@ -1707,6 +1703,10 @@ async fn background_task(mut inner: Inner) {
                     })
                     .sum();
                 let _ = result_tx.send(total);
+            }
+
+            WakeUpReason::EventSendersReady => {
+                // Nothing to do.
             }
         }
     }
