@@ -836,113 +836,6 @@ async fn background_task(mut inner: Inner) {
                     );
                 }
             }
-
-            // The networking service contains a list of connections that should be opened.
-            // Grab this list and start opening a connection for each.
-            // TODO: restore the rate limiting for connections openings
-            loop {
-                if inner.num_pending_out_attempts >= 16 {
-                    // TODO: constant
-                    break;
-                }
-
-                let peer_id = match inner.network.unconnected_desired().next() {
-                    Some(p) => p.clone(),
-                    None => break,
-                };
-
-                inner.num_pending_out_attempts += 1;
-
-                let Some(multiaddr) = inner
-                    .peering_strategy
-                    .pick_address_and_add_connection(&peer_id)
-                else {
-                    // There is no address for that peer in the address book.
-                    inner.network.gossip_remove_desired_all(
-                        &peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    );
-                    inner
-                        .peering_strategy
-                        .unassign_slots_and_ban(&peer_id, Instant::now() + Duration::from_secs(10));
-                    // TODO: log chain names?
-                    inner.log_callback.log(
-                        LogLevel::Debug,
-                        format!(
-                            "all-slots-unassigned; reason=no-address; peer_id={}",
-                            peer_id
-                        ),
-                    );
-                    continue;
-                };
-
-                let multiaddr = match multiaddr::Multiaddr::from_bytes(multiaddr.to_owned()) {
-                    Ok(a) => a,
-                    Err((multiaddr::FromBytesError, multiaddr)) => {
-                        // Address is in an invalid format.
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "invalid-address; peer_id={}; address={:?}",
-                                peer_id, multiaddr
-                            ),
-                        );
-                        let _was_in = inner
-                            .peering_strategy
-                            .decrease_address_connections_and_remove_if_zero(&peer_id, &multiaddr);
-                        debug_assert!(_was_in.is_ok());
-                        continue;
-                    }
-                };
-
-                // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-                // a `Future<dyn Output = Result<TcpStream, ...>>`.
-                let socket = match tasks::multiaddr_to_socket(&multiaddr) {
-                    Ok(socket) => socket,
-                    Err(_) => {
-                        // Address is in an invalid format or isn't supported.
-                        inner.log_callback.log(
-                            LogLevel::Debug,
-                            format!(
-                                "invalid-address; peer_id={}; address={}",
-                                peer_id, multiaddr
-                            ),
-                        );
-                        let _was_in = inner
-                            .peering_strategy
-                            .decrease_address_connections_and_remove_if_zero(
-                                &peer_id,
-                                multiaddr.as_ref(),
-                            );
-                        debug_assert!(_was_in.is_ok());
-                        continue;
-                    }
-                };
-
-                let (tx, rx) = channel::bounded(16); // TODO: ?!
-
-                let (connection_id, connection_task) = inner.network.add_single_stream_connection(
-                    Instant::now(),
-                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
-                        is_initiator: true,
-                        noise_key: &inner.noise_key,
-                    },
-                    multiaddr.clone().into_bytes(),
-                    Some(peer_id.clone()),
-                    tx,
-                );
-
-                // Handle the connection in a separate task.
-                (inner.tasks_executor)(Box::pin(tasks::connection_task(
-                    inner.log_callback.clone(),
-                    multiaddr.to_string(),
-                    socket,
-                    connection_id,
-                    connection_task,
-                    rx,
-                    inner.to_background_tx.clone(),
-                )));
-            }
         }
 
         // TODO: doc
@@ -978,6 +871,7 @@ async fn background_task(mut inner: Inner) {
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
             EventSendersReady,
+            CanStartConnect(PeerId),
             MessageToConnection {
                 connection_id: service::ConnectionId,
                 message: service::CoordinatorToConnection,
@@ -990,6 +884,7 @@ async fn background_task(mut inner: Inner) {
                     let event_senders_ready = matches!(inner.event_senders, either::Left(_));
                     let event_pending_send = &inner.event_pending_send;
                     let network = &mut inner.network;
+                    let num_pending_out_attempts = &inner.num_pending_out_attempts;
                     async move {
                         if let Some(event) = (event_senders_ready && event_pending_send.is_none())
                             .then(|| network.next_event())
@@ -1003,6 +898,11 @@ async fn background_task(mut inner: Inner) {
                                 connection_id,
                                 message,
                             }
+                        } else if let Some(peer_id) = (*num_pending_out_attempts < 16)
+                            .then(|| network.unconnected_desired().next().cloned())
+                            .flatten()
+                        {
+                            WakeUpReason::CanStartConnect(peer_id)
                         } else {
                             future::pending().await
                         }
@@ -1725,6 +1625,100 @@ async fn background_task(mut inner: Inner) {
                         peer_id
                     ),
                 );
+            }
+
+            WakeUpReason::CanStartConnect(peer_id) => {
+                inner.num_pending_out_attempts += 1;
+
+                let Some(multiaddr) = inner
+                    .peering_strategy
+                    .pick_address_and_add_connection(&peer_id)
+                else {
+                    // There is no address for that peer in the address book.
+                    inner.network.gossip_remove_desired_all(
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    inner
+                        .peering_strategy
+                        .unassign_slots_and_ban(&peer_id, Instant::now() + Duration::from_secs(10));
+                    // TODO: log chain names?
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "all-slots-unassigned; reason=no-address; peer_id={}",
+                            peer_id
+                        ),
+                    );
+                    continue;
+                };
+
+                let multiaddr = match multiaddr::Multiaddr::from_bytes(multiaddr.to_owned()) {
+                    Ok(a) => a,
+                    Err((multiaddr::FromBytesError, multiaddr)) => {
+                        // Address is in an invalid format.
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "invalid-address; peer_id={}; address={:?}",
+                                peer_id, multiaddr
+                            ),
+                        );
+                        let _was_in = inner
+                            .peering_strategy
+                            .decrease_address_connections_and_remove_if_zero(&peer_id, &multiaddr);
+                        debug_assert!(_was_in.is_ok());
+                        continue;
+                    }
+                };
+
+                // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
+                // a `Future<dyn Output = Result<TcpStream, ...>>`.
+                let socket = match tasks::multiaddr_to_socket(&multiaddr) {
+                    Ok(socket) => socket,
+                    Err(_) => {
+                        // Address is in an invalid format or isn't supported.
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "invalid-address; peer_id={}; address={}",
+                                peer_id, multiaddr
+                            ),
+                        );
+                        let _was_in = inner
+                            .peering_strategy
+                            .decrease_address_connections_and_remove_if_zero(
+                                &peer_id,
+                                multiaddr.as_ref(),
+                            );
+                        debug_assert!(_was_in.is_ok());
+                        continue;
+                    }
+                };
+
+                let (tx, rx) = channel::bounded(16); // TODO: ?!
+
+                let (connection_id, connection_task) = inner.network.add_single_stream_connection(
+                    Instant::now(),
+                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+                        is_initiator: true,
+                        noise_key: &inner.noise_key,
+                    },
+                    multiaddr.clone().into_bytes(),
+                    Some(peer_id.clone()),
+                    tx,
+                );
+
+                // Handle the connection in a separate task.
+                (inner.tasks_executor)(Box::pin(tasks::connection_task(
+                    inner.log_callback.clone(),
+                    multiaddr.to_string(),
+                    socket,
+                    connection_id,
+                    connection_task,
+                    rx,
+                    inner.to_background_tx.clone(),
+                )));
             }
         }
     }
