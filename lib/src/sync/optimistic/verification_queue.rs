@@ -127,11 +127,13 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             .filter(|(e, _)| matches!(e.ty, VerificationQueueEntryTy::Missing))
             .filter(move |(entry, _)| entry.block_height.get() <= max_block_number)
             .map(move |(entry, next_entry)| {
-                let max = cmp::min(max_block_number, next_entry.block_height.get());
+                let upper_block = cmp::min(max_block_number, next_entry.block_height.get() - 1);
                 (
                     entry.block_height,
-                    NonZeroU32::new(u32::try_from(max - entry.block_height.get()).unwrap())
-                        .unwrap(),
+                    NonZeroU32::new(
+                        1 + u32::try_from(upper_block - entry.block_height.get()).unwrap(),
+                    )
+                    .unwrap(),
                 )
             });
 
