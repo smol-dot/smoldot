@@ -435,9 +435,10 @@ async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // Spawn a task that prints the informant at a regular interval.
+    // The interval is fast enough that the informant should be visible roughly at any time,
+    // even if the terminal is filled with logs.
     // Note that this task also holds the smoldot `client` alive, and thus we spawn it even if
     // the informant is disabled.
-    // TODO: also print immediately after a log line?
     let main_task = executor.spawn({
         let show_informant = matches!(cli_output, cli::Output::Informant);
         let informant_colors = match cli_options.color {
