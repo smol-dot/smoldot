@@ -1144,30 +1144,30 @@ async fn background_task(mut inner: Inner) {
                         .log(LogLevel::Debug, format!("connected; peer_id={}", peer_id));
                 }
             }
+
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
-                address,
-                expected_peer_id,
+                expected_peer_id: Some(_),
                 ..
-            }) => {
-                inner.num_pending_out_attempts -= 1;
-                if let Some(expected_peer_id) = expected_peer_id {
-                    inner
-                        .peering_strategy
-                        .decrease_address_connections(&expected_peer_id, &address)
-                        .unwrap();
-                    let address = Multiaddr::from_bytes(&address).unwrap();
-                    inner.log_callback.log(
-                        LogLevel::Debug,
-                        format!(
-                            "disconnected; handshake-finished=false; peer_id={}; address={}",
-                            expected_peer_id, address
-                        ),
-                    );
+            })
+            | WakeUpReason::NetworkEvent(service::Event::Disconnected { .. }) => {
+                let (address, peer_id, handshake_finished) = match wake_up_reason {
+                    WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                        address,
+                        expected_peer_id: Some(peer_id),
+                        ..
+                    }) => (address, peer_id, false),
+                    WakeUpReason::NetworkEvent(service::Event::Disconnected {
+                        address,
+                        peer_id,
+                        ..
+                    }) => (address, peer_id, true),
+                    _ => unreachable!(),
+                };
+
+                if !handshake_finished {
+                    inner.num_pending_out_attempts -= 1;
                 }
-            }
-            WakeUpReason::NetworkEvent(service::Event::Disconnected {
-                address, peer_id, ..
-            }) => {
+
                 inner
                     .peering_strategy
                     .decrease_address_connections(&peer_id, &address)
@@ -1176,11 +1176,56 @@ async fn background_task(mut inner: Inner) {
                 inner.log_callback.log(
                     LogLevel::Debug,
                     format!(
-                        "disconnected; handshake-finished=true; peer_id={}; address={}",
-                        peer_id, address
+                        "disconnected; handshake-finished={}; peer_id={}; address={}",
+                        handshake_finished, peer_id, address
+                    ),
+                );
+
+                // Ban the peer in order to avoid trying over and over again the same address(es).
+                // Even if the handshake was finished, it is possible that the peer simply shuts
+                // down connections immediately after it has been opened, hence the ban.
+                // Due to race conditions and peerid mismatches, it is possible that there is
+                // another existing connection or connection attempt with that same peer. However,
+                // it is not possible to be sure that we will reach 0 connections or connection
+                // attempts, and thus we ban the peer every time.
+                let ban_duration = Duration::from_secs(5);
+                inner.network.gossip_remove_desired_all(
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
+                for (&chain_id, what_happened) in inner
+                    .peering_strategy
+                    .unassign_slots_and_ban(&peer_id, Instant::now() + ban_duration)
+                {
+                    if matches!(
+                        what_happened,
+                        basic_peering_strategy::UnassignSlotsAndBan::Banned { had_slot: true }
+                    ) {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "slot-unassigned; peer_id={}; chain={}",
+                                peer_id, inner.network[chain_id].log_name
+                            ),
+                        );
+                    }
+                }
+            }
+
+            WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                expected_peer_id: None,
+                address,
+                ..
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "disconnected; handshake-finished=false; address={}",
+                        Multiaddr::from_bytes(&address).unwrap()
                     ),
                 );
             }
+
             WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
                 peer_id,
