@@ -1736,6 +1736,11 @@ async fn background_task(mut inner: Inner) {
                     }
                 };
 
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!("start-connecting; peer_id={peer_id}; address={multiaddr}"),
+                );
+
                 let (tx, rx) = channel::bounded(16); // TODO: ?!
 
                 let (connection_id, connection_task) = inner.network.add_single_stream_connection(
