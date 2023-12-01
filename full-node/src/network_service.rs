@@ -158,9 +158,6 @@ pub struct NetworkService {
 
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
-
-    /// Notified when the service shuts down.
-    foreground_shutdown: event_listener::Event,
 }
 
 enum ToBackground {
@@ -192,7 +189,6 @@ enum ToBackground {
     ForegroundGetNumTotalPeers {
         result_tx: oneshot::Sender<usize>,
     },
-    ForegroundShutdown,
 }
 
 struct Inner {
@@ -353,7 +349,6 @@ impl NetworkService {
 
         let (to_background_tx, to_background_rx) = channel::bounded(16);
         let (from_connections_tx, from_connections_rx) = channel::bounded(64);
-        let foreground_shutdown = event_listener::Event::new();
 
         let local_peer_id =
             peer_id::PublicKey::Ed25519(*config.noise_key.libp2p_public_ed25519_key())
@@ -422,7 +417,7 @@ impl NetworkService {
         }
 
         // Initialize the inner network service.
-        let mut inner = Inner {
+        run(Inner {
             local_peer_id: local_peer_id.clone(),
             identify_agent_version: config.identify_agent_version,
             event_senders: either::Left(event_senders),
@@ -448,18 +443,6 @@ impl NetworkService {
             next_discovery: smol::Timer::after(Duration::from_secs(1)),
             next_discovery_period: Duration::from_secs(1),
             incoming_connections,
-        };
-
-        // Spawn a task that sends a "shutdown" message whenever the service shuts down.
-        (inner.tasks_executor)({
-            let on_foreground_shutdown = foreground_shutdown.listen();
-            let to_background_tx = to_background_tx.clone();
-            Box::pin(async move {
-                let () = on_foreground_shutdown.await;
-                let _ = to_background_tx
-                    .send(ToBackground::ForegroundShutdown)
-                    .await;
-            })
         });
 
         // Build the final network service.
@@ -469,11 +452,7 @@ impl NetworkService {
             jaeger_service: config.jaeger_service,
             to_background_tx: Mutex::new(to_background_tx),
             log_callback: config.log_callback,
-            foreground_shutdown,
         });
-
-        // Spawn the main task dedicated to processing the network.
-        run(inner);
 
         // Adjust the receivers to keep the `network_service` alive.
         // TODO: no, hacky
@@ -690,12 +669,6 @@ impl NetworkService {
     }
 }
 
-impl Drop for NetworkService {
-    fn drop(&mut self) {
-        self.foreground_shutdown.notify(usize::max_value());
-    }
-}
-
 /// Error when initializing the network service.
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
@@ -739,6 +712,7 @@ async fn background_task(mut inner: Inner) {
             },
             NetworkEvent(service::Event<channel::Sender<service::CoordinatorToConnection>>),
             Message(ToBackground),
+            ForegroundClosed,
             FromConnectionTask {
                 connection_id: service::ConnectionId,
                 // TODO: this Option is weird
@@ -756,7 +730,11 @@ async fn background_task(mut inner: Inner) {
         }
 
         let wake_up_reason = async {
-            WakeUpReason::Message(inner.to_background_rx.next().await.unwrap())
+            inner
+                .to_background_rx
+                .next()
+                .await
+                .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
         }
         .or({
             let event_senders_ready = matches!(inner.event_senders, either::Left(_));
@@ -979,7 +957,7 @@ async fn background_task(mut inner: Inner) {
                 }
             }
 
-            WakeUpReason::Message(ToBackground::ForegroundShutdown) => {
+            WakeUpReason::ForegroundClosed => {
                 // TODO: do a clean shutdown of all the connections
                 return;
             }
