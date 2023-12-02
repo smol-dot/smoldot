@@ -1428,6 +1428,8 @@ fn insert_storage<'a>(
                     LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = insertions.copy_from_base
                     LEFT JOIN temp_newly_inserted_trie_nodes AS temp_newly_inserted_trie_nodes_ref ON temp_newly_inserted_trie_nodes_ref.node_hash = trie_node_storage.node_hash
                     WHERE insertions.copy_from_base IS NOT NULL
+                        AND (temp_newly_inserted_trie_nodes_parent.node_hash IS NULL) = (trie_node_child.hash IS NULL)
+                        AND (temp_newly_inserted_trie_nodes_ref.node_hash IS NULL) = (trie_node_storage.node_hash IS NULL)
             ),
             node_with_key(node_hash, search_node_hash, search_remain) AS (
                 SELECT insertions.node_hash, trie_node.hash, COALESCE(SUBSTR(insertions.copy_from_relative_key, 1 + LENGTH(trie_node.partial_key)), X'')
