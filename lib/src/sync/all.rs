@@ -1384,7 +1384,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     &scale_encoded_message,
                     inner.block_number_bytes(),
                 ) {
-                    Ok(msg) => msg.message.target_number,
+                    Ok(msg) => msg.target_number,
                     Err(_) => return GrandpaCommitMessageOutcome::Discarded,
                 };
 

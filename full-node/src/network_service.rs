@@ -1608,7 +1608,7 @@ async fn background_task(mut inner: Inner) {
                         "grandpa-commit-message; peer_id={}; chain={}; target_hash={}",
                         peer_id,
                         inner.network[chain_id].log_name,
-                        HashDisplay(message.decode().message.target_hash),
+                        HashDisplay(message.decode().target_hash),
                     ),
                 );
             }

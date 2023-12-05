@@ -75,7 +75,7 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
         return InProgress::Finished(Err(Error::BadSetId));
     }
 
-    if decoded_commit.message.auth_data.len() != decoded_commit.message.precommits.len() {
+    if decoded_commit.auth_data.len() != decoded_commit.precommits.len() {
         return InProgress::Finished(Err(Error::InvalidFormat));
     }
 
@@ -84,7 +84,7 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
     // Make sure that there is no duplicate authority public key.
     {
         let mut unique = hashbrown::HashSet::with_capacity_and_hasher(
-            decoded_commit.message.auth_data.len(),
+            decoded_commit.auth_data.len(),
             crate::util::SipHasherBuild::new({
                 let mut seed = [0; 16];
                 randomness.fill_bytes(&mut seed);
@@ -92,7 +92,6 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
             }),
         );
         if let Some((_, faulty_pub_key)) = decoded_commit
-            .message
             .auth_data
             .iter()
             .find(|(_, pubkey)| !unique.insert(pubkey))
@@ -131,7 +130,7 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
             self.inner.block_number_bytes,
         )
         .unwrap();
-        decoded_commit.message.auth_data[self.inner.next_precommit_index].1
+        decoded_commit.auth_data[self.inner.next_precommit_index].1
     }
 
     /// Resumes the verification process.
@@ -172,7 +171,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
             self.inner.block_number_bytes,
         )
         .unwrap();
-        decoded_commit.message.precommits[self.inner.next_precommit_index].target_hash
+        decoded_commit.precommits[self.inner.next_precommit_index].target_hash
     }
 
     /// Height of the block that must be the ancestor of the block to check.
@@ -182,7 +181,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
             self.inner.block_number_bytes,
         )
         .unwrap();
-        decoded_commit.message.target_number
+        decoded_commit.target_number
     }
 
     /// Hash of the block that must be the ancestor of the block to check.
@@ -192,7 +191,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
             self.inner.block_number_bytes,
         )
         .unwrap();
-        decoded_commit.message.target_hash
+        decoded_commit.target_hash
     }
 
     /// Resumes the verification process.
@@ -260,18 +259,14 @@ impl<C: AsRef<[u8]>> Verification<C> {
             decode::decode_grandpa_commit(self.commit.as_ref(), self.block_number_bytes).unwrap();
 
         loop {
-            if let Some(precommit) = decoded_commit
-                .message
-                .precommits
-                .get(self.next_precommit_index)
-            {
+            if let Some(precommit) = decoded_commit.precommits.get(self.next_precommit_index) {
                 if !self.next_precommit_author_verified {
                     return InProgress::IsAuthority(IsAuthority { inner: self });
                 }
 
                 if !self.next_precommit_block_verified {
-                    if precommit.target_hash == decoded_commit.message.target_hash
-                        && precommit.target_number == decoded_commit.message.target_number
+                    if precommit.target_hash == decoded_commit.target_hash
+                        && precommit.target_number == decoded_commit.target_number
                     {
                         self.next_precommit_block_verified = true;
                     } else {
@@ -282,9 +277,8 @@ impl<C: AsRef<[u8]>> Verification<C> {
                     }
                 }
 
-                let authority_public_key =
-                    decoded_commit.message.auth_data[self.next_precommit_index].1;
-                let signature = decoded_commit.message.auth_data[self.next_precommit_index].0;
+                let authority_public_key = decoded_commit.auth_data[self.next_precommit_index].1;
+                let signature = decoded_commit.auth_data[self.next_precommit_index].0;
 
                 let mut msg = Vec::with_capacity(1 + 32 + self.block_number_bytes + 8 + 8);
                 msg.push(1u8); // This `1` indicates which kind of message is being signed.
@@ -327,7 +321,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
                 // number of authorities.
                 // Duplicate signatures are checked below.
                 // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
-                if decoded_commit.message.precommits.len()
+                if decoded_commit.precommits.len()
                     < (usize::try_from(self.num_authorities).unwrap() * 2 / 3) + 1
                 {
                     return InProgress::FinishedUnknown;

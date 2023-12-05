@@ -136,10 +136,7 @@ impl<T> NonFinalizedTree<T> {
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
-            .verify_grandpa_finality_inner(
-                decoded_commit.message.target_hash,
-                decoded_commit.message.target_number,
-            )
+            .verify_grandpa_finality_inner(decoded_commit.target_hash, decoded_commit.target_number)
             .map_err(CommitVerifyError::FinalityVerify)?;
 
         let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
@@ -161,7 +158,7 @@ impl<T> NonFinalizedTree<T> {
                 }
                 grandpa::commit::verify::InProgress::FinishedUnknown => {
                     return Err(CommitVerifyError::NotEnoughKnownBlocks {
-                        target_block_number: decoded_commit.message.target_number,
+                        target_block_number: decoded_commit.target_number,
                     })
                 }
                 grandpa::commit::verify::InProgress::Finished(Err(error)) => {
