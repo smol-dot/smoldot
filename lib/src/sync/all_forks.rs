@@ -992,7 +992,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             &scale_encoded_commit,
             self.chain.block_number_bytes(),
         ) {
-            Ok(msg) => msg.message.target_number,
+            Ok(msg) => msg.target_number,
             Err(_) => return GrandpaCommitMessageOutcome::ParseError,
         };
 

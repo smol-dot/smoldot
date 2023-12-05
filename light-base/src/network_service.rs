@@ -2136,7 +2136,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "Gossip({}, {}) => GrandpaCommitMessage(target_block_hash={})",
                     &task.network[chain_id].log_name,
                     peer_id,
-                    HashDisplay(message.decode().message.target_hash),
+                    HashDisplay(message.decode().target_hash),
                 );
 
                 debug_assert!(task.event_pending_send.is_none());
