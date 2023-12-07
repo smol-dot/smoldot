@@ -138,7 +138,7 @@ impl<C: AsRef<[u8]>> CommitVerifyIsAuthority<C> {
     /// Resumes the verification process.
     ///
     /// Must be passed `true` if the public key is indeed in the list of authorities.
-    /// Passing `false` always returns [`CommitVerifyInProgress::Finished`] containing an error.
+    /// Passing `false` always returns [`CommitVerify::Finished`] containing an error.
     pub fn resume(mut self, is_authority: bool) -> CommitVerify<C> {
         if !is_authority {
             let key = *self.authority_public_key();
@@ -200,7 +200,7 @@ impl<C: AsRef<[u8]>> CommitVerifyIsParent<C> {
     ///
     /// Must be passed `Some(true)` if the block is known to be a descendant of the target block,
     /// or `None` if it is unknown.
-    /// Passing `Some(false)` always returns [`CommitVerifyInProgress::Finished`] containing an
+    /// Passing `Some(false)` always returns [`CommitVerify::Finished`] containing an
     /// error.
     pub fn resume(mut self, is_parent: Option<bool>) -> CommitVerify<C> {
         match is_parent {
