@@ -30,7 +30,7 @@ pub fn decode_grandpa_commit(
 
 /// Attempt to decode the given SCALE-encoded commit.
 ///
-/// Contrary to [`decode_grandpa_commit`], doesn't return an error if the slice is too long but
+/// Contrary to [`decode_grandpa_commit`], doesn't return an error if the slice is too long, but
 /// returns the remainder.
 pub fn decode_partial_grandpa_commit(
     scale_encoded: &[u8],
