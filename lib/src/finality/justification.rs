@@ -28,5 +28,4 @@
 //! When a justification is received from a third party, it must first be verified. See the
 //! [`verify`] module.
 
-pub mod decode;
 pub mod verify;

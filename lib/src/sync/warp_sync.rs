@@ -103,7 +103,7 @@ use crate::{
         host::{self, HostVmPrototype},
         vm::ExecHint,
     },
-    finality::justification,
+    finality::{decode, justification},
     header,
     informant::HashDisplay,
     trie::{self, proof_decode},
@@ -1434,7 +1434,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 return (self.inner, Err(VerifyFragmentError::InvalidHeader(err)));
             }
         };
-        let fragment_decoded_justification = match justification::decode::decode_grandpa_justification(
+        let fragment_decoded_justification = match decode::decode_grandpa_justification(
             &fragment_to_verify.scale_encoded_justification,
             self.inner.block_number_bytes,
         ) {
@@ -1603,7 +1603,7 @@ pub enum VerifyFragmentError {
     /// Failed to decode header.
     InvalidHeader(header::Error),
     /// Failed to decode justification.
-    InvalidJustification(justification::decode::JustificationDecodeError),
+    InvalidJustification(decode::JustificationDecodeError),
 }
 
 impl fmt::Display for VerifyFragmentError {

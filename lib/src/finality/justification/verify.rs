@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::finality::justification::decode;
+use crate::finality::decode;
 
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};

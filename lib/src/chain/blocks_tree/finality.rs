@@ -18,7 +18,7 @@
 //! Extension module containing the API and implementation of everything related to finality.
 
 use super::*;
-use crate::finality::{grandpa, justification};
+use crate::finality::{decode, grandpa, justification};
 
 use core::cmp;
 
@@ -77,7 +77,7 @@ impl<T> NonFinalizedTree<T> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa_justification(
+                let decoded = decode::decode_grandpa_justification(
                     scale_encoded_justification,
                     self.block_number_bytes,
                 )
@@ -128,11 +128,9 @@ impl<T> NonFinalizedTree<T> {
             return Err(CommitVerifyError::NotGrandpa);
         }
 
-        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
-            scale_encoded_commit,
-            self.block_number_bytes,
-        )
-        .map_err(|_| CommitVerifyError::InvalidCommit)?;
+        let decoded_commit =
+            decode::decode_grandpa_commit(scale_encoded_commit, self.block_number_bytes)
+                .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
@@ -482,7 +480,7 @@ pub enum JustificationVerifyError {
     JustificationEngineMismatch,
     /// Error while decoding the justification.
     #[display(fmt = "Error while decoding the justification: {_0}")]
-    InvalidJustification(justification::decode::JustificationDecodeError),
+    InvalidJustification(decode::JustificationDecodeError),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
     #[display(fmt = "{_0}")]
