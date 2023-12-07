@@ -18,8 +18,5 @@
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|params: (&[u8], u8)| {
-    let _ = smoldot::finality::justification::decode::decode_grandpa(
-        params.0,
-        usize::from(params.1) + 1,
-    );
+    let _ = smoldot::finality::decode::decode_grandpa(params.0, usize::from(params.1) + 1);
 });
