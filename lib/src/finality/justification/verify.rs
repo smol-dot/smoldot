@@ -26,7 +26,7 @@ use rand_chacha::{
 
 /// Configuration for a justification verification process.
 #[derive(Debug)]
-pub struct Config<'a, I> {
+pub struct JustificationVerifyConfig<'a, I> {
     /// Justification to verify.
     pub justification: decode::GrandpaJustificationRef<'a>,
 
@@ -47,7 +47,9 @@ pub struct Config<'a, I> {
 }
 
 /// Verifies that a justification is valid.
-pub fn verify<'a>(config: Config<impl Iterator<Item = &'a [u8]>>) -> Result<(), Error> {
+pub fn verify_justification<'a>(
+    config: JustificationVerifyConfig<impl Iterator<Item = &'a [u8]>>,
+) -> Result<(), JustificationVerifyError> {
     let num_precommits = config.justification.precommits.iter().count();
 
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
@@ -76,7 +78,7 @@ pub fn verify<'a>(config: Config<impl Iterator<Item = &'a [u8]>>) -> Result<(), 
     // Duplicate signatures are checked below.
     // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
     if num_precommits < (authorities_list.len() * 2 / 3) + 1 {
-        return Err(Error::NotEnoughSignatures);
+        return Err(JustificationVerifyError::NotEnoughSignatures);
     }
 
     // Verifying all the signatures together brings better performances than verifying them one
@@ -91,11 +93,15 @@ pub fn verify<'a>(config: Config<impl Iterator<Item = &'a [u8]>>) -> Result<(), 
         match authorities_list.entry(precommit.authority_public_key) {
             hashbrown::hash_map::Entry::Occupied(mut entry) => {
                 if entry.insert(true) {
-                    return Err(Error::DuplicateSignature(*precommit.authority_public_key));
+                    return Err(JustificationVerifyError::DuplicateSignature(
+                        *precommit.authority_public_key,
+                    ));
                 }
             }
             hashbrown::hash_map::Entry::Vacant(_) => {
-                return Err(Error::NotAuthority(*precommit.authority_public_key))
+                return Err(JustificationVerifyError::NotAuthority(
+                    *precommit.authority_public_key,
+                ))
             }
         }
 
@@ -135,7 +141,7 @@ pub fn verify<'a>(config: Config<impl Iterator<Item = &'a [u8]>>) -> Result<(), 
     // Actual signatures verification performed here.
     batch
         .verify(&mut randomness)
-        .map_err(|_| Error::BadSignature)?;
+        .map_err(|_| JustificationVerifyError::BadSignature)?;
 
     // TODO: must check that votes_ancestries doesn't contain any unused entry
     // TODO: there's also a "ghost" thing?
@@ -145,7 +151,7 @@ pub fn verify<'a>(config: Config<impl Iterator<Item = &'a [u8]>>) -> Result<(), 
 
 /// Error that can happen while verifying a justification.
 #[derive(Debug, derive_more::Display)]
-pub enum Error {
+pub enum JustificationVerifyError {
     /// One of the public keys is invalid.
     BadPublicKey,
     /// One of the signatures can't be verified.

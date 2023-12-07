@@ -26,7 +26,7 @@ use rand_chacha::{
 
 /// Configuration for a commit verification process.
 #[derive(Debug)]
-pub struct Config<C> {
+pub struct CommitVerifyConfig<C> {
     /// SCALE-encoded commit to verify.
     pub commit: C,
 
@@ -48,13 +48,13 @@ pub struct Config<C> {
 
 /// Commit verification in progress.
 #[must_use]
-pub enum InProgress<C> {
+pub enum CommitVerify<C> {
     /// See [`IsAuthority`].
-    IsAuthority(IsAuthority<C>),
+    IsAuthority(CommitVerifyIsAuthority<C>),
     /// See [`IsParent`].
-    IsParent(IsParent<C>),
+    IsParent(CommitVerifyIsParent<C>),
     /// Verification is finished. Contains an error if the commit message is invalid.
-    Finished(Result<(), Error>),
+    Finished(Result<(), CommitVerifyError>),
     /// Verification is finished, but [`IsParent::resume`] has been called with `None`, meaning
     /// that some signatures couldn't be verified, and the commit message doesn't contain enough
     /// signatures that are known to be valid.
@@ -64,19 +64,19 @@ pub enum InProgress<C> {
 }
 
 /// Verifies that a commit is valid.
-pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
+pub fn verify_commit<C: AsRef<[u8]>>(config: CommitVerifyConfig<C>) -> CommitVerify<C> {
     let decoded_commit =
         match decode::decode_grandpa_commit(config.commit.as_ref(), config.block_number_bytes) {
             Ok(c) => c,
-            Err(_) => return InProgress::Finished(Err(Error::InvalidFormat)),
+            Err(_) => return CommitVerify::Finished(Err(CommitVerifyError::InvalidFormat)),
         };
 
     if decoded_commit.set_id != config.expected_authorities_set_id {
-        return InProgress::Finished(Err(Error::BadSetId));
+        return CommitVerify::Finished(Err(CommitVerifyError::BadSetId));
     }
 
     if decoded_commit.auth_data.len() != decoded_commit.precommits.len() {
-        return InProgress::Finished(Err(Error::InvalidFormat));
+        return CommitVerify::Finished(Err(CommitVerifyError::InvalidFormat));
     }
 
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
@@ -96,11 +96,13 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
             .iter()
             .find(|(_, pubkey)| !unique.insert(pubkey))
         {
-            return InProgress::Finished(Err(Error::DuplicateSignature(**faulty_pub_key)));
+            return CommitVerify::Finished(Err(CommitVerifyError::DuplicateSignature(
+                **faulty_pub_key,
+            )));
         }
     }
 
-    Verification {
+    CommitVerification {
         commit: config.commit,
         block_number_bytes: config.block_number_bytes,
         next_precommit_index: 0,
@@ -117,11 +119,11 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
 /// Must return whether a certain public key is in the list of authorities that are allowed to
 /// generate pre-commits.
 #[must_use]
-pub struct IsAuthority<C> {
-    inner: Verification<C>,
+pub struct CommitVerifyIsAuthority<C> {
+    inner: CommitVerification<C>,
 }
 
-impl<C: AsRef<[u8]>> IsAuthority<C> {
+impl<C: AsRef<[u8]>> CommitVerifyIsAuthority<C> {
     /// Public key to verify.
     pub fn authority_public_key(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_author_verified);
@@ -137,10 +139,10 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
     ///
     /// Must be passed `true` if the public key is indeed in the list of authorities.
     /// Passing `false` always returns [`InProgress::Finished`] containing an error.
-    pub fn resume(mut self, is_authority: bool) -> InProgress<C> {
+    pub fn resume(mut self, is_authority: bool) -> CommitVerify<C> {
         if !is_authority {
             let key = *self.authority_public_key();
-            return InProgress::Finished(Err(Error::NotAuthority(key)));
+            return CommitVerify::Finished(Err(CommitVerifyError::NotAuthority(key)));
         }
 
         self.inner.next_precommit_author_verified = true;
@@ -150,14 +152,14 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
 
 /// Must return whether a certain block is a descendant of the target block.
 #[must_use]
-pub struct IsParent<C> {
-    inner: Verification<C>,
+pub struct CommitVerifyIsParent<C> {
+    inner: CommitVerification<C>,
     /// For performance reasons, the block number is copied here, but not the block hash. This
     /// hasn't actually been benchmarked, so feel free to do so.
     block_number: u64,
 }
 
-impl<C: AsRef<[u8]>> IsParent<C> {
+impl<C: AsRef<[u8]>> CommitVerifyIsParent<C> {
     /// Height of the block to check.
     pub fn block_number(&self) -> u64 {
         self.block_number
@@ -199,12 +201,12 @@ impl<C: AsRef<[u8]>> IsParent<C> {
     /// Must be passed `Some(true)` if the block is known to be a descendant of the target block,
     /// or `None` if it is unknown.
     /// Passing `Some(false)` always returns [`InProgress::Finished`] containing an error.
-    pub fn resume(mut self, is_parent: Option<bool>) -> InProgress<C> {
+    pub fn resume(mut self, is_parent: Option<bool>) -> CommitVerify<C> {
         match is_parent {
             None => {}
             Some(true) => self.inner.num_verified_signatures += 1,
             Some(false) => {
-                return InProgress::Finished(Err(Error::BadAncestry));
+                return CommitVerify::Finished(Err(CommitVerifyError::BadAncestry));
             }
         }
 
@@ -213,7 +215,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
     }
 }
 
-struct Verification<C> {
+struct CommitVerification<C> {
     /// Encoded commit message. Guaranteed to decode successfully.
     commit: C,
 
@@ -251,8 +253,8 @@ struct Verification<C> {
     randomness: ChaCha20Rng,
 }
 
-impl<C: AsRef<[u8]>> Verification<C> {
-    fn resume(mut self) -> InProgress<C> {
+impl<C: AsRef<[u8]>> CommitVerification<C> {
+    fn resume(mut self) -> CommitVerify<C> {
         // The `verify` function that starts the verification performs the preliminary check that
         // the commit has the correct format.
         let decoded_commit =
@@ -261,7 +263,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
         loop {
             if let Some(precommit) = decoded_commit.precommits.get(self.next_precommit_index) {
                 if !self.next_precommit_author_verified {
-                    return InProgress::IsAuthority(IsAuthority { inner: self });
+                    return CommitVerify::IsAuthority(CommitVerifyIsAuthority { inner: self });
                 }
 
                 if !self.next_precommit_block_verified {
@@ -270,7 +272,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
                     {
                         self.next_precommit_block_verified = true;
                     } else {
-                        return InProgress::IsParent(IsParent {
+                        return CommitVerify::IsParent(CommitVerifyIsParent {
                             block_number: precommit.target_number,
                             inner: self,
                         });
@@ -324,16 +326,16 @@ impl<C: AsRef<[u8]>> Verification<C> {
                 if decoded_commit.precommits.len()
                     < (usize::try_from(self.num_authorities).unwrap() * 2 / 3) + 1
                 {
-                    return InProgress::FinishedUnknown;
+                    return CommitVerify::FinishedUnknown;
                 }
 
                 // Actual signatures verification performed here.
                 match self.signatures_batch.verify(&mut self.randomness) {
                     Ok(()) => {}
-                    Err(_) => return InProgress::Finished(Err(Error::BadSignature)),
+                    Err(_) => return CommitVerify::Finished(Err(CommitVerifyError::BadSignature)),
                 }
 
-                return InProgress::Finished(Ok(()));
+                return CommitVerify::Finished(Ok(()));
             }
         }
     }
@@ -341,7 +343,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
 
 /// Error that can happen while verifying a commit.
 #[derive(Debug, derive_more::Display)]
-pub enum Error {
+pub enum CommitVerifyError {
     /// Failed to decode the commit message.
     InvalidFormat,
     /// The authorities set id of the commit doesn't match the one that is expected.

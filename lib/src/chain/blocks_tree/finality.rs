@@ -88,7 +88,7 @@ impl<T> NonFinalizedTree<T> {
                     .verify_grandpa_finality_inner(decoded.target_hash, decoded.target_number)
                     .map_err(JustificationVerifyError::FinalityVerify)?;
 
-                justification::verify::verify(justification::verify::Config {
+                justification::verify::verify_justification(justification::verify::JustificationVerifyConfig {
                     justification: decoded,
                     block_number_bytes: self.block_number_bytes,
                     authorities_set_id,
@@ -137,7 +137,7 @@ impl<T> NonFinalizedTree<T> {
             .verify_grandpa_finality_inner(decoded_commit.target_hash, decoded_commit.target_number)
             .map_err(CommitVerifyError::FinalityVerify)?;
 
-        let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
+        let mut verification = grandpa::commit::verify::verify_commit(grandpa::commit::verify::CommitVerifyConfig {
             commit: scale_encoded_commit,
             block_number_bytes: self.block_number_bytes,
             expected_authorities_set_id,
@@ -147,27 +147,27 @@ impl<T> NonFinalizedTree<T> {
 
         loop {
             match verification {
-                grandpa::commit::verify::InProgress::Finished(Ok(())) => {
+                grandpa::commit::verify::CommitVerify::Finished(Ok(())) => {
                     drop(authorities_list);
                     return Ok(FinalityApply {
                         chain: self,
                         to_finalize: block_index,
                     });
                 }
-                grandpa::commit::verify::InProgress::FinishedUnknown => {
+                grandpa::commit::verify::CommitVerify::FinishedUnknown => {
                     return Err(CommitVerifyError::NotEnoughKnownBlocks {
                         target_block_number: decoded_commit.target_number,
                     })
                 }
-                grandpa::commit::verify::InProgress::Finished(Err(error)) => {
+                grandpa::commit::verify::CommitVerify::Finished(Err(error)) => {
                     return Err(CommitVerifyError::VerificationFailed(error))
                 }
-                grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
+                grandpa::commit::verify::CommitVerify::IsAuthority(is_authority) => {
                     let to_find = is_authority.authority_public_key();
                     let result = authorities_list.clone().any(|a| a == to_find);
                     verification = is_authority.resume(result);
                 }
-                grandpa::commit::verify::InProgress::IsParent(is_parent) => {
+                grandpa::commit::verify::CommitVerify::IsParent(is_parent) => {
                     // Find in the list of non-finalized blocks the target of the check.
                     match self.blocks_by_hash.get(is_parent.block_hash()) {
                         Some(idx) => {
@@ -484,7 +484,7 @@ pub enum JustificationVerifyError {
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
     #[display(fmt = "{_0}")]
-    VerificationFailed(justification::verify::Error),
+    VerificationFailed(justification::verify::JustificationVerifyError),
     /// Error while verifying the finality in the context of the chain.
     #[display(fmt = "{_0}")]
     FinalityVerify(FinalityVerifyError),
@@ -511,7 +511,7 @@ pub enum CommitVerifyError {
     },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
     #[display(fmt = "{_0}")]
-    VerificationFailed(grandpa::commit::verify::Error),
+    VerificationFailed(grandpa::commit::verify::CommitVerifyError),
 }
 
 /// Error that can happen when verifying a proof of finality.

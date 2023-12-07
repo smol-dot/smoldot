@@ -1484,7 +1484,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         }
 
         // Check whether the justification is valid.
-        if let Err(err) = justification::verify::verify(justification::verify::Config {
+        if let Err(err) = justification::verify::verify_justification(justification::verify::JustificationVerifyConfig {
             justification: fragment_decoded_justification,
             block_number_bytes: self.inner.block_number_bytes,
             authorities_list: finalized_triggered_authorities
@@ -1581,7 +1581,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 #[derive(Debug)]
 pub enum VerifyFragmentError {
     /// Justification found within the fragment is invalid.
-    JustificationVerify(justification::verify::Error),
+    JustificationVerify(justification::verify::JustificationVerifyError),
     /// Mismatch between the block targeted by the justification and the header.
     TargetHashMismatch {
         /// Hash of the block the justification targets.
