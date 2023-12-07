@@ -89,7 +89,7 @@ impl<T> NonFinalizedTree<T> {
                     .map_err(JustificationVerifyError::FinalityVerify)?;
 
                 verify::verify_justification(verify::JustificationVerifyConfig {
-                    justification: decoded,
+                    justification: scale_encoded_justification,
                     block_number_bytes: self.block_number_bytes,
                     authorities_set_id,
                     authorities_list,

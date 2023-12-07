@@ -366,9 +366,9 @@ pub enum CommitVerifyError {
 
 /// Configuration for a justification verification process.
 #[derive(Debug)]
-pub struct JustificationVerifyConfig<'a, I> {
+pub struct JustificationVerifyConfig<J, I> {
     /// Justification to verify.
-    pub justification: decode::GrandpaJustificationRef<'a>,
+    pub justification: J,
 
     pub block_number_bytes: usize,
 
@@ -388,9 +388,17 @@ pub struct JustificationVerifyConfig<'a, I> {
 
 /// Verifies that a justification is valid.
 pub fn verify_justification<'a>(
-    config: JustificationVerifyConfig<impl Iterator<Item = &'a [u8]>>,
+    config: JustificationVerifyConfig<impl AsRef<[u8]>, impl Iterator<Item = &'a [u8]>>,
 ) -> Result<(), JustificationVerifyError> {
-    let num_precommits = config.justification.precommits.iter().count();
+    let decoded_justification = match decode::decode_grandpa_justification(
+        config.justification.as_ref(),
+        config.block_number_bytes,
+    ) {
+        Ok(c) => c,
+        Err(_) => return Err(JustificationVerifyError::InvalidFormat),
+    };
+
+    let num_precommits = decoded_justification.precommits.iter().count();
 
     let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
@@ -429,7 +437,7 @@ pub fn verify_justification<'a>(
     // https://github.com/zcash/zips/blob/master/zip-0215.rst
     let mut batch = ed25519_zebra::batch::Verifier::new();
 
-    for precommit in config.justification.precommits.iter() {
+    for precommit in decoded_justification.precommits.iter() {
         match authorities_list.entry(precommit.authority_public_key) {
             hashbrown::hash_map::Entry::Occupied(mut entry) => {
                 if entry.insert(true) {
@@ -467,7 +475,7 @@ pub fn verify_justification<'a>(
                     .saturating_sub(mem::size_of_val(&precommit.target_number)),
             ),
         );
-        msg.extend_from_slice(&u64::to_le_bytes(config.justification.round)[..]);
+        msg.extend_from_slice(&u64::to_le_bytes(decoded_justification.round)[..]);
         msg.extend_from_slice(&u64::to_le_bytes(config.authorities_set_id)[..]);
         debug_assert_eq!(msg.len(), msg.capacity());
 
@@ -492,6 +500,8 @@ pub fn verify_justification<'a>(
 /// Error that can happen while verifying a justification.
 #[derive(Debug, derive_more::Display)]
 pub enum JustificationVerifyError {
+    /// Failed to decode the justification.
+    InvalidFormat,
     /// One of the public keys is invalid.
     BadPublicKey,
     /// One of the signatures can't be verified.

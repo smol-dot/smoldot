@@ -1485,7 +1485,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
         // Check whether the justification is valid.
         if let Err(err) = verify::verify_justification(verify::JustificationVerifyConfig {
-            justification: fragment_decoded_justification,
+            justification: &fragment_to_verify.scale_encoded_justification,
             block_number_bytes: self.inner.block_number_bytes,
             authorities_list: finalized_triggered_authorities
                 .iter()
