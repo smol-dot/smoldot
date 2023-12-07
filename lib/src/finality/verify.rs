@@ -220,17 +220,17 @@ struct CommitVerification<C> {
     /// Encoded commit message. Guaranteed to decode successfully.
     commit: C,
 
-    /// See [`Config::block_number_bytes`].
+    /// See [`CommitVerifyConfig::block_number_bytes`].
     block_number_bytes: usize,
 
     /// Index of the next pre-commit to process within the commit.
     next_precommit_index: usize,
 
-    /// Whether the precommit whose index is [`Verification::next_precommit_index`] has been
+    /// Whether the precommit whose index is [`CommitVerification::next_precommit_index`] has been
     /// verified as coming from the list of authorities.
     next_precommit_author_verified: bool,
 
-    /// Whether the precommit whose index is [`Verification::next_precommit_index`] has been
+    /// Whether the precommit whose index is [`CommitVerification::next_precommit_index`] has been
     /// verified to be about a block that is a descendant of the target block.
     next_precommit_block_verified: bool,
 
