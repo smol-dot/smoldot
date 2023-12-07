@@ -39,8 +39,8 @@ pub fn decode_grandpa_justification(
 
 /// Attempt to decode the given SCALE-encoded justification.
 ///
-/// Contrary to [`decode_grandpa`], doesn't return an error if the slice is too long but returns
-/// the remainder.
+/// Contrary to [`decode_grandpa_justification`], doesn't return an error if the slice is too long
+/// but returns the remainder.
 pub fn decode_partial_grandpa_justification(
     scale_encoded: &[u8],
     block_number_bytes: usize,

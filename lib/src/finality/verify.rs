@@ -49,15 +49,15 @@ pub struct CommitVerifyConfig<C> {
 /// Commit verification in progress.
 #[must_use]
 pub enum CommitVerify<C> {
-    /// See [`IsAuthority`].
+    /// See [`CommitVerifyIsAuthority`].
     IsAuthority(CommitVerifyIsAuthority<C>),
-    /// See [`IsParent`].
+    /// See [`CommitVerifyIsParent`].
     IsParent(CommitVerifyIsParent<C>),
     /// Verification is finished. Contains an error if the commit message is invalid.
     Finished(Result<(), CommitVerifyError>),
-    /// Verification is finished, but [`IsParent::resume`] has been called with `None`, meaning
-    /// that some signatures couldn't be verified, and the commit message doesn't contain enough
-    /// signatures that are known to be valid.
+    /// Verification is finished, but [`CommitVerifyIsParent::resume`] has been called with `None`,
+    /// meaning that some signatures couldn't be verified, and the commit message doesn't contain
+    /// enough signatures that are known to be valid.
     ///
     /// The commit must be verified again after more blocks are available.
     FinishedUnknown,
@@ -138,7 +138,7 @@ impl<C: AsRef<[u8]>> CommitVerifyIsAuthority<C> {
     /// Resumes the verification process.
     ///
     /// Must be passed `true` if the public key is indeed in the list of authorities.
-    /// Passing `false` always returns [`InProgress::Finished`] containing an error.
+    /// Passing `false` always returns [`CommitVerifyInProgress::Finished`] containing an error.
     pub fn resume(mut self, is_authority: bool) -> CommitVerify<C> {
         if !is_authority {
             let key = *self.authority_public_key();
@@ -200,7 +200,8 @@ impl<C: AsRef<[u8]>> CommitVerifyIsParent<C> {
     ///
     /// Must be passed `Some(true)` if the block is known to be a descendant of the target block,
     /// or `None` if it is unknown.
-    /// Passing `Some(false)` always returns [`InProgress::Finished`] containing an error.
+    /// Passing `Some(false)` always returns [`CommitVerifyInProgress::Finished`] containing an
+    /// error.
     pub fn resume(mut self, is_parent: Option<bool>) -> CommitVerify<C> {
         match is_parent {
             None => {}
