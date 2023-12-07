@@ -56,7 +56,7 @@
 //! >           forever remain part of the chain.
 //!
 //! Additionally, a [`NonFinalizedTree::verify_justification`] method is provided in order to
-//! verify the correctness of a [justification](crate::finality::justification).
+//! verify the correctness of a [justification](crate::finality).
 
 // TODO: expand this doc ^
 
