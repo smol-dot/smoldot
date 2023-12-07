@@ -1434,7 +1434,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 return (self.inner, Err(VerifyFragmentError::InvalidHeader(err)));
             }
         };
-        let fragment_decoded_justification = match justification::decode::decode_grandpa(
+        let fragment_decoded_justification = match justification::decode::decode_grandpa_justification(
             &fragment_to_verify.scale_encoded_justification,
             self.inner.block_number_bytes,
         ) {
@@ -1603,7 +1603,7 @@ pub enum VerifyFragmentError {
     /// Failed to decode header.
     InvalidHeader(header::Error),
     /// Failed to decode justification.
-    InvalidJustification(justification::decode::Error),
+    InvalidJustification(justification::decode::JustificationDecodeError),
 }
 
 impl fmt::Display for VerifyFragmentError {

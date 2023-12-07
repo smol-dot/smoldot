@@ -21,10 +21,10 @@ use alloc::vec::Vec;
 pub fn decode_grandpa_commit(
     scale_encoded: &[u8],
     block_number_bytes: usize,
-) -> Result<CommitMessageRef, Error> {
+) -> Result<CommitMessageRef, CommitDecodeError> {
     match nom::combinator::all_consuming(commit_message(block_number_bytes))(scale_encoded) {
         Ok((_, commit)) => Ok(commit),
-        Err(err) => Err(Error(err)),
+        Err(err) => Err(CommitDecodeError(err)),
     }
 }
 
@@ -35,16 +35,16 @@ pub fn decode_grandpa_commit(
 pub fn decode_partial_grandpa_commit(
     scale_encoded: &[u8],
     block_number_bytes: usize,
-) -> Result<(CommitMessageRef, &[u8]), Error> {
+) -> Result<(CommitMessageRef, &[u8]), CommitDecodeError> {
     match commit_message(block_number_bytes)(scale_encoded) {
         Ok((remainder, commit)) => Ok((commit, remainder)),
-        Err(err) => Err(Error(err)),
+        Err(err) => Err(CommitDecodeError(err)),
     }
 }
 
 /// Error potentially returned by [`decode_grandpa_commit`].
 #[derive(Debug, derive_more::Display)]
-pub struct Error<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+pub struct CommitDecodeError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
 
 // TODO: document and explain
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -21,16 +21,18 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// Attempt to decode the given SCALE-encoded justification.
-pub fn decode_grandpa(
+pub fn decode_grandpa_justification(
     scale_encoded: &[u8],
     block_number_bytes: usize,
-) -> Result<GrandpaJustificationRef, Error> {
+) -> Result<GrandpaJustificationRef, JustificationDecodeError> {
     match nom::combinator::complete(nom::combinator::all_consuming(grandpa_justification(
         block_number_bytes,
     )))(scale_encoded)
     {
         Ok((_, justification)) => Ok(justification),
-        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => {
+            Err(JustificationDecodeError(err.code))
+        }
         Err(_) => unreachable!(),
     }
 }
@@ -39,13 +41,15 @@ pub fn decode_grandpa(
 ///
 /// Contrary to [`decode_grandpa`], doesn't return an error if the slice is too long but returns
 /// the remainder.
-pub fn decode_partial_grandpa(
+pub fn decode_partial_grandpa_justification(
     scale_encoded: &[u8],
     block_number_bytes: usize,
-) -> Result<(GrandpaJustificationRef, &[u8]), Error> {
+) -> Result<(GrandpaJustificationRef, &[u8]), JustificationDecodeError> {
     match nom::combinator::complete(grandpa_justification(block_number_bytes))(scale_encoded) {
         Ok((remainder, justification)) => Ok((justification, remainder)),
-        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => {
+            Err(JustificationDecodeError(err.code))
+        }
         Err(_) => unreachable!(),
     }
 }
@@ -219,10 +223,12 @@ impl<'a> PrecommitRef<'a> {
     pub fn decode_partial(
         scale_encoded: &[u8],
         block_number_bytes: usize,
-    ) -> Result<(PrecommitRef, &[u8]), Error> {
+    ) -> Result<(PrecommitRef, &[u8]), JustificationDecodeError> {
         match precommit(block_number_bytes)(scale_encoded) {
             Ok((remainder, precommit)) => Ok((precommit, remainder)),
-            Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
+            Err(nom::Err::Error(err) | nom::Err::Failure(err)) => {
+                Err(JustificationDecodeError(err.code))
+            }
             Err(_) => unreachable!(),
         }
     }
@@ -301,10 +307,10 @@ impl<'a> Iterator for VotesAncestriesIter<'a> {
 
 impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
 
-/// Potential error when decoding a justification.
+/// Potential error when decoding a Grandpa justification.
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "Justification parsing error: {_0:?}")]
-pub struct Error(nom::error::ErrorKind);
+pub struct JustificationDecodeError(nom::error::ErrorKind);
 
 /// `Nom` combinator that parses a justification.
 fn grandpa_justification<'a>(
@@ -417,7 +423,7 @@ fn votes_ancestries<'a>(
 mod tests {
     #[test]
     fn decode() {
-        super::decode_grandpa(
+        super::decode_grandpa_justification(
             &[
                 7, 181, 6, 0, 0, 0, 0, 0, 41, 241, 171, 236, 144, 172, 25, 157, 240, 109, 238, 59,
                 160, 115, 76, 8, 195, 253, 109, 240, 108, 170, 63, 120, 149, 47, 143, 149, 22, 64,

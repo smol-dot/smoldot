@@ -77,7 +77,7 @@ impl<T> NonFinalizedTree<T> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(
+                let decoded = justification::decode::decode_grandpa_justification(
                     scale_encoded_justification,
                     self.block_number_bytes,
                 )
@@ -482,7 +482,7 @@ pub enum JustificationVerifyError {
     JustificationEngineMismatch,
     /// Error while decoding the justification.
     #[display(fmt = "Error while decoding the justification: {_0}")]
-    InvalidJustification(justification::decode::Error),
+    InvalidJustification(justification::decode::JustificationDecodeError),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
     #[display(fmt = "{_0}")]

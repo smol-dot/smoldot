@@ -114,7 +114,7 @@ fn decode_fragment<'a>(
                     })
             }),
             nom::combinator::recognize(move |s| {
-                finality::justification::decode::decode_partial_grandpa(s, block_number_bytes)
+                finality::justification::decode::decode_partial_grandpa_justification(s, block_number_bytes)
                     .map(|(a, b)| (b, a))
                     .map_err(|_| {
                         nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
