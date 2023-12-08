@@ -40,6 +40,9 @@
 //! chosen. Note that there's no mechanism for a server to "steal" clients from another server, as
 //! doing so would create inconsistencies from the point of view of the JSON-RPC client. This is
 //! considered as a defect in the legacy JSON-RPC API.
+//! - If a server is dropped, a `Dropped` update is generated for any active
+//! `author_submitAndWatchExtrinsic` subscription. For all other subscriptions, the subscription
+//! is silently re-opened on a different server.
 //!
 //! For the new JSON-RPC API:
 //!
@@ -125,25 +128,19 @@ pub struct ReverseProxy<TClient, TServer> {
     /// List of all clients. Indices serve as [`ClientId`].
     clients: slab::Slab<Client<TClient>>,
 
-    /// Subset of the entries of [`ReverseProxy::clients`] for which
-    /// [`Client::server_agnostic_requests_queue`] is non-empty.
-    ///
-    /// Because the keys are chosen locally, we can use the FNV hasher with no fear of HashDoS
-    /// attacks.
-    // TODO: call shrink to fit from time to time?
-    clients_with_server_agnostic_request_waiting: hashbrown::HashSet<ClientId, fnv::FnvBuildHasher>,
-
-    /// Queues of server-specific requests waiting to be processed.
+    /// Queues of requests waiting to be processed.
     /// Indexed by client and by server.
     ///
     /// The queues must never be empty. If a queue is emptied, the item must be removed from
     /// the `BTreeMap` altogether.
     // TODO: call shrink to fit from time to time?
-    client_server_specific_requests_queued: BTreeMap<(ClientId, ServerId), VecDeque<QueuedRequest>>,
+    client_requests_queued: BTreeMap<(ClientId, ServerTarget), VecDeque<QueuedRequest>>,
 
-    /// Same entries as [`ReverseProxy::client_server_specific_requests_queued`], but indexed
+    /// Same entries as [`ReverseProxy::client_requests_queued`], but indexed
     /// differently.
-    clients_with_server_specific_request_queued: BTreeSet<(ServerId, ClientId)>,
+    /// [`ServerTarget::ServerAgnostic`] and [`ServerTarget::LegacyApiUnassigned`] both
+    /// correspond to `None`, while [`ServerTarget::Specific`] corresponds to `Some`.
+    clients_with_request_queued: BTreeSet<(Option<ServerId>, ClientId)>,
 
     /// List of all servers. Indices serve as [`ServerId`].
     servers: slab::Slab<Server<TServer>>,
@@ -156,7 +153,7 @@ pub struct ReverseProxy<TClient, TServer> {
     requests_in_progress: BTreeMap<(ServerId, String), (ClientId, QueuedRequest)>,
 
     /// List of all subscriptions that are currently active.
-    active_subscriptions: BTreeMap<(ServerId, String), (ClientId, String)>,
+    active_subscriptions: BTreeMap<(ServerId, String), (ClientId, String, SubscriptionTy)>,
 
     /// Same as [`ReverseProxy::active_subscriptions`], by indexed by client.
     active_subscriptions_by_client: BTreeMap<(ClientId, String), (ServerId, String)>,
@@ -164,6 +161,30 @@ pub struct ReverseProxy<TClient, TServer> {
     /// Source of randomness used for various purposes.
     // TODO: is a crypto secure randomness overkill?
     randomness: ChaCha20Rng,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum ServerTarget {
+    ServerAgnostic,
+    LegacyApiUnassigned,
+    Specific(ServerId),
+}
+
+// TODO: unnecessary?
+impl ServerTarget {
+    const MIN: ServerTarget = ServerTarget::ServerAgnostic;
+    const MAX: ServerTarget = ServerTarget::Specific(ServerId(usize::MAX));
+}
+
+enum SubscriptionTy {
+    AuthorSubmitAndWatchExtrinsic,
+    ChainSubscribeAllHeads,
+    ChainSubscribeFinalizedHeads,
+    ChainSubscribeNewHeads,
+    StateSubscribeRuntimeVersion,
+    StateSubscribeStorage { keys: Vec<methods::HexString> },
+    ChainHeadFollow,
+    TransactionSubmitAndWatch,
 }
 
 struct Client<TClient> {
@@ -200,16 +221,6 @@ struct Client<TClient> {
 
     /// See [`ClientConfig::max_transactions_subscriptions`].
     max_transactions_subscriptions: usize,
-
-    /// Queue of JSON-RPC requests inserted with [`ReverseProxy::insert_client_json_rpc_request`]
-    /// and that are waiting to be picked up by a server.
-    ///
-    /// While this queue normally only contains requests that can be sent to any server, it can
-    /// contains requests where [`QueuedRequest::is_legacy_api_server_specific`], even when
-    /// [`Client::legacy_api_assigned_server`] is `Some`. In that case, when the request is
-    /// extracted, it is instead moved to the corresponding server-specific queue.
-    // TODO: call shrink to fit from time to time?
-    server_agnostic_requests_queue: VecDeque<QueuedRequest>,
 
     /// Queue of responses waiting to be sent to the client.
     // TODO: call shrink to fit from time to time?
@@ -261,17 +272,16 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     pub fn new(config: Config) -> Self {
         ReverseProxy {
             clients: slab::Slab::new(), // TODO: capacity
-            clients_iter: 0,
             servers: slab::Slab::new(), // TODO: capacity
             requests_in_progress: BTreeMap::new(),
             randomness: ChaCha20Rng::from_seed(config.randomness_seed),
+            ..todo!()
         }
     }
 
     pub fn insert_client(&mut self, config: ClientConfig<TClient>) -> ClientId {
         ClientId(self.clients.insert(Client {
             num_unanswered_requests: 0,
-            server_agnostic_requests_queue: VecDeque::new(), // TODO: capacity?
             max_unanswered_parallel_requests: config.max_unanswered_parallel_requests,
             num_legacy_api_subscriptions: 0,
             max_legacy_api_subscriptions: config.max_legacy_api_subscriptions,
@@ -306,19 +316,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
         // Clear the queue of pending requests of this client. While leaving the queue as-is
         // wouldn't be a problem in terms of logic, we clear it for optimization purposes, in
         // order to avoid processing requests that we know are pointless.
-        if !client.server_agnostic_requests_queue.is_empty() {
-            let _was_in = self
-                .clients_with_server_agnostic_request_waiting
-                .remove(&client_id);
-            debug_assert!(_was_in);
-        } else {
-            debug_assert!(!self
-                .clients_with_server_agnostic_request_waiting
-                .contains(&client_id));
-        }
-        client.server_agnostic_requests_queue.clear();
-
-        // TODO: remove from client_server_specific_requests_queued as well
+        // TODO: do it
 
         // For each subscription that was active on this client, push a request that unsubscribes.
         for ((_, client_subscription_id), (server_id, server_subscription_id)) in self
@@ -340,12 +338,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// An error is returned if the JSON-RPC client has queued too many requests that haven't been
     /// answered yet. Try again after a call to [`ReverseProxy::next_client_json_rpc_response`]
     /// has returned `Some`.
-    // TODO: proper return value
     pub fn insert_client_json_rpc_request(
         &mut self,
         client_id: ClientId,
         request: &str,
-    ) -> Result<(), ()> {
+    ) -> Result<InsertClientRequest, InsertClientRequestError> {
         // Check that the client ID is valid.
         assert!(self.clients[client_id.0].user_data.is_some());
 
@@ -353,7 +350,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
         if self.clients[client_id.0].num_unanswered_requests
             >= self.clients[client_id.0].max_unanswered_parallel_requests
         {
-            return Err(());
+            return Err(InsertClientRequestError::TooManySimultaneousRequests);
         }
         self.clients[client_id.0].num_unanswered_requests += 1;
 
@@ -368,7 +365,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                                 methods::Response::system_name("smoldot-json-rpc-proxy".into())
                                     .to_json_response(request_id_json),
                             );
-                        return Ok(());
+                        return Ok(InsertClientRequest::ImmediateAnswer);
                     }
                     methods::MethodCall::system_version {} => {
                         self.clients[client_id.0]
@@ -377,7 +374,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                             methods::Response::system_version("1.0".into()) // TODO: no
                                 .to_json_response(request_id_json),
                         );
-                        return Ok(());
+                        return Ok(InsertClientRequest::ImmediateAnswer);
                     }
                     methods::MethodCall::sudo_unstable_version {} => {
                         self.clients[client_id.0]
@@ -388,7 +385,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                                 ) // TODO: no
                                 .to_json_response(request_id_json),
                             );
-                        return Ok(());
+                        return Ok(InsertClientRequest::ImmediateAnswer);
                     }
                     methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
                         self.clients[client_id.0]
@@ -397,7 +394,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                                 methods::Response::sudo_unstable_p2pDiscover(())
                                     .to_json_response(request_id_json),
                             );
-                        return Ok(());
+                        return Ok(InsertClientRequest::ImmediateAnswer);
                     }
                     methods::MethodCall::state_subscribeRuntimeVersion {}
                     | methods::MethodCall::state_subscribeStorage { .. }
@@ -437,8 +434,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                     _ => {}
                 }
             }
-            Err(methods::ParseClientToServerError::JsonRpcParse(error)) => {
-                todo!() // TODO:
+            Err(methods::ParseClientToServerError::JsonRpcParse(_error)) => {
+                self.clients[client_id.0]
+                    .json_rpc_responses_queue
+                    .push_back(parse::build_parse_error_response());
+                return Ok(InsertClientRequest::ImmediateAnswer);
             }
             Err(methods::ParseClientToServerError::Method { request_id, error }) => {
                 todo!() // TODO:
@@ -448,7 +448,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             }
         };
 
-        Ok(())
+        Ok(todo!())
     }
 
     /// Returns the next JSON-RPC response or notification to send to the given client.
@@ -499,36 +499,77 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             server_and_after
         };
 
-        for (_, (client_id, subscription_id)) in active_subscriptions {
-            // TODO:
+        for ((_, server_subscription_id), (client_id, client_subscription_id, subscription_type)) in
+            active_subscriptions
+        {
+            // TODO: should we really remove subscriptions that we silently reopen somewhere else?
+            self.active_subscriptions_by_client
+                .remove(&(client_id, client_subscription_id.clone()));
+
+            match subscription_type {
+                // Any active `chainHead_follow`, `transaction_submitAndWatch`, or
+                // `author_submitAndWatchExtrinsic` subscription is killed.
+                SubscriptionTy::AuthorSubmitAndWatchExtrinsic => self.clients[client_id.0]
+                    .json_rpc_responses_queue
+                    .push_back(
+                        methods::ServerToClient::author_extrinsicUpdate {
+                            subscription: client_subscription_id.into(),
+                            result: methods::TransactionStatus::Dropped,
+                        }
+                        .to_json_request_object_parameters(None),
+                    ),
+                SubscriptionTy::TransactionSubmitAndWatch => self.clients[client_id.0]
+                    .json_rpc_responses_queue
+                    .push_back(
+                        methods::ServerToClient::transaction_unstable_watchEvent {
+                            subscription: client_subscription_id.into(),
+                            result: methods::TransactionWatchEvent::Dropped {
+                                // Unfortunately, there is no way of knowing whether the server has
+                                // broadcasted the transaction. Since `false` offers guarantees
+                                // but `true` doesn't, we opt to always send back `true`.
+                                // TODO: change the RPC spec to handle this more properly?
+                                broadcasted: true,
+                                error: "Proxied server gone".into(),
+                            },
+                        }
+                        .to_json_request_object_parameters(None),
+                    ),
+                SubscriptionTy::ChainHeadFollow => self.clients[client_id.0]
+                    .json_rpc_responses_queue
+                    .push_back(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: client_subscription_id.into(),
+                            result: methods::FollowEvent::Stop {},
+                        }
+                        .to_json_request_object_parameters(None),
+                    ),
+
+                // Any legacy JSON-RPC API subscription that the server was handling is
+                // re-subscribed by adding to the head of the JSON-RPC client requests queue a
+                // fake subscription request.
+                SubscriptionTy::ChainSubscribeAllHeads => todo!(),
+                SubscriptionTy::ChainSubscribeFinalizedHeads => todo!(),
+                SubscriptionTy::ChainSubscribeNewHeads => todo!(),
+                SubscriptionTy::StateSubscribeRuntimeVersion => todo!(),
+                SubscriptionTy::StateSubscribeStorage { keys } => todo!(),
+            }
         }
 
         // TODO: clear server assignments from clients
-
-        // Any active `chainHead_follow` subscription is killed.
-        // TODO:
-
-        // Any active `transaction_submitAndWatch` subscription is killed.
-        // TODO:
-
-        // Any legacy JSON-RPC API subscription that the server was handling is re-subscribed
-        // by adding to the head of the JSON-RPC client requests queue a fake subscription request.
-        // TODO:
 
         // The server-specific requests that were queued for this server and the requests that
         // were already sent to the server are processed the same way, as from the point of view
         // of the JSON-RPC client there's no possible way to differentiate the two.
         let requests_to_cancel = {
-            // Extract from `clients_with_server_specific_request_queued` the list of clients with
-            // pending requests that can only target that server.
-            let clients_with_server_specific_request_queued = {
+            // Extract from `client_with_requests_queued` the list of clients with pending
+            // srequests that can only target that server.
+            let client_with_requests_queued = {
                 let mut server_and_after = self
-                    .clients_with_server_specific_request_queued
-                    .split_off(&(server_id, ClientId(usize::MIN)));
-                let mut after =
-                    server_and_after.split_off(&(ServerId(server_id.0 + 1), ClientId(usize::MIN)));
-                self.clients_with_server_specific_request_queued
-                    .append(&mut after);
+                    .clients_with_request_queued
+                    .split_off(&(Some(server_id), ClientId(usize::MIN)));
+                let mut after = server_and_after
+                    .split_off(&(Some(ServerId(server_id.0 + 1)), ClientId(usize::MIN)));
+                self.clients_with_request_queued.append(&mut after);
                 server_and_after
             };
 
@@ -543,15 +584,16 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 server_and_after
             };
 
-            let requests_queued = clients_with_server_specific_request_queued
-                .into_iter()
-                .flat_map(|(_, client_id)| {
-                    self.client_server_specific_requests_queued
-                        .remove(&(client_id, server_id))
-                        .unwrap_or_else(|| unreachable!())
-                        .into_iter()
-                        .map(|rq| (client_id, rq))
-                });
+            let requests_queued =
+                client_with_requests_queued
+                    .into_iter()
+                    .flat_map(|(_, client_id)| {
+                        self.client_requests_queued
+                            .remove(&(client_id, ServerTarget::Specific(server_id)))
+                            .unwrap_or_else(|| unreachable!())
+                            .into_iter()
+                            .map(|rq| (client_id, rq))
+                    });
             let requests_dispatched = requests_in_progress
                 .into_iter()
                 .map(|(_, (client_id, rq))| (client_id, rq));
@@ -635,25 +677,30 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             // Choose the client to pick a request from.
             let (client_with_request, pick_from_server_specific) = {
                 let mut clients_with_server_specific_request = self
-                    .clients_with_server_specific_request_queued
-                    .range((server_id, ClientId(usize::MIN))..=(server_id, ClientId(usize::MAX)))
+                    .clients_with_request_queued
+                    .range(
+                        (Some(server_id), ClientId(usize::MIN))
+                            ..=(Some(server_id), ClientId(usize::MAX)),
+                    )
+                    .map(|(_, client_id)| *client_id);
+                let mut clients_with_server_agnostic_request = self
+                    .clients_with_request_queued
+                    .range((None, ClientId(usize::MIN))..=(None, ClientId(usize::MAX)))
                     .map(|(_, client_id)| *client_id);
                 let server_specific_weight: usize =
                     1 + (self.clients.len().saturating_sub(1) / self.servers.len());
                 // While we could in theory use `rand::seq::IteratorRandom` with something
                 // like `(0..server_specific_weight).flat_map(...)`, it's hard to guarantee
                 // that doing so would be `O(1)`. Since we want this guarantee, we do it manually.
-                let total_weight = self
-                    .clients_with_server_agnostic_request_waiting
+                let total_weight = clients_with_server_agnostic_request_waiting
                     .len()
                     .saturating_add(
                         server_specific_weight
                             .saturating_mul(clients_with_server_specific_request.clone().count()),
                     );
                 let index = self.randomness.gen_range(0..total_weight);
-                if index < self.clients_with_server_agnostic_request_waiting.len() {
-                    let client = *self
-                        .clients_with_server_agnostic_request_waiting
+                if index < clients_with_server_agnostic_request_waiting.len() {
+                    let client = *clients_with_server_agnostic_request_waiting
                         .iter()
                         .nth(index)
                         .unwrap();
@@ -661,7 +708,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 } else {
                     let client = clients_with_server_specific_request
                         .nth(
-                            (index - self.clients_with_server_agnostic_request_waiting.len())
+                            (index - clients_with_server_agnostic_request_waiting.len())
                                 / server_specific_weight,
                         )
                         .unwrap();
@@ -672,8 +719,8 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             // Extract a request from that client.
             let queued_request = if pick_from_server_specific {
                 let Some(requests_queue) = self
-                    .client_server_specific_requests_queued
-                    .get_mut(&(client_with_request, server_id))
+                    .client_requests_queued
+                    .get_mut(&(client_with_request, ServerTarget::Specific(server_id)))
                 else {
                     // A panic here indicates a bug in the code.
                     unreachable!()
@@ -686,90 +733,88 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
 
                 // We need to update caches if this was the last request in queue.
                 if requests_queue.is_empty() {
-                    self.client_server_specific_requests_queued
-                        .remove(&(client_with_request, server_id));
-                    self.clients_with_server_specific_request_queued
-                        .remove(&(server_id, client_with_request));
+                    self.client_requests_queued
+                        .remove(&(client_with_request, ServerTarget::Specific(server_id)));
+                    self.clients_with_request_queued
+                        .remove(&(Some(server_id), client_with_request));
                 }
 
                 request
             } else {
-                let Some(request) = self.clients[client_with_request.0]
-                    .server_agnostic_requests_queue
-                    .pop_front()
-                else {
+                // The request can be in two categories: legacy server-specific API, or
+                // server-agnostic.
+                // We currently always prefer pulling from the legacy server-specific API queue,
+                // for no reason except that balancing out the two queues would add a lot of
+                // complexity to the code.
+                let (queue, is_legacy_api_unassigned) = if let Some(queue) = self
+                    .client_requests_queued
+                    .get_mut(&(client_with_request, ServerTarget::LegacyApiUnassigned))
+                {
+                    (queue, true)
+                } else if let Some(queue) = self
+                    .client_requests_queued
+                    .get_mut(&(client_with_request, ServerTarget::ServerAgnostic))
+                {
+                    (queue, false)
+                } else {
                     // A panic here indicates a bug in the code.
                     unreachable!()
                 };
 
-                // We need to update caches if this was the last request in queue.
-                if self.clients[client_with_request.0]
-                    .server_agnostic_requests_queue
-                    .is_empty()
-                {
-                    self.clients_with_server_agnostic_request_waiting
-                        .remove(&client_with_request);
+                // Extract the request.
+                let Some(request) = queue.pop_front() else {
+                    // As documented, queues must always be non-empty, otherwise they should have
+                    // been removed altogether.
+                    unreachable!()
+                };
+
+                // If the request is a legacy API server-specific request, assign the client to
+                // the server.
+                if is_legacy_api_unassigned {
+                    debug_assert!(self.clients[client_with_request.0]
+                        .legacy_api_assigned_server
+                        .is_none());
+                    self.clients[client_with_request.0].legacy_api_assigned_server =
+                        Some(server_id);
                 }
 
-                // In case where the request is a legacy JSON-RPC API function that gets
-                // redirected to a specific server, there are three possibilities:
-                //
-                // - The client is already attributed to the server. All good, nothing more to do.
-                // - The client is not attributed to any server yet. Attribute it to the current
-                //   server.
-                // - The client is attributed to a different server. This can happen if there is
-                //   more than one legacy JSON-RPC API function in queue at the time when the
-                //   client was attributed. In that situation, queue back the request that was
-                //   just pulled but to the proper server this time.
-                //
-                if request.is_legacy_api_server_specific {
-                    if let Some(other_server) =
-                        self.clients[client_with_request.0].legacy_api_assigned_server
-                    {
-                        if other_server != server_id {
-                            // The client is attributed to a different server. Queue back
-                            // the request.
-                            //
-                            // Note that the API user must later call
-                            // `next_proxied_json_rpc_request` again with that other server in
-                            // order for the request to be picked up. As documented, the API user
-                            // is supposed to wake up every idle server when a client inserts a
-                            // request. This means that `next_proxied_json_rpc_request` is
-                            // necessarily called with that other server, and, because the request
-                            // was previously in the server-agnostic queue, that other call could
-                            // have picked up the request as well. The fact that it didn't means
-                            // either that the call hasn't happened yet, or that the call happened
-                            // but the server picked up a different request and was too busy to
-                            // pick up the request that interests us. In both cases the call will
-                            // happen (again or for the first time) later and everything will work
-                            // as intended, except for the small fact that fairness isn't
-                            // properly enforced in that niche situation.
-                            match self
-                                .client_server_specific_requests_queued
-                                .entry((client_with_request, other_server))
-                            {
-                                btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                                btree_map::Entry::Vacant(entry) => {
-                                    let _was_inserted = self
-                                        .clients_with_server_specific_request_queued
-                                        .insert((other_server, client_with_request));
-                                    debug_assert!(_was_inserted);
-                                    entry.insert(VecDeque::new()) // TODO: capacity?
-                                }
-                            }
-                            .push_front(request);
-                            continue;
-                        }
+                // Update the local state, either by removing the queue if it is empty, or, now
+                // that the client is assigned a server, by merging it with the server-specific
+                // queue.
+                if queue.is_empty() {
+                    self.client_requests_queued.remove(&(
+                        client_with_request,
+                        if is_legacy_api_unassigned {
+                            ServerTarget::LegacyApiUnassigned
+                        } else {
+                            ServerTarget::ServerAgnostic
+                        },
+                    ));
+                    if !self.client_requests_queued.contains_key(&(
+                        client_with_request,
+                        if is_legacy_api_unassigned {
+                            ServerTarget::ServerAgnostic
+                        } else {
+                            ServerTarget::LegacyApiUnassigned
+                        },
+                    )) {
+                        self.clients_with_request_queued
+                            .remove(&(client_with_request, None));
                     }
-
-                    if self.clients[client_with_request.0]
-                        .legacy_api_assigned_server
-                        .is_none()
+                } else if is_legacy_api_unassigned {
+                    let queue = mem::take(queue);
+                    self.client_requests_queued
+                        .entry((client_with_request, ServerTarget::Specific(server_id)))
+                        .or_insert_with(|| VecDeque::new())
+                        .extend(queue);
+                    self.client_requests_queued
+                        .remove(&(client_with_request, ServerTarget::LegacyApiUnassigned));
+                    if !self
+                        .client_requests_queued
+                        .contains_key(&(client_with_request, ServerTarget::ServerAgnostic))
                     {
-                        // The client is not attributed to any server yet. Attribute it to the
-                        // current server.
-                        self.clients[client_with_request.0].legacy_api_assigned_server =
-                            Some(server_id);
+                        self.clients_with_request_queued
+                            .remove(&(client_with_request, None));
                     }
                 }
 
@@ -818,7 +863,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
         &mut self,
         server_id: ServerId,
         response: &str,
-    ) -> InsertProxiedJsonRpcResponseOutcome {
+    ) -> InsertProxiedJsonRpcResponse {
         match parse::parse_response(response) {
             Ok(parse::Response::ParseError { .. })
             | Ok(parse::Response::Error {
@@ -833,12 +878,16 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 // we do the blacklisting without removing that request from the state, as the
                 // blacklisting will automatically remove all requests.
                 self.blacklist_server(server_id);
-                InsertProxiedJsonRpcResponseOutcome::Blacklisted("") // TODO:
+                InsertProxiedJsonRpcResponse::Blacklisted("") // TODO:
             }
+
             Ok(parse::Response::Success {
                 id_json,
                 result_json,
             }) => {
+                // Find in our local state the request being answered.
+                // Because clients are removed only after all their in-progress requests have been
+                // answered, it is guaranteed that the client is still in the list.
                 // TODO: to_owned overhead
                 let Some((client_id, request_info)) = self
                     .requests_in_progress
@@ -846,21 +895,21 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 else {
                     // Server has answered a non-existing request. Blacklist it.
                     self.blacklist_server(server_id);
-                    return InsertProxiedJsonRpcResponseOutcome::Blacklisted("");
+                    return InsertProxiedJsonRpcResponse::Blacklisted("");
                     // TODO: ^
                 };
 
                 // TODO: add subscription if this was a subscribe request
                 // TODO: remove subscription if this was an unsubscribe request
 
-                // It is possible that this notification concerns a client that has been
+                // It is possible that this response concerns a client that has been
                 // destroyed by the API user, in which case we simply discard the
-                // notification.
+                // response.
                 if self.clients[client_id.0].user_data.is_none() {
                     // Remove the client for real if it was previously removed by the API user and
                     // that this was its last request.
                     self.try_remove_client(client_id);
-                    return InsertProxiedJsonRpcResponseOutcome::Discarded;
+                    return InsertProxiedJsonRpcResponse::Discarded;
                 }
 
                 // Rewrite the request ID found in the response in order to match what the
@@ -872,8 +921,9 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                     .push_back(response_with_translated_id);
 
                 // Success.
-                InsertProxiedJsonRpcResponseOutcome::Ok(client_id)
+                InsertProxiedJsonRpcResponse::Ok(client_id)
             }
+
             Ok(parse::Response::Error {
                 id_json,
                 error_code,
@@ -889,7 +939,10 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 );
                 // TODO: ?!
             }
+
             Err(response_parse_error) => {
+                // If the message couldn't be parsed as a response, attempt to parse it as a
+                // notification.
                 match methods::parse_notification(response) {
                     Ok(mut notification) => {
                         // This is a subscription notification.
@@ -904,7 +957,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                             // The subscription ID isn't recognized. This indicates something very
                             // wrong with the server. We handle this by blacklisting the server.
                             self.blacklist_server(server_id);
-                            return InsertProxiedJsonRpcResponseOutcome::Blacklisted("");
+                            return InsertProxiedJsonRpcResponse::Blacklisted("");
                             // TODO: ^
                         };
 
@@ -912,7 +965,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         // destroyed by the API user, in which case we simply discard the
                         // notification.
                         if self.clients[client_id.0].user_data.is_none() {
-                            return InsertProxiedJsonRpcResponseOutcome::Discarded;
+                            return InsertProxiedJsonRpcResponse::Discarded;
                         }
 
                         // Rewrite the subscription ID in the notification in order to match what
@@ -926,12 +979,13 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                             .push_back(rewritten_notification);
 
                         // Success
-                        InsertProxiedJsonRpcResponseOutcome::Ok(*client_id)
+                        InsertProxiedJsonRpcResponse::Ok(*client_id)
                     }
+
                     Err(notification_parse_error) => {
                         // Failed to parse the message from the JSON-RPC server.
                         self.blacklist_server(server_id);
-                        InsertProxiedJsonRpcResponseOutcome::Blacklisted("")
+                        InsertProxiedJsonRpcResponse::Blacklisted("")
                         // TODO: ^
                     }
                 }
@@ -955,11 +1009,8 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             .clients_with_server_agnostic_request_waiting
             .contains(&client_id));
         debug_assert!(self
-            .client_server_specific_requests_queued
-            .range(
-                (client_id, ServerId(usize::MIN))
-                    ..(ClientId(client_id.0 + 1), ServerId(usize::MIN))
-            )
+            .client_requests_queued
+            .range((client_id, ServerTarget::MIN)..(ClientId(client_id.0 + 1), ServerTarget::MIN))
             .next()
             .is_none());
 
@@ -1004,7 +1055,35 @@ impl<TClient, TServer> ops::IndexMut<ServerId> for ReverseProxy<TClient, TServer
     }
 }
 
-pub enum InsertProxiedJsonRpcResponseOutcome {
+/// Outcome of a call to [`ReverseProxy::insert_client_json_rpc_request`].
+#[derive(Debug)]
+pub enum InsertClientRequest {
+    /// The request has been immediately answered or discarded and doesn't need any
+    /// further processing.
+    /// [`ReverseProxy::next_client_json_rpc_response`] should be called in order to pull the
+    /// response and send it to the client.
+    ImmediateAnswer,
+
+    /// The request can be processed by any server.
+    /// [`ReverseProxy::next_proxied_json_rpc_request`] should be called with any [`ServerId`].
+    AnyServerWakeUp,
+
+    /// The request must be processed specifically by the indicated server.
+    /// [`ReverseProxy::next_proxied_json_rpc_request`] should be called with the
+    /// given [`ServerId`].
+    ServerWakeUp(ServerId),
+}
+
+/// Error potentially returned by a call to [`ReverseProxy::insert_client_json_rpc_request`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum InsertClientRequestError {
+    /// The number of requests that this client has queued is already equal to
+    /// [`ClientConfig::max_unanswered_parallel_requests`].
+    #[display(fmt = "Too many simultaneous requests")]
+    TooManySimultaneousRequests,
+}
+
+pub enum InsertProxiedJsonRpcResponse {
     Ok(ClientId),
     Discarded,
     Blacklisted(&'static str),
