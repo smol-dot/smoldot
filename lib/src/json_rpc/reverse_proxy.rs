@@ -93,6 +93,12 @@ use super::parse;
 
 /// Configuration for a new [`ReverseProxy`].
 pub struct Config {
+    /// Value to return when a call to the `system_name` JSON-RPC function is received.
+    pub system_name: Cow<'static, str>,
+
+    /// Value to return when a call to the `system_version` JSON-RPC function is received.
+    pub system_version: Cow<'static, str>,
+
     /// Seed used for randomness. Used to avoid HashDoS attacks and to attribute clients and
     /// requests to servers.
     pub randomness_seed: [u8; 32],
@@ -161,6 +167,12 @@ pub struct ReverseProxy<TClient, TServer> {
     /// Source of randomness used for various purposes.
     // TODO: is a crypto secure randomness overkill?
     randomness: ChaCha20Rng,
+
+    /// See [`Config::system_name`]
+    system_name: Cow<'static, str>,
+
+    /// See [`Config::system_version`]
+    system_version: Cow<'static, str>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -279,6 +291,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
         }
     }
 
+    /// Adds a client to the list of clients managed by this state machine.
+    ///
+    /// API users should be aware of the fact that clients are distributed evenly between servers.
+    /// As more clients as added, the latency of the requests of each client is increased, unless
+    /// additional servers are added as well.
     pub fn insert_client(&mut self, config: ClientConfig<TClient>) -> ClientId {
         ClientId(self.clients.insert(Client {
             num_unanswered_requests: 0,
@@ -300,9 +317,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
 
     /// Removes a client previously-inserted with [`ReverseProxy::insert_client`].
     ///
-    /// Calling this function might generate JSON-RPC requests towards some servers, and
-    /// [`ReverseProxy::next_proxied_json_rpc_request`] should be called for every server that
-    /// is currently idle.
+    /// # Panic
+    ///
+    /// Panics if the given [`ClientId`] is invalid.
+    ///
+    // TODO: return list of servers that must wake up
     pub fn remove_client(&mut self, client_id: ClientId) -> TClient {
         let client = self
             .clients
@@ -338,6 +357,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// An error is returned if the JSON-RPC client has queued too many requests that haven't been
     /// answered yet. Try again after a call to [`ReverseProxy::next_client_json_rpc_response`]
     /// has returned `Some`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ClientId`] is invalid.
+    ///
     pub fn insert_client_json_rpc_request(
         &mut self,
         client_id: ClientId,
@@ -362,7 +386,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         self.clients[client_id.0]
                             .json_rpc_responses_queue
                             .push_back(
-                                methods::Response::system_name("smoldot-json-rpc-proxy".into())
+                                methods::Response::system_name(Cow::Borrowed(&*self.system_name))
                                     .to_json_response(request_id_json),
                             );
                         return Ok(InsertClientRequest::ImmediateAnswer);
@@ -371,18 +395,21 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         self.clients[client_id.0]
                             .json_rpc_responses_queue
                             .push_back(
-                            methods::Response::system_version("1.0".into()) // TODO: no
+                                methods::Response::system_version(Cow::Borrowed(
+                                    &*self.system_version,
+                                ))
                                 .to_json_response(request_id_json),
-                        );
+                            );
                         return Ok(InsertClientRequest::ImmediateAnswer);
                     }
                     methods::MethodCall::sudo_unstable_version {} => {
                         self.clients[client_id.0]
                             .json_rpc_responses_queue
                             .push_back(
-                                methods::Response::sudo_unstable_version(
-                                    "smoldot-json-rpc-proxy 1.0".into(),
-                                ) // TODO: no
+                                methods::Response::sudo_unstable_version(Cow::Owned(format!(
+                                    "{} {}",
+                                    self.system_name, self.system_version
+                                )))
                                 .to_json_response(request_id_json),
                             );
                         return Ok(InsertClientRequest::ImmediateAnswer);
@@ -434,17 +461,39 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                     _ => {}
                 }
             }
+
             Err(methods::ParseClientToServerError::JsonRpcParse(_error)) => {
+                // Failed to parse the JSON-RPC request.
                 self.clients[client_id.0]
                     .json_rpc_responses_queue
                     .push_back(parse::build_parse_error_response());
                 return Ok(InsertClientRequest::ImmediateAnswer);
             }
+
             Err(methods::ParseClientToServerError::Method { request_id, error }) => {
-                todo!() // TODO:
+                // JSON-RPC function not recognized.
+
+                // Requests with an unknown method must not be blindly sent to a server, as it is
+                // not possible for the reverse proxy to guarantee that the logic of the request
+                // is respected.
+                // For example, if the request is a subscription request, the reverse proxy
+                // wouldn't be capable of understanding which client to redirect the notifications
+                // to.
+                self.clients[client_id.0]
+                    .json_rpc_responses_queue
+                    .push_back(parse::build_error_response(
+                        request_id,
+                        parse::ErrorResponse::MethodNotFound,
+                        None,
+                    ));
+                return Ok(InsertClientRequest::ImmediateAnswer);
             }
+
             Err(methods::ParseClientToServerError::UnknownNotification(function)) => {
-                todo!() // TODO:
+                // JSON-RPC function not recognized, and the call is a notification.
+                // According to the JSON-RPC specification, the server must not send any response
+                // to notifications, even in case of an error.
+                return Ok(InsertClientRequest::Discarded);
             }
         };
 
@@ -454,7 +503,14 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// Returns the next JSON-RPC response or notification to send to the given client.
     ///
     /// Returns `None` if none is available.
-    // TODO: indicate when one might be available
+    ///
+    /// The return type of [`ReverseProxy::insert_proxied_json_rpc_response`] indicates if a
+    /// JSON-RPC response or notification has become available for a client.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ClientId`] is invalid.
+    ///
     pub fn next_client_json_rpc_response(&mut self, client_id: ClientId) -> Option<String> {
         assert!(self.clients[client_id.0].user_data.is_some());
         // TODO: decrease num_unanswered_requests if not a notification
@@ -476,6 +532,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     ///
     /// All active subscriptions and requests are either stopped or redirected to a different
     /// server.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ServerId`] is invalid.
+    ///
     #[cold]
     pub fn remove_server(&mut self, server_id: ServerId) -> TServer {
         self.blacklist_server(server_id);
@@ -637,15 +698,12 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// If `None` is returned, you should try calling this function again after
     /// [`ReverseProxy::insert_client_json_rpc_request`] or [`ReverseProxy::remove_client`].
     ///
-    /// The JSON-RPC request being returned depends on the server that will process it, as, in
-    /// order to preserve the logic of the JSON-RPC API, some requests must be directed towards
-    /// the same server that has processed an earlier related request. For example, when a
-    /// JSON-RPC client sends a request to unsubscribe, it must be directed to the server that is
-    /// handling the subscription, and no other.
-    /// For this reason, [`ReverseProxy::next_proxied_json_rpc_request`] should be called for
-    /// every (and not just one) idle server after a call to
-    /// [`ReverseProxy::insert_client_json_rpc_request`] or [`ReverseProxy::remove_client`].
-    // TODO: ^ that's a very shitty requirement, remove
+    /// If `Some(_, Some(_))` is returned, then the pulled request belongs to the given client,
+    /// and [`ReverseProxy::insert_client_json_rpc_request`] can be called with that client
+    /// with the guarantee that there is space for a request.
+    ///
+    /// If `Some(_, None)` is returned, the pulled request is related to the internal maintenance
+    /// of the [`ReverseProxy`].
     ///
     /// Note that the [`ReverseProxy`] state machine doesn't enforce any limit to the number of
     /// JSON-RPC requests that a server processes simultaneously. A JSON-RPC server is expected to
@@ -654,7 +712,15 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// server is ready to accept more data.
     /// This ensures that for example a JSON-RPC server that is twice as powerful compared to
     /// another one should get approximately twice the number of requests.
-    pub fn next_proxied_json_rpc_request(&mut self, server_id: ServerId) -> Option<String> {
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ServerId`] is invalid.
+    ///
+    pub fn next_proxied_json_rpc_request(
+        &mut self,
+        server_id: ServerId,
+    ) -> Option<(String, Option<ClientId>)> {
         let server = &mut self.servers[server_id.0];
         if server.is_blacklisted {
             return None;
@@ -687,20 +753,20 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                     .clients_with_request_queued
                     .range((None, ClientId(usize::MIN))..=(None, ClientId(usize::MAX)))
                     .map(|(_, client_id)| *client_id);
+                let clients_with_server_agnostic_request_len =
+                    clients_with_server_agnostic_request.clone().count();
                 let server_specific_weight: usize =
                     1 + (self.clients.len().saturating_sub(1) / self.servers.len());
                 // While we could in theory use `rand::seq::IteratorRandom` with something
                 // like `(0..server_specific_weight).flat_map(...)`, it's hard to guarantee
                 // that doing so would be `O(1)`. Since we want this guarantee, we do it manually.
-                let total_weight = clients_with_server_agnostic_request_waiting
-                    .len()
-                    .saturating_add(
-                        server_specific_weight
-                            .saturating_mul(clients_with_server_specific_request.clone().count()),
-                    );
+                let total_weight = clients_with_server_agnostic_request_len.saturating_add(
+                    server_specific_weight
+                        .saturating_mul(clients_with_server_specific_request.clone().count()),
+                );
                 let index = self.randomness.gen_range(0..total_weight);
-                if index < clients_with_server_agnostic_request_waiting.len() {
-                    let client = *clients_with_server_agnostic_request_waiting
+                if index < clients_with_server_agnostic_request_len {
+                    let client = *clients_with_server_agnostic_request
                         .iter()
                         .nth(index)
                         .unwrap();
@@ -708,7 +774,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 } else {
                     let client = clients_with_server_specific_request
                         .nth(
-                            (index - clients_with_server_agnostic_request_waiting.len())
+                            (index - clients_with_server_agnostic_request_len)
                                 / server_specific_weight,
                         )
                         .unwrap();
@@ -844,7 +910,14 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             debug_assert!(_previous_value.is_none());
 
             // Success.
-            break Some(request_with_adjusted_id);
+            break Some((
+                request_with_adjusted_id,
+                if self.clients[client_with_request.0].user_data.is_some() {
+                    Some(client_with_request)
+                } else {
+                    None
+                },
+            ));
         }
     }
 
@@ -859,6 +932,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// number of notifications is bounded by the maximum number of active subscriptions enforced
     /// on clients. The state machine might merge multiple notifications from the same
     /// subscription into one in order to enforce this bound.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given [`ServerId`] is invalid.
+    ///
     pub fn insert_proxied_json_rpc_response(
         &mut self,
         server_id: ServerId,
@@ -1058,6 +1136,11 @@ impl<TClient, TServer> ops::IndexMut<ServerId> for ReverseProxy<TClient, TServer
 /// Outcome of a call to [`ReverseProxy::insert_client_json_rpc_request`].
 #[derive(Debug)]
 pub enum InsertClientRequest {
+    /// The request has been silently discarded.
+    ///
+    /// This happens for example if the JSON-RPC client sends a notification.
+    Discarded,
+
     /// The request has been immediately answered or discarded and doesn't need any
     /// further processing.
     /// [`ReverseProxy::next_client_json_rpc_response`] should be called in order to pull the
