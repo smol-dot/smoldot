@@ -250,6 +250,9 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     /// Returns a future that becomes ready when [`PlatformRef::read_write_access`] should be
     /// called again on this stream.
     ///
+    /// Must always returned immediately if [`PlatformRef::read_write_access`] has never been
+    /// called on this stream.
+    ///
     /// See the documentation of [`read_write`] for more information.
     ///
     /// > **Note**: The `with_buffers` module provides a helper to more easily implement this

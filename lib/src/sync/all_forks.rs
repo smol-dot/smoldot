@@ -84,7 +84,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    finality::grandpa,
+    finality::decode,
     header, verify,
 };
 
@@ -988,11 +988,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ) -> GrandpaCommitMessageOutcome {
         let source = &mut self.inner.blocks[source_id];
 
-        let block_number = match grandpa::commit::decode::decode_grandpa_commit(
+        let block_number = match decode::decode_grandpa_commit(
             &scale_encoded_commit,
             self.chain.block_number_bytes(),
         ) {
-            Ok(msg) => msg.message.target_number,
+            Ok(msg) => msg.target_number,
             Err(_) => return GrandpaCommitMessageOutcome::ParseError,
         };
 

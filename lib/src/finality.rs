@@ -16,6 +16,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Finality consists is declaring a block as irreversible. It is now forever part of the chain.
+//!
+//! There exists two types of finality proofs: Grandpa commits, and Grandpa justifications. These
+//! two finality proofs are very similar to each other.
+//!
+//! In order to be verified, both Grandpa commits and Grandpa justifications require that the
+//! verifier knows about specific block headers. Grandpa justifications directly include these
+//! block headers in its data, while Grandpa commits are sent in a context where it is assumed
+//! that they are known by the node.
 
-pub mod grandpa;
-pub mod justification;
+pub mod decode;
+pub mod verify;

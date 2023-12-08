@@ -33,7 +33,7 @@
 use crate::{
     chain::{blocks_tree, chain_information},
     executor::host,
-    finality::grandpa,
+    finality::decode,
     header,
     sync::{all_forks, optimistic, warp_sync},
     trie::Nibble,
@@ -1380,11 +1380,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 }
             }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(source_id)) => {
-                let block_number = match grandpa::commit::decode::decode_grandpa_commit(
+                let block_number = match decode::decode_grandpa_commit(
                     &scale_encoded_message,
                     inner.block_number_bytes(),
                 ) {
-                    Ok(msg) => msg.message.target_number,
+                    Ok(msg) => msg.target_number,
                     Err(_) => return GrandpaCommitMessageOutcome::Discarded,
                 };
 

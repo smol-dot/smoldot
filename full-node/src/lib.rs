@@ -444,6 +444,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         })
                         .await
                 },
+                max_in_peers: 25,
+                max_slots: 15,
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
                         chain_spec.boot_nodes().len() + config.chain.additional_bootnodes.len(),
@@ -522,6 +524,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                                 }
                             })
                             .await,
+                        max_in_peers: 25,
+                        max_slots: 15,
                         bootstrap_nodes: {
                             let mut list =
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());

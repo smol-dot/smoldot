@@ -57,6 +57,7 @@ use futures_lite::FutureExt as _;
 use futures_util::{future, stream, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools as _;
+use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     header,
@@ -978,16 +979,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Message)
             };
             let message_for_chain_received = async {
-                if !task.messages_rx.is_empty() {
-                    let (chain_id, message) = task
-                        .messages_rx
-                        .next()
-                        .await
-                        .unwrap_or_else(|| unreachable!());
-                    WakeUpReason::MessageForChain(chain_id, message)
-                } else {
+                // Note that when the last entry of `messages_rx` yields `None`, `messages_rx`
+                // itself will yield `None`. For this reason, we can't use
+                // `task.messages_rx.is_empty()` to determine whether `messages_rx` will
+                // yield `None`.
+                let Some((chain_id, message)) = task.messages_rx.next().await else {
                     future::pending().await
-                }
+                };
+                WakeUpReason::MessageForChain(chain_id, message)
             };
             let message_from_task_received = async {
                 let (connection_id, message) = task.tasks_messages_rx.next().await.unwrap();
@@ -1005,7 +1004,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     WakeUpReason::NetworkEvent(event)
                 } else if let Some(start_connect) = {
                     let x = (task.num_recent_connection_opening < task.connections_open_pool_size)
-                        .then(|| task.network.unconnected_desired().next().cloned())
+                        .then(|| {
+                            task.network
+                                .unconnected_desired()
+                                .choose(&mut task.randomness)
+                                .cloned()
+                        })
                         .flatten();
                     x
                 } {
@@ -1014,7 +1018,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let x = task
                         .network
                         .connected_unopened_gossip_desired()
-                        .next()
+                        .choose(&mut task.randomness)
                         .map(|(peer_id, chain_id, _)| (peer_id.clone(), chain_id));
                     x
                 } {
@@ -1151,7 +1155,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 log::debug!(target: "network", "Chains <= AddChain(id={})", task.network[chain_id].log_name);
             }
             WakeUpReason::EventSendersReady => {
-                // Dispatch the pending event, if any to the various senders.
+                // Dispatch the pending event, if any, to the various senders.
 
                 // We made sure that the senders were ready before generating an event.
                 let either::Left(event_senders) = &mut task.event_senders else {
@@ -2132,7 +2136,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     "Gossip({}, {}) => GrandpaCommitMessage(target_block_hash={})",
                     &task.network[chain_id].log_name,
                     peer_id,
-                    HashDisplay(message.decode().message.target_hash),
+                    HashDisplay(message.decode().target_hash),
                 );
 
                 debug_assert!(task.event_pending_send.is_none());

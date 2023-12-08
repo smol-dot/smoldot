@@ -349,11 +349,23 @@ where
         address: Vec<u8>,
         max_addresses: usize,
     ) -> InsertAddressResult {
-        self.insert_address_inner(peer_id, address, max_addresses, 0, false)
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            return InsertAddressResult::UnknownPeer;
+        };
+
+        match self.insert_address_inner(peer_id_index, address, max_addresses, 0, false) {
+            InsertAddressConnectionsResult::AlreadyKnown => InsertAddressResult::AlreadyKnown,
+            InsertAddressConnectionsResult::Inserted { address_removed } => {
+                InsertAddressResult::Inserted { address_removed }
+            }
+        }
     }
 
     /// Increases the number of connections of the given address. If the address isn't known, it
     /// is inserted.
+    ///
+    /// Contrary to [`BasicPeeringStrategy::insert_address`], the address is inserted anyway if
+    /// the `PeerId` isn't known.
     ///
     /// > **Note**: Use this function if you establish a connection and accidentally reach a
     /// >           certain [`PeerId`].
@@ -367,22 +379,19 @@ where
         peer_id: &PeerId,
         address: Vec<u8>,
         max_addresses: usize,
-    ) -> InsertAddressResult {
-        self.insert_address_inner(peer_id, address, max_addresses, 1, true)
+    ) -> InsertAddressConnectionsResult {
+        let peer_id_index = self.get_or_insert_peer_index(peer_id);
+        self.insert_address_inner(peer_id_index, address, max_addresses, 1, true)
     }
 
     fn insert_address_inner(
         &mut self,
-        peer_id: &PeerId,
+        peer_id_index: usize,
         address: Vec<u8>,
         max_addresses: usize,
         initial_num_connections: u32,
         increase_if_present: bool,
-    ) -> InsertAddressResult {
-        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
-            return InsertAddressResult::UnknownPeer;
-        };
-
+    ) -> InsertAddressConnectionsResult {
         match self.addresses.entry((peer_id_index, address.clone())) {
             btree_map::Entry::Vacant(entry) => {
                 entry.insert(initial_num_connections);
@@ -410,7 +419,7 @@ where
                         .remove(&(peer_id_index, address_removed.clone()));
                 }
 
-                InsertAddressResult::Inserted { address_removed }
+                InsertAddressConnectionsResult::Inserted { address_removed }
             }
             btree_map::Entry::Occupied(entry) => {
                 let entry = entry.into_mut();
@@ -420,7 +429,7 @@ where
                         .unwrap_or_else(|| panic!("overflow in number of connections"));
                 }
 
-                InsertAddressResult::AlreadyKnown
+                InsertAddressConnectionsResult::AlreadyKnown
             }
         }
     }
@@ -836,8 +845,7 @@ pub enum InsertChainPeerResult {
     Duplicate,
 }
 
-/// See [`BasicPeeringStrategy::insert_address`] and
-/// [`BasicPeeringStrategy::increase_address_connections`].
+/// See [`BasicPeeringStrategy::insert_address`].
 pub enum InsertAddressResult {
     /// Address has been successfully inserted.
     Inserted {
@@ -849,6 +857,18 @@ pub enum InsertAddressResult {
     AlreadyKnown,
     /// The peer isn't associated to any chain, and as such the address was not inserted.
     UnknownPeer,
+}
+
+/// See [`BasicPeeringStrategy::increase_address_connections`].
+pub enum InsertAddressConnectionsResult {
+    /// Address has been inserted.
+    Inserted {
+        /// If the maximum number of addresses is reached, an old address might have been
+        /// removed. If so, this contains the address.
+        address_removed: Option<Vec<u8>>,
+    },
+    /// Address was already known.
+    AlreadyKnown,
 }
 
 /// See [`BasicPeeringStrategy::unassign_slot_and_ban`].
@@ -1005,7 +1025,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{BasicPeeringStrategy, Config, InsertAddressResult, InsertChainPeerResult};
+    use super::{
+        BasicPeeringStrategy, Config, InsertAddressConnectionsResult, InsertAddressResult,
+        InsertChainPeerResult,
+    };
     use crate::network::service::{peer_id::PublicKey, PeerId};
     use core::time::Duration;
 
@@ -1066,7 +1089,7 @@ mod tests {
 
         assert!(matches!(
             bps.increase_address_connections(&peer_id, Vec::new(), usize::max_value()),
-            InsertAddressResult::Inserted {
+            InsertAddressConnectionsResult::Inserted {
                 address_removed: None
             }
         ));
@@ -1084,6 +1107,42 @@ mod tests {
 
         bps.decrease_address_connections(&peer_id, &[]).unwrap();
         assert_eq!(bps.peer_addresses(&peer_id).count(), 0);
+    }
+
+    #[test]
+    fn address_not_inserted_when_peer_has_no_chain_association() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
+
+        assert!(matches!(
+            bps.insert_address(&peer_id, Vec::new(), usize::max_value()),
+            InsertAddressResult::UnknownPeer
+        ));
+
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 0);
+    }
+
+    #[test]
+    fn address_connections_inserted_when_peer_has_no_chain_association() {
+        let mut bps = BasicPeeringStrategy::<u32, Duration>::new(Config {
+            randomness_seed: [0; 32],
+            peers_capacity: 0,
+            chains_capacity: 0,
+        });
+
+        let peer_id = PeerId::from_public_key(&PublicKey::Ed25519([0; 32]));
+
+        assert!(matches!(
+            bps.increase_address_connections(&peer_id, Vec::new(), usize::max_value()),
+            InsertAddressConnectionsResult::Inserted { .. }
+        ));
+
+        assert_eq!(bps.peer_addresses(&peer_id).count(), 1);
     }
 
     // TODO: more tests

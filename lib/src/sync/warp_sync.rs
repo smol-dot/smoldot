@@ -103,7 +103,7 @@ use crate::{
         host::{self, HostVmPrototype},
         vm::ExecHint,
     },
-    finality::justification,
+    finality::{decode, verify},
     header,
     informant::HashDisplay,
     trie::{self, proof_decode},
@@ -1434,7 +1434,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 return (self.inner, Err(VerifyFragmentError::InvalidHeader(err)));
             }
         };
-        let fragment_decoded_justification = match justification::decode::decode_grandpa(
+        let fragment_decoded_justification = match decode::decode_grandpa_justification(
             &fragment_to_verify.scale_encoded_justification,
             self.inner.block_number_bytes,
         ) {
@@ -1484,8 +1484,8 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         }
 
         // Check whether the justification is valid.
-        if let Err(err) = justification::verify::verify(justification::verify::Config {
-            justification: fragment_decoded_justification,
+        if let Err(err) = verify::verify_justification(verify::JustificationVerifyConfig {
+            justification: &fragment_to_verify.scale_encoded_justification,
             block_number_bytes: self.inner.block_number_bytes,
             authorities_list: finalized_triggered_authorities
                 .iter()
@@ -1581,7 +1581,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 #[derive(Debug)]
 pub enum VerifyFragmentError {
     /// Justification found within the fragment is invalid.
-    JustificationVerify(justification::verify::Error),
+    JustificationVerify(verify::JustificationVerifyError),
     /// Mismatch between the block targeted by the justification and the header.
     TargetHashMismatch {
         /// Hash of the block the justification targets.
@@ -1603,7 +1603,7 @@ pub enum VerifyFragmentError {
     /// Failed to decode header.
     InvalidHeader(header::Error),
     /// Failed to decode justification.
-    InvalidJustification(justification::decode::Error),
+    InvalidJustification(decode::JustificationDecodeError),
 }
 
 impl fmt::Display for VerifyFragmentError {

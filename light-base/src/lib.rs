@@ -87,7 +87,6 @@ extern crate alloc;
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{num::NonZeroU32, ops, pin, time::Duration};
-use futures_util::FutureExt as _;
 use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
@@ -869,7 +868,6 @@ impl<TPlat: platform::PlatformRef, TChain> Client<TPlat, TChain> {
                     network_service.discover(known_nodes, false).await;
                     network_service.discover(bootstrap_nodes, true).await;
                 }
-                .boxed()
             });
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
@@ -1093,8 +1091,8 @@ fn start_services<TPlat: platform::PlatformRef>(
         network_service::NetworkService::new(network_service::Config {
             platform: platform.clone(),
             identify_agent_version: network_identify_agent_version,
-            connections_open_pool_size: 5,
-            connections_open_pool_restore_delay: Duration::from_secs(1),
+            connections_open_pool_size: 8,
+            connections_open_pool_restore_delay: Duration::from_millis(100),
             chains_capacity: 1,
         })
     });

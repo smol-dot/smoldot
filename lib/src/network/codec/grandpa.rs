@@ -17,13 +17,13 @@
 
 // TODO: document all this
 
-use crate::finality::{grandpa::commit::decode, justification::decode::PrecommitRef};
+use crate::finality::{decode, decode::PrecommitRef}; // TODO: weird imports
 
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};
 use nom::Finish as _;
 
-pub use crate::finality::grandpa::commit::decode::{CommitMessageRef, UnsignedPrecommitRef};
+pub use crate::finality::decode::{CommitMessageRef, UnsignedPrecommitRef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrandpaNotificationRef<'a> {
@@ -376,17 +376,14 @@ fn catch_up<'a>(
                 }),
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
                     nom::multi::many_m_n(num_elems, num_elems, move |s| {
-                        crate::finality::justification::decode::PrecommitRef::decode_partial(
-                            s,
-                            block_number_bytes,
-                        )
-                        .map(|(a, b)| (b, a))
-                        .map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                s,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
+                        crate::finality::decode::PrecommitRef::decode_partial(s, block_number_bytes)
+                            .map(|(a, b)| (b, a))
+                            .map_err(|_| {
+                                nom::Err::Failure(nom::error::make_error(
+                                    s,
+                                    nom::error::ErrorKind::Verify,
+                                ))
+                            })
                     })
                 }),
                 nom::bytes::streaming::take(32u32),

@@ -50,7 +50,10 @@ pub(super) async fn connection_task(
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
     mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
-    connection_to_coordinator: channel::Sender<super::ToBackground>,
+    connection_to_coordinator: channel::Sender<(
+        service::ConnectionId,
+        Option<service::ConnectionToCoordinator>,
+    )>,
 ) {
     // The socket future is wrapped around an object containing a read buffer and a write buffer
     // and allowing easier usage.
@@ -111,19 +114,12 @@ pub(super) async fn connection_task(
                 connection_task = task_update;
                 debug_assert!(message_sending.is_none());
                 if let Some(opaque_message) = opaque_message {
-                    message_sending = Some(connection_to_coordinator.send(
-                        super::ToBackground::FromConnectionTask {
-                            connection_id,
-                            opaque_message: Some(opaque_message),
-                        },
-                    ));
+                    message_sending =
+                        Some(connection_to_coordinator.send((connection_id, Some(opaque_message))));
                 }
             } else {
                 let _ = connection_to_coordinator
-                    .send(super::ToBackground::FromConnectionTask {
-                        connection_id,
-                        opaque_message,
-                    })
+                    .send((connection_id, opaque_message))
                     .await;
                 return;
             }
