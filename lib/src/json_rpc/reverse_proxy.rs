@@ -134,7 +134,10 @@ pub struct ReverseProxy<TClient, TServer> {
     /// List of all clients. Indices serve as [`ClientId`].
     clients: slab::Slab<Client<TClient>>,
 
-    /// Queues of requests waiting to be processed.
+    /// List of all servers. Indices serve as [`ServerId`].
+    servers: slab::Slab<Server<TServer>>,
+
+    /// Queues of requests waiting to be sent to a server.
     /// Indexed by client and by server.
     ///
     /// The queues must never be empty. If a queue is emptied, the item must be removed from
@@ -145,11 +148,9 @@ pub struct ReverseProxy<TClient, TServer> {
     /// Same entries as [`ReverseProxy::client_requests_queued`], but indexed
     /// differently.
     /// [`ServerTarget::ServerAgnostic`] and [`ServerTarget::LegacyApiUnassigned`] both
-    /// correspond to `None`, while [`ServerTarget::Specific`] corresponds to `Some`.
+    /// correspond to a key of `None`, while [`ServerTarget::Specific`] corresponds to a key of
+    /// `Some`.
     clients_with_request_queued: BTreeSet<(Option<ServerId>, ClientId)>,
-
-    /// List of all servers. Indices serve as [`ServerId`].
-    servers: slab::Slab<Server<TServer>>,
 
     /// List of all requests that have been extracted with
     /// [`ReverseProxy::next_proxied_json_rpc_request`] and are being processed by the server.
@@ -158,11 +159,16 @@ pub struct ReverseProxy<TClient, TServer> {
     /// the client and request from the point of view of the client.
     requests_in_progress: BTreeMap<(ServerId, String), (ClientId, QueuedRequest)>,
 
-    /// List of all subscriptions that are currently active.
-    active_subscriptions: BTreeMap<(ServerId, String), (ClientId, String, SubscriptionTy)>,
+    /// List of all subscriptions that are currently active according to servers.
+    active_subscriptions_by_server: BTreeMap<(ServerId, String), (ClientId, String)>,
 
-    /// Same as [`ReverseProxy::active_subscriptions`], by indexed by client.
-    active_subscriptions_by_client: BTreeMap<(ClientId, String), (ServerId, String)>,
+    /// List of all subscriptions that are currently active according to clients.
+    ///
+    /// Contains `Some` only if the subscription is active on a server.
+    /// If it contains `None`, then there must be a subscription request either in queue or
+    /// currently being processed by a server.
+    active_subscriptions_by_client:
+        BTreeMap<(ClientId, String), (SubscriptionTyWithParams, Option<(ServerId, String)>)>,
 
     /// Source of randomness used for various purposes.
     // TODO: is a crypto secure randomness overkill?
@@ -188,13 +194,24 @@ impl ServerTarget {
     const MAX: ServerTarget = ServerTarget::Specific(ServerId(usize::MAX));
 }
 
-enum SubscriptionTy {
+enum SubscriptionTyWithParams {
     AuthorSubmitAndWatchExtrinsic,
     ChainSubscribeAllHeads,
     ChainSubscribeFinalizedHeads,
     ChainSubscribeNewHeads,
     StateSubscribeRuntimeVersion,
     StateSubscribeStorage { keys: Vec<methods::HexString> },
+    ChainHeadFollow,
+    TransactionSubmitAndWatch,
+}
+
+enum SubscriptionTy {
+    AuthorSubmitAndWatchExtrinsic,
+    ChainSubscribeAllHeads,
+    ChainSubscribeFinalizedHeads,
+    ChainSubscribeNewHeads,
+    StateSubscribeRuntimeVersion,
+    StateSubscribeStorage,
     ChainHeadFollow,
     TransactionSubmitAndWatch,
 }
@@ -257,10 +274,22 @@ struct QueuedRequest {
 
     parameters_json: Option<String>,
 
-    /// `true` if the JSON-RPC function belongs to the category of legacy JSON-RPC functions that
-    /// are all redirected to the same server.
-    // TODO: consider removing entirely or turning into a proper "type" with an enum
-    is_legacy_api_server_specific: bool,
+    ty: QueuedRequestTy,
+}
+
+enum QueuedRequestTy {
+    Regular {
+        /// `true` if the JSON-RPC function belongs to the category of legacy JSON-RPC functions
+        /// that are all redirected to the same server.
+        is_legacy_api_server_specific: bool,
+    },
+    Subscription {
+        ty: SubscriptionTyWithParams,
+        /// `Some` if the JSON-RPC client thinks that the subscription is already active, in which
+        /// case this field contains the client-side subscription ID.
+        assigned_subscription_id: Option<String>,
+    },
+    Unsubscribe(SubscriptionTy),
 }
 
 struct Server<TServer> {
@@ -378,10 +407,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
         }
         self.clients[client_id.0].num_unanswered_requests += 1;
 
-        // Answer the request directly if possible.
-        match methods::parse_jsonrpc_client_to_server(request) {
+        // Determine the request information, or answer the request directly if possible.
+        let queued_request = match methods::parse_jsonrpc_client_to_server(request) {
             Ok((request_id_json, method)) => {
-                match method {
+                let ty = match method {
+                    // Answer the request directly if possible.
                     methods::MethodCall::system_name {} => {
                         self.clients[client_id.0]
                             .json_rpc_responses_queue
@@ -423,6 +453,8 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                             );
                         return Ok(InsertClientRequest::ImmediateAnswer);
                     }
+
+                    // Subscription functions.
                     methods::MethodCall::state_subscribeRuntimeVersion {}
                     | methods::MethodCall::state_subscribeStorage { .. }
                     | methods::MethodCall::chain_subscribeAllHeads {}
@@ -436,6 +468,27 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         }
 
                         self.clients[client_id.0].num_legacy_api_subscriptions += 1;
+                        QueuedRequestTy::Subscription {
+                            ty: match method {
+                                methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                                    SubscriptionTyWithParams::StateSubscribeRuntimeVersion
+                                }
+                                methods::MethodCall::state_subscribeStorage { list } => {
+                                    SubscriptionTyWithParams::StateSubscribeStorage { keys: list }
+                                }
+                                methods::MethodCall::chain_subscribeAllHeads {} => {
+                                    SubscriptionTyWithParams::ChainSubscribeAllHeads
+                                }
+                                methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                                    SubscriptionTyWithParams::ChainSubscribeFinalizedHeads
+                                }
+                                methods::MethodCall::chain_subscribeNewHeads {} => {
+                                    SubscriptionTyWithParams::ChainSubscribeNewHeads
+                                }
+                                _ => unreachable!(),
+                            },
+                            assigned_subscription_id: None,
+                        }
                     }
                     methods::MethodCall::chainHead_unstable_follow { .. } => {
                         if self.clients[client_id.0].num_chainhead_follow_subscriptions
@@ -446,6 +499,10 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         }
 
                         self.clients[client_id.0].num_chainhead_follow_subscriptions += 1;
+                        QueuedRequestTy::Subscription {
+                            ty: SubscriptionTyWithParams::ChainHeadFollow,
+                            assigned_subscription_id: None,
+                        }
                     }
                     methods::MethodCall::author_submitAndWatchExtrinsic { .. }
                     | methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
@@ -457,8 +514,143 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         }
 
                         self.clients[client_id.0].num_transactions_subscriptions += 1;
+                        QueuedRequestTy::Subscription {
+                            ty: match method {
+                                methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
+                                    SubscriptionTyWithParams::ChainHeadFollow
+                                }
+                                methods::MethodCall::transaction_unstable_submitAndWatch {
+                                    ..
+                                } => SubscriptionTyWithParams::TransactionSubmitAndWatch,
+                                _ => unreachable!(),
+                            },
+                            assigned_subscription_id: None,
+                        }
                     }
-                    _ => {}
+
+                    // Unsubscription functions.
+                    methods::MethodCall::chain_unsubscribeAllHeads { .. }
+                    | methods::MethodCall::chain_unsubscribeFinalizedHeads { .. }
+                    | methods::MethodCall::chain_unsubscribeNewHeads { .. }
+                    | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
+                        todo!()
+                    }
+                    methods::MethodCall::state_unsubscribeStorage { subscription } => todo!(),
+
+                    // Legacy JSON-RPC API functions.
+                    methods::MethodCall::account_nextIndex { .. }
+                    | methods::MethodCall::author_hasKey { .. }
+                    | methods::MethodCall::author_hasSessionKeys { .. }
+                    | methods::MethodCall::author_insertKey { .. }
+                    | methods::MethodCall::author_pendingExtrinsics { .. }
+                    | methods::MethodCall::author_removeExtrinsic { .. }
+                    | methods::MethodCall::author_rotateKeys { .. }
+                    | methods::MethodCall::author_submitExtrinsic { .. }
+                    | methods::MethodCall::author_unwatchExtrinsic { .. }
+                    | methods::MethodCall::babe_epochAuthorship { .. }
+                    | methods::MethodCall::chain_getBlock { .. }
+                    | methods::MethodCall::chain_getBlockHash { .. }
+                    | methods::MethodCall::chain_getFinalizedHead { .. }
+                    | methods::MethodCall::chain_getHeader { .. }
+                    | methods::MethodCall::childstate_getKeys { .. }
+                    | methods::MethodCall::childstate_getStorage { .. }
+                    | methods::MethodCall::childstate_getStorageHash { .. }
+                    | methods::MethodCall::childstate_getStorageSize { .. }
+                    | methods::MethodCall::grandpa_roundState { .. }
+                    | methods::MethodCall::offchain_localStorageGet { .. }
+                    | methods::MethodCall::offchain_localStorageSet { .. }
+                    | methods::MethodCall::payment_queryInfo { .. }
+                    | methods::MethodCall::rpc_methods { .. }
+                    | methods::MethodCall::state_call { .. }
+                    | methods::MethodCall::state_getKeys { .. }
+                    | methods::MethodCall::state_getKeysPaged { .. }
+                    | methods::MethodCall::state_getMetadata { .. }
+                    | methods::MethodCall::state_getPairs { .. }
+                    | methods::MethodCall::state_getReadProof { .. }
+                    | methods::MethodCall::state_getRuntimeVersion { .. }
+                    | methods::MethodCall::state_getStorage { .. }
+                    | methods::MethodCall::state_getStorageHash { .. }
+                    | methods::MethodCall::state_getStorageSize { .. }
+                    | methods::MethodCall::state_queryStorage { .. }
+                    | methods::MethodCall::state_queryStorageAt { .. }
+                    | methods::MethodCall::system_accountNextIndex { .. }
+                    | methods::MethodCall::system_addReservedPeer { .. }
+                    | methods::MethodCall::system_chain { .. }
+                    | methods::MethodCall::system_chainType { .. }
+                    | methods::MethodCall::system_dryRun { .. }
+                    | methods::MethodCall::system_health { .. }
+                    | methods::MethodCall::system_localListenAddresses { .. }
+                    | methods::MethodCall::system_localPeerId { .. }
+                    | methods::MethodCall::system_networkState { .. }
+                    | methods::MethodCall::system_nodeRoles { .. }
+                    | methods::MethodCall::system_peers { .. }
+                    | methods::MethodCall::system_properties { .. }
+                    | methods::MethodCall::system_removeReservedPeer { .. } => {
+                        QueuedRequestTy::Regular {
+                            is_legacy_api_server_specific: true,
+                        }
+                    }
+
+                    // New JSON-RPC API.
+                    methods::MethodCall::chainSpec_v1_chainName {}
+                    | methods::MethodCall::chainSpec_v1_genesisHash {}
+                    | methods::MethodCall::chainSpec_v1_properties {}
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
+                        QueuedRequestTy::Regular {
+                            is_legacy_api_server_specific: false,
+                        }
+                    }
+
+                    // ChainHead functions.
+                    methods::MethodCall::chainHead_unstable_body {
+                        follow_subscription,
+                        hash,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_call {
+                        follow_subscription,
+                        hash,
+                        function,
+                        call_parameters,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_header {
+                        follow_subscription,
+                        hash,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_stopOperation {
+                        follow_subscription,
+                        operation_id,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_storage {
+                        follow_subscription,
+                        hash,
+                        items,
+                        child_trie,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_continue {
+                        follow_subscription,
+                        operation_id,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_unfollow {
+                        follow_subscription,
+                    } => todo!(),
+                    methods::MethodCall::chainHead_unstable_unpin {
+                        follow_subscription,
+                        hash_or_hashes,
+                    } => todo!(),
+
+                    methods::MethodCall::transaction_unstable_unwatch { subscription } => todo!(),
+                    methods::MethodCall::network_unstable_subscribeEvents {} => todo!(),
+                    methods::MethodCall::network_unstable_unsubscribeEvents { subscription } => {
+                        todo!()
+                    }
+                };
+
+                // TODO: to_owned?
+                QueuedRequest {
+                    id_json: request_id_json.to_owned(),
+                    method: method.name().to_owned(),
+                    parameters_json: Some(method.params_to_json_object()),
+                    ty,
                 }
             }
 
@@ -533,16 +725,22 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
     /// All active subscriptions and requests are either stopped or redirected to a different
     /// server.
     ///
+    /// After this function returns, [`ReverseProxy::next_proxied_json_rpc_request`] should be
+    /// called with all idle servers, in order to pick up the requests that this server was
+    /// processing.
+    ///
     /// # Panic
     ///
     /// Panics if the given [`ServerId`] is invalid.
     ///
+    // TODO: return list of clients that have a response available
     #[cold]
     pub fn remove_server(&mut self, server_id: ServerId) -> TServer {
         self.blacklist_server(server_id);
         self.servers.remove(server_id.0).user_data
     }
 
+    // TODO: return list of clients that have a response available
     #[cold]
     fn blacklist_server(&mut self, server_id: ServerId) {
         // Set `is_blacklisted` to `true`, and return immediately if it was already `true`.
@@ -553,10 +751,10 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
         // Extract from `active_subscriptions` the subscriptions that were handled by that server.
         let active_subscriptions = {
             let mut server_and_after = self
-                .active_subscriptions
+                .active_subscriptions_by_server
                 .split_off(&(server_id, String::new()));
             let mut after = server_and_after.split_off(&(ServerId(server_id.0 + 1), String::new()));
-            self.active_subscriptions.append(&mut after);
+            self.active_subscriptions_by_server.append(&mut after);
             server_and_after
         };
 
@@ -570,7 +768,8 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
             match subscription_type {
                 // Any active `chainHead_follow`, `transaction_submitAndWatch`, or
                 // `author_submitAndWatchExtrinsic` subscription is killed.
-                SubscriptionTy::AuthorSubmitAndWatchExtrinsic => self.clients[client_id.0]
+                SubscriptionTyWithParams::AuthorSubmitAndWatchExtrinsic => self.clients
+                    [client_id.0]
                     .json_rpc_responses_queue
                     .push_back(
                         methods::ServerToClient::author_extrinsicUpdate {
@@ -579,7 +778,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         }
                         .to_json_request_object_parameters(None),
                     ),
-                SubscriptionTy::TransactionSubmitAndWatch => self.clients[client_id.0]
+                SubscriptionTyWithParams::TransactionSubmitAndWatch => self.clients[client_id.0]
                     .json_rpc_responses_queue
                     .push_back(
                         methods::ServerToClient::transaction_unstable_watchEvent {
@@ -595,7 +794,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         }
                         .to_json_request_object_parameters(None),
                     ),
-                SubscriptionTy::ChainHeadFollow => self.clients[client_id.0]
+                SubscriptionTyWithParams::ChainHeadFollow => self.clients[client_id.0]
                     .json_rpc_responses_queue
                     .push_back(
                         methods::ServerToClient::chainHead_unstable_followEvent {
@@ -608,11 +807,11 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 // Any legacy JSON-RPC API subscription that the server was handling is
                 // re-subscribed by adding to the head of the JSON-RPC client requests queue a
                 // fake subscription request.
-                SubscriptionTy::ChainSubscribeAllHeads => todo!(),
-                SubscriptionTy::ChainSubscribeFinalizedHeads => todo!(),
-                SubscriptionTy::ChainSubscribeNewHeads => todo!(),
-                SubscriptionTy::StateSubscribeRuntimeVersion => todo!(),
-                SubscriptionTy::StateSubscribeStorage { keys } => todo!(),
+                SubscriptionTyWithParams::ChainSubscribeAllHeads => todo!(),
+                SubscriptionTyWithParams::ChainSubscribeFinalizedHeads => todo!(),
+                SubscriptionTyWithParams::ChainSubscribeNewHeads => todo!(),
+                SubscriptionTyWithParams::StateSubscribeRuntimeVersion => todo!(),
+                SubscriptionTyWithParams::StateSubscribeStorage { keys } => todo!(),
             }
         }
 
@@ -1029,7 +1228,7 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                         // list.
                         // TODO: overhead of into_owned
                         let Some((client_id, client_notification_id)) = self
-                            .active_subscriptions
+                            .active_subscriptions_by_server
                             .get(&(server_id, notification.subscription().clone().into_owned()))
                         else {
                             // The subscription ID isn't recognized. This indicates something very
