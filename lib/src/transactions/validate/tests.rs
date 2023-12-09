@@ -77,7 +77,7 @@ fn validate_from_proof() {
             }
             super::Query::ClosestDescendantMerkleValue(mv) => {
                 let value = call_proof
-                    .closest_descendant_merkle_value(main_trie_root, &mv.key().collect::<Vec<_>>())
+                    .closest_descendant_merkle_value(main_trie_root, mv.key())
                     .unwrap();
                 validation_in_progress = mv.inject_merkle_value(value);
             }

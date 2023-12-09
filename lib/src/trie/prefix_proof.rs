@@ -169,7 +169,8 @@ impl PrefixScan {
                     };
 
                     match (
-                        decoded_proof.trie_node_info(&self.trie_root_hash, info_of_node),
+                        decoded_proof
+                            .trie_node_info(&self.trie_root_hash, info_of_node.iter().copied()),
                         query_ty,
                     ) {
                         (Ok(info), QueryTy::Exact) => info,

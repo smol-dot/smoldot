@@ -752,7 +752,7 @@ impl<'a> RuntimeCall<'a> {
     pub fn closest_descendant_merkle_value(
         &'_ self,
         child_trie: Option<&[u8]>,
-        key: &[trie::Nibble],
+        key: impl Iterator<Item = trie::Nibble>,
     ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,

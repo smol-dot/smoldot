@@ -1438,7 +1438,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     let child_trie = mv.child_trie();
                     runtime_call_lock.closest_descendant_merkle_value(
                         child_trie.as_ref().map(|c| c.as_ref()),
-                        &mv.key().collect::<Vec<_>>(),
+                        mv.key(),
                     )
                 };
                 let merkle_value = match merkle_value {

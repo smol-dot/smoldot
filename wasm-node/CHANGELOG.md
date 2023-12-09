@@ -5,6 +5,8 @@
 ### Fixed
 
 - Fix connection being properly killed when the ping substream fails to be negotiated. ([#1459](https://github.com/smol-dot/smoldot/pull/1459))
+- Fix Merkle proofs with nodes that have one child and no storage value being considered as valid.
+- Fix Merkle proofs with nodes that have no children or storage value and aren't the root being considered as valid.
 
 ## 2.0.13 - 2023-11-28
 

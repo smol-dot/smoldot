@@ -727,12 +727,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         }
                     }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
-                        let key_nibbles =
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+                        let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());
 
                         let closest_descendant_merkle_value = match decoded_proof
-                            .closest_descendant_merkle_value(main_trie_root_hash, key_nibbles)
-                        {
+                            .closest_descendant_merkle_value(
+                                main_trie_root_hash,
+                                key_nibbles.clone(),
+                            ) {
                             Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {

@@ -2100,7 +2100,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let (proof, downloaded_source) = calls.get(&mv.call_in_progress()).unwrap();
                     let value = match proof.closest_descendant_merkle_value(
                         &self.inner.warped_header_state_root,
-                        &mv.key().collect::<Vec<_>>(), // TODO: overhead
+                        mv.key(),
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
