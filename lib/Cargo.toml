@@ -110,3 +110,6 @@ targets = ["x86_64-unknown-linux-gnu"]
 [[bench]]
 name = "header"
 harness = false
+[[bench]]
+name = "proof-decode"
+harness = false
