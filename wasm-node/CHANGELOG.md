@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix connection being properly killed when the ping substream fails to be negotiated.
+
 ## 2.0.13 - 2023-11-28
 
 ### Changed
