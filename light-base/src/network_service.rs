@@ -1687,6 +1687,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 // a connection.
                 debug_assert!(false);
             }
+            WakeUpReason::NetworkEvent(service::Event::PingOutSuccess {
+                id,
+                peer_id,
+                ping_time,
+            }) => {
+                let remote_addr =
+                    Multiaddr::from_bytes(task.network.connection_remote_addr(id)).unwrap(); // TODO: review this unwrap
+                log::debug!(target: "network", "Connections({peer_id}, {remote_addr}) => Ping({ping_time:?})");
+            }
             WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
                 peer_id,
