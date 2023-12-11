@@ -1033,10 +1033,12 @@ where
                         }
                         Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
-                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                            read_write.wake_up_asap();
+                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                         Err(_) => {
-                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                            read_write.wake_up_asap();
+                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                     }
                 }
@@ -1078,6 +1080,7 @@ where
                             .pop_front()
                             .map_or(true, |expected| pong != *expected)
                         {
+                            read_write.wake_up_asap();
                             return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                         if queued_pings.remove(0).is_some() {
