@@ -1732,7 +1732,7 @@ where
 
                     Event::NotificationsOutReset { substream_id }
                 }
-                ConnectionToCoordinatorInner::PingOutSuccess => {
+                ConnectionToCoordinatorInner::PingOutSuccess { ping_time } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
@@ -1741,7 +1741,10 @@ where
                         continue;
                     }
 
-                    Event::PingOutSuccess { id: connection_id }
+                    Event::PingOutSuccess {
+                        id: connection_id,
+                        ping_time,
+                    }
                 }
                 ConnectionToCoordinatorInner::PingOutFailed => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
@@ -1873,7 +1876,9 @@ enum ConnectionToCoordinatorInner {
         id: SubstreamId,
     },
     /// See the corresponding event in [`established::Event`].
-    PingOutSuccess,
+    PingOutSuccess {
+        ping_time: Duration,
+    },
     /// See the corresponding event in [`established::Event`].
     PingOutFailed,
 
@@ -2157,7 +2162,11 @@ pub enum Event<TConn> {
 
     /// An outgoing ping has succeeded. This event is generated automatically over time for each
     /// connection in the collection.
-    PingOutSuccess { id: ConnectionId },
+    PingOutSuccess {
+        id: ConnectionId,
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
     /// An outgoing ping has failed. This event is generated automatically over time for each
     /// connection in the collection.
     PingOutFailed { id: ConnectionId },

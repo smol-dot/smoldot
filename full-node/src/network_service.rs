@@ -1208,6 +1208,20 @@ async fn background_task(mut inner: Inner) {
                 );
             }
 
+            WakeUpReason::NetworkEvent(service::Event::PingOutSuccess {
+                id,
+                peer_id,
+                ping_time,
+            }) => {
+                let remote_addr =
+                    Multiaddr::from_bytes(inner.network.connection_remote_addr(id).to_owned())
+                        .unwrap(); // TODO: review this unwrap
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!("ping; peer_id={peer_id}; remote_addr={remote_addr}); ping-time={ping_time:?}"),
+                );
+            }
+
             WakeUpReason::NetworkEvent(service::Event::BlockAnnounce {
                 chain_id,
                 peer_id,

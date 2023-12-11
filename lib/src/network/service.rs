@@ -2803,9 +2803,17 @@ where
                     debug_assert!(_was_in1 || _was_in2);
                 }
 
-                collection::Event::PingOutSuccess { .. } => {
-                    // We ignore ping events.
-                    // TODO: report to end user or something
+                collection::Event::PingOutSuccess { id, ping_time } => {
+                    // The connection is necessarily past its handshake phase, and thus
+                    // the `peer_index` is necessarily known and valid.
+                    let Some(peer_index) = self.inner[id].peer_index else {
+                        unreachable!()
+                    };
+                    return Some(Event::PingOutSuccess {
+                        id,
+                        peer_id: self.peers[peer_index.0].clone(),
+                        ping_time,
+                    });
                 }
             }
         }
@@ -4176,6 +4184,16 @@ pub enum Event<TConn> {
         /// User data that was passed to [`ChainNetwork::add_single_stream_connection`] or
         /// [`ChainNetwork::add_multi_stream_connection`].
         user_data: TConn,
+    },
+
+    /// The ping of a connection has been measured.
+    PingOutSuccess {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// [`PeerId`] of the connection.
+        peer_id: PeerId,
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
     },
 
     /// Now connected to the given peer for gossiping purposes.
