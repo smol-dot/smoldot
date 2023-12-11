@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix connection being properly killed when the ping substream fails to be negotiated.
+- Fix connection being properly killed when the ping substream fails to be negotiated. ([#1459](https://github.com/smol-dot/smoldot/pull/1459))
 
 ## 2.0.13 - 2023-11-28
 
