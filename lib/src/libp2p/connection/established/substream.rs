@@ -1053,7 +1053,7 @@ where
                 // We check the timeouts before checking the incoming data, as otherwise pings
                 // might succeed after their timeout.
                 for timeout in queued_pings.iter_mut() {
-                    if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
+                    if timeout.as_ref().map_or(false, |t| *t <= read_write.now) {
                         *timeout = None;
                         read_write.wake_up_asap();
                         return (
