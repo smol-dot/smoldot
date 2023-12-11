@@ -143,7 +143,9 @@ where
                     .unwrap()
                     .0
                     .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
-                self.inner.yamux.mark_substream_write_ready(self.inner.outgoing_pings);
+                self.inner
+                    .yamux
+                    .mark_substream_write_ready(self.inner.outgoing_pings);
             } else {
                 return Ok((self, Some(Event::PingOutFailed)));
             }
