@@ -143,18 +143,12 @@ where
                     .unwrap()
                     .0
                     .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
+                self.inner.yamux.mark_substream_write_ready(self.inner.outgoing_pings);
             } else {
                 return Ok((self, Some(Event::PingOutFailed)));
             }
         }
-
-        // Only wake up if the connection can be closed.
-        // TODO: review w.r.t. https://github.com/smol-dot/smoldot/issues/1121
-        if read_write.expected_incoming_bytes.is_some()
-            && read_write.write_bytes_queueable.is_some()
-        {
-            read_write.wake_up_after(&self.inner.next_ping);
-        }
+        read_write.wake_up_after(&self.inner.next_ping);
 
         // If we have both sent and received a GoAway frame, that means that no new substream
         // can be opened. If in addition to this there is no substream in the connection,
@@ -165,7 +159,13 @@ where
         // to the remote that these new substreams are denied. However, this is not a problem
         // as the remote interprets our GoAway frame as an automatic refusal of all its pending
         // substream requests.
-        if self.inner.yamux.is_empty()
+        // TODO: review w.r.t. https://github.com/smol-dot/smoldot/issues/1121
+        if (self.inner.yamux.len()
+            == if self.inner.yamux.has_substream(self.inner.outgoing_pings) {
+                1
+            } else {
+                0
+            })
             && self.inner.yamux.goaway_sent()
             && self.inner.yamux.received_goaway().is_some()
         {
