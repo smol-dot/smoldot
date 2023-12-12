@@ -578,51 +578,45 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn iter_ordered(
         &'_ self,
     ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_>)> + '_ {
-        iter::empty()
-        /*self.trie_roots
-        .iter()
-        .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
-            self.entries
-                .iter()
-                .enumerate()
-                .skip(trie_root_entry_index)
-                .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
-                .map(|(entry_index, entry)| {
-                    let key = EntryKey {
-                        trie_root_hash,
-                        key: EntryKeyIter::new(self, entry_index),
-                    };
+        self.trie_roots
+            .iter()
+            .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .skip(trie_root_entry_index)
+                    .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
+                    .map(|(entry_index, entry)| {
+                        let key = EntryKey {
+                            trie_root_hash,
+                            key: EntryKeyIter::new(self, entry_index),
+                        };
 
-                    let entry = ProofEntry {
-                        node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
-                        unhashed_storage_value: match storage_value_inner {
-                            StorageValueInner::Known {
-                                is_inline: false,
-                                offset,
-                                len,
-                            } => Some(&self.proof.as_ref()[*offset..][..*len]),
-                            _ => None,
-                        },
-                        trie_node_info: TrieNodeInfo {
-                            children: self.children_from_key(
-                                trie_root_hash,
-                                key,
-                                &self.proof.as_ref()[node_value_range.clone()],
-                                *children_bitmap,
-                            ),
-                            storage_value,
-                        },
-                    };
+                        let entry = ProofEntry {
+                            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+                            unhashed_storage_value: entry
+                                .storage_value_in_proof
+                                .map(|range| &self.proof.as_ref()[range]),
+                            trie_node_info: TrieNodeInfo {
+                                children: self.children_from_entry(
+                                    trie_root_hash,
+                                    entry_index,
+                                    &self.proof.as_ref()[node_value_range.clone()],
+                                    *children_bitmap,
+                                ),
+                                storage_value,
+                            },
+                        };
 
-                    (key, entry)
-                })
-        })*/
+                        (key, entry)
+                    })
+            })
     }
 
-    fn children_from_key<'a>(
+    fn children_from_entry<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
+        entry: usize,
         parent_node_value: &'a [u8],
         children_bitmap: u16,
     ) -> Children<'a> {
@@ -795,7 +789,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             )
                         }
                     },
-                    children: self.children_from_key(
+                    children: self.children_from_entry(
                         trie_root_merkle_value,
                         ancestor_key,
                         &self.proof.as_ref()[node_value_range.clone()],
