@@ -274,3 +274,103 @@ fn empty_database_fill_then_query() {
         }
     }
 }
+
+#[test]
+fn storage_get_partial() {
+    let DatabaseOpen::Empty(empty_db) = open(Config {
+        block_number_bytes: 4,
+        cache_size: 2 * 1024 * 1024,
+        ty: ConfigTy::Memory,
+    })
+    .unwrap() else {
+        panic!()
+    };
+
+    let db = empty_db
+        .initialize(
+            chain_information::ChainInformationRef {
+                finalized_block_header: header::HeaderRef {
+                    number: 0,
+                    extrinsics_root: &[0; 32],
+                    parent_hash: &[0; 32],
+                    state_root: &[1; 32],
+                    digest: header::DigestRef::empty(),
+                },
+                consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                finality: chain_information::ChainInformationFinalityRef::Outsourced,
+            },
+            iter::empty(),
+            None,
+        )
+        .unwrap();
+
+    db.insert_trie_nodes(
+        [
+            InsertTrieNode {
+                merkle_value: Cow::Borrowed(&[1; 32]),
+                partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+                children_merkle_values: [
+                    None,
+                    Some(Cow::Borrowed(&[2; 32])),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                storage_value: InsertTrieNodeStorageValue::Value {
+                    value: Cow::Borrowed(b"hello"),
+                    references_merkle_value: false,
+                },
+            },
+            InsertTrieNode {
+                merkle_value: Cow::Borrowed(&[2; 32]),
+                partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+                children_merkle_values: [
+                    None, None, None, None, None, None, None, None, None, None, None, None, None,
+                    None, None, None,
+                ],
+                storage_value: InsertTrieNodeStorageValue::Value {
+                    value: Cow::Borrowed(b"world"),
+                    references_merkle_value: false,
+                },
+            },
+        ]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap()
+        .0,
+        b"hello"
+    );
+
+    assert_eq!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap()
+        .0,
+        b"world"
+    );
+}
