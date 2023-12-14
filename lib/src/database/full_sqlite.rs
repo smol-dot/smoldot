@@ -433,12 +433,7 @@ impl SqliteFullDatabase {
 
         // Insert the changes in trie nodes.
         // TODO: inline the function
-        insert_storage(
-            &transaction,
-            None, // TODO:
-            new_trie_nodes,
-            trie_entries_version,
-        )?;
+        insert_storage(&transaction, new_trie_nodes, trie_entries_version)?;
 
         transaction
             .commit()
@@ -1314,50 +1309,17 @@ fn set_best_chain(
 
 fn insert_storage<'a>(
     database: &rusqlite::Connection,
-    parent_block_hash: Option<&[u8]>,
     new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
     entries_version: u8,
 ) -> Result<(), CorruptedError> {
-    // Create a temporary table where we store the newly-created trie nodes that must inherit the
-    // storage value of the parent block. These trie nodes are processed later.
-    database
-        .execute(
-            r#"
-        CREATE TEMPORARY TABLE temp_pending_parent_copies(
-            node_hash BLOB NOT NULL PRIMARY KEY
-        );
-    "#,
-            (),
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-    // Create a temporary table where we store the newly-created trie nodes. This is necessary
-    // later in order to know how to walk up the path of trie nodes hashes to find the root.
-    database
-        .execute(
-            r#"
-        CREATE TEMPORARY TABLE temp_newly_inserted_trie_nodes(
-            node_hash BLOB NOT NULL PRIMARY KEY
-        );
-    "#,
-            (),
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
     // TODO: should check whether the existing merkle values that are referenced from inserted nodes exist in the parent's storage
     // TODO: is it correct to have OR IGNORE everywhere?
     let mut insert_node_statement = database
         .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_temporary_node_statement = database
-        .prepare_cached("INSERT OR IGNORE INTO temp_newly_inserted_trie_nodes(node_hash) VALUES(?)")
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_node_storage_statement = database
         .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_node_storage_copy_statement = database
-        .prepare_cached(r#"INSERT OR IGNORE INTO temp_pending_parent_copies(node_hash) VALUES (?)"#)
-        .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
     let mut insert_child_statement = database
         .prepare_cached(
             "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
@@ -1365,9 +1327,6 @@ fn insert_storage<'a>(
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     for trie_node in new_trie_nodes {
         assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
-        insert_temporary_node_statement
-            .execute((&trie_node.merkle_value,))
-            .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
         insert_node_statement
             .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
             .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
@@ -1404,76 +1363,6 @@ fn insert_storage<'a>(
             }
         }
     }
-
-    // For each node in `temp_pending_parent_copies`, determine its full key by walking up the
-    // trie, find the corresponding node in the parent block, and copy the value from there.
-    // Note that the algorithm below ignores orphan nodes (i.e. trie nodes that aren't connected
-    // to the graph), as it is detected above.
-    // TODO: not detected above yet ^
-    // TODO: consider reference counting the storage values?
-    // TODO: DRY with getting a value?
-    // TODO: doesn't properly work with feature `trie_root_ref`
-    // TODO: will be an infinite loop if trie is recursive, can this happen?
-    database
-        .prepare_cached(
-            r#"
-        WITH RECURSIVE
-            insertions(node_hash, copy_from_base, copy_from_relative_key) AS (
-                SELECT node_hash, node_hash, X'' FROM temp_pending_parent_copies
-                UNION ALL
-                SELECT insertions.node_hash, COALESCE(temp_newly_inserted_trie_nodes_parent.node_hash, temp_newly_inserted_trie_nodes_ref.node_hash), CAST(COALESCE(trie_node_child.child_num, X'') || trie_node.partial_key || insertions.copy_from_relative_key AS BLOB)
-                    FROM insertions
-                    JOIN trie_node ON trie_node.hash = insertions.copy_from_base
-                    LEFT JOIN trie_node_child ON trie_node_child.child_hash = insertions.copy_from_base
-                    LEFT JOIN temp_newly_inserted_trie_nodes AS temp_newly_inserted_trie_nodes_parent ON temp_newly_inserted_trie_nodes_parent.node_hash = trie_node_child.hash
-                    LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = insertions.copy_from_base
-                    LEFT JOIN temp_newly_inserted_trie_nodes AS temp_newly_inserted_trie_nodes_ref ON temp_newly_inserted_trie_nodes_ref.node_hash = trie_node_storage.node_hash
-                    WHERE insertions.copy_from_base IS NOT NULL
-                        AND (temp_newly_inserted_trie_nodes_parent.node_hash IS NULL) = (trie_node_child.hash IS NULL)
-                        AND (temp_newly_inserted_trie_nodes_ref.node_hash IS NULL) = (trie_node_storage.node_hash IS NULL)
-            ),
-            node_with_key(node_hash, search_node_hash, search_remain) AS (
-                SELECT insertions.node_hash, trie_node.hash, COALESCE(SUBSTR(insertions.copy_from_relative_key, 1 + LENGTH(trie_node.partial_key)), X'')
-                    FROM insertions
-                    JOIN trie_node ON COALESCE(SUBSTR(insertions.copy_from_relative_key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
-                    JOIN blocks ON blocks.hash = :parent_block_hash AND blocks.state_trie_root_hash = trie_node.hash
-                    WHERE insertions.copy_from_base IS NULL
-                UNION ALL
-                SELECT node_with_key.node_hash, trie_node.hash, SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                    FROM node_with_key
-                    JOIN trie_node_child ON node_with_key.search_node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
-                    JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                    WHERE LENGTH(node_with_key.search_remain) >= 1
-            )
-        INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version)
-        SELECT node_with_key.node_hash, trie_node_storage.value, trie_node_storage.trie_root_ref, trie_node_storage.trie_entry_version
-        FROM node_with_key
-        JOIN trie_node_storage ON node_with_key.search_node_hash = trie_node_storage.node_hash
-        WHERE LENGTH(node_with_key.search_remain) = 0;
-            "#,
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute(rusqlite::named_params! {
-            ":parent_block_hash": parent_block_hash,
-        })
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-    database
-        .execute(
-            r#"
-        DROP TABLE temp_pending_parent_copies;
-    "#,
-            (),
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    database
-        .execute(
-            r#"
-        DROP TABLE temp_newly_inserted_trie_nodes;
-    "#,
-            (),
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     Ok(())
 }
