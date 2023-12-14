@@ -762,7 +762,7 @@ impl SubscribeStorage {
                         .new_report_preparation
                         .push((key, value.map(|(v, _)| v))),
                     Err(database_thread::StorageAccessError::UnknownBlock)
-                    | Err(database_thread::StorageAccessError::StoragePruned) => {
+                    | Err(database_thread::StorageAccessError::IncompleteStorage) => {
                         self.subscription = None;
                         continue 'main_subscription;
                     }

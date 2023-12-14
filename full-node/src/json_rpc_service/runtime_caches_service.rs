@@ -121,8 +121,8 @@ impl RuntimeCachesService {
                                 let _ = result_tx.send(Err(GetError::UnknownBlock));
                                 continue;
                             }
-                            (Err(database_thread::StorageAccessError::StoragePruned), _)
-                            | (_, Err(database_thread::StorageAccessError::StoragePruned)) => {
+                            (Err(database_thread::StorageAccessError::IncompleteStorage), _)
+                            | (_, Err(database_thread::StorageAccessError::IncompleteStorage)) => {
                                 // Note that we don't put the `CorruptedError` in the cache, in
                                 // case the database somehow recovers.
                                 let _ = result_tx.send(Err(GetError::Pruned));

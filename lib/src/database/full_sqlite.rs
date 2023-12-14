@@ -236,14 +236,15 @@ impl SqliteFullDatabase {
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`StorageAccessError::StoragePruned`] error is returned.
+    /// [`StorageAccessError::IncompleteStorage`] error is returned.
+    // TODO: an IncompleteStorage error doesn't seem appropriate; also, why is it even a problem given that the chain information contains the finalized block anyway
     pub fn to_chain_information(
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<chain_information::ValidChainInformation, StorageAccessError> {
         let connection = self.database.lock();
         if finalized_hash(&connection)? != *finalized_block_hash {
-            return Err(StorageAccessError::StoragePruned);
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         let finalized_block_header = block_header(&connection, finalized_block_hash)?
@@ -732,27 +733,57 @@ impl SqliteFullDatabase {
 
         // TODO: could be optimized by having a different request when `parent_tries_paths_nibbles` is empty and when it isn't
         // TODO: trie_root_ref system untested
+        // About the query below:
+        //
+        // At the end of the recursive statement, `node_with_key` must always contain one and
+        // exactly one item where `search_remain` is either empty or null. Empty indicates that
+        // we have found a match, while null means that the search has been interrupted due to
+        // a storage entry not being in the database. If `search_remain` is empty, then `node_hash`
+        // is either a hash in case of a match or null in case there is no entry with the
+        // requested key. If `search_remain` is null, then `node_hash` is irrelevant.
+        //
+        // In order to properly handle the situation where the key is empty, the initial request
+        // of the recursive table building must check whether the partial key of the root matches.
+        // In other words, all the entries of `node_with_key` (where `node_hash` is non-null)
+        // contain entries that are known to be in the database and after the partial key has
+        // already been verified to be correct.
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
                 node_with_key(node_hash, search_remain) AS (
-                    SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
-                        FROM blocks, trie_node
-                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
+                        SELECT
+                            IIF(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)) = trie_node.partial_key, trie_node.hash, NULL),
+                            IIF(trie_node.partial_key IS NULL, NULL, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X''))
+                        FROM blocks
+                        LEFT JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
+                        WHERE blocks.hash = :block_hash
                     UNION ALL
-                    SELECT COALESCE(trie_node.hash, trie_node_storage.trie_root_ref), COALESCE(SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key)), SUBSTR(node_with_key.search_remain, 1))
-                        FROM node_with_key
-                        LEFT JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
-                        LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                        LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL AND HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10'
-                        WHERE LENGTH(node_with_key.search_remain) >= 1 AND (trie_node.hash IS NOT NULL OR trie_node_storage.trie_root_ref IS NOT NULL)
+                    SELECT
+                        CASE
+                            WHEN HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10' THEN trie_node_storage.trie_root_ref
+                            WHEN SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key THEN trie_node_child.child_hash
+                            ELSE NULL END,
+                        CASE
+                            WHEN HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10' THEN SUBSTR(node_with_key.search_remain, 1)
+                            WHEN trie_node_child.child_hash IS NULL THEN X''
+                            WHEN trie_node.partial_key IS NULL THEN NULL
+                            WHEN SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key THEN SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
+                            ELSE X'' END
+                    FROM node_with_key
+                        LEFT JOIN trie_node_child
+                            ON node_with_key.node_hash = trie_node_child.hash
+                            AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
+                        LEFT JOIN trie_node
+                            ON trie_node.hash = trie_node_child.child_hash
+                        LEFT JOIN trie_node_storage
+                            ON node_with_key.node_hash = trie_node_storage.node_hash
+                        WHERE LENGTH(node_with_key.search_remain) >= 1
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, COALESCE(trie_node_storage.value, trie_node_storage.trie_root_ref), trie_node_storage.trie_entry_version
+            SELECT COUNT(blocks.hash) >= 1, node_with_key.search_remain IS NULL, COALESCE(trie_node_storage.value, trie_node_storage.trie_root_ref), trie_node_storage.trie_entry_version
             FROM blocks
-            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN node_with_key ON LENGTH(node_with_key.search_remain) = 0
-            LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash
+            JOIN node_with_key ON LENGTH(node_with_key.search_remain) = 0 OR node_with_key.search_remain IS NULL
+            LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash AND node_with_key.search_remain IS NOT NULL
             WHERE blocks.hash = :block_hash;
             "#)
             .map_err(|err| {
@@ -766,7 +797,7 @@ impl SqliteFullDatabase {
             .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
             .collect::<Vec<_>>();
 
-        let (has_block, block_has_storage, value, trie_entry_version) = statement
+        let (has_block, incomplete_storage, value, trie_entry_version) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -774,10 +805,10 @@ impl SqliteFullDatabase {
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
-                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let incomplete_storage = row.get::<_, i64>(1)? != 0;
                     let value = row.get::<_, Option<Vec<u8>>>(2)?;
                     let trie_entry_version = row.get::<_, Option<i64>>(3)?;
-                    Ok((has_block, block_has_storage, value, trie_entry_version))
+                    Ok((has_block, incomplete_storage, value, trie_entry_version))
                 },
             )
             .map_err(|err| {
@@ -788,8 +819,8 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::UnknownBlock);
         }
 
-        if !block_has_storage {
-            return Err(StorageAccessError::StoragePruned);
+        if incomplete_storage {
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         let Some(value) = value else { return Ok(None) };
@@ -959,7 +990,7 @@ impl SqliteFullDatabase {
         };
 
         if !block_has_storage {
-            return Err(StorageAccessError::StoragePruned);
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         if parent_tries_paths_nibbles_length != 0 {
@@ -1061,7 +1092,7 @@ impl SqliteFullDatabase {
         }
 
         if !block_has_storage {
-            return Err(StorageAccessError::StoragePruned);
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         Ok(merkle_value)
@@ -1134,8 +1165,8 @@ pub enum SetFinalizedError {
 pub enum StorageAccessError {
     /// Error accessing the database.
     Corrupted(CorruptedError),
-    /// Storage of the block hash passed as parameter is no longer in the database.
-    StoragePruned,
+    /// Some trie nodes of the storage of the requested block hash are missing.
+    IncompleteStorage,
     /// Requested block couldn't be found in the database.
     UnknownBlock,
 }

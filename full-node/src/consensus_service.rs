@@ -222,7 +222,7 @@ impl ConsensusService {
                             Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                                 return Err(InitError::DatabaseCorruption(err))
                             }
-                            Err(full_sqlite::StorageAccessError::StoragePruned)
+                            Err(full_sqlite::StorageAccessError::IncompleteStorage)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                         };
                     let finalized_code = match database.block_storage_get(
@@ -235,7 +235,7 @@ impl ConsensusService {
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseCorruption(err))
                         }
-                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     let finalized_heap_pages = match database.block_storage_get(
@@ -248,7 +248,7 @@ impl ConsensusService {
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseCorruption(err))
                         }
-                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     Ok((
