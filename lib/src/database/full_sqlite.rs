@@ -1055,7 +1055,6 @@ pub enum InsertTrieNodeStorageValue<'a> {
         /// If `true`, the value is equal to the Merkle value of the root of another trie.
         references_merkle_value: bool,
     },
-    SameAsParent,
 }
 
 /// Error while calling [`SqliteFullDatabase::insert`].
@@ -1392,13 +1391,6 @@ fn insert_storage<'a>(
                         },
                         entries_version,
                     ))
-                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            }
-            InsertTrieNodeStorageValue::SameAsParent => {
-                // TODO: error if parent_block_hash is None
-
-                insert_node_storage_copy_statement
-                    .execute((&trie_node.merkle_value,))
                     .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             }
             InsertTrieNodeStorageValue::NoValue => {}

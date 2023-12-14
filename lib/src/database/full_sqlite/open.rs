@@ -334,8 +334,7 @@ impl DatabaseEmpty {
     /// Inserts the given [`chain_information::ChainInformationRef`] in the database prototype in
     /// order to turn it into an actual database.
     ///
-    /// Must also pass the body, justification, and state of the storage of the finalized block.
-    // TODO: Passing SameAsParent is invalid, document and error
+    /// Must also pass the body and justification of the finalized block.
     pub fn initialize<'a>(
         mut self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
