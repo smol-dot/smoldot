@@ -423,10 +423,8 @@ impl SqliteFullDatabase {
         new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
         trie_entries_version: u8,
     ) -> Result<(), CorruptedError> {
-        // Locking is performed as late as possible.
         let mut database = self.database.lock();
 
-        // Start a transaction to insert everything at once.
         let transaction = database
             .transaction()
             .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
