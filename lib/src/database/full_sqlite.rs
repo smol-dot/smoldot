@@ -431,9 +431,60 @@ impl SqliteFullDatabase {
             .transaction()
             .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
-        // Insert the changes in trie nodes.
-        // TODO: inline the function
-        insert_storage(&transaction, new_trie_nodes, trie_entries_version)?;
+        {
+            // TODO: should check whether the existing merkle values that are referenced from inserted nodes exist in the parent's storage
+            // TODO: is it correct to have OR IGNORE everywhere?
+            let mut insert_node_statement = transaction
+                .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            let mut insert_node_storage_statement = transaction
+                .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            let mut insert_child_statement = transaction
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
+                )
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            for trie_node in new_trie_nodes {
+                assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
+                insert_node_statement
+                    .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
+                    .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
+                match trie_node.storage_value {
+                    InsertTrieNodeStorageValue::Value {
+                        value,
+                        references_merkle_value,
+                    } => {
+                        insert_node_storage_statement
+                            .execute((
+                                &trie_node.merkle_value,
+                                if !references_merkle_value {
+                                    Some(&value)
+                                } else {
+                                    None
+                                },
+                                if references_merkle_value {
+                                    Some(&value)
+                                } else {
+                                    None
+                                },
+                                trie_entries_version,
+                            ))
+                            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+                    }
+                    InsertTrieNodeStorageValue::NoValue => {}
+                }
+                for (child_num, child) in trie_node.children_merkle_values.iter().enumerate() {
+                    if let Some(child) = child {
+                        let child_num =
+                            vec![u8::try_from(child_num).unwrap_or_else(|_| unreachable!())];
+                        insert_child_statement
+                            .execute((&trie_node.merkle_value, child_num, child))
+                            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+                    }
+                }
+            }
+        }
 
         transaction
             .commit()
@@ -1304,66 +1355,6 @@ fn set_best_chain(
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     meta_set_blob(database, "best", new_best_block_hash)?;
-    Ok(())
-}
-
-fn insert_storage<'a>(
-    database: &rusqlite::Connection,
-    new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
-    entries_version: u8,
-) -> Result<(), CorruptedError> {
-    // TODO: should check whether the existing merkle values that are referenced from inserted nodes exist in the parent's storage
-    // TODO: is it correct to have OR IGNORE everywhere?
-    let mut insert_node_statement = database
-        .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_node_storage_statement = database
-        .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_child_statement = database
-        .prepare_cached(
-            "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    for trie_node in new_trie_nodes {
-        assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
-        insert_node_statement
-            .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
-            .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
-        match trie_node.storage_value {
-            InsertTrieNodeStorageValue::Value {
-                value,
-                references_merkle_value,
-            } => {
-                insert_node_storage_statement
-                    .execute((
-                        &trie_node.merkle_value,
-                        if !references_merkle_value {
-                            Some(&value)
-                        } else {
-                            None
-                        },
-                        if references_merkle_value {
-                            Some(&value)
-                        } else {
-                            None
-                        },
-                        entries_version,
-                    ))
-                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            }
-            InsertTrieNodeStorageValue::NoValue => {}
-        }
-        for (child_num, child) in trie_node.children_merkle_values.iter().enumerate() {
-            if let Some(child) = child {
-                let child_num = vec![u8::try_from(child_num).unwrap_or_else(|_| unreachable!())];
-                insert_child_statement
-                    .execute((&trie_node.merkle_value, child_num, child))
-                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            }
-        }
-    }
-
     Ok(())
 }
 
