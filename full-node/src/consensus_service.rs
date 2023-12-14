@@ -1717,6 +1717,15 @@ impl SyncBackground {
                                             &scale_encoded_header,
                                             is_new_best,
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                        );
+
+                                        match result {
+                                            Ok(()) => {}
+                                            Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                            Err(err) => panic!("{}", err),
+                                        }
+
+                                        let result = database.insert_trie_nodes(
                                             storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
                                                 |(_child_trie, key, change)| {
                                                     let body_only::TrieChange::InsertUpdate {
@@ -1766,7 +1775,6 @@ impl SyncBackground {
 
                                         match result {
                                             Ok(()) => {}
-                                            Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
                                             Err(err) => panic!("{}", err),
                                         }
                                     }

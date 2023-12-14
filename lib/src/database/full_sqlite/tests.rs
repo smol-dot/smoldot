@@ -159,25 +159,27 @@ fn empty_database_fill_then_query() {
                             ),
                         }
                     });
-            empty_db.initialize(
-                chain_information::ChainInformationRef {
-                    finalized_block_header: header::HeaderRef {
-                        number: 0,
-                        extrinsics_root: &[0; 32],
-                        parent_hash: &[0; 32],
-                        state_root,
-                        digest: header::DigestRef::empty(),
+
+            let db = empty_db
+                .initialize(
+                    chain_information::ChainInformationRef {
+                        finalized_block_header: header::HeaderRef {
+                            number: 0,
+                            extrinsics_root: &[0; 32],
+                            parent_hash: &[0; 32],
+                            state_root,
+                            digest: header::DigestRef::empty(),
+                        },
+                        consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                        finality: chain_information::ChainInformationFinalityRef::Outsourced,
                     },
-                    consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                    finality: chain_information::ChainInformationFinalityRef::Outsourced,
-                },
-                iter::empty(),
-                None,
-                trie_entries_linear,
-                0,
-            )
-        }
-        .unwrap();
+                    iter::empty(),
+                    None,
+                )
+                .unwrap();
+            db.insert_trie_nodes(trie_entries_linear, 0).unwrap();
+            db
+        };
 
         let block0_hash = open_db.finalized_block_hash().unwrap();
 

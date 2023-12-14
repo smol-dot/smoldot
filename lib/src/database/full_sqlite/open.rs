@@ -21,10 +21,7 @@
 
 // TODO:remove all the unwraps in this module that shouldn't be there
 
-use super::{
-    encode_babe_epoch_information, insert_storage, CorruptedError, InsertTrieNode, InternalError,
-    SqliteFullDatabase,
-};
+use super::{encode_babe_epoch_information, CorruptedError, InternalError, SqliteFullDatabase};
 use crate::chain::chain_information;
 
 use std::path::Path;
@@ -344,8 +341,6 @@ impl DatabaseEmpty {
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
-        finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, CorruptedError> {
         // Start a transaction to insert everything in one go.
         let transaction = self
@@ -373,13 +368,6 @@ impl DatabaseEmpty {
                 a.extend_from_slice(b.as_ref());
                 a
             });
-
-        insert_storage(
-            &transaction,
-            None,
-            finalized_block_storage_entries,
-            finalized_block_state_version,
-        )?;
 
         transaction
             .prepare_cached(

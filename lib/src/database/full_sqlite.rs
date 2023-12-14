@@ -330,8 +330,7 @@ impl SqliteFullDatabase {
 
     /// Insert a new block in the database.
     ///
-    /// Must pass the header and body of the block, and the changes to the storage that this block
-    /// performs relative to its parent.
+    /// Must pass the header and body of the block.
     ///
     /// Blocks must be inserted in the correct order. An error is returned if the parent of the
     /// newly-inserted block isn't present in the database.
@@ -344,8 +343,6 @@ impl SqliteFullDatabase {
         scale_encoded_header: &[u8],
         is_new_best: bool,
         body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
-        new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
-        trie_entries_version: u8,
     ) -> Result<(), InsertError> {
         // Calculate the hash of the new best block.
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
@@ -372,13 +369,6 @@ impl SqliteFullDatabase {
         if !has_block(&transaction, header.parent_hash)? {
             return Err(InsertError::MissingParent);
         }
-
-        // Temporarily disable foreign key checks in order to make the insertion easier, as we
-        // don't have to make sure that trie nodes are sorted.
-        // Note that this is immediately disabled again when we `COMMIT` later down below.
-        transaction
-            .execute("PRAGMA defer_foreign_keys = ON", ())
-            .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         transaction
             .prepare_cached(
@@ -409,15 +399,6 @@ impl SqliteFullDatabase {
             }
         }
 
-        // Insert the changes in trie nodes.
-        insert_storage(
-            &transaction,
-            Some(&header.parent_hash[..]),
-            new_trie_nodes,
-            trie_entries_version,
-        )
-        .map_err(InsertError::Corrupted)?;
-
         // Change the best chain to be the new block.
         if is_new_best {
             // It would be illegal to change the best chain to not overlay with the
@@ -433,6 +414,35 @@ impl SqliteFullDatabase {
         transaction
             .commit()
             .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+        Ok(())
+    }
+
+    pub fn insert_trie_nodes<'a>(
+        &self,
+        new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
+        trie_entries_version: u8,
+    ) -> Result<(), CorruptedError> {
+        // Locking is performed as late as possible.
+        let mut database = self.database.lock();
+
+        // Start a transaction to insert everything at once.
+        let transaction = database
+            .transaction()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        // Insert the changes in trie nodes.
+        // TODO: inline the function
+        insert_storage(
+            &transaction,
+            None, // TODO:
+            new_trie_nodes,
+            trie_entries_version,
+        )?;
+
+        transaction
+            .commit()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         Ok(())
     }
@@ -1303,7 +1313,6 @@ fn set_best_chain(
     Ok(())
 }
 
-// TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
 fn insert_storage<'a>(
     database: &rusqlite::Connection,
     parent_block_hash: Option<&[u8]>,
