@@ -171,8 +171,7 @@ CREATE TABLE trie_node_storage(
     value BLOB,
     trie_root_ref BLOB,
     trie_entry_version INTEGER NOT NULL,
-    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (trie_root_ref) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
     CHECK((value IS NULL) != (trie_root_ref IS NULL))
 );
 CREATE INDEX trie_node_storage_by_trie_root_ref ON trie_node_storage(trie_root_ref);
@@ -185,8 +184,7 @@ CREATE TABLE trie_node_child(
     child_num BLOB NOT NULL,   -- Always contains one single byte. We use `BLOB` instead of `INTEGER` because SQLite stupidly doesn't provide any way of converting between integers and blobs
     child_hash BLOB NOT NULL,
     PRIMARY KEY (hash, child_num),
-    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
     CHECK(LENGTH(child_num) == 1 AND HEX(child_num) < '10')
 );
 CREATE INDEX trie_node_child_by_hash ON trie_node_child(hash);
@@ -204,8 +202,7 @@ CREATE TABLE blocks(
     justification BLOB,
     is_best_chain BOOLEAN NOT NULL,
     UNIQUE(number, hash),
-    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
-    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE SET NULL
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE RESTRICT ON DELETE NO ACTION
 );
 CREATE INDEX blocks_by_number ON blocks(number);
 CREATE INDEX blocks_by_parent ON blocks(parent_hash);
