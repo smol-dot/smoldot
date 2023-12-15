@@ -733,24 +733,23 @@ impl SqliteFullDatabase {
 
         // TODO: could be optimized by having a different request when `parent_tries_paths_nibbles` is empty and when it isn't
         // TODO: trie_root_ref system untested
-        // About the query below:
-        //
-        // At the end of the recursive statement, `node_with_key` must always contain one and
-        // exactly one item where `search_remain` is either empty or null. Empty indicates that
-        // we have found a match, while null means that the search has been interrupted due to
-        // a storage entry not being in the database. If `search_remain` is empty, then `node_hash`
-        // is either a hash in case of a match or null in case there is no entry with the
-        // requested key. If `search_remain` is null, then `node_hash` is irrelevant.
-        //
-        // In order to properly handle the situation where the key is empty, the initial request
-        // of the recursive table building must check whether the partial key of the root matches.
-        // In other words, all the entries of `node_with_key` (where `node_hash` is non-null)
-        // contain entries that are known to be in the database and after the partial key has
-        // already been verified to be correct.
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
+                -- At the end of the recursive statement, `node_with_key` must always contain
+                -- one and exactly one item where `search_remain` is either empty or null. Empty
+                -- indicates that we have found a match, while null means that the search has
+                -- been interrupted due to a storage entry not being in the database. If
+                -- `search_remain` is empty, then `node_hash` is either a hash in case of a match
+                -- or null in case there is no entry with the requested key. If `search_remain`
+                -- is null, then `node_hash` is irrelevant.
+                --
+                -- In order to properly handle the situation where the key is empty, the initial
+                -- request of the recursive table building must check whether the partial key of
+                -- the root matches. In other words, all the entries of `node_with_key` (where
+                -- `node_hash` is non-null) contain entries that are known to be in the database
+                -- and after the partial key has already been verified to be correct.
                 node_with_key(node_hash, search_remain) AS (
                         SELECT
                             IIF(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)) = trie_node.partial_key, trie_node.hash, NULL),
