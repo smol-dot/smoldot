@@ -893,22 +893,20 @@ impl SqliteFullDatabase {
                             trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL,
                             CAST(next_key.node_full_key || trie_node_child.child_num || COALESCE(trie_node.partial_key, trie_node_trieref.partial_key) AS BLOB)
                                 AS node_full_key,
-                            CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                                WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                                ELSE CASE HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
-                                    WHEN TRUE THEN COALESCE(SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
-                                    ELSE X'' END
-                                END
+                            CASE
+                                WHEN SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                                    THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
+                                WHEN HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
+                                    THEN COALESCE(SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
+                                ELSE X'' END
                         FROM next_key
 
                         LEFT JOIN trie_node_child
                             ON next_key.node_hash = trie_node_child.hash
-                            AND CASE LENGTH(next_key.search_remain)
-                                WHEN 0 THEN next_key.node_is_branch AND :skip_branches
+                            AND CASE WHEN LENGTH(next_key.search_remain) = 0 THEN next_key.node_is_branch AND :skip_branches
                                 ELSE SUBSTR(next_key.search_remain, 1, 1) <= trie_node_child.child_num END
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
-                            AND CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
-                                WHEN TRUE THEN SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) <= trie_node.partial_key
+                            AND CASE WHEN SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num THEN SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) <= trie_node.partial_key
                                 ELSE TRUE END
 
                         LEFT JOIN trie_node_child AS trie_node_child_before
@@ -932,8 +930,8 @@ impl SqliteFullDatabase {
 
             SELECT
                 COUNT(trie_node.hash) >= 1,
-                CASE COALESCE(SUBSTR(MIN(next_key.node_full_key), 1, LENGTH(:prefix)), X'') = :prefix
-                    WHEN TRUE THEN MIN(next_key.node_full_key)
+                CASE
+                    WHEN COALESCE(SUBSTR(MIN(next_key.node_full_key), 1, LENGTH(:prefix)), X'') = :prefix THEN MIN(next_key.node_full_key)
                     ELSE NULL END
             FROM blocks
             LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
