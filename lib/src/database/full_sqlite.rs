@@ -753,7 +753,7 @@ impl SqliteFullDatabase {
                 -- and after the partial key has already been verified to be correct.
                 node_with_key(node_hash, search_remain) AS (
                         SELECT
-                            IIF(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)) = trie_node.partial_key, trie_node.hash, NULL),
+                            IIF(COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key, trie_node.hash, NULL),
                             IIF(trie_node.partial_key IS NULL, NULL, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X''))
                         FROM blocks
                         LEFT JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash

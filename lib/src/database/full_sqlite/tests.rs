@@ -746,4 +746,16 @@ fn storage_next_key_partial() {
         .unwrap(),
         None
     );
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [3].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap(),
+        None
+    );
 }
