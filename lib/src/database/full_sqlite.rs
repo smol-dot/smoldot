@@ -897,6 +897,12 @@ impl SqliteFullDatabase {
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
         let connection = self.database.lock();
 
+        // Sorry for that extremely complicated SQL statement. While the logic isn't actually very
+        // complicated, we have to jump through many hoops in order to go around quirks in the
+        // SQL language.
+        // If you want to work on this SQL code, there is no miracle: write tests, and if a test
+        // fails debug the content of `next_key` to find out where the iteration doesn't behave
+        // as expected.
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         // TODO: trie_root_ref system untested and most likely not working
         // TODO: infinite loop if there's a loop in the trie; detect this
@@ -1046,6 +1052,11 @@ impl SqliteFullDatabase {
             FROM blocks
             LEFT JOIN terminal_next_key
             WHERE blocks.hash = :block_hash
+                -- We pick the entry of `terminal_next_key` with the smallest full key. Note that
+                -- it might seem like a good idea to not using any GROUP BY and instead just do
+                -- `ORDER BY node_full_key ASC LIMIT 1`, but doing so sometimes leads to SQLite
+                -- not picking the entry with the smallest full key for a reason I couldn't
+                -- figure out.
                 AND (terminal_next_key.node_full_key IS NULL OR terminal_next_key.node_full_key = (SELECT MIN(node_full_key) FROM terminal_next_key))
             LIMIT 1"#,
             )
