@@ -978,8 +978,6 @@ impl SqliteFullDatabase {
                                     THEN NULL    -- Child exists but is missing from database
                                 WHEN HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND trie_node_trieref.hash IS NULL
                                     THEN NULL    -- Trie reference exists but is missing from database
-                                WHEN HEX(SUBSTR(next_key.search_remain, 1, 1)) != '10' AND trie_node_child.child_num IS NULL
-                                    THEN X''     -- No child
                                 WHEN SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
                                     THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))    -- Equal match, continue iterating
                                 WHEN SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) < trie_node.partial_key
@@ -1021,22 +1019,34 @@ impl SqliteFullDatabase {
                             next_key.node_hash IS NOT NULL AND next_key.search_remain IS NOT NULL AND (next_key.search_remain != X'' OR (next_key.node_is_branch AND :skip_branches))
                             -- See explanation above.
                             AND trie_node_child_before.hash IS NULL
+                            -- Don't generate an item if there's nowhere to go to.
+                            AND (HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' OR trie_node_child.child_num IS NOT NULL)
                             -- Stop iterating if the child's partial key is before the searched key.
                             AND (trie_node.hash IS NULL OR NOT (COALESCE(SUBSTR(next_key.search_remain, 1, 1), X'') = trie_node_child.child_num AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)), X'') > trie_node.partial_key))
+                ),
+
+                -- Now keep only the entries of `next_key` which have finished iterating.
+                terminal_next_key(incomplete_storage, node_full_key, output) AS (
+                    SELECT
+                        search_remain IS NULL,
+                        node_full_key,
+                        CASE
+                            WHEN node_hash IS NULL THEN NULL
+                            WHEN COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') = :prefix THEN node_full_key
+                            ELSE NULL
+                        END
+                    FROM next_key
+                    WHERE search_remain IS NULL OR (LENGTH(search_remain) = 0 AND (NOT :skip_branches OR NOT node_is_branch))
                 )
 
             SELECT
                 COUNT(blocks.hash) >= 0,
-                next_key.node_full_key IS NOT NULL AND next_key.search_remain IS NULL,
-                CASE     -- Note that the third field is irrevalant if search_remain is null
-                    WHEN next_key.node_hash IS NULL THEN NULL
-                    WHEN COALESCE(SUBSTR(next_key.node_full_key, 1, LENGTH(:prefix)), X'') = :prefix THEN next_key.node_full_key
-                    ELSE NULL END
+                COALESCE(terminal_next_key.incomplete_storage, FALSE),
+                terminal_next_key.output
             FROM blocks
-            LEFT JOIN next_key
+            LEFT JOIN terminal_next_key
             WHERE blocks.hash = :block_hash
-                AND next_key.search_remain IS NULL OR (LENGTH(next_key.search_remain) = 0 AND (NOT :skip_branches OR NOT next_key.node_is_branch))
-            ORDER BY next_key.node_full_key ASC
+                AND (terminal_next_key.node_full_key IS NULL OR terminal_next_key.node_full_key = (SELECT MIN(node_full_key) FROM terminal_next_key))
             LIMIT 1"#,
             )
             .map_err(|err| {
