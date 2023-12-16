@@ -230,6 +230,7 @@ fn empty_database_fill_then_query() {
                 .unwrap();
             let expected = trie
                 .iter_ordered()
+                .filter(|n| branch_nodes || trie[*n].0.is_some())
                 .map(|n| trie.node_full_key_by_index(n).unwrap().collect::<Vec<_>>())
                 .find(|n| *n >= key)
                 .filter(|n| n.starts_with(&prefix))
