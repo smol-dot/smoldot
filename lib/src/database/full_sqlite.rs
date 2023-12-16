@@ -1018,7 +1018,7 @@ impl SqliteFullDatabase {
 
                         WHERE
                             -- Don't pull items that have already finished searching.
-                            next_key.search_remain IS NOT NULL AND (next_key.search_remain != X'' OR (next_key.node_is_branch AND :skip_branches))
+                            next_key.node_hash IS NOT NULL AND next_key.search_remain IS NOT NULL AND (next_key.search_remain != X'' OR (next_key.node_is_branch AND :skip_branches))
                             -- See explanation above.
                             AND trie_node_child_before.hash IS NULL
                             -- Stop iterating if the child's partial key is before the searched key.
