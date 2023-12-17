@@ -419,6 +419,8 @@ impl SqliteFullDatabase {
         Ok(())
     }
 
+    // TODO: needs documentation
+    // TODO: should we refuse inserting disjoint storage nodes?
     pub fn insert_trie_nodes<'a>(
         &self,
         new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
@@ -444,6 +446,7 @@ impl SqliteFullDatabase {
                     "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
                 )
                 .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            // TODO: if the iterator's `next()` function accesses the database, we deadlock
             for trie_node in new_trie_nodes {
                 assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
                 insert_node_statement
@@ -729,6 +732,14 @@ impl SqliteFullDatabase {
         parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
+        // Process the iterators at the very beginning and before locking the database, in order
+        // to avoid a deadlock in case the `next()` function of one of the iterators accesses
+        // the database as well.
+        let key_vectored = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
+            .collect::<Vec<_>>();
+
         let connection = self.database.lock();
 
         // TODO: could be optimized by having a different request when `parent_tries_paths_nibbles` is empty and when it isn't
@@ -791,11 +802,6 @@ impl SqliteFullDatabase {
                     InternalError(err),
                 ))
             })?;
-
-        let key_vectored = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
-            .collect::<Vec<_>>();
 
         // In order to debug the SQL query above (for example in case of a failing test),
         // uncomment this block:
@@ -895,6 +901,24 @@ impl SqliteFullDatabase {
         prefix_nibbles: impl Iterator<Item = u8>,
         branch_nodes: bool,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
+        // Process the iterators at the very beginning and before locking the database, in order
+        // to avoid a deadlock in case the `next()` function of one of the iterators accesses
+        // the database as well.
+        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .collect::<Vec<_>>();
+        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
+        let key_nibbles = {
+            let mut v = parent_tries_paths_nibbles.clone();
+            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
+        let prefix_nibbles = {
+            let mut v = parent_tries_paths_nibbles;
+            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
+
         let connection = self.database.lock();
 
         // Sorry for that extremely complicated SQL statement. While the logic isn't actually very
@@ -1066,23 +1090,6 @@ impl SqliteFullDatabase {
                 ))
             })?;
 
-        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .collect::<Vec<_>>();
-        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
-
-        let key_nibbles = {
-            let mut v = parent_tries_paths_nibbles.clone();
-            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
-            v
-        };
-
-        let prefix_nibbles = {
-            let mut v = parent_tries_paths_nibbles;
-            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
-            v
-        };
-
         // In order to debug the SQL query above (for example in case of a failing test),
         // uncomment this block:
         //
@@ -1175,6 +1182,14 @@ impl SqliteFullDatabase {
         parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
+        // Process the iterators at the very beginning and before locking the database, in order
+        // to avoid a deadlock in case the `next()` function of one of the iterators accesses
+        // the database as well.
+        let key_vectored = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
+            .collect::<Vec<_>>();
+
         let connection = self.database.lock();
 
         // TODO: trie_root_ref system untested
@@ -1253,11 +1268,6 @@ impl SqliteFullDatabase {
                     InternalError(err),
                 ))
             })?;
-
-        let key_vectored = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
-            .collect::<Vec<_>>();
 
         // In order to debug the SQL query above (for example in case of a failing test),
         // uncomment this block:
