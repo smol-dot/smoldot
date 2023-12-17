@@ -56,6 +56,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Instant,
+    vec,
 };
 
 pub use smoldot::network::service::ChainId;
@@ -191,6 +192,25 @@ enum ToBackground {
         config: codec::BlocksRequestConfig,
         result_tx: oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
     },
+    ForegroundWarpSyncRequest {
+        target: PeerId,
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+        result_tx:
+            oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+    },
+    ForegroundStorageProofRequest {
+        target: PeerId,
+        chain_id: ChainId,
+        config: codec::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
+        result_tx: oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+    },
+    ForegroundCallProofRequest {
+        target: PeerId, // TODO: takes by value because of futures longevity issue
+        chain_id: ChainId,
+        config: codec::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
+        result_tx: oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+    },
     ForegroundGetNumConnections {
         result_tx: oneshot::Sender<usize>,
     },
@@ -269,6 +289,27 @@ struct Inner {
     blocks_requests: HashMap<
         service::SubstreamId,
         oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all warp sync requests that have been started but not finished yet.
+    warp_sync_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all storage requests that have been started but not finished yet.
+    storage_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all call proof requests that have been started but not finished yet.
+    call_proof_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -454,6 +495,18 @@ impl NetworkService {
             peering_strategy,
             blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
                 50, // TODO: ?
+                Default::default(),
+            ),
+            warp_sync_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                2, // TODO: ?
+                Default::default(),
+            ),
+            storage_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                5, // TODO: ?
+                Default::default(),
+            ),
+            call_proof_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                5, // TODO: ?
                 Default::default(),
             ),
             kademlia_find_nodes_requests: hashbrown::HashMap::with_capacity_and_hasher(
@@ -688,6 +741,114 @@ impl NetworkService {
 
         result
     }
+
+    /// Sends a warp sync request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn warp_sync_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+    ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
+        let chain_name = self.chain_names[&chain_id].clone();
+
+        self.log_callback.log(
+            LogLevel::Debug,
+            format!(
+                "warp-sync-request-start; peer_id={}; chain={}; begin_hash={}",
+                target,
+                chain_name,
+                HashDisplay(&begin_hash)
+            ),
+        );
+
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundWarpSyncRequest {
+                target: target.clone(),
+                chain_id,
+                begin_hash,
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
+
+    /// Sends a storage proof request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn storage_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
+    ) -> Result<service::EncodedMerkleProof, ()> {
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundStorageProofRequest {
+                target: target.clone(),
+                chain_id,
+                config: codec::StorageProofRequestConfig {
+                    block_hash: config.block_hash,
+                    keys: config
+                        .keys
+                        .map(|key| key.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
+
+    /// Sends a call proof request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn call_proof_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+    ) -> Result<service::EncodedMerkleProof, ()> {
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundCallProofRequest {
+                target: target.clone(),
+                chain_id,
+                config: codec::CallProofRequestConfig {
+                    block_hash: config.block_hash,
+                    method: config.method.into_owned().into(),
+                    parameter_vectored: config
+                        .parameter_vectored
+                        .map(|v| v.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
 }
 
 /// Error when initializing the network service.
@@ -709,6 +870,16 @@ pub enum BlocksRequestError {
     /// Error during the request.
     #[display(fmt = "{_0}")]
     Request(service::BlocksRequestError),
+}
+
+/// Error returned by [`NetworkService::warp_sync_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum WarpSyncRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    #[display(fmt = "{_0}")]
+    Request(service::GrandpaWarpSyncRequestError),
 }
 
 fn run(mut inner: Inner) {
@@ -1023,6 +1194,75 @@ async fn background_task(mut inner: Inner) {
                     }
                     Err(service::StartRequestError::NoConnection) => {
                         let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundWarpSyncRequest {
+                target,
+                chain_id,
+                begin_hash,
+                result_tx,
+            }) => {
+                match inner.network.start_grandpa_warp_sync_request(
+                    &target,
+                    chain_id,
+                    begin_hash,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.warp_sync_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestError::NoConnection) => {
+                        let _ = result_tx.send(Err(WarpSyncRequestError::NoConnection));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundStorageProofRequest {
+                target,
+                chain_id,
+                config,
+                result_tx,
+            }) => {
+                match inner.network.start_storage_proof_request(
+                    &target,
+                    chain_id,
+                    config,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.storage_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        let _ = result_tx.send(Err(()));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        let _ = result_tx.send(Err(()));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundCallProofRequest {
+                target,
+                chain_id,
+                config,
+                result_tx,
+            }) => {
+                match inner.network.start_call_proof_request(
+                    &target,
+                    chain_id,
+                    config,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.call_proof_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        let _ = result_tx.send(Err(()));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        let _ = result_tx.send(Err(()));
                     }
                 }
             }
@@ -1445,6 +1685,36 @@ async fn background_task(mut inner: Inner) {
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(BlocksRequestError::Request));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::GrandpaWarpSync(response),
+            }) => {
+                let _ = inner
+                    .warp_sync_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(WarpSyncRequestError::Request));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::StorageProof(response),
+            }) => {
+                let _ = inner
+                    .storage_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(|_| ()));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::CallProof(response),
+            }) => {
+                let _ = inner
+                    .call_proof_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(|_| ()));
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
