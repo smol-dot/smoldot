@@ -303,7 +303,7 @@ impl ConsensusService {
                 // the chain and the machine of the user.
                 NonZeroU32::new(2000).unwrap()
             },
-            full_mode: true,
+            full_mode: false,
             code_trie_node_hint: None,
         });
 
@@ -736,7 +736,9 @@ impl SyncBackground {
                 // related to the block authoring is ready.
                 // TODO: refactor as a separate task?
                 let authoring_ready_future = {
-                    // TODO: overhead to call best_block_consensus() multiple times
+                    future::pending::<WakeUpReason>()
+                    // TODO: restore
+                    /*// TODO: overhead to call best_block_consensus() multiple times
                     let local_authorities = {
                         let namespace_filter = match self.sync.best_block_consensus() {
                             chain_information::ChainInformationConsensusRef::Aura { .. } => {
@@ -821,7 +823,7 @@ impl SyncBackground {
                                 delay,
                             )))
                         }
-                    }
+                    }*/
                 };
 
                 async move {
