@@ -2799,7 +2799,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-            download_bodies: false,
+            download_bodies: self.download_bodies,
         });
 
         debug_assert!(self
