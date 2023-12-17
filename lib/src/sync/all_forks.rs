@@ -42,14 +42,6 @@
 //! >              block. This is necessary in case it is this other block 5 that will end up
 //! >              being finalized.
 //!
-//! # Full vs non-full
-//!
-//! The [`Config::full`] option configures whether the state machine only holds headers of the
-//! non-finalized blocks (`full` equal to `false`), or the headers, and bodies, and storage
-//! (`full` equal to `true`).
-//!
-//! In full mode, .
-//!
 //! # Bounded and unbounded containers
 //!
 //! It is important to limit the memory usage of this state machine no matter how the
@@ -170,14 +162,13 @@ pub struct Config {
     /// The higher the value, the more bandwidth is potentially wasted.
     pub max_requests_per_block: NonZeroU32,
 
-    /// If true, the block bodies and storage are also synchronized.
-    pub full: bool,
+    /// If true, the body of a block is downloaded (if necessary) before a
+    /// [`ProcessOne::BlockVerify`] is generated.
+    pub download_bodies: bool,
 }
 
 pub struct AllForksSync<TBl, TRq, TSrc> {
     /// Data structure containing the non-finalized blocks.
-    ///
-    /// If [`Config::full`], this only contains blocks whose header *and* body have been verified.
     chain: blocks_tree::NonFinalizedTree<TBl>,
 
     /// Extra fields. In a separate structure in order to be moved around.
@@ -440,7 +431,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     finalized_block_height,
                     max_requests_per_block: config.max_requests_per_block,
                     sources_capacity: config.sources_capacity,
-                    verify_bodies: config.full,
+                    download_bodies: config.download_bodies,
                 }),
             }),
         }

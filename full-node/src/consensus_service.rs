@@ -303,7 +303,7 @@ impl ConsensusService {
                 // the chain and the machine of the user.
                 NonZeroU32::new(2000).unwrap()
             },
-            full_mode: false,
+            download_bodies: true,
             code_trie_node_hint: None,
         });
 

@@ -116,7 +116,7 @@ pub struct Config {
 
     /// If `true`, block bodies are downloaded and verified. If `false`, only headers are
     /// verified.
-    pub verify_bodies: bool,
+    pub download_bodies: bool,
 
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
@@ -172,8 +172,8 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// Blocks whose validity couldn't be determined yet.
     blocks: disjoint::DisjointBlocks<UnverifiedBlock<TBl>>,
 
-    /// See [`Config::verify_bodies`].
-    verify_bodies: bool,
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 
     /// Set of `(block_height, block_hash, request_id)`.
     /// Contains the list of all requests, associated to their block.
@@ -232,7 +232,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 config.finalized_block_height,
             ),
             blocks: disjoint::DisjointBlocks::with_capacity(config.blocks_capacity),
-            verify_bodies: config.verify_bodies,
+            download_bodies: config.download_bodies,
             blocks_requests: Default::default(),
             requested_blocks: Default::default(),
             source_occupations: Default::default(),
@@ -677,7 +677,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// blocks. These blocks can potentially be verified.
     ///
     /// All the returned block are guaranteed to be in a "header known" state. If
-    /// [`Config::verify_bodies`] if `true`, they they are also guaranteed to be in a "body known"
+    /// [`Config::download_bodies`] if `true`, they they are also guaranteed to be in a "body known"
     /// state.
     ///
     /// > **Note**: The naming of this function assumes that all blocks that are referenced by
@@ -692,7 +692,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 .state
             {
                 UnverifiedBlockState::HeightHash => false,
-                UnverifiedBlockState::Header { .. } => !self.verify_bodies,
+                UnverifiedBlockState::Header { .. } => !self.download_bodies,
                 UnverifiedBlockState::HeaderBody { .. } => true,
             }
         })
@@ -896,7 +896,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// In details, the requests concern:
     ///
-    /// - If [`Config::verify_bodies`] was `true`, downloading the body of blocks whose body is
+    /// - If [`Config::download_bodies`] was `true`, downloading the body of blocks whose body is
     /// unknown.
     /// - Downloading headers of blocks whose state is [`UnverifiedBlockState::HeightHash`].
     ///
@@ -958,7 +958,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         // TODO: could provide more optimized requests by avoiding potentially overlapping requests (e.g. if blocks #4 and #5 are unknown, ask for block #5 with num_blocks=2), but this is complicated because peers aren't obligated to respond with the given number of blocks
 
         // List of blocks whose header is known but not its body.
-        let unknown_body_iter = if self.verify_bodies {
+        let unknown_body_iter = if self.download_bodies {
             either::Left(
                 self.blocks
                     .iter()
