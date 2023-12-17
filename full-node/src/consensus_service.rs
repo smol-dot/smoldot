@@ -1060,6 +1060,19 @@ impl SyncBackground {
                 }
 
                 WakeUpReason::RequestFinished(request_id, source_id, result) => {
+                    if result.is_err() {
+                        // Note that we perform the ban even if the source is now disconnected.
+                        let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                        self.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                self.network_chain_id,
+                                network_service::BanSeverity::Low,
+                                "blocks-request-error",
+                            )
+                            .await;
+                    }
+
                     // TODO: clarify this piece of code
                     let result = result.map_err(|_| ());
                     let (_, response_outcome) = self.sync.blocks_request_response(
@@ -1616,6 +1629,7 @@ impl SyncBackground {
             | all::ProcessOne::WarpSyncBuildChainInformation(_)
             | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
             all::ProcessOne::VerifyBlock(verify) => {
+                // TODO: ban peer in case of verification failure
                 let when_verification_started = Instant::now();
                 let mut database_accesses_duration = Duration::new(0, 0);
                 let mut runtime_build_duration = Duration::new(0, 0);
@@ -2053,6 +2067,7 @@ impl SyncBackground {
             }
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
+                // TODO: ban peer in case of verification failure
                 match verify.perform(rand::random()) {
                     (
                         sync_out,
