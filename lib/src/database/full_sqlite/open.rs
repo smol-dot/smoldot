@@ -198,7 +198,8 @@ CREATE TABLE blocks(
     header BLOB NOT NULL,
     justification BLOB,
     is_best_chain BOOLEAN NOT NULL,
-    UNIQUE(number, hash)
+    UNIQUE(number, hash),
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE RESTRICT ON DELETE NO ACTION
 );
 CREATE INDEX blocks_by_number ON blocks(number);
 CREATE INDEX blocks_by_parent ON blocks(parent_hash);
