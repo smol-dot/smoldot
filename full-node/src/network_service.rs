@@ -304,10 +304,10 @@ struct Chain {
     max_in_peers: usize,
 }
 
+/// Severity of a ban. See [`NetworkService::ban_and_disconnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BanSeverity {
     Low,
-    High,
 }
 
 impl NetworkService {
@@ -574,7 +574,7 @@ impl NetworkService {
             .await;
     }
 
-    /// Starts asynchronously disconnect the given peer. A [`Event::Disconnected`] will later be
+    /// Starts asynchronously disconnecting the given peer. A [`Event::Disconnected`] will later be
     /// generated. Prevents a new gossip link with the same peer from being reopened for a
     /// little while.
     ///
@@ -1037,7 +1037,6 @@ async fn background_task(mut inner: Inner) {
                     &peer_id,
                     Instant::now()
                         + Duration::from_secs(match severity {
-                            BanSeverity::High => 45,
                             BanSeverity::Low => 10,
                         }),
                 );

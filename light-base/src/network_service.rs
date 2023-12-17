@@ -285,6 +285,12 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     marker: core::marker::PhantomData<TPlat>,
 }
 
+/// Severity of a ban. See [`NetworkService::ban_and_disconnect`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BanSeverity {
+    Low,
+}
+
 impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// Subscribes to the networking events that happen on the given chain.
     ///
@@ -316,6 +322,33 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .unwrap();
 
         rx
+    }
+
+    /// Starts asynchronously disconnecting the given peer. A [`Event::Disconnected`] will later be
+    /// generated. Prevents a new gossip link with the same peer from being reopened for a
+    /// little while.
+    ///
+    /// `reason` is a human-readable string printed in the logs.
+    ///
+    /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
+    /// reconnection was already happening as the call to this function is still being processed.
+    /// If that happens another [`Event::Disconnected`] will be delivered afterwards. In other
+    /// words, this function guarantees that we will be disconnected in the future rather than
+    /// guarantees that we will disconnect.
+    pub async fn ban_and_disconnect(
+        &self,
+        peer_id: PeerId,
+        severity: BanSeverity,
+        reason: &'static str,
+    ) {
+        let _ = self
+            .messages_tx
+            .send(ToBackgroundChain::DisconnectAndBan {
+                peer_id,
+                severity,
+                reason,
+            })
+            .await;
     }
 
     /// Sends a blocks request to the given peer.
@@ -762,6 +795,11 @@ enum ToBackgroundChain {
     RemoveChain,
     Subscribe {
         sender: async_channel::Sender<Event>,
+    },
+    DisconnectAndBan {
+        peer_id: PeerId,
+        severity: BanSeverity,
+        reason: &'static str,
     },
     // TODO: serialize the request before sending over channel
     StartBlocksRequest {
@@ -1263,6 +1301,51 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::MessageForChain(chain_id, ToBackgroundChain::Subscribe { sender }) => {
                 task.pending_new_subscriptions.push((chain_id, sender));
+            }
+            WakeUpReason::MessageForChain(
+                chain_id,
+                ToBackgroundChain::DisconnectAndBan {
+                    peer_id,
+                    severity,
+                    reason,
+                },
+            ) => {
+                let ban_duration = Duration::from_secs(match severity {
+                    BanSeverity::Low => 10,
+                });
+
+                let had_slot = matches!(
+                    task.peering_strategy.unassign_slot_and_ban(
+                        &chain_id,
+                        &peer_id,
+                        task.platform.now() + ban_duration,
+                    ),
+                    basic_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
+                );
+
+                let _ = task.network.gossip_close(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                );
+
+                if had_slot {
+                    log::debug!(
+                        target: "network",
+                        "Slots({}) ∌ {} (reason=user-ban, ban-duration={:?}, user-reason={})",
+                        &task.network[chain_id].log_name,
+                        peer_id,
+                        ban_duration,
+                        reason
+                    );
+                    task.network.gossip_remove_desired(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                }
+
+                task.open_gossip_links.remove(&(chain_id, peer_id));
             }
             WakeUpReason::MessageForChain(
                 chain_id,
