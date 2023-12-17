@@ -1401,8 +1401,6 @@ pub enum CorruptedError {
     /// Values in the database are all well-formatted, but are incoherent.
     #[display(fmt = "Invalid chain information: {_0}")]
     InvalidChainInformation(chain_information::ValidityError),
-    /// The parent of a block in the database couldn't be found in that same database.
-    BrokenChain,
     /// Missing a key in the `meta` table.
     MissingMetaKey,
     /// Some parts of the database refer to a block by its hash, but the block's constituents
