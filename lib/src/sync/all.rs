@@ -649,7 +649,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
                 inner.source_num_ongoing_requests(*src)
             }
-            (AllSyncInner::WarpSync { .. }, SourceMapping::WarpSync(_)) => 0,
+            (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
+                inner.source_num_ongoing_requests(*src)
+            }
 
             (AllSyncInner::Poisoned, _) => unreachable!(),
             // Invalid combinations of syncing state machine and source id.
