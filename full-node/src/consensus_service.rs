@@ -1968,8 +1968,14 @@ impl SyncBackground {
                 }
                 (self, true)
             }
-            all::ProcessOne::WarpSyncFinished { sync, .. } => {
+            all::ProcessOne::WarpSyncFinished {
+                sync,
+                finalized_block_runtime,
+                ..
+            } => {
                 self.sync = sync;
+                self.finalized_runtime = Arc::new(Mutex::new(Some(finalized_block_runtime)));
+                // TODO: insert the finalized storage information into the database
                 (self, true)
             }
             all::ProcessOne::VerifyBlock(verify) => {
