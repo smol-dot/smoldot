@@ -1975,6 +1975,7 @@ impl SyncBackground {
             } => {
                 self.sync = sync;
                 self.finalized_runtime = Arc::new(Mutex::new(Some(finalized_block_runtime)));
+                // TODO: update database
                 // TODO: insert the finalized storage information into the database
                 (self, true)
             }

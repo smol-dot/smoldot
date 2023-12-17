@@ -2067,6 +2067,23 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
         self.verified_header.scale_encoded_header()
     }
 
+    /// Returns the SCALE-encoded header of the block that was verified.
+    // TODO: return &[u8] instead
+    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+        if self.block_to_verify.parent_block_hash == self.parent.chain.finalized_block_hash() {
+            self.parent
+                .chain
+                .finalized_block_header()
+                .scale_encoding_vec(self.parent.chain.block_number_bytes())
+        } else {
+            self.parent
+                .chain
+                .non_finalized_block_header(&self.block_to_verify.parent_block_hash)
+                .unwrap()
+                .to_owned()
+        }
+    }
+
     /// Reject the block and mark it as bad.
     pub fn reject_bad_block(mut self) -> AllForksSync<TBl, TRq, TSrc> {
         // Remove the block from `pending_blocks`.
