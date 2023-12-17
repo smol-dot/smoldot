@@ -178,11 +178,14 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TBl, TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, Source<TSrc>>,
+
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 }
 
 struct PendingBlock<TBl> {
     header: Option<header::Header>,
-    // TODO: add body: Option<Vec<Vec<u8>>>, when adding full node support
+    body: Option<Vec<Vec<u8>>>,
     user_data: TBl,
 }
 
@@ -433,6 +436,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     download_bodies: config.download_bodies,
                 }),
+                download_bodies: config.download_bodies,
             }),
         }
     }
@@ -1162,9 +1166,13 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
     ///
     /// If an error is returned, the [`FinishAncestrySearch`] is turned back again into a
     /// [`AllForksSync`], but all the blocks that have already been added are retained.
+    ///
+    /// If [`Config::download_bodies`] was `false`, the content of `scale_encoded_extrinsics`
+    /// is ignored.
     pub fn add_block(
         mut self,
         scale_encoded_header: &[u8],
+        scale_encoded_extrinsics: Vec<Vec<u8>>,
         scale_encoded_justifications: impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
     ) -> Result<AddBlock<TBl, TRq, TSrc>, (AncestrySearchResponseError, AllForksSync<TBl, TRq, TSrc>)>
     {
@@ -1195,6 +1203,8 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
         }
 
+        // TODO: /!\ must verify that scale_encoded_extrinsics matches the header's extrinsics root
+
         // At this point, the source has given us correct blocks, and we consider the response
         // as a whole to be useful.
         self.any_progress = true;
@@ -1215,6 +1225,8 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             .collect::<Vec<_>>();
 
         // If the block is already part of the local tree of blocks, nothing more to do.
+        // Note that the block body is silently discarded, as in the API only non-verified blocks
+        // exhibit a body.
         if self
             .inner
             .chain
@@ -1265,6 +1277,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             Ok(AddBlock::UnknownBlock(AddBlockVacant {
                 inner: self,
                 decoded_header: decoded_header.into(),
+                scale_encoded_extrinsics,
                 justifications,
             }))
         } else {
@@ -1275,6 +1288,22 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                         decoded_header.number,
                         FinalityProofs::Justifications(justifications),
                     );
+            }
+
+            if self.inner.inner.download_bodies {
+                self.inner
+                    .inner
+                    .blocks
+                    .set_unverified_block_header_body_known(
+                        decoded_header.number,
+                        &self.expected_next_hash,
+                        *decoded_header.parent_hash,
+                    );
+                self.inner
+                    .inner
+                    .blocks
+                    .unverified_block_user_data_mut(decoded_header.number, &self.expected_next_hash)
+                    .body = Some(scale_encoded_extrinsics);
             }
 
             Ok(AddBlock::AlreadyPending(AddBlockOccupied {
@@ -1437,6 +1466,7 @@ pub struct AddBlockVacant<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
     justifications: Vec<([u8; 4], Vec<u8>)>,
+    scale_encoded_extrinsics: Vec<Vec<u8>>,
 }
 
 impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
@@ -1460,11 +1490,18 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         self.inner.inner.inner.blocks.insert_unverified_block(
             self.decoded_header.number,
             self.inner.expected_next_hash,
-            pending_blocks::UnverifiedBlockState::Header {
-                parent_hash: self.decoded_header.parent_hash,
+            if self.inner.inner.inner.download_bodies {
+                pending_blocks::UnverifiedBlockState::HeaderBody {
+                    parent_hash: self.decoded_header.parent_hash,
+                }
+            } else {
+                pending_blocks::UnverifiedBlockState::Header {
+                    parent_hash: self.decoded_header.parent_hash,
+                }
             },
             PendingBlock {
                 header: Some(self.decoded_header.clone()),
+                body: Some(self.scale_encoded_extrinsics),
                 user_data,
             },
         );
@@ -1703,6 +1740,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             },
             PendingBlock {
                 header: Some(self.announced_header_encoded),
+                body: None,
                 user_data,
             },
         );
@@ -1907,6 +1945,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             pending_blocks::UnverifiedBlockState::HeightHash,
             PendingBlock {
                 header: None,
+                body: None,
                 user_data: best_block_user_data,
             },
         );
@@ -2056,6 +2095,31 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
     /// Returns the SCALE-encoded header of the block that was verified.
     pub fn scale_encoded_header(&self) -> &[u8] {
         self.verified_header.scale_encoded_header()
+    }
+
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        if self.parent.inner.download_bodies {
+            Some(
+                self.parent
+                    .inner
+                    .blocks
+                    .unverified_block_user_data(
+                        self.block_to_verify.block_number,
+                        &self.block_to_verify.block_hash,
+                    )
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .iter(),
+            )
+        } else {
+            None
+        }
     }
 
     /// Returns the SCALE-encoded header of the block that was verified.
