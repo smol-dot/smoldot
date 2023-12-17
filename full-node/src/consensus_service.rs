@@ -1046,6 +1046,15 @@ impl SyncBackground {
                         all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                     }
                 }
+                WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {
+                    chain_id,
+                    peer_id,
+                    finalized_block_height,
+                }) if chain_id == self.network_chain_id => {
+                    let source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                    self.sync
+                        .update_source_finality_state(source_id, finalized_block_height);
+                }
                 WakeUpReason::NetworkEvent(_) => {
                     // Different chain index.
                 }

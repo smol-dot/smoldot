@@ -148,6 +148,11 @@ pub enum Event {
         scale_encoded_header: Vec<u8>,
         is_best: bool,
     },
+    GrandpaNeighborPacket {
+        chain_id: ChainId,
+        peer_id: PeerId,
+        finalized_block_height: u64,
+    },
 }
 
 pub struct NetworkService {
@@ -1609,7 +1614,13 @@ async fn background_task(mut inner: Inner) {
                     state.set_id,
                     state.commit_finalized_height,
                 ));
-                // TODO: report to the sync state machine
+
+                debug_assert!(inner.event_pending_send.is_none());
+                inner.event_pending_send = Some(Event::GrandpaNeighborPacket {
+                    chain_id,
+                    peer_id,
+                    finalized_block_height: state.commit_finalized_height,
+                });
             }
             WakeUpReason::NetworkEvent(service::Event::GrandpaCommitMessage {
                 chain_id,
