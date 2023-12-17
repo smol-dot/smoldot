@@ -1183,33 +1183,68 @@ impl SqliteFullDatabase {
             .prepare_cached(
                 r#"
             WITH RECURSIVE
+                -- At the end of the recursive statement, `closest_descendant` must always contain
+                -- at most one item where `search_remain` is either empty or null. Empty
+                -- indicates that we have found a match, while null means that the search has
+                -- been interrupted due to a storage entry not being in the database. If
+                -- `search_remain` is null, then `node_hash` is irrelevant.
+                -- If `closest_descendant` doesn't have any entry where `search_remain` is empty
+                -- or null, then the request key doesn't have any descendant.
                 closest_descendant(node_hash, search_remain) AS (
-                    SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
-                        FROM blocks, trie_node
-                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash
+                    SELECT
+                            blocks.state_trie_root_hash,
+                            CASE
+                                WHEN trie_node.partial_key IS NULL AND LENGTH(:key) = 0
+                                    THEN X''   -- Trie root node isn't in database, but since key is empty we have a match anyway
+                                WHEN trie_node.partial_key IS NULL AND LENGTH(:key) != 0
+                                    THEN NULL  -- Trie root node isn't in database and we can't iterate further
+                                ELSE
+                                    COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
+                            END
+                        FROM blocks
+                        LEFT JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
+                        WHERE blocks.hash = :block_hash
                             AND (
-                                COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:key)), X'') = :key
+                                trie_node.partial_key IS NULL
+                                OR COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:key)), X'') = :key
                                 OR COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
+
                     UNION ALL
                     SELECT
-                            COALESCE(trie_node.hash, trie_node_storage.trie_root_ref),
-                            COALESCE(SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key)), SUBSTR(closest_descendant.search_remain, 1), X'')
+                            COALESCE(trie_node_child.child_hash, trie_node_storage.trie_root_ref),
+                            CASE
+                                WHEN trie_node_child.child_hash IS NULL AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) != '10'
+                                    THEN X''      -- No child matching the key.
+                                WHEN trie_node_child.child_hash IS NOT NULL AND trie_node.hash IS NULL AND LENGTH(closest_descendant.search_remain) = 1
+                                    THEN X''      -- Descendant node not in trie but we know that it's the result.
+                                WHEN trie_node_child.child_hash IS NOT NULL AND trie_node.hash IS NULL
+                                    THEN NULL     -- Descendant node not in trie.
+                                WHEN COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
+                                        OR COALESCE(SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
+                                    THEN SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key))
+                                ELSE
+                                    X''           -- Unreachable.
+                            END
                         FROM closest_descendant
                         LEFT JOIN trie_node_child ON closest_descendant.node_hash = trie_node_child.hash
                             AND SUBSTR(closest_descendant.search_remain, 1, 1) = trie_node_child.child_num
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
+                        LEFT JOIN trie_node_storage
+                            ON closest_descendant.node_hash = trie_node_storage.node_hash
+                            AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) = '10'
+                            AND trie_node_storage.trie_root_ref IS NOT NULL
+                        WHERE
+                            LENGTH(closest_descendant.search_remain) >= 1
                             AND (
-                                COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
+                                trie_node.hash IS NULL
+                                OR COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
                                 OR COALESCE(SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
-                        LEFT JOIN trie_node_storage ON closest_descendant.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) = '10'
-                        WHERE LENGTH(closest_descendant.search_remain) >= 1 AND (trie_node.hash IS NOT NULL OR trie_node_storage.trie_root_ref IS NOT NULL)
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, closest_descendant.node_hash
+            SELECT COUNT(blocks.hash) >= 1, closest_descendant.node_hash IS NOT NULL AND closest_descendant.search_remain IS NULL, closest_descendant.node_hash
             FROM blocks
-            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN closest_descendant ON LENGTH(closest_descendant.search_remain) = 0
+            LEFT JOIN closest_descendant ON LENGTH(closest_descendant.search_remain) = 0 OR closest_descendant.search_remain IS NULL
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
@@ -1224,7 +1259,34 @@ impl SqliteFullDatabase {
             .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
             .collect::<Vec<_>>();
 
-        let (has_block, block_has_storage, merkle_value) = statement
+        // In order to debug the SQL query above (for example in case of a failing test),
+        // uncomment this block:
+        //
+        /*println!("{:?}", {
+            let mut statement = connection
+                    .prepare_cached(
+                        r#"
+                    WITH RECURSIVE
+                        copy-paste the definition of closest_descendant here
+
+                    SELECT * FROM closest_descendant"#).unwrap();
+            statement
+                .query_map(
+                    rusqlite::named_params! {
+                        ":block_hash": &block_hash[..],
+                        ":key": key_vectored,
+                    },
+                    |row| {
+                        let node_hash = row.get::<_, Option<Vec<u8>>>(0)?.map(hex::encode);
+                        let search_remain = row.get::<_, Option<Vec<u8>>>(1)?;
+                        Ok((node_hash, search_remain))
+                    },
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+        });*/
+
+        let (has_block, incomplete_storage, merkle_value) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -1232,9 +1294,9 @@ impl SqliteFullDatabase {
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
-                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let incomplete_storage = row.get::<_, i64>(1)? != 0;
                     let merkle_value = row.get::<_, Option<Vec<u8>>>(2)?;
-                    Ok((has_block, block_has_storage, merkle_value))
+                    Ok((has_block, incomplete_storage, merkle_value))
                 },
             )
             .map_err(|err| {
@@ -1245,7 +1307,7 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::UnknownBlock);
         }
 
-        if !block_has_storage {
+        if incomplete_storage {
             return Err(StorageAccessError::IncompleteStorage);
         }
 
