@@ -1188,6 +1188,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 ProcessOne::WarpSyncFinished {
                     sync: self,
                     finalized_block_runtime,
+                    finalized_block_scale_encoded_extrinsics: Vec::new(), // TODO: /!\ not implemented
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
@@ -2072,6 +2073,11 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
         /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
         /// >           block this runtime corresponds to.
         finalized_block_runtime: host::HostVmPrototype,
+
+        /// SCALE-encoded extrinsics of the finalized block. The ordering is important.
+        ///
+        /// If [`Config::download_bodies`] was `false`, then this field is always empty.
+        finalized_block_scale_encoded_extrinsics: Vec<Vec<u8>>,
 
         /// Storage value at the `:code` key of the finalized block.
         finalized_storage_code: Option<Vec<u8>>,
