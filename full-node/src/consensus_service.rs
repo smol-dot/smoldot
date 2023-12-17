@@ -222,7 +222,7 @@ impl ConsensusService {
                             Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                                 return Err(InitError::DatabaseCorruption(err))
                             }
-                            Err(full_sqlite::StorageAccessError::StoragePruned)
+                            Err(full_sqlite::StorageAccessError::IncompleteStorage)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                         };
                     let finalized_code = match database.block_storage_get(
@@ -235,7 +235,7 @@ impl ConsensusService {
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseCorruption(err))
                         }
-                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     let finalized_heap_pages = match database.block_storage_get(
@@ -248,7 +248,7 @@ impl ConsensusService {
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseCorruption(err))
                         }
-                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     Ok((
@@ -1717,56 +1717,74 @@ impl SyncBackground {
                                             &scale_encoded_header,
                                             is_new_best,
                                             iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                            storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
-                                                |(_child_trie, key, change)| {
-                                                    let body_only::TrieChange::InsertUpdate {
-                                                        new_merkle_value,
-                                                        partial_key,
-                                                        children_merkle_values,
-                                                        new_storage_value
-                                                    } = &change
-                                                        else { return None };
-
-                                                    // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
-                                                    let references_merkle_value = key.iter().copied()
-                                                        .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
-                                                        .all(|(a, b)| a == b);
-
-                                                    Some(full_sqlite::InsertTrieNode {
-                                                        merkle_value: (&new_merkle_value[..]).into(),
-                                                        children_merkle_values: array::from_fn(|n| {
-                                                            children_merkle_values[n]
-                                                                .as_ref()
-                                                                .map(|v| From::from(&v[..]))
-                                                        }),
-                                                        storage_value: match new_storage_value {
-                                                            body_only::TrieChangeStorageValue::Modified {
-                                                                new_value: Some(value),
-                                                            } => full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                                value: Cow::Borrowed(value),
-                                                                references_merkle_value,
-                                                            },
-                                                            body_only::TrieChangeStorageValue::Modified {
-                                                                new_value: None,
-                                                            } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                                            body_only::TrieChangeStorageValue::Unmodified => {
-                                                                full_sqlite::InsertTrieNodeStorageValue::SameAsParent
-                                                            }
-                                                        },
-                                                        partial_key_nibbles: partial_key
-                                                            .iter()
-                                                            .map(|n| u8::from(*n))
-                                                            .collect::<Vec<_>>()
-                                                            .into(),
-                                                    })
-                                                },
-                                            ),
-                                            u8::from(state_trie_version),
                                         );
 
                                         match result {
                                             Ok(()) => {}
                                             Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                            Err(err) => panic!("{}", err),
+                                        }
+
+                                        let trie_nodes = storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
+                                            |(_child_trie, key, change)| {
+                                                let body_only::TrieChange::InsertUpdate {
+                                                    new_merkle_value,
+                                                    partial_key,
+                                                    children_merkle_values,
+                                                    new_storage_value
+                                                } = &change
+                                                    else { return None };
+
+                                                // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                                                let references_merkle_value = key.iter().copied()
+                                                    .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                                                    .all(|(a, b)| a == b);
+
+                                                Some(full_sqlite::InsertTrieNode {
+                                                    merkle_value: (&new_merkle_value[..]).into(),
+                                                    children_merkle_values: array::from_fn(|n| {
+                                                        children_merkle_values[n]
+                                                            .as_ref()
+                                                            .map(|v| From::from(&v[..]))
+                                                    }),
+                                                    storage_value: match new_storage_value {
+                                                        body_only::TrieChangeStorageValue::Modified {
+                                                            new_value: Some(value),
+                                                        } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                            value: Cow::Borrowed(value),
+                                                            references_merkle_value,
+                                                        },
+                                                        body_only::TrieChangeStorageValue::Modified {
+                                                            new_value: None,
+                                                        } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                                        body_only::TrieChangeStorageValue::Unmodified => {
+                                                            // TODO: overhead, and no child trie support
+                                                            if let Some((value_in_parent, _)) = database.block_storage_get(&parent_hash, iter::empty::<iter::Empty<_>>(), key.iter().map(|n| u8::from(*n))).unwrap() {
+                                                                full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                                    value: Cow::Owned(value_in_parent),
+                                                                    references_merkle_value,
+                                                                }
+                                                            } else {
+                                                                full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                                            }
+                                                        }
+                                                    },
+                                                    partial_key_nibbles: partial_key
+                                                        .iter()
+                                                        .map(|n| u8::from(*n))
+                                                        .collect::<Vec<_>>()
+                                                        .into(),
+                                                })
+                                           },
+                                        ).collect::<Vec<_>>();
+
+                                        let result = database.insert_trie_nodes(
+                                            trie_nodes.into_iter(),
+                                            u8::from(state_trie_version),
+                                        );
+
+                                        match result {
+                                            Ok(()) => {}
                                             Err(err) => panic!("{}", err),
                                         }
                                     }

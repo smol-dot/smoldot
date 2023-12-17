@@ -21,10 +21,7 @@
 
 // TODO:remove all the unwraps in this module that shouldn't be there
 
-use super::{
-    encode_babe_epoch_information, insert_storage, CorruptedError, InsertTrieNode, InternalError,
-    SqliteFullDatabase,
-};
+use super::{encode_babe_epoch_information, CorruptedError, InternalError, SqliteFullDatabase};
 use crate::chain::chain_information;
 
 use std::path::Path;
@@ -171,8 +168,7 @@ CREATE TABLE trie_node_storage(
     value BLOB,
     trie_root_ref BLOB,
     trie_entry_version INTEGER NOT NULL,
-    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (trie_root_ref) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (node_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
     CHECK((value IS NULL) != (trie_root_ref IS NULL))
 );
 CREATE INDEX trie_node_storage_by_trie_root_ref ON trie_node_storage(trie_root_ref);
@@ -185,8 +181,7 @@ CREATE TABLE trie_node_child(
     child_num BLOB NOT NULL,   -- Always contains one single byte. We use `BLOB` instead of `INTEGER` because SQLite stupidly doesn't provide any way of converting between integers and blobs
     child_hash BLOB NOT NULL,
     PRIMARY KEY (hash, child_num),
-    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE,
-    FOREIGN KEY (child_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE CASCADE
     CHECK(LENGTH(child_num) == 1 AND HEX(child_num) < '10')
 );
 CREATE INDEX trie_node_child_by_hash ON trie_node_child(hash);
@@ -204,8 +199,7 @@ CREATE TABLE blocks(
     justification BLOB,
     is_best_chain BOOLEAN NOT NULL,
     UNIQUE(number, hash),
-    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE RESTRICT,
-    FOREIGN KEY (state_trie_root_hash) REFERENCES trie_node(hash) ON UPDATE CASCADE ON DELETE SET NULL
+    FOREIGN KEY (parent_hash) REFERENCES blocks(hash) ON UPDATE RESTRICT ON DELETE NO ACTION
 );
 CREATE INDEX blocks_by_number ON blocks(number);
 CREATE INDEX blocks_by_parent ON blocks(parent_hash);
@@ -340,15 +334,12 @@ impl DatabaseEmpty {
     /// Inserts the given [`chain_information::ChainInformationRef`] in the database prototype in
     /// order to turn it into an actual database.
     ///
-    /// Must also pass the body, justification, and state of the storage of the finalized block.
-    // TODO: Passing SameAsParent is invalid, document and error
+    /// Must also pass the body and justification of the finalized block.
     pub fn initialize<'a>(
         mut self,
         chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
-        finalized_block_storage_entries: impl Iterator<Item = InsertTrieNode<'a>>,
-        finalized_block_state_version: u8,
     ) -> Result<SqliteFullDatabase, CorruptedError> {
         // Start a transaction to insert everything in one go.
         let transaction = self
@@ -376,13 +367,6 @@ impl DatabaseEmpty {
                 a.extend_from_slice(b.as_ref());
                 a
             });
-
-        insert_storage(
-            &transaction,
-            None,
-            finalized_block_storage_entries,
-            finalized_block_state_version,
-        )?;
 
         transaction
             .prepare_cached(

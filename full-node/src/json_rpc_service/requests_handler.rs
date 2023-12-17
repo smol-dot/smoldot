@@ -279,7 +279,7 @@ pub fn spawn_requests_handler(config: Config) {
                             Ok(out) => {
                                 request.respond(methods::Response::state_getKeysPaged(out));
                             }
-                            Err(database_thread::StorageAccessError::StoragePruned)
+                            Err(database_thread::StorageAccessError::IncompleteStorage)
                             | Err(database_thread::StorageAccessError::UnknownBlock) => {
                                 // Note that it is unclear how the function should behave in
                                 // that situation.
@@ -589,7 +589,7 @@ pub fn spawn_requests_handler(config: Config) {
                             Ok(out) => {
                                 request.respond(methods::Response::state_queryStorageAt(vec![out]));
                             }
-                            Err(database_thread::StorageAccessError::StoragePruned)
+                            Err(database_thread::StorageAccessError::IncompleteStorage)
                             | Err(database_thread::StorageAccessError::UnknownBlock) => {
                                 // Note that it is unclear how the function should behave in
                                 // that situation.
