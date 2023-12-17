@@ -314,16 +314,32 @@ fn unknown_block() {
     ));
 
     assert!(matches!(
-        db.block_storage_next_key(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter(), [].into_iter(), true),
+        db.block_storage_next_key(
+            &[0xff; 32],
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+            [].into_iter(),
+            true
+        ),
         Err(StorageAccessError::UnknownBlock)
     ));
     assert!(matches!(
-        db.block_storage_next_key(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter(), [].into_iter(), false),
+        db.block_storage_next_key(
+            &[0xff; 32],
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+            [].into_iter(),
+            false
+        ),
         Err(StorageAccessError::UnknownBlock)
     ));
 
     assert!(matches!(
-        db.block_storage_closest_descendant_merkle_value(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter()),
+        db.block_storage_closest_descendant_merkle_value(
+            &[0xff; 32],
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter()
+        ),
         Err(StorageAccessError::UnknownBlock)
     ));
 }
