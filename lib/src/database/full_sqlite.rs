@@ -333,9 +333,6 @@ impl SqliteFullDatabase {
     ///
     /// Must pass the header and body of the block.
     ///
-    /// Blocks must be inserted in the correct order. An error is returned if the parent of the
-    /// newly-inserted block isn't present in the database.
-    ///
     /// > **Note**: It is not necessary for the newly-inserted block to be a descendant of the
     /// >           finalized block, unless `is_new_best` is true.
     ///
@@ -364,11 +361,6 @@ impl SqliteFullDatabase {
         // Make sure that the block to insert isn't already in the database.
         if has_block(&transaction, &block_hash)? {
             return Err(InsertError::Duplicate);
-        }
-
-        // Make sure that the parent of the block to insert is in the database.
-        if !has_block(&transaction, header.parent_hash)? {
-            return Err(InsertError::MissingParent);
         }
 
         transaction
@@ -1369,8 +1361,6 @@ pub enum InsertError {
     /// Error when decoding the header to import.
     #[display(fmt = "Failed to decode header: {_0}")]
     BadHeader(header::Error),
-    /// Parent of the block to insert isn't in the database.
-    MissingParent,
     /// The new best block would be outside of the finalized chain.
     BestNotInFinalizedChain,
 }
