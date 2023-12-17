@@ -280,6 +280,55 @@ fn empty_database_fill_then_query() {
 }
 
 #[test]
+fn unknown_block() {
+    let DatabaseOpen::Empty(empty_db) = open(Config {
+        block_number_bytes: 4,
+        cache_size: 2 * 1024 * 1024,
+        ty: ConfigTy::Memory,
+    })
+    .unwrap() else {
+        panic!()
+    };
+
+    let db = empty_db
+        .initialize(
+            chain_information::ChainInformationRef {
+                finalized_block_header: header::HeaderRef {
+                    number: 0,
+                    extrinsics_root: &[0; 32],
+                    parent_hash: &[0; 32],
+                    state_root: &[1; 32],
+                    digest: header::DigestRef::empty(),
+                },
+                consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                finality: chain_information::ChainInformationFinalityRef::Outsourced,
+            },
+            iter::empty(),
+            None,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        db.block_storage_get(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter()),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter(), [].into_iter(), true),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+    assert!(matches!(
+        db.block_storage_next_key(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter(), [].into_iter(), false),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+
+    assert!(matches!(
+        db.block_storage_closest_descendant_merkle_value(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter()),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+}
+
+#[test]
 fn storage_get_partial() {
     let DatabaseOpen::Empty(empty_db) = open(Config {
         block_number_bytes: 4,

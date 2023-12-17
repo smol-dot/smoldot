@@ -1070,7 +1070,7 @@ impl SqliteFullDatabase {
                 )
 
             SELECT
-                COUNT(blocks.hash) >= 0,
+                COUNT(blocks.hash) >= 1,
                 COALESCE(terminal_next_key.incomplete_storage, FALSE),
                 terminal_next_key.output
             FROM blocks
