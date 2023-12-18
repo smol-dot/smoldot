@@ -1929,6 +1929,33 @@ impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
         &self.block_to_verify.block_hash
     }
 
+    /// Returns the list of SCALE-encoded extrinsics of the block to verify.
+    ///
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
+    pub fn scale_encoded_extrinsics(
+        &'_ self,
+    ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
+        if self.parent.inner.blocks.downloading_bodies() {
+            Some(
+                self.parent
+                    .inner
+                    .blocks
+                    .unverified_block_user_data(
+                        self.block_to_verify.block_number,
+                        &self.block_to_verify.block_hash,
+                    )
+                    .body
+                    .as_ref()
+                    // The block shouldn't have been proposed for verification if it doesn't
+                    // have its body available.
+                    .unwrap_or_else(|| unreachable!())
+                    .iter(),
+            )
+        } else {
+            None
+        }
+    }
+
     /// Returns the SCALE-encoded header of the block about to be verified.
     pub fn scale_encoded_header(&self) -> Vec<u8> {
         self.parent
@@ -2081,6 +2108,23 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
             )
         } else {
             None
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block that was verified.
+    // TODO: return &[u8] instead
+    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+        if self.block_to_verify.parent_block_hash == self.parent.chain.finalized_block_hash() {
+            self.parent
+                .chain
+                .finalized_block_header()
+                .scale_encoding_vec(self.parent.chain.block_number_bytes())
+        } else {
+            self.parent
+                .chain
+                .non_finalized_block_header(&self.block_to_verify.parent_block_hash)
+                .unwrap()
+                .to_owned()
         }
     }
 

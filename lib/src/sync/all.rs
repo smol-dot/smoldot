@@ -2200,8 +2200,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            BlockVerifyInner::AllForks(_verify) => todo!(), // TODO: /!\
-            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+            BlockVerifyInner::AllForks(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Left(iter.map(either::Left))),
+            BlockVerifyInner::Optimistic(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Right(iter.map(either::Right))),
         }
     }
 
@@ -2382,7 +2386,9 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     /// is the finalized block.
     pub fn parent_user_data(&self) -> Option<&TBl> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::AllForks(verify) => {
+                verify.parent_user_data().map(|ud| ud.as_ref().unwrap()) // TODO: don't unwrap
+            }
             HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_user_data(),
         }
     }
@@ -2398,7 +2404,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     /// Returns the SCALE-encoded header of the parent of the block.
     pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(_inner) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::AllForks(inner) => inner.parent_scale_encoded_header(),
             HeaderVerifySuccessInner::Optimistic(inner) => inner.parent_scale_encoded_header(),
         }
     }
