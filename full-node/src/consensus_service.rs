@@ -1976,27 +1976,22 @@ impl SyncBackground {
             } => {
                 self.sync = sync;
                 self.finalized_runtime = Arc::new(Mutex::new(Some(finalized_block_runtime)));
-                let header = self
-                    .sync
-                    .finalized_block_header()
-                    .scale_encoding_vec(self.sync.block_number_bytes());
-                let hash = self
-                    .sync
-                    .finalized_block_header()
-                    .hash(self.sync.block_number_bytes());
+                let chain_info: chain_information::ValidChainInformation =
+                    self.sync.as_chain_information().into();
                 self.database
                     .with_database(move |database| {
                         database
-                            .insert(
-                                &header,
-                                true,
-                                finalized_block_scale_encoded_extrinsics.into_iter(),
+                            .reset(
+                                chain_info.as_ref(),
+                                finalized_block_scale_encoded_extrinsics
+                                    .iter()
+                                    .map(|e| &e[..]),
+                                None,
                             )
                             .unwrap();
-                        database.set_finalized(&hash).unwrap();
                     })
                     .await;
-                // TODO: insert the finalized storage information into the database
+                // TODO: insert what is known about the finalized storage into the database
                 (self, true)
             }
             all::ProcessOne::VerifyBlock(verify) => {
