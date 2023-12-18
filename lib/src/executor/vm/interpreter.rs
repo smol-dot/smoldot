@@ -66,6 +66,7 @@ impl InterpreterPrototype {
             config.wasm_mutable_global(false);
             config.wasm_saturating_float_to_int(false);
             config.wasm_tail_call(false);
+            config.compilation_mode(wasmi::CompilationMode::Lazy);
 
             wasmi::Engine::new(&config)
         };
@@ -129,7 +130,7 @@ impl InterpreterPrototype {
                         &mut store,
                         func_type.clone(),
                         move |_caller, parameters, _ret| {
-                            Err(wasmi::core::Trap::from(InterruptedTrap {
+                            Err(wasmi::Error::host(InterruptedTrap {
                                 function_index,
                                 parameters: parameters
                                     .iter()
