@@ -2059,7 +2059,9 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
                     )
                     .body
                     .as_ref()
-                    .unwrap()
+                    // The block shouldn't have been proposed for verification if it doesn't
+                    // have its body available.
+                    .unwrap_or_else(|| unreachable!())
                     .iter(),
             )
         } else {
