@@ -1022,7 +1022,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     )
                     .count();
 
-                debug_assert!(num_existing_requests <= self.max_requests_per_block);
                 num_existing_requests < self.max_requests_per_block
             })
             .flat_map(move |(unknown_block_height, unknown_block_hash)| {
