@@ -1451,6 +1451,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         // TODO: many of the errors don't properly translate here, needs some refactoring
                         match blocks_append.add_block(
                             &block.scale_encoded_header,
+                            block.scale_encoded_extrinsics,
                             block
                                 .scale_encoded_justifications
                                 .into_iter()
@@ -2360,8 +2361,12 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+            HeaderVerifySuccessInner::AllForks(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Left(iter.map(either::Left))),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Right(iter.map(either::Right))),
         }
     }
 
@@ -2805,7 +2810,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-            full: false,
+            download_bodies: false,
         });
 
         debug_assert!(self
