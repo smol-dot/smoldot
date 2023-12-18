@@ -1413,6 +1413,9 @@ impl SqliteFullDatabase {
         meta_clear(&transaction, "grandpa_authorities_set_id")?;
         meta_clear(&transaction, "grandpa_scheduled_target")?;
         transaction
+            .execute("DELETE FROM grandpa_triggered_authorities WHERE TRUE;", ())
+            .unwrap();
+        transaction
             .execute("DELETE FROM grandpa_scheduled_authorities WHERE TRUE;", ())
             .unwrap();
 
