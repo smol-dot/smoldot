@@ -178,13 +178,12 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TBl, TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, Source<TSrc>>,
-
-    /// See [`Config::download_bodies`].
-    download_bodies: bool,
 }
 
 struct PendingBlock<TBl> {
     header: Option<header::Header>,
+    /// SCALE-encoded extrinsics of the block. `None` if unknown. Only ever filled
+    /// if [`Config::download_bodies`] was `true`.
     body: Option<Vec<Vec<u8>>>,
     user_data: TBl,
 }
@@ -436,7 +435,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     download_bodies: config.download_bodies,
                 }),
-                download_bodies: config.download_bodies,
             }),
         }
     }
@@ -1047,59 +1045,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             ProcessOne::AllSync { sync: self }
         }
     }
-
-    /*/// Call in response to a [`BlockAnnounceOutcome::BlockBodyDownloadStart`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`RequestId`] is invalid.
-    ///
-    pub fn block_body_response(
-        mut self,
-        now_from_unix_epoch: Duration,
-        request_id: RequestId,
-        block_body: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> (BlockBodyVerify<TBl, TRq, TSrc>, Option<Request>) {
-        // TODO: unfinished
-
-        todo!()
-
-        /*// TODO: update occupation
-
-        // Removes traces of the request from the state machine.
-        let block_header_hash = if let Some((h, _)) = self
-            .inner
-            .pending_body_downloads
-            .iter_mut()
-            .find(|(_, (_, s))| *s == Some(source_id))
-        {
-            let hash = *h;
-            let header = self.inner.pending_body_downloads.remove(&hash).unwrap().0;
-            (header, hash)
-        } else {
-            panic!()
-        };
-
-        // Sanity check.
-        debug_assert_eq!(block_header_hash.1, block_header_hash.0.hash());
-
-        // If not full, there shouldn't be any block body download happening in the first place.
-        debug_assert!(self.inner.full);
-
-        match self
-            .chain
-            .verify_body(
-                block_header_hash.0.scale_encoding()
-                    .fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), now_from_unix_epoch) // TODO: stupid extra allocation
-        {
-            blocks_tree::BodyVerifyStep1::BadParent { .. }
-            | blocks_tree::BodyVerifyStep1::InvalidHeader(..)
-            | blocks_tree::BodyVerifyStep1::Duplicate(_) => unreachable!(),
-            blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(_runtime_req) => {
-                todo!()
-            }
-        }*/
-    }*/
 }
 
 impl<TBl, TRq, TSrc> ops::Index<SourceId> for AllForksSync<TBl, TRq, TSrc> {
@@ -1203,7 +1148,17 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
         }
 
-        // TODO: /!\ must verify that scale_encoded_extrinsics matches the header's extrinsics root
+        // Check whether the SCALE-encoded extrinsics match the extrinsics root found in
+        // the header.
+        if self.inner.inner.blocks.downloading_bodies() {
+            let calculated = header::extrinsics_root(&scale_encoded_extrinsics);
+            if calculated != *decoded_header.extrinsics_root {
+                return Err((
+                    AncestrySearchResponseError::ExtrinsicsRootMismatch,
+                    self.finish(),
+                ));
+            }
+        }
 
         // At this point, the source has given us correct blocks, and we consider the response
         // as a whole to be useful.
@@ -1290,7 +1245,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                     );
             }
 
-            if self.inner.inner.download_bodies {
+            if self.inner.inner.blocks.downloading_bodies() {
                 self.inner
                     .inner
                     .blocks
@@ -1490,7 +1445,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         self.inner.inner.inner.blocks.insert_unverified_block(
             self.decoded_header.number,
             self.inner.expected_next_hash,
-            if self.inner.inner.inner.download_bodies {
+            if self.inner.inner.inner.blocks.downloading_bodies() {
                 pending_blocks::UnverifiedBlockState::HeaderBody {
                     parent_hash: self.decoded_header.parent_hash,
                 }
@@ -1787,6 +1742,11 @@ pub enum AncestrySearchResponseError {
     /// requested. If this is not the first block, then it doesn't correspond to the parent of
     /// the previous block that has been added.
     UnexpectedBlock,
+
+    /// List of SCALE-encoded extrinsics doesn't match the extrinsics root found in the header.
+    ///
+    /// This can only happen if [`Config::download_bodies`] was `true`.
+    ExtrinsicsRootMismatch,
 
     /// The block height is equal to the locally-known finalized block height, but its hash isn't
     /// the same.
@@ -2103,7 +2063,7 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
-        if self.parent.inner.download_bodies {
+        if self.parent.inner.blocks.downloading_bodies() {
             Some(
                 self.parent
                     .inner
@@ -2114,7 +2074,9 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
                     )
                     .body
                     .as_ref()
-                    .unwrap()
+                    // The block shouldn't have been proposed for verification if it doesn't
+                    // have its body available.
+                    .unwrap_or_else(|| unreachable!())
                     .iter(),
             )
         } else {

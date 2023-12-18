@@ -246,6 +246,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         }
     }
 
+    /// Returns the value that was passed as [`Config::download_bodies`]
+    pub fn downloading_bodies(&self) -> bool {
+        self.download_bodies
+    }
+
     /// Add a new source to the container.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
@@ -997,8 +1002,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         // Combine the two block iterators and find sources.
         // There isn't any overlap between the two iterators.
         unknown_body_iter
-            .chain(unknown_header_iter)
-            .filter(move |(unknown_block_height, unknown_block_hash)| {
+            .map(|(n, h)| (n, h, false))
+            .chain(unknown_header_iter.map(|(n, h)| (n, h, true)))
+            .filter(move |(unknown_block_height, unknown_block_hash, _)| {
                 // Cap by `max_requests_per_block`.
                 // TODO: O(n)?
                 let num_existing_requests = self
@@ -1017,69 +1023,73 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     )
                     .count();
 
-                debug_assert!(num_existing_requests <= self.max_requests_per_block);
                 num_existing_requests < self.max_requests_per_block
             })
-            .flat_map(move |(unknown_block_height, unknown_block_hash)| {
-                // Try to find all appropriate sources.
-                let possible_sources = if let Some(force_source) = force_source {
-                    either::Left(iter::once(force_source).filter(move |id| {
-                        self.sources.source_knows_non_finalized_block(
-                            *id,
-                            unknown_block_height,
-                            unknown_block_hash,
-                        )
-                    }))
-                } else {
-                    either::Right(
-                        self.sources
-                            .knows_non_finalized_block(unknown_block_height, unknown_block_hash),
-                    )
-                };
-
-                possible_sources
-                    .filter(move |source_id| {
-                        // Don't start any request towards this source if there's another request
-                        // for the same block from the same source.
-                        // TODO: O(n)?
-                        !self
-                            .blocks_requests
-                            .range(
-                                (
+            .flat_map(
+                move |(unknown_block_height, unknown_block_hash, download_many)| {
+                    // Try to find all appropriate sources.
+                    let possible_sources =
+                        if let Some(force_source) = force_source {
+                            either::Left(iter::once(force_source).filter(move |id| {
+                                self.sources.source_knows_non_finalized_block(
+                                    *id,
                                     unknown_block_height,
-                                    *unknown_block_hash,
-                                    RequestId(usize::min_value()),
+                                    unknown_block_hash,
                                 )
-                                    ..=(
+                            }))
+                        } else {
+                            either::Right(self.sources.knows_non_finalized_block(
+                                unknown_block_height,
+                                unknown_block_hash,
+                            ))
+                        };
+
+                    possible_sources
+                        .filter(move |source_id| {
+                            // Don't start any request towards this source if there's another request
+                            // for the same block from the same source.
+                            // TODO: O(n)?
+                            !self
+                                .blocks_requests
+                                .range(
+                                    (
                                         unknown_block_height,
                                         *unknown_block_hash,
-                                        RequestId(usize::max_value()),
-                                    ),
-                            )
-                            .any(|(_, _, request_id)| {
-                                self.requests[request_id.0].source_id == *source_id
-                            })
-                    })
-                    .map(move |source_id| {
-                        debug_assert!(self.sources.source_knows_non_finalized_block(
-                            source_id,
-                            unknown_block_height,
-                            unknown_block_hash
-                        ));
-
-                        DesiredRequest {
-                            source_id,
-                            request_params: RequestParams {
-                                first_block_hash: *unknown_block_hash,
-                                first_block_height: unknown_block_height,
-                                num_blocks: NonZeroU64::new(
-                                    unknown_block_height - self.sources.finalized_block_height(),
+                                        RequestId(usize::min_value()),
+                                    )
+                                        ..=(
+                                            unknown_block_height,
+                                            *unknown_block_hash,
+                                            RequestId(usize::max_value()),
+                                        ),
                                 )
-                                .unwrap(),
-                            },
-                        }
-                    })
-            })
+                                .any(|(_, _, request_id)| {
+                                    self.requests[request_id.0].source_id == *source_id
+                                })
+                        })
+                        .map(move |source_id| {
+                            debug_assert!(self.sources.source_knows_non_finalized_block(
+                                source_id,
+                                unknown_block_height,
+                                unknown_block_hash
+                            ));
+
+                            DesiredRequest {
+                                source_id,
+                                request_params: RequestParams {
+                                    first_block_hash: *unknown_block_hash,
+                                    first_block_height: unknown_block_height,
+                                    num_blocks: NonZeroU64::new(if download_many {
+                                        unknown_block_height - self.sources.finalized_block_height()
+                                    } else {
+                                        1
+                                    })
+                                    .unwrap(),
+                                },
+                            }
+                        })
+                },
+            )
     }
 }
 
