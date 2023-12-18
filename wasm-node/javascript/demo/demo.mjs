@@ -59,7 +59,7 @@ worker.postMessage(port2, [port2]);
 
 const client = smoldot.start({
     portToWorker: port1,
-    maxLogLevel: 3,  // Can be increased for more verbosity
+    maxLogLevel: process.stdout.isTTY ? 3 : 4,  // Can be modified manually for more verbosity
     forbidTcp: false,
     forbidWs: false,
     forbidNonLocalWs: false,
