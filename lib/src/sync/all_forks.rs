@@ -1148,7 +1148,17 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
         }
 
-        // TODO: /!\ must verify that scale_encoded_extrinsics matches the header's extrinsics root
+        // Check whether the SCALE-encoded extrinsics match the extrinsics root found in
+        // the header.
+        if self.inner.inner.blocks.downloading_bodies() {
+            let calculated = header::extrinsics_root(&scale_encoded_extrinsics);
+            if calculated != *decoded_header.extrinsics_root {
+                return Err((
+                    AncestrySearchResponseError::ExtrinsicsRootMismatch,
+                    self.finish(),
+                ));
+            }
+        }
 
         // At this point, the source has given us correct blocks, and we consider the response
         // as a whole to be useful.
@@ -1732,6 +1742,11 @@ pub enum AncestrySearchResponseError {
     /// requested. If this is not the first block, then it doesn't correspond to the parent of
     /// the previous block that has been added.
     UnexpectedBlock,
+
+    /// List of SCALE-encoded extrinsics doesn't match the extrinsics root found in the header.
+    ///
+    /// This can only happen if [`Config::download_bodies`] was `true`.
+    ExtrinsicsRootMismatch,
 
     /// The block height is equal to the locally-known finalized block height, but its hash isn't
     /// the same.
