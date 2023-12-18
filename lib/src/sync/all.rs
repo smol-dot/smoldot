@@ -2192,8 +2192,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            BlockVerifyInner::AllForks(_verify) => todo!(), // TODO: /!\
-            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+            BlockVerifyInner::AllForks(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Left(iter.map(either::Left))),
+            BlockVerifyInner::Optimistic(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Right(iter.map(either::Right))),
         }
     }
 
