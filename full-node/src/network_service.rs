@@ -347,6 +347,7 @@ struct Chain {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BanSeverity {
     Low,
+    High,
 }
 
 impl NetworkService {
@@ -1117,6 +1118,7 @@ async fn background_task(mut inner: Inner) {
                     Instant::now()
                         + Duration::from_secs(match severity {
                             BanSeverity::Low => 10,
+                            BanSeverity::High => 40,
                         }),
                 );
                 let _ = inner.network.gossip_close(

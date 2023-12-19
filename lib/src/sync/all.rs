@@ -2476,6 +2476,20 @@ enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
+    /// Returns the source the justification was obtained from.
+    pub fn sender(&self) -> (SourceId, &TSrc) {
+        match &self.inner {
+            FinalityProofVerifyInner::AllForks(inner) => {
+                let sender = inner.sender().1;
+                (sender.outer_source_id, &sender.user_data)
+            }
+            FinalityProofVerifyInner::Optimistic(inner) => {
+                let sender = inner.sender().1;
+                (sender.outer_source_id, &sender.user_data)
+            }
+        }
+    }
+
     /// Perform the verification.
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the

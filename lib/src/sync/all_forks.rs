@@ -2180,6 +2180,11 @@ pub struct FinalityProofVerify<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
+    /// Returns the source the justification was obtained from.
+    pub fn sender(&self) -> (SourceId, &TSrc) {
+        (self.source_id, &self.parent[self.source_id])
+    }
+
     /// Perform the verification.
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
