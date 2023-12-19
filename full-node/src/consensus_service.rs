@@ -1836,10 +1836,65 @@ impl SyncBackground {
                 self.sync = idle;
                 (self, false)
             }
-            all::ProcessOne::VerifyWarpSyncFragment(_)
-            | all::ProcessOne::WarpSyncBuildRuntime(_)
-            | all::ProcessOne::WarpSyncBuildChainInformation(_)
-            | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
+            all::ProcessOne::VerifyWarpSyncFragment(verify) => {
+                let sender = verify
+                    .proof_sender()
+                    .map(|(_, s)| s.as_ref().unwrap().peer_id.clone());
+
+                let (new_sync, outcome) = verify.perform(rand::random());
+                self.sync = new_sync;
+                match outcome {
+                    Ok((fragment_hash, fragment_height)) => {
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "warp-sync-fragment-verification-success; peer_id={}, fragment-hash={}, fragment-height={fragment_height}",
+                                sender.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_owned()),
+                                hex::encode(&fragment_hash)
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!(
+                                "failed-warp-sync-fragment-verification; peer_id={}, error={err}",
+                                sender
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "unknown".to_owned()),
+                            ),
+                        );
+                    }
+                }
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncBuildRuntime(build_runtime) => {
+                let (new_sync, outcome) =
+                    build_runtime.build(all::ExecHint::CompileAheadOfTime, true);
+                self.sync = new_sync;
+                if let Err(err) = outcome {
+                    self.log_callback.log(
+                        LogLevel::Warn,
+                        format!("failed-warp-sync-runtime-compilation; error={err}"),
+                    );
+                }
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncBuildChainInformation(build_chain_information) => {
+                let (new_sync, outcome) = build_chain_information.build();
+                self.sync = new_sync;
+                if let Err(err) = outcome {
+                    self.log_callback.log(
+                        LogLevel::Warn,
+                        format!("failed-warp-sync-chain-information-build; error={err}"),
+                    );
+                }
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncFinished { .. } => {
+                // Warp syncing is currently disabled for the full node.
+                unimplemented!()
+            }
             all::ProcessOne::VerifyBlock(verify) => {
                 let when_verification_started = Instant::now();
                 let mut database_accesses_duration = Duration::new(0, 0);
