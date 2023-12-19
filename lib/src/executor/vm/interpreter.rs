@@ -25,6 +25,8 @@ use super::{
 use alloc::{borrow::ToOwned as _, string::ToString as _, sync::Arc, vec::Vec};
 use core::fmt;
 
+pub use wasmi::CompilationMode;
+
 /// See [`super::VirtualMachinePrototype`].
 pub struct InterpreterPrototype {
     /// Base components that can be used to recreate a prototype later if desired.
@@ -52,6 +54,7 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module_bytes: &[u8],
+        compilation_mode: CompilationMode,
         symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let engine = {
@@ -66,7 +69,7 @@ impl InterpreterPrototype {
             config.wasm_mutable_global(false);
             config.wasm_saturating_float_to_int(false);
             config.wasm_tail_call(false);
-            config.compilation_mode(wasmi::CompilationMode::Lazy);
+            config.compilation_mode(compilation_mode);
 
             wasmi::Engine::new(&config)
         };

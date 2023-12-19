@@ -105,7 +105,7 @@ impl RuntimeCachesService {
                                         executor::host::Config {
                                             module: &code,
                                             heap_pages,
-                                            exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
+                                            exec_hint: executor::vm::ExecHint::ValidateAndCompile,
                                             allow_unresolved_imports: true, // TODO: configurable? or if not, document
                                         },
                                     )
