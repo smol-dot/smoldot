@@ -1038,7 +1038,7 @@ impl SyncBackground {
                         all::BlockAnnounceOutcome::NotFinalizedChain => {}
                         all::BlockAnnounceOutcome::Discarded => {}
                         all::BlockAnnounceOutcome::StoredForLater {} => {}
-                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
+                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(), // TODO: ?!?! why unreachable? also, ban the peer
                     }
                 }
                 WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {

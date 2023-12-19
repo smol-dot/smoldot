@@ -289,6 +289,7 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BanSeverity {
     Low,
+    High,
 }
 
 impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
@@ -1312,6 +1313,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             ) => {
                 let ban_duration = Duration::from_secs(match severity {
                     BanSeverity::Low => 10,
+                    BanSeverity::High => 40,
                 });
 
                 let had_slot = matches!(
