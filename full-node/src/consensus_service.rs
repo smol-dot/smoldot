@@ -689,6 +689,24 @@ enum SubtaskFinished {
         source_id: all::SourceId,
         result: Result<Vec<BlockData>, network_service::BlocksRequestError>,
     },
+    WarpSyncRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<
+            network::service::EncodedGrandpaWarpSyncResponse,
+            network_service::WarpSyncRequestError,
+        >,
+    },
+    StorageRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<network::service::EncodedMerkleProof, ()>,
+    },
+    CallProofRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<network::service::EncodedMerkleProof, ()>,
+    },
 }
 
 impl SyncBackground {
@@ -1039,14 +1057,13 @@ impl SyncBackground {
                 WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
                     request_id,
                     source_id,
-                    result,
+                    result: Ok(blocks),
                 }) => {
-                    // TODO: clarify this piece of code
-                    let result = result.map_err(|_| ());
-                    let (_, response_outcome) = self.sync.blocks_request_response(
+                    let _ = self.sync.blocks_request_response(
                         request_id,
-                        result.map(|v| {
-                            v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        Ok(blocks
+                            .into_iter()
+                            .map(|block| all::BlockRequestSuccessBlock {
                                 scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                                 scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
                                 scale_encoded_justifications: block
@@ -1059,19 +1076,158 @@ impl SyncBackground {
                                     })
                                     .collect(),
                                 user_data: NonFinalizedBlock::NotVerified,
-                            })
-                        }),
+                            })),
                     );
-
-                    match response_outcome {
-                        all::ResponseOutcome::Outdated
-                        | all::ResponseOutcome::Queued
-                        | all::ResponseOutcome::NotFinalizedChain { .. }
-                        | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-                    }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Err(_),
+                }) => {
+                    let _ = self
+                        .sync
+                        .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::WarpSyncRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Ok(result),
+                }) => {
+                    let decoded = result.decode();
+                    let fragments = decoded
+                        .fragments
+                        .into_iter()
+                        .map(|f| all::WarpSyncFragment {
+                            scale_encoded_header: f.scale_encoded_header.to_vec(),
+                            scale_encoded_justification: f.scale_encoded_justification.to_vec(),
+                        })
+                        .collect();
+                    let _ = self.sync.grandpa_warp_sync_response_ok(
+                        request_id,
+                        fragments,
+                        decoded.is_finished,
+                    );
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::WarpSyncRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Err(_),
+                }) => {
+                    let _ = self.sync.grandpa_warp_sync_response_err(request_id);
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::StorageRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
+                    // Storage proof request.
+                    let _ = self
+                        .sync
+                        .storage_get_response(request_id, result.map(|r| r.decode().to_owned()));
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::CallProofRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
+                    // Successful call proof request.
+                    self.sync
+                        .call_proof_response(request_id, result.map(|r| r.decode().to_owned()));
+                    // TODO: need help from networking service to avoid this to_owned
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
                     if self.sync[source_id]
                         .as_ref()
                         .map_or(false, |info| info.is_disconnected)
@@ -1562,11 +1718,101 @@ impl SyncBackground {
                         }
                     }));
                 }
-                all::DesiredRequest::WarpSync { .. }
-                | all::DesiredRequest::StorageGetMerkleProof { .. }
-                | all::DesiredRequest::RuntimeCallMerkleProof { .. } => {
-                    // Not used in "full" mode.
-                    unreachable!()
+                all::DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().warp_sync_request(
+                        peer_id,
+                        self.network_chain_id,
+                        sync_start_block_hash,
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::WarpSync {
+                            sync_start_block_hash,
+                        },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::WarpSyncRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+                all::DesiredRequest::StorageGetMerkleProof {
+                    block_hash, keys, ..
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().storage_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::StorageProofRequestConfig {
+                            block_hash,
+                            keys: keys.clone().into_iter(),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::StorageGet { block_hash, keys },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::StorageRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+                all::DesiredRequest::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().call_proof_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::CallProofRequestConfig {
+                            block_hash,
+                            method: function_name.clone(),
+                            parameter_vectored: iter::once(parameter_vectored.clone()),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::RuntimeCallMerkleProof {
+                            block_hash,
+                            function_name,
+                            parameter_vectored,
+                        },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::CallProofRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
                 }
             }
         }
