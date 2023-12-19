@@ -4,7 +4,7 @@
 
 ### Changed
 
-- When a network request fails, smoldot now closes the gossip link with the peer it tried to send the request to, and will not re-open a new gossip link for a little while.
+- When a network request fails, smoldot now closes the gossip link with the peer it tried to send the request to, and will not re-open a new gossip link for a little while. ([#1482](https://github.com/smol-dot/smoldot/pull/1482))
 
 ## 2.0.14 - 2023-12-11
 
