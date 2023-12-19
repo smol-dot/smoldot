@@ -1121,11 +1121,23 @@ async fn background_task(mut inner: Inner) {
                             BanSeverity::High => 40,
                         }),
                 );
-                let _ = inner.network.gossip_close(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
+                if inner
+                    .network
+                    .gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .is_ok()
+                {
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "chain-disconnected; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+                }
                 if inner.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,

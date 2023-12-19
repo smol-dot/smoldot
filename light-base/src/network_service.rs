@@ -1325,11 +1325,22 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     basic_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
                 );
 
-                let _ = task.network.gossip_close(
-                    chain_id,
-                    &peer_id,
-                    service::GossipKind::ConsensusTransactions,
-                );
+                if task
+                    .network
+                    .gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    )
+                    .is_ok()
+                {
+                    log::debug!(
+                        target: "network",
+                        "Gossip({}, {}) => Closed",
+                        &task.network[chain_id].log_name,
+                        peer_id,
+                    );
+                }
 
                 if had_slot {
                     log::debug!(
