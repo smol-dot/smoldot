@@ -29,7 +29,11 @@ use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLe
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, SinkExt as _, StreamExt as _};
+use futures_util::{
+    future,
+    stream::{self, FuturesUnordered},
+    SinkExt as _, StreamExt as _,
+};
 use hashbrown::HashSet;
 use smol::lock::Mutex;
 use smoldot::{
@@ -48,8 +52,10 @@ use smoldot::{
 use std::{
     array,
     borrow::Cow,
-    iter, mem,
+    future::Future,
+    iter,
     num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -174,7 +180,7 @@ pub enum InitError {
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
+    pub async fn new(mut config: Config) -> Result<Arc<Self>, InitError> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_number,
@@ -324,7 +330,6 @@ impl ConsensusService {
 
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
 
-        let (block_requests_finished_tx, block_requests_finished_rx) = mpsc::channel(0);
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
         let background_sync = SyncBackground {
@@ -342,14 +347,12 @@ impl ConsensusService {
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
-            tasks_executor: config.tasks_executor,
+            sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
-            block_requests_finished_tx,
-            block_requests_finished_rx,
             jaeger_service: config.jaeger_service,
         };
 
-        background_sync.start();
+        (config.tasks_executor)(Box::pin(background_sync.run()));
 
         Ok(Arc::new(ConsensusService {
             block_number_bytes: config.block_number_bytes,
@@ -646,26 +649,11 @@ struct SyncBackground {
     /// source are removed.
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
 
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    /// Futures that get executed by the background task.
+    sub_tasks: FuturesUnordered<Pin<Box<dyn Future<Output = SubtaskFinished> + Send>>>,
 
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
-
-    /// Block requests that have been emitted on the networking service and that are still in
-    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    block_requests_finished_rx: mpsc::Receiver<(
-        all::RequestId,
-        all::SourceId,
-        Result<Vec<BlockData>, network_service::BlocksRequestError>,
-    )>,
-
-    /// Sending side of [`SyncBackground::block_requests_finished_rx`].
-    block_requests_finished_tx: mpsc::Sender<(
-        all::RequestId,
-        all::SourceId,
-        Result<Vec<BlockData>, network_service::BlocksRequestError>,
-    )>,
 
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
@@ -696,22 +684,15 @@ struct NetworkSourceInfo {
     is_disconnected: bool,
 }
 
-impl SyncBackground {
-    fn start(mut self) {
-        // This function is a small hack because I didn't find a better way to store the executor
-        // within `Background` while at the same time spawning the `Background` using said
-        // executor.
-        let mut actual_executor =
-            mem::replace(&mut self.tasks_executor, Box::new(|_| unreachable!()));
-        let (tx, rx) = oneshot::channel();
-        actual_executor(Box::pin(async move {
-            let actual_executor = rx.await.unwrap();
-            self.tasks_executor = actual_executor;
-            self.run().await;
-        }));
-        tx.send(actual_executor).unwrap_or_else(|_| panic!());
-    }
+enum SubtaskFinished {
+    BlocksRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    },
+}
 
+impl SyncBackground {
     async fn run(mut self) {
         let mut process_sync = true;
 
@@ -723,11 +704,7 @@ impl SyncBackground {
                 FrontendEvent(ToBackground),
                 FrontendClosed,
                 NetworkEvent(network_service::Event),
-                RequestFinished(
-                    all::RequestId,
-                    all::SourceId,
-                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
-                ),
+                SubtaskFinished(SubtaskFinished),
                 SyncProcess,
             }
 
@@ -838,9 +815,10 @@ impl SyncBackground {
                     WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
                 })
                 .or(async {
-                    let (request_id, source_id, result) =
-                        self.block_requests_finished_rx.select_next_some().await;
-                    WakeUpReason::RequestFinished(request_id, source_id, result)
+                    let Some(subtask_finished) = self.sub_tasks.next().await else {
+                        future::pending().await
+                    };
+                    WakeUpReason::SubtaskFinished(subtask_finished)
                 })
                 .or(async {
                     if !process_sync {
@@ -1059,7 +1037,11 @@ impl SyncBackground {
                     // Different chain index.
                 }
 
-                WakeUpReason::RequestFinished(request_id, source_id, result) => {
+                WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
                     // TODO: clarify this piece of code
                     let result = result.map_err(|_| ());
                     let (_, response_outcome) = self.sync.blocks_request_response(
@@ -1572,14 +1554,12 @@ impl SyncBackground {
 
                     let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
-                    (self.tasks_executor)(Box::pin({
-                        let mut block_requests_finished_tx =
-                            self.block_requests_finished_tx.clone();
-                        async move {
-                            let result = request.await;
-                            let _ = block_requests_finished_tx
-                                .send((request_id, source_id, result))
-                                .await;
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::BlocksRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
                         }
                     }));
                 }
