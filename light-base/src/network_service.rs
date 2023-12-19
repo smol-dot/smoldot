@@ -285,7 +285,7 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     marker: core::marker::PhantomData<TPlat>,
 }
 
-/// Severity of a ban. See [`NetworkService::ban_and_disconnect`].
+/// Severity of a ban. See [`NetworkServiceChain::ban_and_disconnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BanSeverity {
     Low,
