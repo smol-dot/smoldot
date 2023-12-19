@@ -1953,6 +1953,7 @@ impl SyncBackground {
                         .choose(&mut rand::thread_rng())
                         .unwrap();
                     self.network_service
+                        .clone()
                         .call_proof_request(
                             target.clone(),
                             self.network_chain_id,
@@ -1967,16 +1968,17 @@ impl SyncBackground {
                         .unwrap()
                 };
 
-                let decoded_proof =
-                    trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
-                        proof: proof.decode(),
-                    })
-                    .unwrap();
+                self.database
+                    .with_database(move |database| {
+                        let decoded_proof = trie::proof_decode::decode_and_verify_proof(
+                            trie::proof_decode::Config {
+                                proof: proof.decode(),
+                            },
+                        )
+                        .unwrap();
 
-                for (key, entry) in decoded_proof.iter_ordered() {
-                    // TODO: check the state root hash
-                    self.database
-                        .with_database(|database| {
+                        for (_, entry) in decoded_proof.iter_ordered() {
+                            // TODO: check the state root hash
                             database.insert_trie_nodes(
                                 iter::once(full_sqlite::InsertTrieNode {
                                     merkle_value: todo!(),
@@ -2011,10 +2013,10 @@ impl SyncBackground {
                                         ..
                                     } => 1,
                                 },
-                            );
-                        })
-                        .await;
-                }
+                            ).unwrap();
+                        }
+                    })
+                    .await;
 
                 let parent_info = header_verification_success.parent_user_data().map(|b| {
                     let NonFinalizedBlock::Verified { runtime } = b else {
