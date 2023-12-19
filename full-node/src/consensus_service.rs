@@ -35,6 +35,7 @@ use futures_util::{
     SinkExt as _, StreamExt as _,
 };
 use hashbrown::HashSet;
+use rand::seq::IteratorRandom;
 use smol::lock::Mutex;
 use smoldot::{
     author,
@@ -44,7 +45,10 @@ use smoldot::{
     identity::keystore,
     informant::HashDisplay,
     libp2p,
-    network::{self, codec::BlockData},
+    network::{
+        self,
+        codec::{BlockData, CallProofRequestConfig},
+    },
     sync::all,
     trie,
     verify::body_only::{self, StorageChanges, TrieEntryVersion},
@@ -1941,6 +1945,77 @@ impl SyncBackground {
                     };
 
                 let parent_hash = *header_verification_success.parent_hash();
+
+                let proof = {
+                    let target = self
+                        .peers_source_id_map
+                        .keys()
+                        .choose(&mut rand::thread_rng())
+                        .unwrap();
+                    self.network_service
+                        .call_proof_request(
+                            target.clone(),
+                            self.network_chain_id,
+                            CallProofRequestConfig {
+                                block_hash: parent_hash,
+                                // TODO: must also do checkinherents
+                                method: "Core_execute_block".into(),
+                                parameter_vectored: iter::empty::<Vec<u8>>(), // TODO: no
+                            },
+                        )
+                        .await
+                        .unwrap()
+                };
+
+                let decoded_proof =
+                    trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                        proof: proof.decode(),
+                    })
+                    .unwrap();
+
+                for (key, entry) in decoded_proof.iter_ordered() {
+                    // TODO: check the state root hash
+                    self.database
+                        .with_database(|database| {
+                            database.insert_trie_nodes(
+                                iter::once(full_sqlite::InsertTrieNode {
+                                    merkle_value: todo!(),
+                                    partial_key_nibbles: todo!(),
+                                    children_merkle_values: todo!(),
+                                    storage_value: match entry.trie_node_info.storage_value {
+                                        trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                            _,
+                                        ) => return,
+                                        trie::proof_decode::StorageValue::None => {
+                                            full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                        }
+                                        trie::proof_decode::StorageValue::Known {
+                                            value, ..
+                                        } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                            value: Cow::Borrowed(value),
+                                            references_merkle_value: false, // TODO:
+                                        },
+                                    },
+                                }),
+                                match entry.trie_node_info.storage_value {
+                                    trie::proof_decode::StorageValue::None => 0, // TODO: ?!
+                                    trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                        hash,
+                                    ) => return,
+                                    trie::proof_decode::StorageValue::Known {
+                                        inline: true,
+                                        ..
+                                    } => 0,
+                                    trie::proof_decode::StorageValue::Known {
+                                        inline: false,
+                                        ..
+                                    } => 1,
+                                },
+                            );
+                        })
+                        .await;
+                }
+
                 let parent_info = header_verification_success.parent_user_data().map(|b| {
                     let NonFinalizedBlock::Verified { runtime } = b else {
                         unreachable!()
