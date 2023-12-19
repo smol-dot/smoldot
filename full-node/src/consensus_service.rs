@@ -587,8 +587,7 @@ struct SyncBackground {
     /// This "trick" is necessary in order to not cancel requests that have already been started
     /// against a peer when it disconnects and that might already have a response.
     ///
-    /// Each on-going request has a corresponding background task that sends its result to
-    /// [`SyncBackground::block_requests_finished_rx`].
+    /// Each on-going request has a corresponding background task in [`SyncBackground::sub_tasks`].
     sync: all::AllSync<(), Option<NetworkSourceInfo>, NonFinalizedBlock>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
