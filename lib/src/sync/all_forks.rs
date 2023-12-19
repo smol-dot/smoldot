@@ -787,6 +787,16 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.obsolete_requests()
     }
 
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        self.inner.blocks.request_source_id(request_id)
+    }
+
     /// Call in response to a blocks request being successful.
     ///
     /// This method takes ownership of the [`AllForksSync`] and puts it in a mode where the blocks

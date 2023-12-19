@@ -24,7 +24,7 @@ use crate::{network_service, platform::PlatformRef, util};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    string::{String, ToString as _},
+    string::String,
     sync::Arc,
     vec::Vec,
 };
@@ -620,9 +620,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Err(_)))) => {
                 // Failed block request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
                 task.network_service
                     .ban_and_disconnect(
-                        todo!(),
+                        source_peer_id,
                         network_service::BanSeverity::Low,
                         "failed-blocks-request",
                     )
@@ -648,9 +649,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Err(_)))) => {
                 // Failed warp sync request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
                 task.network_service
                     .ban_and_disconnect(
-                        todo!(),
+                        source_peer_id,
                         network_service::BanSeverity::Low,
                         "failed-warp-sync-request",
                     )
@@ -661,9 +663,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(r))) => {
                 // Storage proof request.
                 if r.is_err() {
+                    let source_peer_id =
+                        task.sync[task.sync.request_source_id(request_id)].0.clone();
                     task.network_service
                         .ban_and_disconnect(
-                            todo!(),
+                            source_peer_id,
                             network_service::BanSeverity::Low,
                             "failed-storage-request",
                         )
@@ -681,9 +685,10 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(err)))) => {
                 // Failed call proof request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
                 task.network_service
                     .ban_and_disconnect(
-                        todo!(),
+                        source_peer_id,
                         network_service::BanSeverity::Low,
                         "failed-call-proof-request",
                     )

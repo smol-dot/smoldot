@@ -492,7 +492,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Removes a source from the state machine. Returns the user data of this source, and all
-    /// the requests that this source were expected to perform.
+    /// the requests that this source was expected to perform.
     ///
     /// # Panic
     ///
@@ -1140,6 +1140,27 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             AllSyncInner::WarpSync { .. } => either::Right(either::Right(iter::empty())), // TODO: not implemented properly
             AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        match (&self.inner, &self.shared.requests[request_id.0]) {
+            (AllSyncInner::AllForks(inner), RequestMapping::AllForks(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            (AllSyncInner::WarpSync { inner, .. }, RequestMapping::WarpSync(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            _ => unreachable!(),
         }
     }
 

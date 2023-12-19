@@ -670,6 +670,25 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         user_data
     }
 
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        if let Some((src, _)) = self.inner.obsolete_requests.get(&request_id) {
+            *src
+        } else {
+            self.inner
+                .verification_queue
+                .requests()
+                .find(|(rq, _)| rq.0 == request_id)
+                .unwrap()
+                .1
+        }
+    }
+
     /// Process the next block in the queue of verification.
     ///
     /// This method takes ownership of the [`OptimisticSync`]. The [`OptimisticSync`] is yielded
