@@ -1291,6 +1291,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
                 // Finality proof to verify.
+                let sender = verify.sender().1 .0.clone();
                 match verify.perform({
                     let mut seed = [0; 32];
                     self.platform.fill_random_bytes(&mut seed);
@@ -1308,7 +1309,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => FinalityProofVerified(finalized_blocks={})",
+                            "Sync => FinalityProofVerified(finalized_blocks={}, sender={sender})",
                             finalized_blocks_newest_to_oldest.len(),
                         );
 
@@ -1344,28 +1345,33 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     (sync, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the proof
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => JustificationVerificationError(error={:?})",
-                            error,
+                            "Sync => JustificationVerificationError(error={error:?}, sender={sender})",
                         );
 
+                        // TODO: don't print for consensusenginemismatch?
                         log::warn!(
                             target: &self.log_target,
-                            "Error while verifying justification: {}",
-                            error
+                            "Error while verifying justification: {error}"
                         );
+
+                        // TODO: don't ban for consensusenginemismatch?
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender,
+                                network_service::BanSeverity::High,
+                                "bad-justification",
+                            )
+                            .await;
                     }
 
                     (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the proof
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => GrandpaCommitVerificationError(error={:?})",
-                            error,
+                            "Sync => GrandpaCommitVerificationError(error={error:?}, sender={sender})",
                         );
 
                         log::warn!(
@@ -1373,6 +1379,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             "Error while verifying GrandPa commit: {}",
                             error
                         );
+
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender,
+                                network_service::BanSeverity::High,
+                                "bad-grandpa-commit",
+                            )
+                            .await;
                     }
                 }
             }
