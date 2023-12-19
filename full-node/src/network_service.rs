@@ -1151,6 +1151,9 @@ async fn background_task(mut inner: Inner) {
                         ),
                     );
                 }
+
+                debug_assert!(inner.event_pending_send.is_none());
+                inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
             }
 
             WakeUpReason::Message(ToBackground::ForegroundAnnounceBlock {

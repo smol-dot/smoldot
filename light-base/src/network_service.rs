@@ -1340,6 +1340,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         &task.network[chain_id].log_name,
                         peer_id,
                     );
+                    let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
+                    debug_assert!(_was_in.is_some());
                 }
 
                 if had_slot {
@@ -1358,7 +1360,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
-                task.open_gossip_links.remove(&(chain_id, peer_id));
+                debug_assert!(task.event_pending_send.is_none());
+                task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
             }
             WakeUpReason::MessageForChain(
                 chain_id,
