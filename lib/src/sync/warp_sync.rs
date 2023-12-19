@@ -583,6 +583,19 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         self.sources.iter().map(|(id, _)| SourceId(id))
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        assert!(self.sources.contains(source_id.0));
+        self.in_progress_requests_by_source
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
+            .count()
+    }
+
     /// Add a source to the list of sources.
     ///
     /// The source has a finalized block height of 0, which should later be updated using

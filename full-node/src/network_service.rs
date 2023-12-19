@@ -43,7 +43,7 @@ use smol::{
 use smoldot::{
     database::full_sqlite,
     header,
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     libp2p::{
         connection,
         multiaddr::{self, Multiaddr, Protocol},
@@ -56,6 +56,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Instant,
+    vec,
 };
 
 pub use smoldot::network::service::ChainId;
@@ -160,16 +161,14 @@ pub struct NetworkService {
     local_peer_id: PeerId,
 
     /// Service to use to report traces.
-    jaeger_service: Arc<jaeger_service::JaegerService>,
+    // TODO: unused
+    _jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
     to_background_tx: Mutex<channel::Sender<ToBackground>>,
 
     /// Name of all the chains that have been registered, for logging purposes.
     chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
-
-    /// See [`Config::log_callback`].
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
 }
 
 enum ToBackground {
@@ -196,6 +195,25 @@ enum ToBackground {
         chain_id: ChainId,
         config: codec::BlocksRequestConfig,
         result_tx: oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
+    },
+    ForegroundWarpSyncRequest {
+        target: PeerId,
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+        result_tx:
+            oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+    },
+    ForegroundStorageProofRequest {
+        target: PeerId,
+        chain_id: ChainId,
+        config: codec::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
+        result_tx: oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+    },
+    ForegroundCallProofRequest {
+        target: PeerId, // TODO: takes by value because of futures longevity issue
+        chain_id: ChainId,
+        config: codec::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
+        result_tx: oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
     },
     ForegroundGetNumConnections {
         result_tx: oneshot::Sender<usize>,
@@ -275,6 +293,27 @@ struct Inner {
     blocks_requests: HashMap<
         service::SubstreamId,
         oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all warp sync requests that have been started but not finished yet.
+    warp_sync_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all storage requests that have been started but not finished yet.
+    storage_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all call proof requests that have been started but not finished yet.
+    call_proof_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -460,12 +499,24 @@ impl NetworkService {
             from_connections_rx,
             from_connections_tx,
             tasks_executor: config.tasks_executor,
-            log_callback: config.log_callback.clone(),
+            log_callback: config.log_callback,
             network,
             noise_key: config.noise_key,
             peering_strategy,
             blocks_requests: hashbrown::HashMap::with_capacity_and_hasher(
                 50, // TODO: ?
+                Default::default(),
+            ),
+            warp_sync_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                2, // TODO: ?
+                Default::default(),
+            ),
+            storage_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                5, // TODO: ?
+                Default::default(),
+            ),
+            call_proof_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                5, // TODO: ?
                 Default::default(),
             ),
             kademlia_find_nodes_requests: hashbrown::HashMap::with_capacity_and_hasher(
@@ -482,9 +533,8 @@ impl NetworkService {
         let network_service = Arc::new(NetworkService {
             local_peer_id,
             chain_names,
-            jaeger_service: config.jaeger_service,
+            _jaeger_service: config.jaeger_service,
             to_background_tx: Mutex::new(to_background_tx),
-            log_callback: config.log_callback,
         });
 
         // Adjust the receivers to keep the `network_service` alive.
@@ -639,59 +689,6 @@ impl NetworkService {
         chain_id: ChainId,
         config: codec::BlocksRequestConfig,
     ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
-        let chain_name = self.chain_names[&chain_id].clone();
-
-        self.log_callback.log(
-            LogLevel::Debug,
-            format!(
-                "blocks-request-start; peer_id={}; chain={}; start={}; desired_count={}; direction={}",
-                target,
-                chain_name,
-                match &config.start {
-                    codec::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
-                    codec::BlocksRequestConfigStart::Number(n) => either::Right(n),
-                },
-                config.desired_count,
-                match config.direction {
-                    codec::BlocksRequestDirection::Ascending => "ascending",
-                    codec::BlocksRequestDirection::Descending => "descending",
-                },
-            ),
-        );
-
-        // Setup a guard that will print a log message in case it is dropped silently.
-        // This lets us detect if the request is cancelled.
-        struct LogIfCancel(PeerId, String, Arc<dyn LogCallback + Send + Sync>);
-        impl Drop for LogIfCancel {
-            fn drop(&mut self) {
-                self.2.log(
-                    LogLevel::Debug,
-                    format!(
-                        "blocks-request-ended; peer_id={}; chain={}; outcome=cancelled",
-                        self.0, self.1
-                    ),
-                );
-            }
-        }
-        let _log_if_cancel = LogIfCancel(
-            target.clone(),
-            chain_name.clone(),
-            self.log_callback.clone(),
-        );
-
-        let _jaeger_span = self.jaeger_service.outgoing_block_request_span(
-            &self.local_peer_id,
-            &target,
-            config.desired_count.get(),
-            if let (1, codec::BlocksRequestConfigStart::Hash(block_hash)) =
-                (config.desired_count.get(), &config.start)
-            {
-                Some(block_hash)
-            } else {
-                None
-            },
-        );
-
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -706,30 +703,102 @@ impl NetworkService {
             })
             .await;
 
-        let result = result_rx.await.unwrap();
+        result_rx.await.unwrap()
+    }
 
-        // Requet has finished. Print the log and prevent the cancellation message from being
-        // printed.
-        mem::forget(_log_if_cancel);
-        match &result {
-            Ok(success) => {
-                self.log_callback.log(LogLevel::Debug, format!(
-                    "blocks-request-ended; peer_id={}; chain={}; outcome=success; response_blocks={}",
-                    target, chain_name, success.len()
-                ));
-            }
-            Err(err) => {
-                self.log_callback.log(
-                    LogLevel::Debug,
-                    format!(
-                        "blocks-request-ended; peer_id={}; chain={}; outcome=failure; error={}",
-                        target, chain_name, err
-                    ),
-                );
-            }
-        }
+    /// Sends a warp sync request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn warp_sync_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+    ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
+        let (result_tx, result_rx) = oneshot::channel();
 
-        result
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundWarpSyncRequest {
+                target: target.clone(),
+                chain_id,
+                begin_hash,
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
+
+    /// Sends a storage proof request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn storage_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
+    ) -> Result<service::EncodedMerkleProof, ()> {
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundStorageProofRequest {
+                target: target.clone(),
+                chain_id,
+                config: codec::StorageProofRequestConfig {
+                    block_hash: config.block_hash,
+                    keys: config
+                        .keys
+                        .map(|key| key.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
+
+    /// Sends a call proof request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn call_proof_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+    ) -> Result<service::EncodedMerkleProof, ()> {
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundCallProofRequest {
+                target: target.clone(),
+                chain_id,
+                config: codec::CallProofRequestConfig {
+                    block_hash: config.block_hash,
+                    method: config.method.into_owned().into(),
+                    parameter_vectored: config
+                        .parameter_vectored
+                        .map(|v| v.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
     }
 }
 
@@ -752,6 +821,16 @@ pub enum BlocksRequestError {
     /// Error during the request.
     #[display(fmt = "{_0}")]
     Request(service::BlocksRequestError),
+}
+
+/// Error returned by [`NetworkService::warp_sync_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum WarpSyncRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    #[display(fmt = "{_0}")]
+    Request(service::GrandpaWarpSyncRequestError),
 }
 
 fn run(mut inner: Inner) {
@@ -1089,6 +1168,24 @@ async fn background_task(mut inner: Inner) {
                 config,
                 result_tx,
             }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "blocks-request-start; peer_id={}; chain={}; start={}; desired_count={}; direction={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        match &config.start {
+                            codec::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
+                            codec::BlocksRequestConfigStart::Number(n) => either::Right(n),
+                        },
+                        config.desired_count,
+                        match config.direction {
+                            codec::BlocksRequestDirection::Ascending => "ascending",
+                            codec::BlocksRequestDirection::Descending => "descending",
+                        },
+                    ),
+                );
+
                 match inner.network.start_blocks_request(
                     &target,
                     chain_id,
@@ -1100,7 +1197,156 @@ async fn background_task(mut inner: Inner) {
                         inner.blocks_requests.insert(request_id, result_tx);
                     }
                     Err(service::StartRequestError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "blocks-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
                         let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundWarpSyncRequest {
+                target,
+                chain_id,
+                begin_hash,
+                result_tx,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "warp-sync-request-start; peer_id={}; chain={}; begin-hash={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(&begin_hash)
+                    ),
+                );
+
+                match inner.network.start_grandpa_warp_sync_request(
+                    &target,
+                    chain_id,
+                    begin_hash,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.warp_sync_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "warp-sync-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(WarpSyncRequestError::NoConnection));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundStorageProofRequest {
+                target,
+                chain_id,
+                config,
+                result_tx,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "storage-request-start; peer_id={}; chain={}; block-hash={}; num-keys={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(&config.block_hash),
+                        config.keys.len()
+                    ),
+                );
+
+                match inner.network.start_storage_proof_request(
+                    &target,
+                    chain_id,
+                    config,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.storage_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; peer_id={}; chain={}; outcome=failure; error=request-too-large",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundCallProofRequest {
+                target,
+                chain_id,
+                config,
+                result_tx,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "call-proof-request-start; peer_id={}; chain={}; block-hash={}; function={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(&config.block_hash),
+                        config.method
+                    ),
+                );
+
+                match inner.network.start_call_proof_request(
+                    &target,
+                    chain_id,
+                    config,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.call_proof_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; peer_id={}; chain={}; outcome=failure; error=request-too-large",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
                     }
                 }
             }
@@ -1518,11 +1764,118 @@ async fn background_task(mut inner: Inner) {
                 substream_id,
                 response: service::RequestResult::Blocks(response),
             }) => {
+                // TODO: print PeerId and chain name
+                match &response {
+                    Ok(success) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "blocks-request-ended; outcome=success; response-blocks={}",
+                                success.len()
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("blocks-request-ended; outcome=failure; error={}", err),
+                        );
+                    }
+                }
+
                 let _ = inner
                     .blocks_requests
                     .remove(&substream_id)
                     .unwrap()
                     .send(response.map_err(BlocksRequestError::Request));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::GrandpaWarpSync(response),
+            }) => {
+                // TODO: print PeerId and chain name
+                match &response {
+                    Ok(success) => {
+                        let decoded = success.decode();
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "warp-sync-request-ended; outcome=success; num-fragments={}; is-finished={:?}",
+                                decoded.fragments.len(), decoded.is_finished,
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("warp-sync-request-ended; outcome=failure; error={}", err),
+                        );
+                    }
+                }
+
+                let _ = inner
+                    .warp_sync_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(WarpSyncRequestError::Request));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::StorageProof(response),
+            }) => {
+                // TODO: print PeerId and chain name
+                match &response {
+                    Ok(success) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; outcome=success; proof-size={}",
+                                BytesDisplay(u64::try_from(success.decode().len()).unwrap()),
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("storage-request-ended; outcome=failure; error={}", err),
+                        );
+                    }
+                }
+
+                let _ = inner
+                    .storage_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(|_| ()));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                response: service::RequestResult::CallProof(response),
+            }) => {
+                // TODO: print PeerId and chain name
+                match &response {
+                    Ok(success) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; outcome=success; proof-size={}",
+                                BytesDisplay(u64::try_from(success.decode().len()).unwrap()),
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("call-proof-request-ended; outcome=failure; error={}", err),
+                        );
+                    }
+                }
+
+                let _ = inner
+                    .call_proof_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(|_| ()));
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
