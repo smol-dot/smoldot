@@ -29,7 +29,11 @@ use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLe
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, SinkExt as _, StreamExt as _};
+use futures_util::{
+    future,
+    stream::{self, FuturesUnordered},
+    SinkExt as _, StreamExt as _,
+};
 use hashbrown::HashSet;
 use smol::lock::Mutex;
 use smoldot::{
@@ -48,8 +52,10 @@ use smoldot::{
 use std::{
     array,
     borrow::Cow,
-    iter, mem,
+    future::Future,
+    iter,
     num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -174,7 +180,7 @@ pub enum InitError {
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
+    pub async fn new(mut config: Config) -> Result<Arc<Self>, InitError> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_number,
@@ -324,10 +330,6 @@ impl ConsensusService {
 
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
 
-        let (block_requests_finished_tx, block_requests_finished_rx) = mpsc::channel(0);
-        let (warp_sync_requests_finished_tx, warp_sync_requests_finished_rx) = mpsc::channel(0);
-        let (storage_requests_finished_tx, storage_requests_finished_rx) = mpsc::channel(0);
-        let (call_proof_requests_finished_tx, call_proof_requests_finished_rx) = mpsc::channel(0);
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
         let background_sync = SyncBackground {
@@ -345,20 +347,12 @@ impl ConsensusService {
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
-            tasks_executor: config.tasks_executor,
+            sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
-            block_requests_finished_tx,
-            block_requests_finished_rx,
-            warp_sync_requests_finished_rx,
-            warp_sync_requests_finished_tx,
-            storage_requests_finished_rx,
-            storage_requests_finished_tx,
-            call_proof_requests_finished_rx,
-            call_proof_requests_finished_tx,
             jaeger_service: config.jaeger_service,
         };
 
-        background_sync.start();
+        (config.tasks_executor)(Box::pin(background_sync.run()));
 
         Ok(Arc::new(ConsensusService {
             block_number_bytes: config.block_number_bytes,
@@ -593,8 +587,7 @@ struct SyncBackground {
     /// This "trick" is necessary in order to not cancel requests that have already been started
     /// against a peer when it disconnects and that might already have a response.
     ///
-    /// Each on-going request has a corresponding background task that sends its result to
-    /// [`SyncBackground::block_requests_finished_rx`].
+    /// Each on-going request has a corresponding background task in [`SyncBackground::sub_tasks`].
     sync: all::AllSync<(), Option<NetworkSourceInfo>, NonFinalizedBlock>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
@@ -655,77 +648,11 @@ struct SyncBackground {
     /// source are removed.
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
 
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    /// Futures that get executed by the background task.
+    sub_tasks: FuturesUnordered<Pin<Box<dyn Future<Output = SubtaskFinished> + Send>>>,
 
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
-
-    /// Block requests that have been emitted on the networking service and that are still in
-    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    block_requests_finished_rx: mpsc::Receiver<(
-        all::RequestId,
-        all::SourceId,
-        Result<Vec<BlockData>, network_service::BlocksRequestError>,
-    )>,
-
-    /// Sending side of [`SyncBackground::block_requests_finished_rx`].
-    block_requests_finished_tx: mpsc::Sender<(
-        all::RequestId,
-        all::SourceId,
-        Result<Vec<BlockData>, network_service::BlocksRequestError>,
-    )>,
-
-    /// Warp sync requests that have been emitted on the networking service and that are still in
-    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    warp_sync_requests_finished_rx: mpsc::Receiver<(
-        all::RequestId,
-        all::SourceId,
-        Result<
-            network::service::EncodedGrandpaWarpSyncResponse,
-            network_service::WarpSyncRequestError,
-        >,
-    )>,
-
-    /// Sending side of [`SyncBackground::warp_sync_requests_finished_rx`].
-    warp_sync_requests_finished_tx: mpsc::Sender<(
-        all::RequestId,
-        all::SourceId,
-        Result<
-            network::service::EncodedGrandpaWarpSyncResponse,
-            network_service::WarpSyncRequestError,
-        >,
-    )>,
-
-    /// Storage requests that have been emitted on the networking service and that are still in
-    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    storage_requests_finished_rx: mpsc::Receiver<(
-        all::RequestId,
-        all::SourceId,
-        Result<network::service::EncodedMerkleProof, ()>,
-    )>,
-
-    /// Sending side of [`SyncBackground::storage_requests_finished_rx`].
-    storage_requests_finished_tx: mpsc::Sender<(
-        all::RequestId,
-        all::SourceId,
-        Result<network::service::EncodedMerkleProof, ()>,
-    )>,
-
-    /// Call proof requests that have been emitted on the networking service and that are still in
-    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    call_proof_requests_finished_rx: mpsc::Receiver<(
-        all::RequestId,
-        all::SourceId,
-        Result<network::service::EncodedMerkleProof, ()>,
-    )>,
-
-    /// Sending side of [`SyncBackground::call_proof_requests_finished_rx`].
-    call_proof_requests_finished_tx: mpsc::Sender<(
-        all::RequestId,
-        all::SourceId,
-        Result<network::service::EncodedMerkleProof, ()>,
-    )>,
 
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
@@ -756,22 +683,33 @@ struct NetworkSourceInfo {
     is_disconnected: bool,
 }
 
-impl SyncBackground {
-    fn start(mut self) {
-        // This function is a small hack because I didn't find a better way to store the executor
-        // within `Background` while at the same time spawning the `Background` using said
-        // executor.
-        let mut actual_executor =
-            mem::replace(&mut self.tasks_executor, Box::new(|_| unreachable!()));
-        let (tx, rx) = oneshot::channel();
-        actual_executor(Box::pin(async move {
-            let actual_executor = rx.await.unwrap();
-            self.tasks_executor = actual_executor;
-            self.run().await;
-        }));
-        tx.send(actual_executor).unwrap_or_else(|_| panic!());
-    }
+enum SubtaskFinished {
+    BlocksRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    },
+    WarpSyncRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<
+            network::service::EncodedGrandpaWarpSyncResponse,
+            network_service::WarpSyncRequestError,
+        >,
+    },
+    StorageRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<network::service::EncodedMerkleProof, ()>,
+    },
+    CallProofRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<network::service::EncodedMerkleProof, ()>,
+    },
+}
 
+impl SyncBackground {
     async fn run(mut self) {
         let mut process_sync = true;
 
@@ -783,29 +721,7 @@ impl SyncBackground {
                 FrontendEvent(ToBackground),
                 FrontendClosed,
                 NetworkEvent(network_service::Event),
-                BlocksRequestFinished(
-                    all::RequestId,
-                    all::SourceId,
-                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
-                ),
-                WarpSyncRequestFinished(
-                    all::RequestId,
-                    all::SourceId,
-                    Result<
-                        network::service::EncodedGrandpaWarpSyncResponse,
-                        network_service::WarpSyncRequestError,
-                    >,
-                ),
-                StorageRequestFinished(
-                    all::RequestId,
-                    all::SourceId,
-                    Result<network::service::EncodedMerkleProof, ()>,
-                ),
-                CallProofRequestFinished(
-                    all::RequestId,
-                    all::SourceId,
-                    Result<network::service::EncodedMerkleProof, ()>,
-                ),
+                SubtaskFinished(SubtaskFinished),
                 SyncProcess,
             }
 
@@ -918,26 +834,10 @@ impl SyncBackground {
                     WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
                 })
                 .or(async {
-                    let (request_id, source_id, result) =
-                        self.block_requests_finished_rx.select_next_some().await;
-                    WakeUpReason::BlocksRequestFinished(request_id, source_id, result)
-                })
-                .or(async {
-                    let (request_id, source_id, result) =
-                        self.warp_sync_requests_finished_rx.select_next_some().await;
-                    WakeUpReason::WarpSyncRequestFinished(request_id, source_id, result)
-                })
-                .or(async {
-                    let (request_id, source_id, result) =
-                        self.storage_requests_finished_rx.select_next_some().await;
-                    WakeUpReason::StorageRequestFinished(request_id, source_id, result)
-                })
-                .or(async {
-                    let (request_id, source_id, result) = self
-                        .call_proof_requests_finished_rx
-                        .select_next_some()
-                        .await;
-                    WakeUpReason::CallProofRequestFinished(request_id, source_id, result)
+                    let Some(subtask_finished) = self.sub_tasks.next().await else {
+                        future::pending().await
+                    };
+                    WakeUpReason::SubtaskFinished(subtask_finished)
                 })
                 .or(async {
                     if !process_sync {
@@ -1156,13 +1056,16 @@ impl SyncBackground {
                     // Different chain index.
                 }
 
-                WakeUpReason::BlocksRequestFinished(request_id, source_id, result) => {
-                    // TODO: clarify this piece of code
-                    let result = result.map_err(|_| ());
+                WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Ok(blocks),
+                }) => {
                     let _ = self.sync.blocks_request_response(
                         request_id,
-                        result.map(|v| {
-                            v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        Ok(blocks
+                            .into_iter()
+                            .map(|block| all::BlockRequestSuccessBlock {
                                 scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                                 scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
                                 scale_encoded_justifications: block
@@ -1175,8 +1078,7 @@ impl SyncBackground {
                                     })
                                     .collect(),
                                 user_data: NonFinalizedBlock::NotVerified,
-                            })
-                        }),
+                            })),
                     );
 
                     // If the source was actually disconnected and has no other request in
@@ -1197,7 +1099,38 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WakeUpReason::WarpSyncRequestFinished(request_id, source_id, Ok(result)) => {
+                WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Err(_),
+                }) => {
+                    let _ = self
+                        .sync
+                        .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::WarpSyncRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Ok(result),
+                }) => {
                     let decoded = result.decode();
                     let fragments = decoded
                         .fragments
@@ -1231,7 +1164,11 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WakeUpReason::WarpSyncRequestFinished(request_id, source_id, Err(_)) => {
+                WakeUpReason::SubtaskFinished(SubtaskFinished::WarpSyncRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Err(_),
+                }) => {
                     let _ = self.sync.grandpa_warp_sync_response_err(request_id);
 
                     // If the source was actually disconnected and has no other request in
@@ -1252,7 +1189,11 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WakeUpReason::StorageRequestFinished(request_id, source_id, result) => {
+                WakeUpReason::SubtaskFinished(SubtaskFinished::StorageRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
                     // Storage proof request.
                     let _ = self
                         .sync
@@ -1276,33 +1217,15 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WakeUpReason::CallProofRequestFinished(request_id, source_id, Ok(result)) => {
+                WakeUpReason::SubtaskFinished(SubtaskFinished::CallProofRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
                     // Successful call proof request.
                     self.sync
-                        .call_proof_response(request_id, Ok(result.decode().to_owned()));
+                        .call_proof_response(request_id, result.map(|r| r.decode().to_owned()));
                     // TODO: need help from networking service to avoid this to_owned
-
-                    // If the source was actually disconnected and has no other request in
-                    // progress, we clean it up.
-                    // TODO: DRY
-                    if self.sync[source_id]
-                        .as_ref()
-                        .map_or(false, |info| info.is_disconnected)
-                        && self.sync.source_num_ongoing_requests(source_id) == 0
-                    {
-                        let (info, mut _requests) = self.sync.remove_source(source_id);
-                        debug_assert!(_requests.next().is_none());
-                        self.peers_source_id_map
-                            .remove(&info.unwrap().peer_id)
-                            .unwrap();
-                    }
-
-                    process_sync = true;
-                }
-
-                WakeUpReason::CallProofRequestFinished(request_id, source_id, Err(err)) => {
-                    // Failed call proof request.
-                    self.sync.call_proof_response(request_id, Err(err));
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -1788,14 +1711,12 @@ impl SyncBackground {
 
                     let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
-                    (self.tasks_executor)(Box::pin({
-                        let mut block_requests_finished_tx =
-                            self.block_requests_finished_tx.clone();
-                        async move {
-                            let result = request.await;
-                            let _ = block_requests_finished_tx
-                                .send((request_id, source_id, result))
-                                .await;
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::BlocksRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
                         }
                     }));
                 }
@@ -1819,14 +1740,12 @@ impl SyncBackground {
                         (),
                     );
 
-                    (self.tasks_executor)(Box::pin({
-                        let mut warp_sync_requests_finished_tx =
-                            self.warp_sync_requests_finished_tx.clone();
-                        async move {
-                            let result = request.await;
-                            let _ = warp_sync_requests_finished_tx
-                                .send((request_id, source_id, result))
-                                .await;
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::WarpSyncRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
                         }
                     }));
                 }
@@ -1851,14 +1770,12 @@ impl SyncBackground {
                         (),
                     );
 
-                    (self.tasks_executor)(Box::pin({
-                        let mut storage_requests_finished_tx =
-                            self.storage_requests_finished_tx.clone();
-                        async move {
-                            let result = request.await;
-                            let _ = storage_requests_finished_tx
-                                .send((request_id, source_id, result))
-                                .await;
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::StorageRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
                         }
                     }));
                 }
@@ -1890,14 +1807,12 @@ impl SyncBackground {
                         (),
                     );
 
-                    (self.tasks_executor)(Box::pin({
-                        let mut call_proof_requests_finished_tx =
-                            self.call_proof_requests_finished_tx.clone();
-                        async move {
-                            let result = request.await;
-                            let _ = call_proof_requests_finished_tx
-                                .send((request_id, source_id, result))
-                                .await;
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::CallProofRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
                         }
                     }));
                 }
