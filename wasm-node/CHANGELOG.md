@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
+
 ## 2.0.15 - 2023-12-20
 
 ### Changed

@@ -2924,9 +2924,7 @@ impl<TRq> Shared<TRq> {
                 }
             };
 
-            if let Some(finalized_block_height) = finalized_block_height {
-                all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
-            }
+            all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
 
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }
