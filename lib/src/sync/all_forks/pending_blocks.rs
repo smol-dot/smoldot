@@ -873,7 +873,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     #[track_caller]
-    pub fn request_source(&self, request_id: RequestId) -> SourceId {
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
         self.requests.get(request_id.0).unwrap().source_id
     }
 

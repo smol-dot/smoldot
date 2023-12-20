@@ -172,6 +172,12 @@ pub struct NetworkService {
 }
 
 enum ToBackground {
+    ForegroundDisconnectAndBan {
+        peer_id: PeerId,
+        chain_id: ChainId,
+        severity: BanSeverity,
+        reason: &'static str,
+    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_id: ChainId,
@@ -332,6 +338,13 @@ struct Chain {
     /// Maximum number of peers that have gossip links open but without having slots attributed
     /// to them.
     max_in_peers: usize,
+}
+
+/// Severity of a ban. See [`NetworkService::ban_and_disconnect`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BanSeverity {
+    Low,
+    High,
 }
 
 impl NetworkService {
@@ -601,6 +614,37 @@ impl NetworkService {
                 chain_id,
                 best_hash,
                 best_number,
+            })
+            .await;
+    }
+
+    /// Starts asynchronously disconnecting the given peer. A [`Event::Disconnected`] will later be
+    /// generated. Prevents a new gossip link with the same peer from being reopened for a
+    /// little while.
+    ///
+    /// `reason` is a human-readable string printed in the logs.
+    ///
+    /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
+    /// reconnection was already happening as the call to this function is still being processed.
+    /// If that happens another [`Event::Disconnected`] will be delivered afterwards. In other
+    /// words, this function guarantees that we will be disconnected in the future rather than
+    /// guarantees that we will disconnect.
+    pub async fn ban_and_disconnect(
+        &self,
+        peer_id: PeerId,
+        chain_id: ChainId,
+        severity: BanSeverity,
+        reason: &'static str,
+    ) {
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundDisconnectAndBan {
+                peer_id,
+                chain_id,
+                severity,
+                reason,
             })
             .await;
     }
@@ -1047,6 +1091,61 @@ async fn background_task(mut inner: Inner) {
             WakeUpReason::ForegroundClosed => {
                 // TODO: do a clean shutdown of all the connections
                 return;
+            }
+
+            WakeUpReason::Message(ToBackground::ForegroundDisconnectAndBan {
+                peer_id,
+                chain_id,
+                severity,
+                reason,
+            }) => {
+                // Note that peer doesn't necessarily have an out slot.
+                inner.peering_strategy.unassign_slot_and_ban(
+                    &chain_id,
+                    &peer_id,
+                    Instant::now()
+                        + Duration::from_secs(match severity {
+                            BanSeverity::Low => 10,
+                            BanSeverity::High => 40,
+                        }),
+                );
+                if inner.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "slot-unassigned; peer_id={}; chain={}; reason=user-ban; user-reason={}",
+                            peer_id, inner.network[chain_id].log_name, reason
+                        ),
+                    );
+                }
+
+                if inner.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    let _close_result = inner.network.gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    debug_assert!(_close_result.is_ok());
+
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "chain-disconnected; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+
+                    debug_assert!(inner.event_pending_send.is_none());
+                    inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
+                }
             }
 
             WakeUpReason::Message(ToBackground::ForegroundAnnounceBlock {

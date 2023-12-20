@@ -1038,7 +1038,7 @@ impl SyncBackground {
                         all::BlockAnnounceOutcome::NotFinalizedChain => {}
                         all::BlockAnnounceOutcome::Discarded => {}
                         all::BlockAnnounceOutcome::StoredForLater {} => {}
-                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
+                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(), // TODO: ?!?! why unreachable? also, ban the peer
                     }
                 }
                 WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {
@@ -1102,6 +1102,17 @@ impl SyncBackground {
                     source_id,
                     result: Err(_),
                 }) => {
+                    // Note that we perform the ban even if the source is now disconnected.
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                    self.network_service
+                        .ban_and_disconnect(
+                            peer_id,
+                            self.network_chain_id,
+                            network_service::BanSeverity::Low,
+                            "blocks-request-error",
+                        )
+                        .await;
+
                     let _ = self
                         .sync
                         .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
@@ -1167,6 +1178,17 @@ impl SyncBackground {
                     source_id,
                     result: Err(_),
                 }) => {
+                    // Note that we perform the ban even if the source is now disconnected.
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                    self.network_service
+                        .ban_and_disconnect(
+                            peer_id,
+                            self.network_chain_id,
+                            network_service::BanSeverity::Low,
+                            "warp-sync-request-error",
+                        )
+                        .await;
+
                     let _ = self.sync.grandpa_warp_sync_response_err(request_id);
 
                     // If the source was actually disconnected and has no other request in
@@ -1192,7 +1214,19 @@ impl SyncBackground {
                     source_id,
                     result,
                 }) => {
-                    // Storage proof request.
+                    if result.is_err() {
+                        // Note that we perform the ban even if the source is now disconnected.
+                        let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                        self.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                self.network_chain_id,
+                                network_service::BanSeverity::Low,
+                                "storage-proof-request-error",
+                            )
+                            .await;
+                    }
+
                     let _ = self
                         .sync
                         .storage_get_response(request_id, result.map(|r| r.decode().to_owned()));
@@ -1220,7 +1254,19 @@ impl SyncBackground {
                     source_id,
                     result,
                 }) => {
-                    // Successful call proof request.
+                    if result.is_err() {
+                        // Note that we perform the ban even if the source is now disconnected.
+                        let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                        self.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                self.network_chain_id,
+                                network_service::BanSeverity::Low,
+                                "call-proof-request-error",
+                            )
+                            .await;
+                    }
+
                     self.sync
                         .call_proof_response(request_id, result.map(|r| r.decode().to_owned()));
                     // TODO: need help from networking service to avoid this to_owned
@@ -1855,6 +1901,17 @@ impl SyncBackground {
                         );
                     }
                     Err(err) => {
+                        if let Some(sender) = &sender {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender.clone(),
+                                    self.network_chain_id,
+                                    network_service::BanSeverity::High,
+                                    "bad-warp-sync-fragment",
+                                )
+                                .await;
+                        }
+
                         self.log_callback.log(
                             LogLevel::Warn,
                             format!(
@@ -1896,6 +1953,7 @@ impl SyncBackground {
                 unimplemented!()
             }
             all::ProcessOne::VerifyBlock(verify) => {
+                // TODO: ban peer in case of verification failure
                 let when_verification_started = Instant::now();
                 let mut database_accesses_duration = Duration::new(0, 0);
                 let mut runtime_build_duration = Duration::new(0, 0);
@@ -2333,6 +2391,13 @@ impl SyncBackground {
             }
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
+                let sender = verify
+                    .sender()
+                    .1
+                    .as_ref()
+                    .map(|s| s.peer_id.clone())
+                    .unwrap();
+
                 match verify.perform(rand::random()) {
                     (
                         sync_out,
@@ -2352,7 +2417,7 @@ impl SyncBackground {
                         self.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "finality-proof-verification; outcome=success; new-finalized={}",
+                                "finality-proof-verification; outcome=success, sender={sender}, new-finalized={}",
                                 HashDisplay(&new_finalized_hash)
                             ),
                         );
@@ -2407,7 +2472,8 @@ impl SyncBackground {
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
                         self.log_callback.log(
                             LogLevel::Debug,
-                            "finality-proof-verification; outcome=pending".to_string(),
+                            "finality-proof-verification; outcome=pending, sender={sender}"
+                                .to_string(),
                         );
                         self.sync = sync_out;
                         (self, true)
@@ -2415,23 +2481,45 @@ impl SyncBackground {
                     (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
                         self.log_callback.log(
                             LogLevel::Debug,
-                            "finality-proof-verification; outcome=already-finalized".to_string(),
+                            "finality-proof-verification; outcome=already-finalized, sender={sender}".to_string(),
                         );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender.clone(),
+                                self.network_chain_id,
+                                network_service::BanSeverity::High,
+                                "bad-warp-sync-fragment",
+                            )
+                            .await;
                         self.log_callback.log(
                             LogLevel::Warn,
-                            format!("finality-proof-verification-failure; error={}", error),
+                            format!(
+                                "finality-proof-verification-failure; sender={sender}, error={}",
+                                error
+                            ),
                         );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender.clone(),
+                                self.network_chain_id,
+                                network_service::BanSeverity::High,
+                                "bad-warp-sync-fragment",
+                            )
+                            .await;
                         self.log_callback.log(
                             LogLevel::Warn,
-                            format!("finality-proof-verification-failure; error={}", error),
+                            format!(
+                                "finality-proof-verification-failure; sender={sender}, error={}",
+                                error
+                            ),
                         );
                         self.sync = sync_out;
                         (self, true)

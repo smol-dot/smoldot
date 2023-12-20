@@ -334,11 +334,20 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(target, request_config.clone(), timeout_per_request)
+                .blocks_request(target.clone(), request_config.clone(), timeout_per_request)
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
-                Ok(_) | Err(_) => continue,
+                Ok(_) | Err(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "blocks-request-failed",
+                        )
+                        .await;
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -379,7 +388,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
-                Ok(_) | Err(_) => continue,
+                Ok(_) | Err(_) => {
+                    // Because we have no idea whether the block is canonical, it might be
+                    // totally legitimate for the peer to refuse the request. For this reason,
+                    // we don't ban it.
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -553,7 +567,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .storage_proof_request(
-                    target,
+                    target.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash: *block_hash,
                         keys: keys_to_request.into_iter(),
@@ -580,6 +594,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         network_service::StorageProofRequestError::RequestTooLarge
                     ) || response_nodes_cap == 1
                     {
+                        self.network_service
+                            .ban_and_disconnect(
+                                target,
+                                network_service::BanSeverity::Low,
+                                "storage-request-failed",
+                            )
+                            .await;
                         outcome_errors.push(StorageQueryErrorDetail::Network(err));
                     }
 
@@ -596,6 +617,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }) {
                 Ok(d) => d,
                 Err(err) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::High,
+                            "bad-merkle-proof",
+                        )
+                        .await;
                     outcome_errors.push(StorageQueryErrorDetail::ProofVerification(err));
                     continue;
                 }
@@ -796,20 +824,36 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let result = self
                 .network_service
                 .clone()
-                .call_proof_request(target, config.clone(), timeout_per_request)
+                .call_proof_request(target.clone(), config.clone(), timeout_per_request)
                 .await;
 
             match result {
                 Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
-                Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
+                Ok(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "call-proof-request-failed",
+                        )
+                        .await;
+                    outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
                         smoldot::network::service::RequestError::Substream(
                             smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                         ),
                     ),
-                )),
+                ))
+                }
                 Err(err) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "call-proof-request-failed",
+                        )
+                        .await;
                     outcome_errors.push(err);
                 }
             }
