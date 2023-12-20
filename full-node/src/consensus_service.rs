@@ -2079,7 +2079,7 @@ impl SyncBackground {
                             database.insert_trie_nodes(
                                 iter::once(full_sqlite::InsertTrieNode {
                                     merkle_value: Cow::Owned(entry.merkle_value),
-                                    partial_key_nibbles: todo!(),
+                                    partial_key_nibbles: Cow::Owned(entry.partial_key_nibbles.into_iter().map(|n| u8::from(n)).collect()),
                                     children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
                                     storage_value: match entry.trie_node_info.storage_value {
                                         trie::proof_decode::StorageValue::HashKnownValueMissing(

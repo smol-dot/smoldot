@@ -521,6 +521,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     },
                     ProofEntry {
                         node_value: &self.proof.as_ref()[node_value_range.clone()],
+                        // TODO: wrong, doesn't take root-ness into account
                         merkle_value: if self.proof.as_ref()[node_value_range.clone()].len() < 32 {
                             self.proof.as_ref()[node_value_range.clone()].to_vec()
                         } else {
@@ -532,6 +533,12 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             .as_bytes()
                             .to_vec()
                         },
+                        partial_key_nibbles: trie_node::decode(
+                            &self.proof.as_ref()[node_value_range.clone()],
+                        )
+                        .unwrap()
+                        .partial_key
+                        .collect(),
                         unhashed_storage_value: match storage_value_inner {
                             StorageValueInner::Known {
                                 is_inline: false,
@@ -1114,6 +1121,8 @@ pub struct ProofEntry<'a> {
     /// > **Note**: This is a low-level information. If you're not familiar with how the trie
     /// >           works, you most likely don't need this.
     pub merkle_value: Vec<u8>,
+
+    pub partial_key_nibbles: Vec<nibble::Nibble>,
 
     /// Node value of that proof entry.
     ///
