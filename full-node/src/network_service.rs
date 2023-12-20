@@ -172,6 +172,12 @@ pub struct NetworkService {
 }
 
 enum ToBackground {
+    ForegroundDisconnectAndBan {
+        peer_id: PeerId,
+        chain_id: ChainId,
+        severity: BanSeverity,
+        reason: &'static str,
+    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_id: ChainId,
@@ -316,9 +322,6 @@ struct Inner {
 
     /// Time between [`Inner::next_discovery`] and the follow-up discovery.
     next_discovery_period: Duration,
-
-    /// List of Kademlia discovery operations that have been started but not finished yet.
-    kademlia_find_nodes_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
 /// Extra information of a chain.
@@ -335,6 +338,13 @@ struct Chain {
     /// Maximum number of peers that have gossip links open but without having slots attributed
     /// to them.
     max_in_peers: usize,
+}
+
+/// Severity of a ban. See [`NetworkService::ban_and_disconnect`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BanSeverity {
+    Low,
+    High,
 }
 
 impl NetworkService {
@@ -507,10 +517,6 @@ impl NetworkService {
                 5, // TODO: ?
                 Default::default(),
             ),
-            kademlia_find_nodes_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                4,
-                Default::default(),
-            ),
             jaeger_service: config.jaeger_service.clone(),
             next_discovery: smol::Timer::after(Duration::from_secs(1)),
             next_discovery_period: Duration::from_secs(1),
@@ -608,6 +614,37 @@ impl NetworkService {
                 chain_id,
                 best_hash,
                 best_number,
+            })
+            .await;
+    }
+
+    /// Starts asynchronously disconnecting the given peer. A [`Event::Disconnected`] will later be
+    /// generated. Prevents a new gossip link with the same peer from being reopened for a
+    /// little while.
+    ///
+    /// `reason` is a human-readable string printed in the logs.
+    ///
+    /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
+    /// reconnection was already happening as the call to this function is still being processed.
+    /// If that happens another [`Event::Disconnected`] will be delivered afterwards. In other
+    /// words, this function guarantees that we will be disconnected in the future rather than
+    /// guarantees that we will disconnect.
+    pub async fn ban_and_disconnect(
+        &self,
+        peer_id: PeerId,
+        chain_id: ChainId,
+        severity: BanSeverity,
+        reason: &'static str,
+    ) {
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundDisconnectAndBan {
+                peer_id,
+                chain_id,
+                severity,
+                reason,
             })
             .await;
     }
@@ -1036,20 +1073,15 @@ async fn background_task(mut inner: Inner) {
                         .cloned();
 
                     if let Some(target) = target {
-                        let substream_id = match inner.network.start_kademlia_find_node_request(
+                        match inner.network.start_kademlia_find_node_request(
                             &target,
                             chain_id,
                             &random_peer_id,
                             Duration::from_secs(20),
                         ) {
-                            Ok(s) => s,
+                            Ok(_) => {}
                             Err(service::StartRequestError::NoConnection) => unreachable!(),
                         };
-
-                        let _prev_value = inner
-                            .kademlia_find_nodes_requests
-                            .insert(substream_id, chain_id);
-                        debug_assert!(_prev_value.is_none());
                     } else {
                         // TODO: log message
                     }
@@ -1059,6 +1091,61 @@ async fn background_task(mut inner: Inner) {
             WakeUpReason::ForegroundClosed => {
                 // TODO: do a clean shutdown of all the connections
                 return;
+            }
+
+            WakeUpReason::Message(ToBackground::ForegroundDisconnectAndBan {
+                peer_id,
+                chain_id,
+                severity,
+                reason,
+            }) => {
+                // Note that peer doesn't necessarily have an out slot.
+                inner.peering_strategy.unassign_slot_and_ban(
+                    &chain_id,
+                    &peer_id,
+                    Instant::now()
+                        + Duration::from_secs(match severity {
+                            BanSeverity::Low => 10,
+                            BanSeverity::High => 40,
+                        }),
+                );
+                if inner.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "slot-unassigned; peer_id={}; chain={}; reason=user-ban; user-reason={}",
+                            peer_id, inner.network[chain_id].log_name, reason
+                        ),
+                    );
+                }
+
+                if inner.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    let _close_result = inner.network.gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    debug_assert!(_close_result.is_ok());
+
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "chain-disconnected; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+
+                    debug_assert!(inner.event_pending_send.is_none());
+                    inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
+                }
             }
 
             WakeUpReason::Message(ToBackground::ForegroundAnnounceBlock {
@@ -1684,15 +1771,17 @@ async fn background_task(mut inner: Inner) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::Blocks(response),
             }) => {
-                // TODO: print PeerId and chain name
                 match &response {
                     Ok(success) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "blocks-request-ended; outcome=success; response-blocks={}",
+                                "blocks-request-ended; outcome=success; peer_id={peer_id}; chain={}; response-blocks={}",
+                                inner.network[chain_id].log_name,
                                 success.len()
                             ),
                         );
@@ -1700,7 +1789,8 @@ async fn background_task(mut inner: Inner) {
                     Err(err) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
-                            format!("blocks-request-ended; outcome=failure; error={}", err),
+                            format!("blocks-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                            inner.network[chain_id].log_name, err),
                         );
                     }
                 }
@@ -1713,16 +1803,18 @@ async fn background_task(mut inner: Inner) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::GrandpaWarpSync(response),
             }) => {
-                // TODO: print PeerId and chain name
                 match &response {
                     Ok(success) => {
                         let decoded = success.decode();
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "warp-sync-request-ended; outcome=success; num-fragments={}; is-finished={:?}",
+                                "warp-sync-request-ended; outcome=success; peer_id={peer_id}; chain={}; num-fragments={}; is-finished={:?}",
+                                inner.network[chain_id].log_name,
                                 decoded.fragments.len(), decoded.is_finished,
                             ),
                         );
@@ -1730,7 +1822,8 @@ async fn background_task(mut inner: Inner) {
                     Err(err) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
-                            format!("warp-sync-request-ended; outcome=failure; error={}", err),
+                            format!("warp-sync-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                            inner.network[chain_id].log_name, err),
                         );
                     }
                 }
@@ -1743,15 +1836,17 @@ async fn background_task(mut inner: Inner) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::StorageProof(response),
             }) => {
-                // TODO: print PeerId and chain name
                 match &response {
                     Ok(success) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "storage-request-ended; outcome=success; proof-size={}",
+                                "storage-request-ended; outcome=success; peer_id={peer_id}; chain={}; proof-size={}",
+                                inner.network[chain_id].log_name,
                                 BytesDisplay(u64::try_from(success.decode().len()).unwrap()),
                             ),
                         );
@@ -1759,7 +1854,10 @@ async fn background_task(mut inner: Inner) {
                     Err(err) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
-                            format!("storage-request-ended; outcome=failure; error={}", err),
+                            format!(
+                                "storage-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                                inner.network[chain_id].log_name, err
+                            ),
                         );
                     }
                 }
@@ -1772,15 +1870,17 @@ async fn background_task(mut inner: Inner) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::CallProof(response),
             }) => {
-                // TODO: print PeerId and chain name
                 match &response {
                     Ok(success) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "call-proof-request-ended; outcome=success; proof-size={}",
+                                "call-proof-request-ended; outcome=success; peer_id={peer_id}; chain={}; proof-size={}",
+                                inner.network[chain_id].log_name,
                                 BytesDisplay(u64::try_from(success.decode().len()).unwrap()),
                             ),
                         );
@@ -1788,7 +1888,11 @@ async fn background_task(mut inner: Inner) {
                     Err(err) => {
                         inner.log_callback.log(
                             LogLevel::Debug,
-                            format!("call-proof-request-ended; outcome=failure; error={}", err),
+                            format!(
+                                "call-proof-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                                inner.network[chain_id].log_name,
+                                err
+                            ),
                         );
                     }
                 }
@@ -1800,14 +1904,11 @@ async fn background_task(mut inner: Inner) {
                     .send(response.map_err(|_| ()));
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
-                substream_id,
+                peer_id: kademlia_request_target,
+                chain_id,
                 response: service::RequestResult::KademliaFindNode(Ok(nodes)),
+                ..
             }) => {
-                let chain_id = inner
-                    .kademlia_find_nodes_requests
-                    .remove(&substream_id)
-                    .unwrap();
-
                 for (peer_id, addrs) in nodes {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
@@ -1817,7 +1918,7 @@ async fn background_task(mut inner: Inner) {
                                 inner.log_callback.log(
                                     LogLevel::Debug,
                                     format!(
-                                        "discovery-invalid-address; error={error}, addr={}",
+                                        "discovery-invalid-address; error={error}, addr={}, discovered_from={kademlia_request_target}",
                                         hex::encode(&addr)
                                     ),
                                 );
@@ -1850,7 +1951,7 @@ async fn background_task(mut inner: Inner) {
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "discovered; chain={}; peer_id={peer_id}; address={addr}",
+                                "discovered; chain={}; peer_id={peer_id}; address={addr}; discovered_from={kademlia_request_target}",
                                 inner.network[chain_id].log_name
                             ),
                         );
@@ -1872,18 +1973,16 @@ async fn background_task(mut inner: Inner) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
-                substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::KademliaFindNode(Err(error)),
+                ..
             }) => {
-                let chain_id = inner
-                    .kademlia_find_nodes_requests
-                    .remove(&substream_id)
-                    .unwrap();
                 inner.log_callback.log(
                     LogLevel::Debug,
                     format!(
-                        "discovery-error; chain={}; error={}",
-                        inner.network[chain_id].log_name, error
+                        "discovery-error; chain={}; peer_id={peer_id}; error={error}",
+                        inner.network[chain_id].log_name
                     ),
                 );
             }

@@ -159,6 +159,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
         verification_queue::VerificationQueue<(RequestId, TRq), RequestSuccessBlock<TBl>>,
 
     /// Justifications, if any, of the block that has just been verified.
+    // TODO: clean up when a source is removed
     pending_encoded_justifications: vec::IntoIter<([u8; 4], Vec<u8>, SourceId)>,
 
     /// Identifier to assign to the next request.
@@ -669,6 +670,25 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         user_data
     }
 
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        if let Some((src, _)) = self.inner.obsolete_requests.get(&request_id) {
+            *src
+        } else {
+            self.inner
+                .verification_queue
+                .requests()
+                .find(|(rq, _)| rq.0 == request_id)
+                .unwrap()
+                .1
+        }
+    }
+
     /// Process the next block in the queue of verification.
     ///
     /// This method takes ownership of the [`OptimisticSync`]. The [`OptimisticSync`] is yielded
@@ -1041,6 +1061,17 @@ pub struct JustificationVerify<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
+    /// Returns the source the justification was obtained from.
+    pub fn sender(&self) -> (SourceId, &TSrc) {
+        let (_, _, source_id) = self
+            .inner
+            .pending_encoded_justifications
+            .as_slice()
+            .first()
+            .unwrap();
+        (*source_id, &self.inner.sources[source_id].user_data)
+    }
+
     /// Verify the justification.
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the

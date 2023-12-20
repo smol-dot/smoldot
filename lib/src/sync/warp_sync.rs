@@ -1042,6 +1042,16 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        self.in_progress_requests[request_id.0].0
+    }
+
     /// Injects a successful Merkle proof and removes the given request from the state machine.
     /// Returns the user data that was associated to it.
     ///

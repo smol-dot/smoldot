@@ -150,7 +150,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ca33f4bc4ed1babef42cad36cc1f51fa88be00420404e5b1e80ab1b18f7678c"
 dependencies = [
  "concurrent-queue",
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "event-listener-strategy",
  "futures-core",
  "pin-project-lite",
@@ -236,7 +236,7 @@ version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7125e42787d53db9dd54261812ef17e937c95a51e4d291373b670342fa44310c"
 dependencies = [
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "event-listener-strategy",
  "pin-project-lite",
 ]
@@ -994,9 +994,9 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "4.0.0"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "770d968249b5d99410d61f5bf89057f3199a077a04d087092f58e7d10692baae"
+checksum = "84f2cdcf274580f2d63697192d744727b3198894b1bf02923643bf59e2c26712"
 dependencies = [
  "concurrent-queue",
  "parking",
@@ -1009,7 +1009,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "958e4d70b6d5e81971bebec42271ec641e7ff4e170a6fa605f2b8a8b65cb97d3"
 dependencies = [
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "pin-project-lite",
 ]
 
@@ -2354,7 +2354,7 @@ dependencies = [
  "derive_more",
  "ed25519-zebra",
  "either",
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "fnv",
  "futures-executor",
  "futures-lite 2.1.0",
@@ -2408,7 +2408,7 @@ dependencies = [
  "derive_more",
  "directories",
  "either",
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "fnv",
  "futures-channel",
  "futures-lite 2.1.0",
@@ -2440,7 +2440,7 @@ dependencies = [
  "derive_more",
  "either",
  "env_logger",
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "fnv",
  "futures-channel",
  "futures-lite 2.1.0",
@@ -2466,14 +2466,14 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "2.0.14"
+version = "2.0.15"
 dependencies = [
  "async-lock 3.2.0",
  "async-task",
  "crossbeam-queue",
  "derive_more",
  "dlmalloc",
- "event-listener 4.0.0",
+ "event-listener 4.0.1",
  "fnv",
  "futures-lite 2.1.0",
  "futures-util",
