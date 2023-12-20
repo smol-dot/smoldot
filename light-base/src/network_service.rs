@@ -199,7 +199,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             next_discovery_period: Duration::from_secs(5),
             next_discovery: Box::pin(config.platform.sleep(Duration::from_secs(5))),
-            kademlia_find_node_requests: HashMap::with_capacity_and_hasher(2, Default::default()),
         }));
 
         config
@@ -221,8 +220,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
     /// references to [`NetworkServiceChain`] are destroyed, the network service automatically
     /// purges that chain.
     pub fn add_chain(&self, config: ConfigChain) -> Arc<NetworkServiceChain<TPlat>> {
-        let log_name = config.log_name.clone();
-
         let (messages_tx, messages_rx) = async_channel::bounded(32);
 
         // TODO: this code is hacky because we don't want to make `add_chain` async at the moment, because it's not convenient for lib.rs
@@ -243,7 +240,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                 role: Role::Light,
                 allow_inbound_block_requests: false,
                 user_data: Chain {
-                    log_name: config.log_name.clone(),
+                    log_name: config.log_name,
                     block_number_bytes: config.block_number_bytes,
                     num_out_slots: config.num_out_slots,
                     num_references: NonZeroUsize::new(1).unwrap(),
@@ -263,7 +260,6 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 
         Arc::new(NetworkServiceChain {
             _keep_alive_messages_tx: self.messages_tx.clone(),
-            log_name,
             messages_tx,
             marker: core::marker::PhantomData,
         })
@@ -274,9 +270,6 @@ pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Copy of [`NetworkService::messages_tx`]. Used in order to maintain the network service
     /// background task alive.
     _keep_alive_messages_tx: async_channel::Sender<ToBackground>,
-
-    /// Logging name of the chain.
-    log_name: String,
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
@@ -338,52 +331,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        let result = rx.await.unwrap();
-
-        match &result {
-            Ok(blocks) => {
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
-                    target,
-                    self.log_name,
-                    blocks.len(),
-                    BytesDisplay(blocks.iter().fold(0, |sum, block| {
-                        let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
-                            block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
-                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.justification.len());
-                        sum + u64::try_from(block_size).unwrap()
-                    }))
-                );
-            }
-            Err(err) => {
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => BlocksRequest(chain={}, error={:?})",
-                    target,
-                    self.log_name,
-                    err
-                );
-            }
-        }
-
-        if !log::log_enabled!(log::Level::Debug) {
-            match &result {
-                Ok(_) | Err(BlocksRequestError::NoConnection) => {}
-                Err(BlocksRequestError::Request(service::BlocksRequestError::Request(err)))
-                    if !err.is_protocol_error() => {}
-                Err(err) => {
-                    log::warn!(
-                        target: "network",
-                        "Error in block request with {}. This might indicate an incompatibility. Error: {}",
-                        target,
-                        err
-                    );
-                }
-            }
-        }
-
-        result
+        rx.await.unwrap()
     }
 
     /// Sends a grandpa warp sync request to the given peer.
@@ -406,33 +354,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        let result = rx.await.unwrap();
-
-        match &result {
-            Ok(response) => {
-                // TODO: print total bytes size
-                let decoded = response.decode();
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => WarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
-                    target,
-                    self.log_name,
-                    decoded.fragments.len(),
-                    decoded.is_finished,
-                );
-            }
-            Err(err) => {
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => WarpSyncRequest(chain={}, error={:?})",
-                    target,
-                    self.log_name,
-                    err,
-                );
-            }
-        }
-
-        result
+        rx.await.unwrap()
     }
 
     pub async fn set_local_best_block(&self, best_hash: [u8; 32], best_number: u64) {
@@ -479,31 +401,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        let result = rx.await.unwrap();
-
-        match &result {
-            Ok(items) => {
-                let decoded = items.decode();
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => StorageProofRequest(chain={}, total_size={})",
-                    target,
-                    self.log_name,
-                    BytesDisplay(u64::try_from(decoded.len()).unwrap()),
-                );
-            }
-            Err(err) => {
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => StorageProofRequest(chain={}, error={:?})",
-                    target,
-                    self.log_name,
-                    err
-                );
-            }
-        }
-
-        result
+        rx.await.unwrap()
     }
 
     /// Sends a call proof request to the given peer.
@@ -536,31 +434,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        let result = rx.await.unwrap();
-
-        match &result {
-            Ok(items) => {
-                let decoded = items.decode();
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => CallProofRequest({}, total_size: {})",
-                    target,
-                    self.log_name,
-                    BytesDisplay(u64::try_from(decoded.len()).unwrap())
-                );
-            }
-            Err(err) => {
-                log::debug!(
-                    target: "network",
-                    "Connections({}) => CallProofRequest({}, {})",
-                    target,
-                    self.log_name,
-                    err
-                );
-            }
-        }
-
-        result
+        rx.await.unwrap()
     }
 
     /// Announces transaction to the peers we are connected to.
@@ -921,8 +795,6 @@ struct BackgroundTask<TPlat: PlatformRef> {
     next_discovery_period: Duration,
 
     next_discovery: Pin<Box<TPlat::Delay>>,
-
-    kademlia_find_node_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
 struct Chain {
@@ -1253,10 +1125,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     debug_assert!(_was_in.is_some());
                 }
 
-                // TODO: this is O(n)
-                task.kademlia_find_node_requests
-                    .retain(|_, c| *c != chain_id);
-
                 log::debug!(target: "network", "Chains <= RemoveChain(id={})", task.network[chain_id].log_name);
                 task.network.remove_chain(chain_id).unwrap();
                 task.peering_strategy.remove_chain_peers(&chain_id);
@@ -1273,37 +1141,43 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     result,
                 },
             ) => {
+                match &config.start {
+                    codec::BlocksRequestConfigStart::Hash(hash) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                            target, task.network[chain_id].log_name, HashDisplay(hash),
+                            config.desired_count.get(),
+                            matches!(config.direction, codec::BlocksRequestDirection::Descending),
+                            config.fields.header, config.fields.body, config.fields.justifications
+                        );
+                    }
+                    codec::BlocksRequestConfigStart::Number(number) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                            target, task.network[chain_id].log_name, number,
+                            config.desired_count.get(),
+                            matches!(config.direction, codec::BlocksRequestDirection::Descending),
+                            config.fields.header, config.fields.body, config.fields.justifications
+                        );
+                    }
+                }
+
                 match task
                     .network
                     .start_blocks_request(&target, chain_id, config.clone(), timeout)
                 {
                     Ok(substream_id) => {
-                        match &config.start {
-                            codec::BlocksRequestConfigStart::Hash(hash) => {
-                                log::debug!(
-                                    target: "network",
-                                    "Connections({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                                    target, task.network[chain_id].log_name, HashDisplay(hash),
-                                    config.desired_count.get(),
-                                    matches!(config.direction, codec::BlocksRequestDirection::Descending),
-                                    config.fields.header, config.fields.body, config.fields.justifications
-                                );
-                            }
-                            codec::BlocksRequestConfigStart::Number(number) => {
-                                log::debug!(
-                                    target: "network",
-                                    "Connections({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
-                                    target, task.network[chain_id].log_name, number,
-                                    config.desired_count.get(),
-                                    matches!(config.direction, codec::BlocksRequestDirection::Descending),
-                                    config.fields.header, config.fields.body, config.fields.justifications
-                                );
-                            }
-                        }
-
                         task.blocks_requests.insert(substream_id, result);
                     }
                     Err(service::StartRequestError::NoConnection) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => BlocksRequest(chain={}, error=NoConnection)",
+                            target,
+                            task.network[chain_id].log_name,
+                        );
                         let _ = result.send(Err(BlocksRequestError::NoConnection));
                     }
                 }
@@ -1317,19 +1191,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     result,
                 },
             ) => {
+                log::debug!(
+                    target: "network", "Connections({}) <= WarpSyncRequest(chain={}, start={})",
+                    target, task.network[chain_id].log_name, HashDisplay(&begin_hash)
+                );
+
                 match task
                     .network
                     .start_grandpa_warp_sync_request(&target, chain_id, begin_hash, timeout)
                 {
                     Ok(substream_id) => {
-                        log::debug!(
-                            target: "network", "Connections({}) <= WarpSyncRequest(chain={}, start={})",
-                            target, task.network[chain_id].log_name, HashDisplay(&begin_hash)
-                        );
-
                         task.grandpa_warp_sync_requests.insert(substream_id, result);
                     }
                     Err(service::StartRequestError::NoConnection) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => WarpSyncRequest(chain={}, error=NoConnection)",
+                            target,
+                            task.network[chain_id].log_name,
+                        );
                         let _ = result.send(Err(WarpSyncRequestError::NoConnection));
                     }
                 }
@@ -1343,6 +1223,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     result,
                 },
             ) => {
+                log::debug!(
+                    target: "network",
+                    "Connections({}) <= StorageProofRequest(chain={}, block={})",
+                    target,
+                    task.network[chain_id].log_name,
+                    HashDisplay(&config.block_hash)
+                );
+
                 match task.network.start_storage_proof_request(
                     &target,
                     chain_id,
@@ -1350,20 +1238,22 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     timeout,
                 ) {
                     Ok(substream_id) => {
-                        log::debug!(
-                            target: "network",
-                            "Connections({}) <= StorageProofRequest(chain={}, block={})",
-                            target,
-                            task.network[chain_id].log_name,
-                            HashDisplay(&config.block_hash)
-                        );
-
                         task.storage_proof_requests.insert(substream_id, result);
                     }
                     Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({target}) => StorageProofRequest(chain={}, error=NoConnection)",
+                            task.network[chain_id].log_name,
+                        );
                         let _ = result.send(Err(StorageProofRequestError::NoConnection));
                     }
                     Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({target}) => StorageProofRequest(chain={}, error=RequestTooLarge)",
+                            task.network[chain_id].log_name,
+                        );
                         let _ = result.send(Err(StorageProofRequestError::RequestTooLarge));
                     }
                 };
@@ -1377,6 +1267,15 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     result,
                 },
             ) => {
+                log::debug!(
+                    target: "network",
+                    "Connections({}) <= CallProofRequest({}, {}, {})",
+                    target,
+                    task.network[chain_id].log_name,
+                    HashDisplay(&config.block_hash),
+                    config.method
+                );
+
                 match task.network.start_call_proof_request(
                     &target,
                     chain_id,
@@ -1384,21 +1283,22 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     timeout,
                 ) {
                     Ok(substream_id) => {
-                        log::debug!(
-                            target: "network",
-                            "Connections({}) <= CallProofRequest({}, {}, {})",
-                            target,
-                            task.network[chain_id].log_name,
-                            HashDisplay(&config.block_hash),
-                            config.method
-                        );
-
                         task.call_proof_requests.insert(substream_id, result);
                     }
                     Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({target}) => CallProofRequest({}, NoConnection)",
+                            task.network[chain_id].log_name
+                        );
                         let _ = result.send(Err(CallProofRequestError::NoConnection));
                     }
                     Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({target}) => CallProofRequest({}, RequestTooLarge)",
+                            task.network[chain_id].log_name
+                        );
                         let _ = result.send(Err(CallProofRequestError::RequestTooLarge));
                     }
                 };
@@ -1566,13 +1466,13 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .cloned();
 
                     if let Some(target) = target {
-                        let substream_id = match task.network.start_kademlia_find_node_request(
+                        match task.network.start_kademlia_find_node_request(
                             &target,
                             chain_id,
                             &random_peer_id,
                             Duration::from_secs(20),
                         ) {
-                            Ok(s) => s,
+                            Ok(_) => {}
                             Err(service::StartRequestError::NoConnection) => unreachable!(),
                         };
 
@@ -1583,11 +1483,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             target,
                             random_peer_id
                         );
-
-                        let _prev_value = task
-                            .kademlia_find_node_requests
-                            .insert(substream_id, chain_id);
-                        debug_assert!(_prev_value.is_none());
                     } else {
                         log::debug!(
                             target: "network",
@@ -1863,8 +1758,53 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::Blocks(response),
             }) => {
+                match &response {
+                    Ok(blocks) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
+                            peer_id,
+                            task.network[chain_id].log_name,
+                            blocks.len(),
+                            BytesDisplay(blocks.iter().fold(0, |sum, block| {
+                                let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
+                                    block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
+                                    block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.justification.len());
+                                sum + u64::try_from(block_size).unwrap()
+                            }))
+                        );
+                    }
+                    Err(err) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => BlocksRequest(chain={}, error={:?})",
+                            peer_id,
+                            task.network[chain_id].log_name,
+                            err
+                        );
+                    }
+                }
+
+                if !log::log_enabled!(log::Level::Debug) {
+                    match &response {
+                        Ok(_) => {}
+                        Err(service::BlocksRequestError::Request(err))
+                            if !err.is_protocol_error() => {}
+                        Err(err) => {
+                            log::warn!(
+                                target: "network",
+                                "Error in block request with {}. This might indicate an incompatibility. Error: {}",
+                                peer_id,
+                                err
+                            );
+                        }
+                    }
+                }
+
                 let _ = task
                     .blocks_requests
                     .remove(&substream_id)
@@ -1873,8 +1813,34 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::GrandpaWarpSync(response),
             }) => {
+                match &response {
+                    Ok(response) => {
+                        // TODO: print total bytes size
+                        let decoded = response.decode();
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => WarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
+                            peer_id,
+                            task.network[chain_id].log_name,
+                            decoded.fragments.len(),
+                            decoded.is_finished,
+                        );
+                    }
+                    Err(err) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => WarpSyncRequest(chain={}, error={:?})",
+                            peer_id,
+                            task.network[chain_id].log_name,
+                            err,
+                        );
+                    }
+                }
+
                 let _ = task
                     .grandpa_warp_sync_requests
                     .remove(&substream_id)
@@ -1883,8 +1849,30 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::StorageProof(response),
             }) => {
+                match &response {
+                    Ok(items) => {
+                        let decoded = items.decode();
+                        log::debug!(
+                            target: "network",
+                            "Connections({peer_id}) => StorageProofRequest(chain={}, total_size={})",
+                            task.network[chain_id].log_name,
+                            BytesDisplay(u64::try_from(decoded.len()).unwrap()),
+                        );
+                    }
+                    Err(err) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({peer_id}) => StorageProofRequest(chain={}, error={:?})",
+                            task.network[chain_id].log_name,
+                            err
+                        );
+                    }
+                }
+
                 let _ = task
                     .storage_proof_requests
                     .remove(&substream_id)
@@ -1893,8 +1881,32 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::CallProof(response),
             }) => {
+                match &response {
+                    Ok(items) => {
+                        let decoded = items.decode();
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => CallProofRequest({}, total_size: {})",
+                            peer_id,
+                            task.network[chain_id].log_name,
+                            BytesDisplay(u64::try_from(decoded.len()).unwrap())
+                        );
+                    }
+                    Err(err) => {
+                        log::debug!(
+                            target: "network",
+                            "Connections({}) => CallProofRequest({}, {})",
+                            peer_id,
+                            task.network[chain_id].log_name,
+                            err
+                        );
+                    }
+                }
+
                 let _ = task
                     .call_proof_requests
                     .remove(&substream_id)
@@ -1902,14 +1914,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .send(response.map_err(CallProofRequestError::Request));
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
-                substream_id,
+                peer_id: requestee_peer_id,
+                chain_id,
                 response: service::RequestResult::KademliaFindNode(Ok(nodes)),
+                ..
             }) => {
-                let chain_id = task
-                    .kademlia_find_node_requests
-                    .remove(&substream_id)
-                    .unwrap();
-
                 for (peer_id, mut addrs) in nodes {
                     // Make sure to not insert too many address for a single peer.
                     // While the .
@@ -1931,7 +1940,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 } else {
                                     log::debug!(
                                         target: "network",
-                                        "Discovery({}) => UnsupportedAddress(peer_id={}, addr={})",
+                                        "Discovery({}) => UnsupportedAddress(peer_id={}, addr={}, obtained_from={requestee_peer_id})",
                                         &task.network[chain_id].log_name,
                                         peer_id,
                                         &a
@@ -1941,7 +1950,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             Err((err, addr)) => {
                                 log::debug!(
                                     target: "network",
-                                    "Discovery({}) => InvalidAddress(peer_id={}, error={}, addr={})",
+                                    "Discovery({}) => InvalidAddress(peer_id={}, error={}, addr={}, obtained_from={requestee_peer_id})",
                                     &task.network[chain_id].log_name,
                                     peer_id,
                                     err,
@@ -1971,7 +1980,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             }
 
                             log::debug!(
-                                target: "network", "Discovery({}) => NewPeer(peer_id={}, addr={})",
+                                target: "network", "Discovery({}) => NewPeer(peer_id={}, addr={}, obtained_from={requestee_peer_id})",
                                 &task.network[chain_id].log_name,
                                 peer_id,
                                 valid_addrs.iter().map(|a| a.to_string()).join(", addr=")
@@ -1991,17 +2000,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
-                substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::KademliaFindNode(Err(error)),
+                ..
             }) => {
-                let chain_id = task
-                    .kademlia_find_node_requests
-                    .remove(&substream_id)
-                    .unwrap();
-
                 log::debug!(
                     target: "network",
-                    "Discovery({}) => FindNodeError(error={:?})",
+                    "Discovery({}) => FindNodeError(error={:?}, find_node_target={peer_id})",
                     &task.network[chain_id].log_name,
                     error
                 );
