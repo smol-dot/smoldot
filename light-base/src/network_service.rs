@@ -1234,7 +1234,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     debug_assert!(task.event_pending_send.is_none());
                     task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
                 }
-
             }
             WakeUpReason::MessageForChain(
                 chain_id,
