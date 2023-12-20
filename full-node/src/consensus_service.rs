@@ -2030,8 +2030,7 @@ impl SyncBackground {
                                 // TODO: must also do checkinherents
                                 method: "Core_execute_block".into(),
                                 parameter_vectored: iter::once({
-                                    let header =
-                                        header_verification_success.scale_encoded_header();
+                                    let header = header_verification_success.scale_encoded_header();
                                     let mut unsealed_header =
                                         header::decode(&header, block_number_bytes).unwrap();
                                     let _seal_log = unsealed_header.digest.pop_seal();
@@ -2079,9 +2078,9 @@ impl SyncBackground {
                             // TODO: check the state root hash
                             database.insert_trie_nodes(
                                 iter::once(full_sqlite::InsertTrieNode {
-                                    merkle_value: todo!(),
+                                    merkle_value: Cow::Owned(entry.merkle_value),
                                     partial_key_nibbles: todo!(),
-                                    children_merkle_values: todo!(),
+                                    children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
                                     storage_value: match entry.trie_node_info.storage_value {
                                         trie::proof_decode::StorageValue::HashKnownValueMissing(
                                             _,

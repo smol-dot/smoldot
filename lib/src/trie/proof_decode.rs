@@ -521,6 +521,17 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     },
                     ProofEntry {
                         node_value: &self.proof.as_ref()[node_value_range.clone()],
+                        merkle_value: if self.proof.as_ref()[node_value_range.clone()].len() < 32 {
+                            self.proof.as_ref()[node_value_range.clone()].to_vec()
+                        } else {
+                            blake2_rfc::blake2b::blake2b(
+                                32,
+                                &[],
+                                &self.proof.as_ref()[node_value_range.clone()],
+                            )
+                            .as_bytes()
+                            .to_vec()
+                        },
                         unhashed_storage_value: match storage_value_inner {
                             StorageValueInner::Known {
                                 is_inline: false,
@@ -1093,10 +1104,16 @@ pub enum Error {
 }
 
 /// Information about an entry in the proof.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct ProofEntry<'a> {
     /// Information about the node of the trie associated to this entry.
     pub trie_node_info: TrieNodeInfo<'a>,
+
+    /// Merkle value of the entry.
+    ///
+    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
+    /// >           works, you most likely don't need this.
+    pub merkle_value: Vec<u8>,
 
     /// Node value of that proof entry.
     ///
