@@ -3333,6 +3333,53 @@ where
             .map(|(_, peer_index, _, _, _)| &self.peers[peer_index.0])
     }
 
+    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
+    /// been emitted.
+    /// It is possible to send gossip notifications to these peers.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn gossip_is_connected(
+        &'_ self,
+        chain_id: ChainId,
+        target: &PeerId,
+        kind: GossipKind,
+    ) -> bool {
+        assert!(self.chains.contains(chain_id.0));
+        let GossipKind::ConsensusTransactions = kind;
+
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            // If the `PeerId` is unknown, then we also don't have any gossip link to it.
+            return false;
+        };
+
+        self.notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    peer_index,
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::open_min_value(),
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::open_max_value(),
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .is_some()
+    }
+
     /// Open a gossiping substream with the given peer on the given chain.
     ///
     /// Either a [`Event::GossipConnected`] or [`Event::GossipOpenFailed`] is guaranteed to later

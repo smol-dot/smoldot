@@ -1121,23 +1121,6 @@ async fn background_task(mut inner: Inner) {
                             BanSeverity::High => 40,
                         }),
                 );
-                if inner
-                    .network
-                    .gossip_close(
-                        chain_id,
-                        &peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    )
-                    .is_ok()
-                {
-                    inner.log_callback.log(
-                        LogLevel::Debug,
-                        format!(
-                            "chain-disconnected; peer_id={}; chain={}",
-                            peer_id, inner.network[chain_id].log_name
-                        ),
-                    );
-                }
                 if inner.network.gossip_remove_desired(
                     chain_id,
                     &peer_id,
@@ -1152,8 +1135,29 @@ async fn background_task(mut inner: Inner) {
                     );
                 }
 
-                debug_assert!(inner.event_pending_send.is_none());
-                inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
+                if inner.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    let _close_result = inner.network.gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    debug_assert!(_close_result.is_ok());
+
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "chain-disconnected; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+
+                    debug_assert!(inner.event_pending_send.is_none());
+                    inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
+                }
             }
 
             WakeUpReason::Message(ToBackground::ForegroundAnnounceBlock {

@@ -1325,25 +1325,6 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     basic_peering_strategy::UnassignSlotAndBan::Banned { had_slot: true }
                 );
 
-                if task
-                    .network
-                    .gossip_close(
-                        chain_id,
-                        &peer_id,
-                        service::GossipKind::ConsensusTransactions,
-                    )
-                    .is_ok()
-                {
-                    log::debug!(
-                        target: "network",
-                        "Gossip({}, {}) => Closed",
-                        &task.network[chain_id].log_name,
-                        peer_id,
-                    );
-                    let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
-                    debug_assert!(_was_in.is_some());
-                }
-
                 if had_slot {
                     log::debug!(
                         target: "network",
@@ -1360,8 +1341,32 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                if task.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    let _closed_result = task.network.gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    debug_assert!(_closed_result.is_ok());
+
+                    log::debug!(
+                        target: "network",
+                        "Gossip({}, {}) => Closed",
+                        &task.network[chain_id].log_name,
+                        peer_id,
+                    );
+
+                    let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
+                    debug_assert!(_was_in.is_some());
+
+                    debug_assert!(task.event_pending_send.is_none());
+                    task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                }
+
             }
             WakeUpReason::MessageForChain(
                 chain_id,
