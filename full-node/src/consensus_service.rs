@@ -2014,58 +2014,81 @@ impl SyncBackground {
 
                 let parent_hash = *header_verification_success.parent_hash();
 
-                let proof = {
-                    let target = self
-                        .peers_source_id_map
-                        .keys()
-                        .choose(&mut rand::thread_rng())
-                        .unwrap();
-                    self.network_service
-                        .clone()
-                        .call_proof_request(
-                            target.clone(),
-                            self.network_chain_id,
-                            CallProofRequestConfig {
-                                block_hash: parent_hash,
-                                // TODO: must also do checkinherents
-                                method: "Core_execute_block".into(),
-                                parameter_vectored: iter::once({
-                                    let header = header_verification_success.scale_encoded_header();
-                                    let mut unsealed_header =
-                                        header::decode(&header, block_number_bytes).unwrap();
-                                    let _seal_log = unsealed_header.digest.pop_seal();
+                let core_execute_block_param = {
+                    let header = header_verification_success.scale_encoded_header();
+                    let mut unsealed_header = header::decode(&header, block_number_bytes).unwrap();
+                    let _seal_log = unsealed_header.digest.pop_seal();
 
-                                    let encoded_body_len =
-                                        smoldot::util::encode_scale_compact_usize(
-                                            header_verification_success
-                                                .scale_encoded_extrinsics()
-                                                .unwrap()
-                                                .len(),
-                                        );
-                                    unsealed_header
-                                        .scale_encoding(block_number_bytes)
-                                        .map(|b| either::Right(either::Left(b)))
-                                        .chain(iter::once(either::Right(either::Right(
-                                            encoded_body_len,
-                                        ))))
-                                        .chain(
-                                            header_verification_success
-                                                .scale_encoded_extrinsics()
-                                                .unwrap()
-                                                .map(either::Left),
-                                        )
-                                        .fold(Vec::new(), |mut a, b| {
-                                            a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
-                                            a
-                                        })
-                                }),
-                            },
+                    let encoded_body_len = smoldot::util::encode_scale_compact_usize(
+                        header_verification_success
+                            .scale_encoded_extrinsics()
+                            .unwrap()
+                            .len(),
+                    );
+                    unsealed_header
+                        .scale_encoding(block_number_bytes)
+                        .map(|b| either::Right(either::Left(b)))
+                        .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+                        .chain(
+                            header_verification_success
+                                .scale_encoded_extrinsics()
+                                .unwrap()
+                                .map(either::Left),
                         )
-                        .await
-                        .unwrap()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
+                            a
+                        })
                 };
 
-                self.database
+                let calls = [
+                    ("BlockBuilder_check_inherents", {
+                        let inherent_data = smoldot::verify::inherents::InherentData {
+                            timestamp: u64::try_from(unix_time.as_millis())
+                                .unwrap_or(u64::max_value()),
+                        };
+                        let inherent_data = inherent_data.as_raw_list();
+
+                        let mut v = core_execute_block_param.clone();
+                        v.extend_from_slice(
+                            smoldot::util::encode_scale_compact_usize(inherent_data.len()).as_ref(),
+                        );
+                        for (id, item) in inherent_data {
+                            v.extend_from_slice(&id);
+                            v.extend_from_slice(
+                                smoldot::util::encode_scale_compact_usize(item.as_ref().len())
+                                    .as_ref(),
+                            );
+                            v.extend_from_slice(item.as_ref());
+                        }
+                        v
+                    }),
+                    ("Core_execute_block", core_execute_block_param),
+                ];
+
+                for (method, parameter) in calls {
+                    let proof = {
+                        let target = self
+                            .peers_source_id_map
+                            .keys()
+                            .choose(&mut rand::thread_rng())
+                            .unwrap();
+                        self.network_service
+                            .clone()
+                            .call_proof_request(
+                                target.clone(),
+                                self.network_chain_id,
+                                CallProofRequestConfig {
+                                    block_hash: parent_hash,
+                                    method: Cow::Borrowed(method),
+                                    parameter_vectored: iter::once(parameter),
+                                },
+                            )
+                            .await
+                            .unwrap()
+                    };
+
+                    self.database
                     .with_database(move |database| {
                         let decoded_proof = trie::proof_decode::decode_and_verify_proof(
                             trie::proof_decode::Config {
@@ -2114,6 +2137,7 @@ impl SyncBackground {
                         }
                     })
                     .await;
+                }
 
                 let parent_info = header_verification_success.parent_user_data().map(|b| {
                     let NonFinalizedBlock::Verified { runtime } = b else {
