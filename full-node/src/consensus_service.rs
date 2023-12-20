@@ -2029,7 +2029,37 @@ impl SyncBackground {
                                 block_hash: parent_hash,
                                 // TODO: must also do checkinherents
                                 method: "Core_execute_block".into(),
-                                parameter_vectored: iter::empty::<Vec<u8>>(), // TODO: no
+                                parameter_vectored: iter::once({
+                                    let header =
+                                        header_verification_success.scale_encoded_header();
+                                    let mut unsealed_header =
+                                        header::decode(&header, block_number_bytes).unwrap();
+                                    let _seal_log = unsealed_header.digest.pop_seal();
+
+                                    let encoded_body_len =
+                                        smoldot::util::encode_scale_compact_usize(
+                                            header_verification_success
+                                                .scale_encoded_extrinsics()
+                                                .unwrap()
+                                                .len(),
+                                        );
+                                    unsealed_header
+                                        .scale_encoding(block_number_bytes)
+                                        .map(|b| either::Right(either::Left(b)))
+                                        .chain(iter::once(either::Right(either::Right(
+                                            encoded_body_len,
+                                        ))))
+                                        .chain(
+                                            header_verification_success
+                                                .scale_encoded_extrinsics()
+                                                .unwrap()
+                                                .map(either::Left),
+                                        )
+                                        .fold(Vec::new(), |mut a, b| {
+                                            a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
+                                            a
+                                        })
+                                }),
                             },
                         )
                         .await

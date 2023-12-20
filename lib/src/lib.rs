@@ -213,4 +213,5 @@ pub mod transactions;
 pub mod trie;
 pub mod verify;
 
-mod util;
+// TODO: shouldn't be pub
+pub mod util;
