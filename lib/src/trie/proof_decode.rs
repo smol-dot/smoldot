@@ -128,15 +128,6 @@ where
         merkle_values
     };
 
-    // Dummy empty proofs are always valid.
-    if merkle_values.is_empty() {
-        return Ok(DecodedTrieProof {
-            proof: config.proof,
-            entries: Vec::new(),
-            trie_roots: Default::default(),
-        });
-    }
-
     // Start by iterating over each element of the proof, and keep track of elements that are
     // decodable but aren't mentioned in any other element. This gives us the tries roots.
     let trie_roots = {
