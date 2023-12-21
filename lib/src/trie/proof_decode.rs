@@ -173,10 +173,11 @@ where
 
     // We repeat this operation for every trie root.
     for trie_root_hash in trie_roots {
-        struct StackEntry {
+        struct StackEntry<'a> {
             range_in_proof: ops::Range<usize>,
             index_in_entries: usize,
             num_visited_children: u8,
+            children_node_values: [Option<&'a [u8]>; 16],
         }
 
         // TODO: configurable capacity?
@@ -236,20 +237,15 @@ where
                 Some(StackEntry {
                     range_in_proof: stack_top_proof_range,
                     num_visited_children: stack_top_visited_children,
+                    children_node_values: stack_top_children,
                     ..
                 }) => {
                     // Find the next child of the top of the stack.
                     let stack_top_entry = &proof_as_ref[stack_top_proof_range.clone()];
-                    let Ok(stack_top_decoded) = trie_node::decode(stack_top_entry) else {
-                        // If the node is in the stack, it has necessarily successfully
-                        // decoded before.
-                        unreachable!()
-                    };
 
                     // Store in `stack_top_visited_children` the index of the next child (that
                     // we are about to visit), or store 16 is all children have been visited.
-                    *stack_top_visited_children = stack_top_decoded
-                        .children
+                    *stack_top_visited_children = stack_top_children
                         .iter()
                         .skip(usize::from(*stack_top_visited_children))
                         .position(|c| c.is_some())
@@ -264,9 +260,8 @@ where
 
                     // The value of the child node is either directly inlined (if less
                     // than 32 bytes) or is a hash.
-                    let child_node_value = stack_top_decoded.children
-                        [usize::from(*stack_top_visited_children - 1)]
-                    .unwrap();
+                    let child_node_value =
+                        stack_top_children[usize::from(*stack_top_visited_children - 1)].unwrap();
                     debug_assert!(child_node_value.len() <= 32); // Guarnateed by decoding API.
                     if child_node_value.len() < 32 {
                         let offset = stack_top_proof_range.start
@@ -381,6 +376,7 @@ where
                 range_in_proof: visited_node_entry_range,
                 index_in_entries: entries.len() - 1,
                 num_visited_children: 0,
+                children_node_values: visited_node_decoded.children,
             });
         }
     }
