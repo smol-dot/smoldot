@@ -595,91 +595,95 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn iter_ordered(
         &'_ self,
     ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> + '_ {
-        /*self.trie_roots
-        .iter()
-        .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
-            self.entries
-                .iter()
-                .enumerate()
-                .skip(trie_root_entry_index)
-                .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
-                .map(|(entry_index, entry)| {
-                    let key = EntryKey {
-                        trie_root_hash,
-                        key: EntryKeyIter::new(self, entry_index),
-                    };
+        let proof = self.proof.as_ref();
 
-                    let entry = ProofEntry {
-                        node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
-                        unhashed_storage_value: entry
-                            .storage_value_in_proof
-                            .map(|range| &self.proof.as_ref()[range]),
-                        trie_node_info: TrieNodeInfo {
-                            children: self.children_from_entry(
-                                trie_root_hash,
-                                entry_index,
-                                &self.proof.as_ref()[node_value_range.clone()],
-                                *children_bitmap,
-                            ),
-                            storage_value,
-                        },
-                    };
+        self.trie_roots
+            .iter()
+            .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .skip(trie_root_entry_index)
+                    .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
+                    .map(|(entry_index, entry)| {
+                        let key = EntryKey {
+                            trie_root_hash,
+                            key: EntryKeyIter::new(self, entry_index),
+                        };
 
-                    (key, entry)
-                })
-        })*/
-        iter::empty()
-    }
+                        let Ok(entry_index_decoded) =
+                            trie_node::decode(&proof[entry.range_in_proof.clone()])
+                        else {
+                            // Proof has been checked to be entirely decodable.
+                            unreachable!()
+                        };
 
-    fn children_from_entry<'a>(
-        &'a self,
-        trie_root_merkle_value: &[u8; 32],
-        entry: usize,
-        parent_node_value: &'a [u8],
-        children_bitmap: u16,
-    ) -> Children<'a, T> {
-        /*debug_assert_eq!(
-            self.entries
-                .get(&(*trie_root_merkle_value, key.to_vec()))
-                .unwrap()
-                .2,
-            children_bitmap
-        );
+                        let entry = ProofEntry {
+                            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+                            unhashed_storage_value: entry
+                                .storage_value_in_proof
+                                .as_ref()
+                                .map(|range| &proof[range.clone()]),
+                            trie_node_info: TrieNodeInfo {
+                                children: Children {
+                                    children: {
+                                        let mut children = core::array::from_fn(|_| Child::NoChild);
+                                        let mut i = entry_index + 1;
+                                        for child_num in 0..16 {
+                                            let Some(child_merkle_value) =
+                                                entry_index_decoded.children[child_num]
+                                            else {
+                                                continue;
+                                            };
+                                            if entry.children_present_in_proof_bitmap
+                                                & (1 << child_num)
+                                                != 0
+                                            {
+                                                children[child_num] = Child::InProof {
+                                                    child_key: EntryKeyIter::new(self, i),
+                                                    merkle_value: child_merkle_value,
+                                                };
+                                                i += self.entries[i].child_entries_follow_up;
+                                                i += i;
+                                            } else {
+                                                children[child_num] = Child::AbsentFromProof {
+                                                    merkle_value: child_merkle_value,
+                                                };
+                                            }
+                                        }
+                                        children
+                                    },
+                                },
+                                storage_value: match (
+                                    entry_index_decoded.storage_value,
+                                    &entry.storage_value_in_proof,
+                                ) {
+                                    (trie_node::StorageValue::Unhashed(value), _) => {
+                                        StorageValue::Known {
+                                            value,
+                                            inline: true,
+                                        }
+                                    }
+                                    (trie_node::StorageValue::Hashed(_), Some(value_range)) => {
+                                        StorageValue::Known {
+                                            value: &proof[value_range.clone()],
+                                            inline: false,
+                                        }
+                                    }
+                                    (trie_node::StorageValue::Hashed(hash), None) => {
+                                        StorageValue::HashKnownValueMissing(hash)
+                                    }
+                                    (trie_node::StorageValue::None, _v) => {
+                                        debug_assert!(_v.is_none());
+                                        StorageValue::None
+                                    }
+                                },
+                            },
+                        };
 
-        let mut children = [Child::NoChild; 16];
-        let mut child_search = key.to_vec();
-
-        let parent_node_value = trie_node::decode(parent_node_value).unwrap();
-
-        for nibble in nibble::all_nibbles().filter(|n| (children_bitmap & (1 << u8::from(*n))) != 0)
-        {
-            child_search.push(nibble);
-
-            let merkle_value = &parent_node_value.children[usize::from(u8::from(nibble))].unwrap();
-
-            children[usize::from(u8::from(nibble))] = if let Some(((_, child), _)) = self
-                .entries
-                .range((
-                    ops::Bound::Included((*trie_root_merkle_value, child_search.clone())), // TODO: stupid allocation
-                    ops::Bound::Unbounded,
-                ))
-                .next()
-                .filter(|((trie_root, maybe_child), _)| {
-                    trie_root == trie_root_merkle_value && maybe_child.starts_with(&child_search)
-                }) {
-                Child::InProof {
-                    child_key: child,
-                    merkle_value,
-                }
-            } else {
-                Child::AbsentFromProof { merkle_value }
-            };
-
-            child_search.pop();
-        }
-
-        Children { children }*/
-        todo!()
+                        (key, entry)
+                    })
+            })
     }
 
     /// Returns the closest ancestor to the given key that can be found in the proof. If `key` is
@@ -720,7 +724,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         // Mismatch in partial key. Closest ancestor is the parent entry.
                     }
                     (Some(child_num), None) => {
-                        if let Some(child) = iter_entry_decoded.children[usize::from(child_num)] {
+                        if let Some(_) = iter_entry_decoded.children[usize::from(child_num)] {
                             // Key points to child. Update `iter_entry` and continue.
                             let children_present_in_proof_bitmap =
                                 self.entries[iter_entry].children_present_in_proof_bitmap;
@@ -851,7 +855,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         }
                     }
                     (None, None) => {
-                        //
                         // Exact match. Trie node is `iter_entry`.
                         return Ok(TrieNodeInfo {
                             storage_value: match (
