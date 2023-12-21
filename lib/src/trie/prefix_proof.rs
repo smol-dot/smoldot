@@ -180,7 +180,7 @@ impl PrefixScan {
                                     // Rather than complicate this code, we just add the child to
                                     // `next` (this time an `Exact` query) and process it during
                                     // the next iteration.
-                                    next.push((child_key.to_owned(), QueryTy::Exact));
+                                    next.push((child_key.collect::<Vec<_>>(), QueryTy::Exact));
                                     continue;
                                 }
                                 proof_decode::Child::AbsentFromProof { .. } => {
@@ -259,7 +259,7 @@ impl PrefixScan {
                             next.push((direction, QueryTy::Direction));
                         }
                         proof_decode::Child::InProof { child_key, .. } => {
-                            next.push((child_key.to_owned(), QueryTy::Exact))
+                            next.push((child_key.collect::<Vec<_>>(), QueryTy::Exact))
                         }
                     }
                 }
