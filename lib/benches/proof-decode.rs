@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::iter;
+
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use rand::Rng as _;
 
@@ -95,7 +97,15 @@ fn benchmark_proof_decode(c: &mut Criterion) {
                             .map(|_| rand::thread_rng().gen_range(0..16).try_into().unwrap())
                             .collect::<Vec<_>>()
                     },
-                    |key| i.next_key(&proof.trie_root, &key, false, &[], true),
+                    |key| {
+                        i.next_key(
+                            &proof.trie_root,
+                            key.iter().copied(),
+                            false,
+                            iter::empty(),
+                            true,
+                        )
+                    },
                     BatchSize::SmallInput,
                 )
             },
@@ -114,7 +124,7 @@ fn benchmark_proof_decode(c: &mut Criterion) {
                             .map(|_| rand::thread_rng().gen_range(0..16).try_into().unwrap())
                             .collect::<Vec<_>>()
                     },
-                    |key| i.closest_descendant_merkle_value(&proof.trie_root, &key),
+                    |key| i.closest_descendant_merkle_value(&proof.trie_root, key.iter().copied()),
                     BatchSize::SmallInput,
                 )
             },
@@ -133,7 +143,7 @@ fn benchmark_proof_decode(c: &mut Criterion) {
                             .map(|_| rand::thread_rng().gen_range(0..16).try_into().unwrap())
                             .collect::<Vec<_>>()
                     },
-                    |key| i.closest_ancestor_in_proof(&proof.trie_root, &key),
+                    |key| i.closest_ancestor_in_proof(&proof.trie_root, key.iter().copied()),
                     BatchSize::SmallInput,
                 )
             },
