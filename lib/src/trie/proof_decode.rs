@@ -234,25 +234,26 @@ where
                     // Find the next child of the top of the stack.
                     let stack_top_entry = &proof_as_ref[stack_top_proof_range.clone()];
 
-                    // Store in `stack_top_visited_children` the index of the next child (that
-                    // we are about to visit), or store 16 is all children have been visited.
-                    *stack_top_visited_children = stack_top_children
+                    // Find the index of the next child (that we are about to visit).
+                    let next_child_to_visit = stack_top_children
                         .iter()
                         .skip(usize::from(*stack_top_visited_children))
                         .position(|c| c.is_some())
-                        .map(|idx| u8::try_from(idx).unwrap() + *stack_top_visited_children + 1)
+                        .map(|idx| u8::try_from(idx).unwrap() + *stack_top_visited_children)
                         .unwrap_or(16);
 
                     // `continue` if all children have been visited. The next iteration will
                     // pop the stack entry.
-                    if *stack_top_visited_children == 16 {
+                    if next_child_to_visit == 16 {
+                        *stack_top_visited_children = 16;
                         continue;
                     }
+                    *stack_top_visited_children = next_child_to_visit + 1;
 
                     // The value of the child node is either directly inlined (if less
                     // than 32 bytes) or is a hash.
                     let child_node_value =
-                        stack_top_children[usize::from(*stack_top_visited_children - 1)].unwrap();
+                        stack_top_children[usize::from(next_child_to_visit)].unwrap();
                     debug_assert!(child_node_value.len() <= 32); // Guaranteed by decoding API.
                     if child_node_value.len() < 32 {
                         let offset = stack_top_proof_range.start
