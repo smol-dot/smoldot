@@ -1045,6 +1045,18 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     (Some(k), None, Some(pk)) if k == pk => {
                         // Continue descending down the tree.
                     }
+                    (None, None, Some(_)) => {
+                        // Exact match. Due to the `branch_nodes` setting, we can't just
+                        // return `iter_entry` and instead continue iterating.
+                        or_equal = true;
+                    }
+                    (Some(k), None, Some(pk)) if k < pk => {
+                        // `key_before` points to somewhere between `iter_entry`'s parent
+                        // and `iter_entry`. Due to the `branch_nodes` setting, we can't just
+                        // return `iter_entry` and instead continue iterating.
+                        key_before = either::Right(iter::empty().fuse());
+                        or_equal = true;
+                    }
                     (Some(k), Some(p), _) if k > p => {
                         // `key_before` is strictly superior to `prefix`. The next key is
                         // thus necessarily `None`.
@@ -1084,10 +1096,6 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         key_before = either::Right(iter::empty().fuse());
                         or_equal = true;
                         break;
-                    }
-                    (None, None, Some(_)) => {
-                        // Exact match. Next key is `iter_entry`.
-                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
                     }
                     (None, None, None)
                         if or_equal
