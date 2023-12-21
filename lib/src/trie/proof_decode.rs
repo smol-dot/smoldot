@@ -773,20 +773,21 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     ///
     /// This function will return `Ok` even if there is no node in the trie for `key`, in which
     /// case the returned [`TrieNodeInfo`] will indicate no storage value and no children.
-    pub fn trie_node_info<'a>(
-        &'a self,
-        trie_root_merkle_value: &'a [u8; 32],
+    pub fn trie_node_info(
+        &'_ self,
+        trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
-    ) -> Result<TrieNodeInfo<'a, T>, IncompleteProofError> {
+    ) -> Result<TrieNodeInfo<'_, T>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // Find the starting point of the requested trie.
-        let Some(&(mut iter_entry)) = self.trie_roots.get(trie_root_merkle_value) else {
+        let Some((mut iter_entry_merkle_value, mut iter_entry)) = self
+            .trie_roots
+            .get_key_value(trie_root_merkle_value)
+            .map(|(k, v)| (&k[..], *v))
+        else {
             return Err(IncompleteProofError());
         };
-
-        // Merkle value corresponding to `iter_entry`.
-        let mut iter_entry_merkle_value: &[u8] = trie_root_merkle_value;
 
         loop {
             let Ok(iter_entry_decoded) =
@@ -925,11 +926,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// > **Note**: This function is a convenient wrapper around
     /// >           [`DecodedTrieProof::trie_node_info`].
     // TODO: accept param as iterator rather than slice?
-    pub fn storage_value<'a>(
-        &'a self,
-        trie_root_merkle_value: &'a [u8; 32],
+    pub fn storage_value(
+        &'_ self,
+        trie_root_merkle_value: &[u8; 32],
         key: &[u8],
-    ) -> Result<Option<(&'a [u8], TrieEntryVersion)>, IncompleteProofError> {
+    ) -> Result<Option<(&'_ [u8], TrieEntryVersion)>, IncompleteProofError> {
         match self
             .trie_node_info(
                 trie_root_merkle_value,
@@ -1215,20 +1216,21 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns an error if the proof doesn't contain enough information to determine the Merkle
     /// value.
     /// Returns `Ok(None)` if the proof indicates that there is no descendant.
-    pub fn closest_descendant_merkle_value<'a>(
-        &'a self,
-        trie_root_merkle_value: &'a [u8; 32],
+    pub fn closest_descendant_merkle_value(
+        &'_ self,
+        trie_root_merkle_value: &[u8; 32],
         mut key: impl Iterator<Item = nibble::Nibble>,
-    ) -> Result<Option<&'a [u8]>, IncompleteProofError> {
+    ) -> Result<Option<&'_ [u8]>, IncompleteProofError> {
         let proof = self.proof.as_ref();
 
         // Find the starting point of the requested trie.
-        let Some(&(mut iter_entry)) = self.trie_roots.get(trie_root_merkle_value) else {
+        let Some((mut iter_entry_merkle_value, mut iter_entry)) = self
+            .trie_roots
+            .get_key_value(trie_root_merkle_value)
+            .map(|(k, v)| (&k[..], *v))
+        else {
             return Err(IncompleteProofError());
         };
-
-        // Merkle value corresponding to `iter_entry`.
-        let mut iter_entry_merkle_value: &[u8] = trie_root_merkle_value;
 
         loop {
             let Ok(iter_entry_decoded) =
