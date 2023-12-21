@@ -253,7 +253,7 @@ where
                     // than 32 bytes) or is a hash.
                     let child_node_value =
                         stack_top_children[usize::from(*stack_top_visited_children - 1)].unwrap();
-                    debug_assert!(child_node_value.len() <= 32); // Guarnateed by decoding API.
+                    debug_assert!(child_node_value.len() <= 32); // Guaranteed by decoding API.
                     if child_node_value.len() < 32 {
                         let offset = stack_top_proof_range.start
                             + if !child_node_value.is_empty() {
