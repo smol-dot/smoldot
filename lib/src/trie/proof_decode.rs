@@ -1713,9 +1713,16 @@ mod tests {
 
         assert_eq!(
             decoded
-                .next_key(EXAMPLE_PROOF_STATE_ROOT, &[], true, &[], true)
+                .next_key(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    iter::empty(),
+                    true,
+                    iter::empty(),
+                    true
+                )
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .collect::<Vec<_>>(),
             &[]
         );
 
@@ -1723,20 +1730,20 @@ mod tests {
             decoded
                 .next_key(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &[
+                    [
                         9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4,
                         0xb, 2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
                     ]
                     .into_iter()
-                    .map(|n| Nibble::try_from(n).unwrap())
-                    .collect::<Vec<_>>(),
+                    .map(|n| Nibble::try_from(n).unwrap()),
                     true,
-                    &[],
+                    iter::empty(),
                     true
                 )
                 .unwrap()
-                .unwrap(),
-            &[
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [
                 9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
                 4, 6, 4, 0xe, 3, 3, 3, 9, 7
             ]
@@ -1750,19 +1757,18 @@ mod tests {
             decoded
                 .next_key(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &[
+                    [
                         9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4,
                         0xb, 2, 4, 6, 4, 0xe, 3, 3, 3, 9
                     ]
                     .into_iter()
-                    .map(|n| Nibble::try_from(n).unwrap())
-                    .collect::<Vec<_>>(),
+                    .map(|n| Nibble::try_from(n).unwrap()),
                     false,
-                    &[],
+                    iter::empty(),
                     true
                 )
                 .unwrap()
-                .unwrap(),
+                .unwrap().collect::<Vec<_>>(),
             &[
                 9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
                 4, 6, 4, 0xe, 3, 3, 3, 9, 7
@@ -1775,15 +1781,14 @@ mod tests {
         assert!(matches!(
             decoded.next_key(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 false,
-                &[],
+                iter::empty(),
                 false
             ),
             Err(super::IncompleteProofError())
@@ -1792,21 +1797,19 @@ mod tests {
         assert!(decoded
             .next_key(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7, 0
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true
             )
             .unwrap()
@@ -1815,21 +1818,19 @@ mod tests {
         assert!(decoded
             .next_key(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 0xa
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true
             )
             .unwrap()
@@ -1847,7 +1848,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles([].into_iter()).collect::<Vec<_>>()
+                    trie::bytes_to_nibbles([].into_iter())
                 )
                 .unwrap()
                 .unwrap(),
@@ -1858,7 +1859,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &[super::nibble::Nibble::try_from(1).unwrap()]
+                    [super::nibble::Nibble::try_from(1).unwrap()].into_iter()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1872,10 +1873,10 @@ mod tests {
         /*assert!(matches!(
             dbg!(decoded.closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     super::nibble::Nibble::try_from(1).unwrap(),
                     super::nibble::Nibble::try_from(0).unwrap()
-                ]
+                ].into_iter()
             )),
             Err(super::IncompleteProofError())
         ));*/
@@ -1883,7 +1884,7 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[super::nibble::Nibble::try_from(0xe).unwrap()]
+                [super::nibble::Nibble::try_from(0xe).unwrap()].into_iter()
             )
             .unwrap()
             .is_none());
@@ -1891,10 +1892,11 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     super::nibble::Nibble::try_from(0xe).unwrap(),
                     super::nibble::Nibble::try_from(0).unwrap()
                 ]
+                .into_iter()
             )
             .unwrap()
             .is_none());
@@ -1903,10 +1905,9 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227].into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1919,10 +1920,9 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &trie::bytes_to_nibbles(
+                trie::bytes_to_nibbles(
                     [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 228].into_iter()
                 )
-                .collect::<Vec<_>>()
             )
             .unwrap()
             .is_none());
@@ -1931,11 +1931,10 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151]
                             .into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1948,7 +1947,7 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &trie::bytes_to_nibbles(
+                trie::bytes_to_nibbles(
                     [
                         156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151, 99,
                         230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129, 125, 112,
@@ -1957,7 +1956,6 @@ mod tests {
                     ]
                     .into_iter()
                 )
-                .collect::<Vec<_>>()
             )
             .unwrap()
             .is_none());
@@ -1966,7 +1964,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [
                             156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151,
                             99, 230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129,
@@ -1976,7 +1974,6 @@ mod tests {
                         ]
                         .into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1990,7 +1987,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [
                             156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151,
                             99, 230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129,
@@ -2000,7 +1997,6 @@ mod tests {
                         ]
                         .into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
