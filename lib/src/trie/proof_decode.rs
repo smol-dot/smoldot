@@ -422,6 +422,7 @@ struct Entry {
     /// to jump to the next sibling of that entry, jump to `N + 1 + k`. If `k` is non-zero, then
     /// entry `N + 1` corresponds to the first child of the entry of index `N`.
     child_entries_follow_up: usize,
+    // TODO: by adding the partial key, we should be able to avoid decoding the entry while iterating down the trie
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
@@ -1911,6 +1912,8 @@ mod tests {
             )
             .unwrap()
             .is_none());
+
+        // TODO: more tests
     }
 
     #[test]
@@ -2082,6 +2085,8 @@ mod tests {
             ][..]
         );
     }
+
+    // TODO: test closest_ancestor
 
     #[test]
     fn node_values_smaller_than_32bytes() {
