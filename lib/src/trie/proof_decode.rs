@@ -595,39 +595,40 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn iter_ordered(
         &'_ self,
     ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_>)> + '_ {
-        self.trie_roots
-            .iter()
-            .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .skip(trie_root_entry_index)
-                    .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
-                    .map(|(entry_index, entry)| {
-                        let key = EntryKey {
-                            trie_root_hash,
-                            key: EntryKeyIter::new(self, entry_index),
-                        };
+        /*self.trie_roots
+        .iter()
+        .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
+            self.entries
+                .iter()
+                .enumerate()
+                .skip(trie_root_entry_index)
+                .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
+                .map(|(entry_index, entry)| {
+                    let key = EntryKey {
+                        trie_root_hash,
+                        key: EntryKeyIter::new(self, entry_index),
+                    };
 
-                        let entry = ProofEntry {
-                            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
-                            unhashed_storage_value: entry
-                                .storage_value_in_proof
-                                .map(|range| &self.proof.as_ref()[range]),
-                            trie_node_info: TrieNodeInfo {
-                                children: self.children_from_entry(
-                                    trie_root_hash,
-                                    entry_index,
-                                    &self.proof.as_ref()[node_value_range.clone()],
-                                    *children_bitmap,
-                                ),
-                                storage_value,
-                            },
-                        };
+                    let entry = ProofEntry {
+                        node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+                        unhashed_storage_value: entry
+                            .storage_value_in_proof
+                            .map(|range| &self.proof.as_ref()[range]),
+                        trie_node_info: TrieNodeInfo {
+                            children: self.children_from_entry(
+                                trie_root_hash,
+                                entry_index,
+                                &self.proof.as_ref()[node_value_range.clone()],
+                                *children_bitmap,
+                            ),
+                            storage_value,
+                        },
+                    };
 
-                        (key, entry)
-                    })
-            })
+                    (key, entry)
+                })
+        })*/
+        iter::empty()
     }
 
     fn children_from_entry<'a>(
@@ -1066,6 +1067,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         iterating_up = true;
                         key_before = either::Right(iter::empty().fuse());
                         or_equal = true;
+                        break;
                     }
                     (None, None, Some(_)) => {
                         // Exact match. Next key is `iter_entry`.
@@ -1136,6 +1138,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                 key_before = either::Right(iter::empty().fuse());
                                 or_equal = true;
                             }
+                            break;
                         } else {
                             // Childless branch nodes are forbidden. This is checked when
                             // decoding the proof.
@@ -1149,6 +1152,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             iterating_up = true;
                             key_before = either::Right(iter::empty().fuse());
                             or_equal = true;
+                            break;
                         }
                     }
                 }
