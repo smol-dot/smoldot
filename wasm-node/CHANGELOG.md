@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
+
+## 2.0.15 - 2023-12-20
+
+### Changed
+
+- When a network request fails, or when a block or justification fails to verify, smoldot now closes the gossip link with the peer it tried to send the request to or obtained the block or justification from, and will not re-open a new gossip link for a little while. ([#1482](https://github.com/smol-dot/smoldot/pull/1482))
+
+## 2.0.14 - 2023-12-11
+
+### Fixed
+
+- Fix pings never being sent to peers, which means that smoldot would fail to detect when a connection is no longer responsive. ([#1461](https://github.com/smol-dot/smoldot/pull/1461))
 - Fix connection being properly killed when the ping substream fails to be negotiated. ([#1459](https://github.com/smol-dot/smoldot/pull/1459))
 - Fix Merkle proofs with nodes that have one child and no storage value being considered as valid.
 - Fix Merkle proofs with nodes that have no children or storage value and aren't the root being considered as valid.

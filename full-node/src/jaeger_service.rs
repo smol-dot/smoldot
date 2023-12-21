@@ -165,7 +165,8 @@ impl JaegerService {
         [Some(span1), span2]
     }
 
-    pub fn outgoing_block_request_span(
+    // TODO: unused
+    pub fn _outgoing_block_request_span(
         &self,
         local_peer_id: &PeerId,
         remote_peer_id: &PeerId,

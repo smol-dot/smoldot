@@ -492,7 +492,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Removes a source from the state machine. Returns the user data of this source, and all
-    /// the requests that this source were expected to perform.
+    /// the requests that this source was expected to perform.
     ///
     /// # Panic
     ///
@@ -649,7 +649,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
                 inner.source_num_ongoing_requests(*src)
             }
-            (AllSyncInner::WarpSync { .. }, SourceMapping::WarpSync(_)) => 0,
+            (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
+                inner.source_num_ongoing_requests(*src)
+            }
 
             (AllSyncInner::Poisoned, _) => unreachable!(),
             // Invalid combinations of syncing state machine and source id.
@@ -1141,6 +1143,27 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        match (&self.inner, &self.shared.requests[request_id.0]) {
+            (AllSyncInner::AllForks(inner), RequestMapping::AllForks(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            (AllSyncInner::WarpSync { inner, .. }, RequestMapping::WarpSync(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            _ => unreachable!(),
+        }
+    }
+
     /// Process the next block in the queue of verification.
     ///
     /// This method takes ownership of the [`AllSync`] and starts a verification process. The
@@ -1449,6 +1472,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         // TODO: many of the errors don't properly translate here, needs some refactoring
                         match blocks_append.add_block(
                             &block.scale_encoded_header,
+                            block.scale_encoded_extrinsics,
                             block
                                 .scale_encoded_justifications
                                 .into_iter()
@@ -2197,8 +2221,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            BlockVerifyInner::AllForks(_verify) => todo!(), // TODO: /!\
-            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+            BlockVerifyInner::AllForks(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Left(iter.map(either::Left))),
+            BlockVerifyInner::Optimistic(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Right(iter.map(either::Right))),
         }
     }
 
@@ -2358,8 +2386,12 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_extrinsics(),
+            HeaderVerifySuccessInner::AllForks(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Left(iter.map(either::Left))),
+            HeaderVerifySuccessInner::Optimistic(verify) => verify
+                .scale_encoded_extrinsics()
+                .map(|iter| either::Right(iter.map(either::Right))),
         }
     }
 
@@ -2375,7 +2407,9 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     /// is the finalized block.
     pub fn parent_user_data(&self) -> Option<&TBl> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(_verify) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::AllForks(verify) => {
+                verify.parent_user_data().map(|ud| ud.as_ref().unwrap()) // TODO: don't unwrap
+            }
             HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_user_data(),
         }
     }
@@ -2391,7 +2425,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     /// Returns the SCALE-encoded header of the parent of the block.
     pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(_inner) => todo!(), // TODO: /!\
+            HeaderVerifySuccessInner::AllForks(inner) => inner.parent_scale_encoded_header(),
             HeaderVerifySuccessInner::Optimistic(inner) => inner.parent_scale_encoded_header(),
         }
     }
@@ -2463,6 +2497,20 @@ enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
+    /// Returns the source the justification was obtained from.
+    pub fn sender(&self) -> (SourceId, &TSrc) {
+        match &self.inner {
+            FinalityProofVerifyInner::AllForks(inner) => {
+                let sender = inner.sender().1;
+                (sender.outer_source_id, &sender.user_data)
+            }
+            FinalityProofVerifyInner::Optimistic(inner) => {
+                let sender = inner.sender().1;
+                (sender.outer_source_id, &sender.user_data)
+            }
+        }
+    }
+
     /// Perform the verification.
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
@@ -2803,7 +2851,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-            full: false,
+            download_bodies: false,
         });
 
         debug_assert!(self
@@ -2876,9 +2924,7 @@ impl<TRq> Shared<TRq> {
                 }
             };
 
-            if let Some(finalized_block_height) = finalized_block_height {
-                all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
-            }
+            all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
 
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }

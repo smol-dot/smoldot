@@ -318,8 +318,8 @@ where
                             id: outer_substream_id,
                         })
                     }
-                    Some(established::Event::PingOutSuccess) => {
-                        Some(ConnectionToCoordinatorInner::PingOutSuccess)
+                    Some(established::Event::PingOutSuccess { ping_time }) => {
+                        Some(ConnectionToCoordinatorInner::PingOutSuccess { ping_time })
                     }
                     Some(established::Event::PingOutFailed) => {
                         Some(ConnectionToCoordinatorInner::PingOutFailed)

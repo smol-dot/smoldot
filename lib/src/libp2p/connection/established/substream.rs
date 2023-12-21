@@ -27,8 +27,12 @@ use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
-use core::mem;
-use core::{fmt, num::NonZeroUsize};
+use core::{
+    fmt, mem,
+    num::NonZeroUsize,
+    ops::{Add, Sub},
+    time::Duration,
+};
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -156,7 +160,7 @@ enum SubstreamInner<TNow> {
     /// Failed to negotiate a protocol for an outgoing ping substream.
     PingOutFailed {
         /// FIFO queue of pings that will immediately fail.
-        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+        queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
     },
     /// Outbound ping substream.
     PingOut {
@@ -167,15 +171,15 @@ enum SubstreamInner<TNow> {
         /// Data waiting to be received from the remote. Any mismatch will cause an error.
         /// Contains even the data that is still queued in `outgoing_payload`.
         expected_payload: VecDeque<Vec<u8>>,
-        /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occurred.
-        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+        /// FIFO queue of pings waiting to be answered. For each ping, when the ping was queued
+        /// and after how long it will time out, or `None` if the timeout has already occurred.
+        queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
     },
 }
 
 impl<TNow> Substream<TNow>
 where
-    TNow: Clone + Ord,
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Initializes an new `ingoing` substream.
     ///
@@ -1053,7 +1057,9 @@ where
                 // We check the timeouts before checking the incoming data, as otherwise pings
                 // might succeed after their timeout.
                 for timeout in queued_pings.iter_mut() {
-                    if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
+                    if timeout.as_ref().map_or(false, |(when_started, timeout)| {
+                        (read_write.now.clone() - when_started.clone()) >= *timeout
+                    }) {
                         *timeout = None;
                         read_write.wake_up_asap();
                         return (
@@ -1069,8 +1075,8 @@ where
                         );
                     }
 
-                    if let Some(timeout) = timeout {
-                        read_write.wake_up_after(timeout);
+                    if let Some((when_started, timeout)) = timeout {
+                        read_write.wake_up_after(&(when_started.clone() + *timeout));
                     }
                 }
 
@@ -1083,7 +1089,7 @@ where
                             read_write.wake_up_asap();
                             return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
-                        if queued_pings.remove(0).is_some() {
+                        if let Some((when_started, _)) = queued_pings.remove(0) {
                             return (
                                 Some(SubstreamInner::PingOut {
                                     negotiation,
@@ -1091,7 +1097,9 @@ where
                                     outgoing_payload,
                                     queued_pings,
                                 }),
-                                Some(Event::PingOutSuccess),
+                                Some(Event::PingOutSuccess {
+                                    ping_time: read_write.now.clone() - when_started,
+                                }),
                             );
                         }
                     }
@@ -1278,11 +1286,11 @@ where
     ///
     /// Panics if the substream isn't an outgoing ping substream.
     ///
-    pub fn queue_ping(&mut self, payload: &[u8; 32], timeout: TNow) {
+    pub fn queue_ping(&mut self, payload: &[u8; 32], now: TNow, timeout: Duration) {
         match &mut self.inner {
             SubstreamInner::PingOut { queued_pings, .. }
             | SubstreamInner::PingOutFailed { queued_pings, .. } => {
-                queued_pings.push(Some(timeout));
+                queued_pings.push(Some((now, timeout)));
             }
             _ => panic!(),
         }
@@ -1487,7 +1495,10 @@ pub enum Event {
     NotificationsOutReset,
 
     /// A ping has been successfully answered by the remote.
-    PingOutSuccess,
+    PingOutSuccess {
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
     /// Remote has failed to answer one or more pings.
     PingOutError {
         /// Number of pings that the remote has failed to answer.

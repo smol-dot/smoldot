@@ -24,7 +24,7 @@ use crate::{network_service, platform::PlatformRef, util};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    string::{String, ToString as _},
+    string::String,
     sync::Arc,
     vec::Vec,
 };
@@ -316,7 +316,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             target: &task.log_target,
                             "Failed to decode header in block announce received from {}. Error: {}",
                             peer_id, error,
-                        )
+                        );
                     }
                 }
 
@@ -359,6 +359,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             announce_block_height,
                             peer_id
                         );
+
+                        task.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                network_service::BanSeverity::Low,
+                                "announced-block-below-known-finalized",
+                            )
+                            .await;
                     }
                     all::BlockAnnounceOutcome::NotFinalizedChain => {
                         log::debug!(
@@ -374,6 +382,13 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     }
                     all::BlockAnnounceOutcome::InvalidHeader(_) => {
                         // Log messages are already printed above.
+                        task.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                network_service::BanSeverity::High,
+                                "bad-block-announce",
+                            )
+                            .await;
                     }
                 }
             }
@@ -605,7 +620,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Err(_)))) => {
                 // Failed block request.
-                // TODO: should disconnect peer
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-blocks-request",
+                    )
+                    .await;
                 task.sync
                     .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
             }
@@ -627,12 +649,30 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Err(_)))) => {
                 // Failed warp sync request.
-                // TODO: should disconnect peer
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-warp-sync-request",
+                    )
+                    .await;
                 task.sync.grandpa_warp_sync_response_err(request_id);
             }
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(r))) => {
                 // Storage proof request.
+                if r.is_err() {
+                    let source_peer_id =
+                        task.sync[task.sync.request_source_id(request_id)].0.clone();
+                    task.network_service
+                        .ban_and_disconnect(
+                            source_peer_id,
+                            network_service::BanSeverity::Low,
+                            "failed-storage-request",
+                        )
+                        .await;
+                }
                 task.sync.storage_get_response(request_id, r);
             }
 
@@ -645,6 +685,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(err)))) => {
                 // Failed call proof request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-call-proof-request",
+                    )
+                    .await;
                 task.sync.call_proof_response(request_id, Err(err));
             }
 
@@ -971,7 +1019,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                     Err(err) => {
-                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
                         if !matches!(err, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
                             log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
@@ -988,7 +1035,6 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
                     }
                     Err(err) => {
-                        // TODO: should disconnect peer
                         log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
                         if !matches!(
                             err,
@@ -1040,10 +1086,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                 // Grandpa warp sync fragment to verify.
-                let sender_peer_id = verify
+                let sender_if_still_connected = verify
                     .proof_sender()
-                    .map(|(_, (peer_id, _))| Cow::Owned(peer_id.to_string())) // TODO: unnecessary cloning most of the time
-                    .unwrap_or(Cow::Borrowed("<disconnected>"));
+                    .map(|(_, (peer_id, _))| peer_id.clone());
 
                 let (sync, result) = verify.perform({
                     let mut seed = [0; 32];
@@ -1058,25 +1103,31 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         log::debug!(
                             target: &self.log_target,
                             "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
-                            sender_peer_id,
+                            sender_if_still_connected.as_ref().map(|p| Cow::Owned(p.to_base58())).unwrap_or(Cow::Borrowed("<disconnected>")),
                             HashDisplay(&fragment_hash)
                         );
                     }
                     Err(err) => {
-                        // TODO: should disconnect peer
-                        let maybe_forced_change =
-                            matches!(err, all::VerifyFragmentError::JustificationVerify(_));
                         log::warn!(
                             target: &self.log_target,
                             "Failed to verify warp sync fragment from {}: {}{}",
-                            sender_peer_id,
+                            sender_if_still_connected.as_ref().map(|p| Cow::Owned(p.to_base58())).unwrap_or(Cow::Borrowed("<disconnected>")),
                             err,
-                            if maybe_forced_change {
+                            if matches!(err, all::VerifyFragmentError::JustificationVerify(_)) {
                                 ". This might be caused by a forced GrandPa authorities change having \
                                 been enacted on the chain. If this is the case, please update the \
                                 chain specification with a checkpoint past this forced change."
                             } else { "" }
                         );
+                        if let Some(sender_if_still_connected) = sender_if_still_connected {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender_if_still_connected,
+                                    network_service::BanSeverity::High,
+                                    "bad-warp-sync-fragment",
+                                )
+                                .await;
+                        }
                     }
                 }
             }
@@ -1223,12 +1274,24 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             HashDisplay(&verified_hash),
                             error
                         );
+
+                        // TODO: ban peers that have announced the block
+                        /*for peer_id in self.sync.knows_non_finalized_block(height, hash) {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    peer_id,
+                                    network_service::BanSeverity::High,
+                                    "bad-block",
+                                )
+                                .await;
+                        }*/
                     }
                 }
             }
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
                 // Finality proof to verify.
+                let sender = verify.sender().1 .0.clone();
                 match verify.perform({
                     let mut seed = [0; 32];
                     self.platform.fill_random_bytes(&mut seed);
@@ -1246,7 +1309,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => FinalityProofVerified(finalized_blocks={})",
+                            "Sync => FinalityProofVerified(finalized_blocks={}, sender={sender})",
                             finalized_blocks_newest_to_oldest.len(),
                         );
 
@@ -1282,28 +1345,33 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     (sync, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the proof
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => JustificationVerificationError(error={:?})",
-                            error,
+                            "Sync => JustificationVerificationError(error={error:?}, sender={sender})",
                         );
 
+                        // TODO: don't print for consensusenginemismatch?
                         log::warn!(
                             target: &self.log_target,
-                            "Error while verifying justification: {}",
-                            error
+                            "Error while verifying justification: {error}"
                         );
+
+                        // TODO: don't ban for consensusenginemismatch?
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender,
+                                network_service::BanSeverity::High,
+                                "bad-justification",
+                            )
+                            .await;
                     }
 
                     (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the proof
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => GrandpaCommitVerificationError(error={:?})",
-                            error,
+                            "Sync => GrandpaCommitVerificationError(error={error:?}, sender={sender})",
                         );
 
                         log::warn!(
@@ -1311,6 +1379,14 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             "Error while verifying GrandPa commit: {}",
                             error
                         );
+
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender,
+                                network_service::BanSeverity::High,
+                                "bad-grandpa-commit",
+                            )
+                            .await;
                     }
                 }
             }
