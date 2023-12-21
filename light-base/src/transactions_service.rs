@@ -1438,7 +1438,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     let child_trie = mv.child_trie();
                     runtime_call_lock.closest_descendant_merkle_value(
                         child_trie.as_ref().map(|c| c.as_ref()),
-                        &mv.key().collect::<Vec<_>>(),
+                        mv.key(),
                     )
                 };
                 let merkle_value = match merkle_value {
@@ -1459,9 +1459,9 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     let child_trie = nk.child_trie();
                     runtime_call_lock.next_key(
                         child_trie.as_ref().map(|c| c.as_ref()),
-                        &nk.key().collect::<Vec<_>>(),
+                        nk.key(),
                         nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.prefix(),
                         nk.branch_nodes(),
                     )
                 };
@@ -1474,7 +1474,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                         ));
                     }
                 };
-                validation_in_progress = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                validation_in_progress = nk.inject_key(next_key);
             }
         }
     }

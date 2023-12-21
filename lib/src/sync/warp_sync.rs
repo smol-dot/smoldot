@@ -1715,19 +1715,23 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
             match decoded_downloaded_runtime.closest_ancestor_in_proof(
                 &self.inner.warped_header_state_root,
-                &code_nibbles[..code_nibbles.len() - 1],
+                code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
             ) {
                 Ok(Some(closest_ancestor_key)) => {
+                    let closest_ancestor_key = closest_ancestor_key.collect::<Vec<_>>();
                     let next_nibble = code_nibbles[closest_ancestor_key.len()];
                     let merkle_value = decoded_downloaded_runtime
-                        .trie_node_info(&self.inner.warped_header_state_root, closest_ancestor_key)
+                        .trie_node_info(
+                            &self.inner.warped_header_state_root,
+                            closest_ancestor_key.iter().copied(),
+                        )
                         .unwrap()
                         .children
                         .child(next_nibble)
                         .merkle_value();
 
                     match merkle_value {
-                        Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
+                        Some(mv) => (mv.to_owned(), closest_ancestor_key),
                         None => {
                             self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
@@ -2034,9 +2038,9 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let (proof, downloaded_source) = calls.get(&nk.call_in_progress()).unwrap();
                     let value = match proof.next_key(
                         &self.inner.warped_header_state_root,
-                        &nk.key().collect::<Vec<_>>(), // TODO: overhead
+                        nk.key(),
                         nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(), // TODO: overhead
+                        nk.prefix(),
                         nk.branch_nodes(),
                     ) {
                         Ok(v) => v,
@@ -2052,14 +2056,14 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             );
                         }
                     };
-                    nk.inject_key(value.map(|v| v.iter().copied()))
+                    nk.inject_key(value)
                 }
                 chain_information::build::InProgress::ClosestDescendantMerkleValue(mv) => {
                     // TODO: child tries not supported
                     let (proof, downloaded_source) = calls.get(&mv.call_in_progress()).unwrap();
                     let value = match proof.closest_descendant_merkle_value(
                         &self.inner.warped_header_state_root,
-                        &mv.key().collect::<Vec<_>>(), // TODO: overhead
+                        mv.key(),
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {

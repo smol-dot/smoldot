@@ -40,8 +40,8 @@
 
 use super::{nibble, trie_node, TrieEntryVersion};
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::{fmt, iter, mem, ops};
+use alloc::vec::Vec;
+use core::{fmt, iter, ops};
 
 /// Configuration to pass to [`decode_and_verify_proof`].
 pub struct Config<I> {
@@ -128,14 +128,6 @@ where
         merkle_values
     };
 
-    // Dummy empty proofs are always valid.
-    if merkle_values.is_empty() {
-        return Ok(DecodedTrieProof {
-            proof: config.proof,
-            entries: BTreeMap::new(),
-        });
-    }
-
     // Start by iterating over each element of the proof, and keep track of elements that are
     // decodable but aren't mentioned in any other element. This gives us the tries roots.
     let trie_roots = {
@@ -161,7 +153,10 @@ where
     // note of the traversed elements.
 
     // Keep track of all the entries found in the proof.
-    let mut entries = BTreeMap::new();
+    let mut entries: Vec<Entry> = Vec::with_capacity(merkle_values.len());
+
+    let mut trie_roots_with_entries =
+        hashbrown::HashMap::with_capacity_and_hasher(trie_roots.len(), Default::default());
 
     // Keep track of the proof entries that haven't been visited when traversing.
     let mut unvisited_proof_entries =
@@ -169,148 +164,212 @@ where
 
     // We repeat this operation for every trie root.
     for trie_root_hash in trie_roots {
-        // Find the expected trie root in the proof. This is the starting point of the verification.
-        let mut remain_iterate = {
-            let (root_position, root_range) =
-                merkle_values.get(&trie_root_hash[..]).unwrap().clone();
-            let _ = unvisited_proof_entries.remove(&root_position);
-            vec![(root_range, Vec::new())]
-        };
+        struct StackEntry<'a> {
+            range_in_proof: ops::Range<usize>,
+            index_in_entries: usize,
+            num_visited_children: u8,
+            children_node_values: [Option<&'a [u8]>; 16],
+        }
 
-        while !remain_iterate.is_empty() {
-            // Iterate through each entry in `remain_iterate`.
-            // This clears `remain_iterate` so that we can add new entries to it during the iteration.
-            for (proof_entry_range, storage_key_before_partial) in
-                mem::replace(&mut remain_iterate, Vec::with_capacity(merkle_values.len()))
-            {
-                // Decodes the proof entry.
-                let proof_entry = &proof_as_ref[proof_entry_range.clone()];
-                let decoded_node_value =
-                    trie_node::decode(proof_entry).map_err(Error::InvalidNodeValue)?;
-                let decoded_node_value_children_bitmap = decoded_node_value.children_bitmap();
+        // TODO: configurable capacity?
+        let mut visited_entries_stack: Vec<StackEntry> = Vec::with_capacity(24);
 
-                // Build the storage key of the node.
-                let storage_key = {
-                    let mut storage_key_after_partial = Vec::with_capacity(
-                        storage_key_before_partial.len() + decoded_node_value.partial_key.len(),
-                    );
-                    storage_key_after_partial.extend_from_slice(&storage_key_before_partial);
-                    storage_key_after_partial.extend(decoded_node_value.partial_key);
-                    storage_key_after_partial
-                };
-
-                // Add the children to `remain_iterate`.
-                for (child_num, child_node_value) in
-                    decoded_node_value.children.into_iter().enumerate()
-                {
-                    // Ignore missing children slots.
-                    let child_node_value = match child_node_value {
-                        None => continue,
-                        Some(v) => v,
+        loop {
+            // Find which node to visit next.
+            // This is the next child of the node at the top of the stack, or if the node at
+            // the top of the stack doesn't have any child, we pop it and continue iterating.
+            // If the stack is empty, we are necessarily at the first iteration.
+            let visited_node_entry_range = match visited_entries_stack.last_mut() {
+                None => {
+                    // Stack is empty.
+                    // Because we immediately `break` after popping the last element, the stack
+                    // can only ever be empty at the very start.
+                    let (root_position, root_range) =
+                        merkle_values.get(&trie_root_hash[..]).unwrap().clone();
+                    let _ = unvisited_proof_entries.remove(&root_position);
+                    trie_roots_with_entries.insert(*trie_root_hash, entries.len());
+                    root_range
+                }
+                Some(StackEntry {
+                    num_visited_children: stack_top_visited_children,
+                    ..
+                }) if *stack_top_visited_children == 16 => {
+                    // We have visited all the children of the top of the stack. Pop the node from
+                    // the stack.
+                    let Some(StackEntry {
+                        index_in_entries: stack_top_index_in_entries,
+                        ..
+                    }) = visited_entries_stack.pop()
+                    else {
+                        unreachable!()
                     };
 
-                    debug_assert!(child_num < 16);
-                    let child_nibble =
-                        nibble::Nibble::try_from(u8::try_from(child_num).unwrap()).unwrap();
+                    // Update the value of `child_entries_follow_up`
+                    // and `children_present_in_proof_bitmap` of the parent.
+                    if let Some(&StackEntry {
+                        index_in_entries: parent_index_in_entries,
+                        num_visited_children: parent_children_visited,
+                        ..
+                    }) = visited_entries_stack.last()
+                    {
+                        entries[parent_index_in_entries].child_entries_follow_up +=
+                            entries[stack_top_index_in_entries].child_entries_follow_up + 1;
+                        entries[parent_index_in_entries].children_present_in_proof_bitmap |=
+                            1 << (parent_children_visited - 1);
+                    }
 
-                    // Key of the child node before its partial key.
-                    let mut child_storage_key_before_partial =
-                        Vec::with_capacity(storage_key.len() + 1);
-                    child_storage_key_before_partial.extend_from_slice(&storage_key);
-                    child_storage_key_before_partial.push(child_nibble);
-
-                    // The value of the child node is either directly inlined (if less than 32 bytes)
-                    // or is a hash.
-                    if child_node_value.len() < 32 {
-                        let offset = proof_entry_range.start
-                            + if !child_node_value.is_empty() {
-                                child_node_value.as_ptr() as usize - proof_entry.as_ptr() as usize
-                            } else {
-                                0
-                            };
-                        debug_assert!(offset == 0 || offset >= proof_entry_range.start);
-                        debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
-                        remain_iterate.push((
-                            offset..(offset + child_node_value.len()),
-                            child_storage_key_before_partial,
-                        ));
+                    // If we popped the last node of the stack, we have finished the iteration.
+                    if visited_entries_stack.is_empty() {
+                        break;
                     } else {
-                        // The decoding API guarantees that the child value is never larger than
-                        // 32 bytes.
-                        debug_assert_eq!(child_node_value.len(), 32);
-                        if let Some((child_position, child_entry_range)) =
-                            merkle_values.get(child_node_value)
-                        {
-                            // If the node value of the child is less than 32 bytes long, it should
-                            // have been inlined instead of given separately.
-                            if child_entry_range.end - child_entry_range.start < 32 {
-                                return Err(Error::UnexpectedHashedNode);
-                            }
-
-                            // Remove the entry from `unvisited_proof_entries`.
-                            // Note that it is questionable what to do if the same entry is visited
-                            // multiple times. In case where multiple storage branches are identical,
-                            // the sender of the proof should de-duplicate the identical nodes. For
-                            // this reason, it could be legitimate for the same proof entry to be
-                            // visited multiple times.
-                            let _ = unvisited_proof_entries.remove(child_position);
-                            remain_iterate.push((
-                                child_entry_range.clone(),
-                                child_storage_key_before_partial,
-                            ));
-                        }
+                        continue;
                     }
                 }
+                Some(StackEntry {
+                    range_in_proof: stack_top_proof_range,
+                    num_visited_children: stack_top_visited_children,
+                    children_node_values: stack_top_children,
+                    ..
+                }) => {
+                    // Find the next child of the top of the stack.
+                    let stack_top_entry = &proof_as_ref[stack_top_proof_range.clone()];
 
-                // Insert the node into `entries`.
-                // This is done at the end so that `storage_key` doesn't need to be cloned.
-                let _prev_value = entries.insert((*trie_root_hash, storage_key), {
-                    let storage_value = match decoded_node_value.storage_value {
-                        trie_node::StorageValue::None => StorageValueInner::None,
-                        trie_node::StorageValue::Hashed(value_hash) => {
-                            if let Some((value_position, value_entry_range)) =
-                                merkle_values.get(&value_hash[..])
-                            {
-                                let _ = unvisited_proof_entries.remove(value_position);
-                                StorageValueInner::Known {
-                                    is_inline: false,
-                                    offset: value_entry_range.start,
-                                    len: value_entry_range.end - value_entry_range.start,
-                                }
-                            } else {
-                                let offset =
-                                    value_hash.as_ptr() as usize - proof_as_ref.as_ptr() as usize;
-                                debug_assert!(offset >= proof_entry_range.start);
-                                debug_assert!(
-                                    offset <= (proof_entry_range.start + proof_entry.len())
-                                );
-                                StorageValueInner::HashKnownValueMissing { offset }
-                            }
-                        }
-                        trie_node::StorageValue::Unhashed(v) => {
-                            let offset = if !v.is_empty() {
-                                v.as_ptr() as usize - proof_as_ref.as_ptr() as usize
+                    // Find the index of the next child (that we are about to visit).
+                    let next_child_to_visit = stack_top_children
+                        .iter()
+                        .skip(usize::from(*stack_top_visited_children))
+                        .position(|c| c.is_some())
+                        .map(|idx| u8::try_from(idx).unwrap() + *stack_top_visited_children)
+                        .unwrap_or(16);
+
+                    // `continue` if all children have been visited. The next iteration will
+                    // pop the stack entry.
+                    if next_child_to_visit == 16 {
+                        *stack_top_visited_children = 16;
+                        continue;
+                    }
+                    *stack_top_visited_children = next_child_to_visit + 1;
+
+                    // The value of the child node is either directly inlined (if less
+                    // than 32 bytes) or is a hash.
+                    let child_node_value =
+                        stack_top_children[usize::from(next_child_to_visit)].unwrap();
+                    debug_assert!(child_node_value.len() <= 32); // Guaranteed by decoding API.
+                    if child_node_value.len() < 32 {
+                        let offset = stack_top_proof_range.start
+                            + if !child_node_value.is_empty() {
+                                child_node_value.as_ptr() as usize
+                                    - stack_top_entry.as_ptr() as usize
                             } else {
                                 0
                             };
-                            debug_assert!(offset == 0 || offset >= proof_entry_range.start);
-                            debug_assert!(offset <= (proof_entry_range.start + proof_entry.len()));
-                            StorageValueInner::Known {
-                                is_inline: true,
-                                offset,
-                                len: v.len(),
-                            }
+                        debug_assert!(offset == 0 || offset >= stack_top_proof_range.start);
+                        debug_assert!(
+                            offset <= (stack_top_proof_range.start + stack_top_entry.len())
+                        );
+                        offset..(offset + child_node_value.len())
+                    } else if let Some(&(child_position, ref child_entry_range)) =
+                        merkle_values.get(child_node_value)
+                    {
+                        // If the node value of the child is less than 32 bytes long, it should
+                        // have been inlined instead of given separately.
+                        if child_entry_range.end - child_entry_range.start < 32 {
+                            return Err(Error::UnexpectedHashedNode);
                         }
-                    };
 
-                    (
-                        storage_value,
-                        proof_entry_range.clone(),
-                        decoded_node_value_children_bitmap,
-                    )
-                });
-                debug_assert!(_prev_value.is_none());
+                        // Remove the entry from `unvisited_proof_entries`.
+                        // Note that it is questionable what to do if the same entry is visited
+                        // multiple times. In case where multiple storage branches are identical,
+                        // the sender of the proof should de-duplicate the identical nodes. For
+                        // this reason, it could be legitimate for the same proof entry to be
+                        // visited multiple times.
+                        let _ = unvisited_proof_entries.remove(&child_position);
+                        child_entry_range.clone()
+                    } else {
+                        // Child is a hash that was not found in the proof. Simply continue
+                        // iterating, in order to try to find the follow-up child.
+                        continue;
+                    }
+                }
+            };
+
+            // Decodes the proof entry.
+            let visited_node_entry = &proof_as_ref[visited_node_entry_range.clone()];
+            let visited_node_decoded =
+                trie_node::decode(visited_node_entry).map_err(Error::InvalidNodeValue)?;
+
+            // All nodes must either have a child or a storage value or be the root.
+            if visited_node_decoded.children_bitmap() == 0
+                && matches!(
+                    visited_node_decoded.storage_value,
+                    trie_node::StorageValue::None
+                )
+                && !visited_entries_stack.is_empty()
+            {
+                return Err(Error::NonRootBranchNodeWithNoValue);
             }
+
+            // Nodes with no storage value and one children are forbidden.
+            if visited_node_decoded
+                .children
+                .iter()
+                .filter(|c| c.is_some())
+                .count()
+                == 1
+                && matches!(
+                    visited_node_decoded.storage_value,
+                    trie_node::StorageValue::None
+                )
+            {
+                return Err(Error::NodeWithNoValueAndOneChild);
+            }
+
+            // Add an entry for this node in the final list of entries.
+            entries.push(Entry {
+                parent_entry_index: visited_entries_stack.last().map(|entry| {
+                    (
+                        entry.index_in_entries,
+                        nibble::Nibble::try_from(entry.num_visited_children - 1).unwrap(),
+                    )
+                }),
+                range_in_proof: visited_node_entry_range.clone(),
+                storage_value_in_proof: match visited_node_decoded.storage_value {
+                    trie_node::StorageValue::None => None,
+                    trie_node::StorageValue::Hashed(value_hash) => {
+                        if let Some(&(value_position, ref value_entry_range)) =
+                            merkle_values.get(&value_hash[..])
+                        {
+                            let _ = unvisited_proof_entries.remove(&value_position);
+                            Some(value_entry_range.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    trie_node::StorageValue::Unhashed(v) => {
+                        let offset = if !v.is_empty() {
+                            v.as_ptr() as usize - proof_as_ref.as_ptr() as usize
+                        } else {
+                            0
+                        };
+                        debug_assert!(offset == 0 || offset >= visited_node_entry_range.start);
+                        debug_assert!(
+                            offset <= (visited_node_entry_range.start + visited_node_entry.len())
+                        );
+                        Some(offset..offset + v.len())
+                    }
+                },
+                child_entries_follow_up: 0,          // Filled later.
+                children_present_in_proof_bitmap: 0, // Filled later.
+            });
+
+            // Add the visited node to the stack. The next iteration will either go to its first
+            // child, or pop the node from the stack.
+            visited_entries_stack.push(StackEntry {
+                range_in_proof: visited_node_entry_range,
+                index_in_entries: entries.len() - 1,
+                num_visited_children: 0,
+                children_node_values: visited_node_decoded.children,
+            });
         }
     }
 
@@ -323,22 +382,8 @@ where
     Ok(DecodedTrieProof {
         proof: config.proof,
         entries,
+        trie_roots: trie_roots_with_entries,
     })
-}
-
-/// Equivalent to [`StorageValue`] but contains offsets indexing [`DecodedTrieProof::proof`].
-#[derive(Debug, Copy, Clone)]
-enum StorageValueInner {
-    /// Equivalent to [`StorageValue::Known`].
-    Known {
-        is_inline: bool,
-        offset: usize,
-        len: usize,
-    },
-    /// Equivalent to [`StorageValue::HashKnownValueMissing`].
-    HashKnownValueMissing { offset: usize },
-    /// Equivalent to [`StorageValue::None`].
-    None,
 }
 
 /// Decoded Merkle proof. The proof is guaranteed valid.
@@ -346,10 +391,38 @@ pub struct DecodedTrieProof<T> {
     /// The proof itself.
     proof: T,
 
-    /// For each trie-root-hash + storage-key tuple, contains the entry found in the proof, the
-    /// range at which to find its node value, and the children bitmap.
-    // TODO: a BTreeMap is actually kind of stupid since `proof` is itself in a tree format
-    entries: BTreeMap<([u8; 32], Vec<nibble::Nibble>), (StorageValueInner, ops::Range<usize>, u16)>,
+    /// All entries in the proof, in lexicographic order. Ordering between trie roots is
+    /// unspecified.
+    entries: Vec<Entry>,
+
+    ///
+    /// Given that hashes are verified to actually match their values, there is no risk of
+    /// HashDoS attack.
+    // TODO: is that true? ^ depends on whether there are a lot of storage values
+    trie_roots: hashbrown::HashMap<[u8; 32], usize, fnv::FnvBuildHasher>,
+}
+
+struct Entry {
+    /// Index within [`DecodedTrieProof::entries`] of the parent of this entry and child direction
+    /// nibble, or `None` if it is the root.
+    parent_entry_index: Option<(usize, nibble::Nibble)>,
+
+    /// Range within [`DecodedTrieProof::proof`] of the node value of this entry.
+    range_in_proof: ops::Range<usize>,
+
+    /// Range within [`DecodedTrieProof::proof`] of the unhashed storage value of this entry.
+    /// `None` if the entry doesn't have any storage entry or if it's missing from the proof.
+    storage_value_in_proof: Option<ops::Range<usize>>,
+
+    // TODO: doc
+    children_present_in_proof_bitmap: u16,
+
+    /// Given an entry of index `N`, it is always followed with `k` entries that correspond to the
+    /// sub-tree of that entry, where `k` is equal to [`Entry::child_entries_follow_up`]. In order
+    /// to jump to the next sibling of that entry, jump to `N + 1 + k`. If `k` is non-zero, then
+    /// entry `N + 1` corresponds to the first child of the entry of index `N`.
+    child_entries_follow_up: usize,
+    // TODO: by adding the partial key, we should be able to avoid decoding the entry while iterating down the trie
 }
 
 impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
@@ -376,14 +449,16 @@ impl<T: AsRef<[u8]>> fmt::Debug for DecodedTrieProof<T> {
                         }
                     }
 
-                    struct DummyNibbles<'a>(&'a [nibble::Nibble]);
-                    impl<'a> fmt::Debug for DummyNibbles<'a> {
+                    struct DummyNibbles<'a, T: AsRef<[u8]>>(EntryKeyIter<'a, T>);
+                    impl<'a, T: AsRef<[u8]>> fmt::Debug for DummyNibbles<'a, T> {
                         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                            if self.0.is_empty() {
-                                write!(f, "∅")?
+                            let mut any_written = false;
+                            for nibble in self.0.clone() {
+                                any_written = true;
+                                write!(f, "{:x}", nibble)?
                             }
-                            for nibble in self.0 {
-                                write!(f, "{:x}", *nibble)?
+                            if !any_written {
+                                write!(f, "∅")?
                             }
                             Ok(())
                         }
@@ -447,6 +522,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// containing a value at a key that consists in an uneven number of nibbles is considered as
     /// valid according to [`decode_and_verify_proof`].
     ///
+    // TODO: paragraph below not true anymore
     /// However, given that [`decode_and_verify_proof`] verifies the trie proof against the state
     /// trie root hash, we are also guaranteed that this proof reflects the actual trie. If the
     /// actual trie can't contain any storage value at a key that consists in an uneven number of
@@ -459,6 +535,8 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// context of a runtime, and that the block using this trie is guaranteed to be valid, then
     /// this function will work as intended and return the entire content of the proof.
     ///
+    // TODO: ordering between trie roots unspecified
+    // TODO: consider not returning a Vec
     pub fn iter_runtime_context_ordered(
         &'_ self,
     ) -> impl Iterator<Item = (EntryKey<'_, Vec<u8>>, StorageValue<'_>)> + '_ {
@@ -472,11 +550,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             )| {
                 let value = entry.trie_node_info.storage_value;
 
-                if key.len() % 2 != 0 {
+                if key.clone().count() % 2 != 0 {
                     return None;
                 }
 
-                let key = nibble::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect();
+                let key = nibble::nibbles_to_bytes_suffix_extend(key).collect();
                 Some((
                     EntryKey {
                         trie_root_hash,
@@ -491,180 +569,99 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns a list of all elements of the proof, ordered by key in lexicographic order.
     ///
     /// The iterator includes branch nodes.
+    // TODO: ordering between trie roots unspecified
     pub fn iter_ordered(
         &'_ self,
-    ) -> impl Iterator<Item = (EntryKey<'_, &'_ [nibble::Nibble]>, ProofEntry<'_>)> + '_ {
-        self.entries.iter().map(
-            |((trie_root_hash, key), (storage_value_inner, node_value_range, children_bitmap))| {
-                let storage_value = match storage_value_inner {
-                    StorageValueInner::Known {
-                        offset,
-                        len,
-                        is_inline,
-                        ..
-                    } => StorageValue::Known {
-                        value: &self.proof.as_ref()[*offset..][..*len],
-                        inline: *is_inline,
-                    },
-                    StorageValueInner::None => StorageValue::None,
-                    StorageValueInner::HashKnownValueMissing { offset } => {
-                        StorageValue::HashKnownValueMissing(
-                            <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32]).unwrap(),
-                        )
-                    }
-                };
+    ) -> impl Iterator<Item = (EntryKey<'_, EntryKeyIter<'_, T>>, ProofEntry<'_, T>)> + '_ {
+        let proof = self.proof.as_ref();
 
-                (
-                    EntryKey {
-                        trie_root_hash,
-                        key: &key[..],
-                    },
-                    ProofEntry {
-                        node_value: &self.proof.as_ref()[node_value_range.clone()],
-                        unhashed_storage_value: match storage_value_inner {
-                            StorageValueInner::Known {
-                                is_inline: false,
-                                offset,
-                                len,
-                            } => Some(&self.proof.as_ref()[*offset..][..*len]),
-                            _ => None,
-                        },
-                        trie_node_info: TrieNodeInfo {
-                            children: self.children_from_key(
-                                trie_root_hash,
-                                key,
-                                &self.proof.as_ref()[node_value_range.clone()],
-                                *children_bitmap,
-                            ),
-                            storage_value,
-                        },
-                    },
-                )
-            },
-        )
-    }
+        self.trie_roots
+            .iter()
+            .flat_map(|(trie_root_hash, &trie_root_entry_index)| {
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .skip(trie_root_entry_index)
+                    .take(self.entries[trie_root_entry_index].child_entries_follow_up + 1)
+                    .map(|(entry_index, entry)| {
+                        let key = EntryKey {
+                            trie_root_hash,
+                            key: EntryKeyIter::new(self, entry_index),
+                        };
 
-    fn children_from_key<'a>(
-        &'a self,
-        trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
-        parent_node_value: &'a [u8],
-        children_bitmap: u16,
-    ) -> Children<'a> {
-        debug_assert_eq!(
-            self.entries
-                .get(&(*trie_root_merkle_value, key.to_vec()))
-                .unwrap()
-                .2,
-            children_bitmap
-        );
+                        let Ok(entry_index_decoded) =
+                            trie_node::decode(&proof[entry.range_in_proof.clone()])
+                        else {
+                            // Proof has been checked to be entirely decodable.
+                            unreachable!()
+                        };
 
-        let mut children = [Child::NoChild; 16];
-        let mut child_search = key.to_vec();
+                        let entry = ProofEntry {
+                            node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+                            unhashed_storage_value: entry
+                                .storage_value_in_proof
+                                .as_ref()
+                                .map(|range| &proof[range.clone()]),
+                            trie_node_info: TrieNodeInfo {
+                                children: Children {
+                                    children: {
+                                        let mut children = core::array::from_fn(|_| Child::NoChild);
+                                        let mut i = entry_index + 1;
+                                        for child_num in 0..16 {
+                                            let Some(child_merkle_value) =
+                                                entry_index_decoded.children[child_num]
+                                            else {
+                                                continue;
+                                            };
+                                            if entry.children_present_in_proof_bitmap
+                                                & (1 << child_num)
+                                                != 0
+                                            {
+                                                children[child_num] = Child::InProof {
+                                                    child_key: EntryKeyIter::new(self, i),
+                                                    merkle_value: child_merkle_value,
+                                                };
+                                                i += self.entries[i].child_entries_follow_up;
+                                                i += 1;
+                                            } else {
+                                                children[child_num] = Child::AbsentFromProof {
+                                                    merkle_value: child_merkle_value,
+                                                };
+                                            }
+                                        }
+                                        children
+                                    },
+                                },
+                                storage_value: match (
+                                    entry_index_decoded.storage_value,
+                                    &entry.storage_value_in_proof,
+                                ) {
+                                    (trie_node::StorageValue::Unhashed(value), _) => {
+                                        StorageValue::Known {
+                                            value,
+                                            inline: true,
+                                        }
+                                    }
+                                    (trie_node::StorageValue::Hashed(_), Some(value_range)) => {
+                                        StorageValue::Known {
+                                            value: &proof[value_range.clone()],
+                                            inline: false,
+                                        }
+                                    }
+                                    (trie_node::StorageValue::Hashed(hash), None) => {
+                                        StorageValue::HashKnownValueMissing(hash)
+                                    }
+                                    (trie_node::StorageValue::None, _v) => {
+                                        debug_assert!(_v.is_none());
+                                        StorageValue::None
+                                    }
+                                },
+                            },
+                        };
 
-        let parent_node_value = trie_node::decode(parent_node_value).unwrap();
-
-        for nibble in nibble::all_nibbles().filter(|n| (children_bitmap & (1 << u8::from(*n))) != 0)
-        {
-            child_search.push(nibble);
-
-            let merkle_value = &parent_node_value.children[usize::from(u8::from(nibble))].unwrap();
-
-            children[usize::from(u8::from(nibble))] = if let Some(((_, child), _)) = self
-                .entries
-                .range((
-                    ops::Bound::Included((*trie_root_merkle_value, child_search.clone())), // TODO: stupid allocation
-                    ops::Bound::Unbounded,
-                ))
-                .next()
-                .filter(|((trie_root, maybe_child), _)| {
-                    trie_root == trie_root_merkle_value && maybe_child.starts_with(&child_search)
-                }) {
-                Child::InProof {
-                    child_key: child,
-                    merkle_value,
-                }
-            } else {
-                Child::AbsentFromProof { merkle_value }
-            };
-
-            child_search.pop();
-        }
-
-        Children { children }
-    }
-
-    /// Returns the closest ancestor to the given key that can be found in the proof. If `key` is
-    /// in the proof, returns `key`.
-    fn closest_ancestor<'a>(
-        &'a self,
-        trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
-    ) -> Result<
-        Option<(
-            &'a [nibble::Nibble],
-            &'a (StorageValueInner, ops::Range<usize>, u16),
-        )>,
-        IncompleteProofError,
-    > {
-        // If the proof doesn't contain any entry for the requested trie, then we have no
-        // information about the node whatsoever.
-        // This check is necessary because we assume below that a lack of ancestor means that the
-        // key is outside of the trie.
-        if self
-            .entries
-            .range((
-                ops::Bound::Included((*trie_root_merkle_value, Vec::new())),
-                ops::Bound::Unbounded,
-            ))
-            .next()
-            .map_or(true, |((h, _), _)| h != trie_root_merkle_value)
-        {
-            return Err(IncompleteProofError());
-        }
-
-        // Search for the key in the proof that is an ancestor or equal to the requested key.
-        // As explained in the comments below, there are at most `key.len()` iterations, making
-        // this `O(log n)`.
-        let mut to_search = key;
-        loop {
-            debug_assert!(key.starts_with(to_search));
-
-            match self
-                .entries
-                .range((
-                    ops::Bound::Included(&(*trie_root_merkle_value, Vec::new())),
-                    ops::Bound::Included(&(*trie_root_merkle_value, to_search.to_vec())), // TODO: stupid allocation
-                ))
-                .next_back()
-            {
-                None => {
-                    debug_assert!(!self.entries.is_empty());
-                    // The requested key doesn't have any ancestor in the trie. This means that
-                    // it doesn't share any prefix with any other entry in the trie. This means
-                    // that it doesn't exist.
-                    return Ok(None);
-                }
-                Some(((_, found_key), value)) if key.starts_with(found_key) => {
-                    // Requested key is a descendant of an entry found in the proof. Returning.
-                    return Ok(Some((found_key, value)));
-                }
-                Some(((_, found_key), _)) => {
-                    // ̀`found_key` is somewhere between the ancestor of the requested key and the
-                    // requested key. Continue searching, this time starting at the common ancestor
-                    // between `found_key` and the requested key.
-                    // This means that we have at most `key.len()` loop iterations.
-                    let common_nibbles = found_key
-                        .iter()
-                        .zip(key.iter())
-                        .take_while(|(a, b)| a == b)
-                        .count();
-                    debug_assert!(common_nibbles < to_search.len()); // Make sure we progress.
-                    debug_assert_eq!(&found_key[..common_nibbles], &key[..common_nibbles]);
-                    to_search = &key[..common_nibbles];
-                }
-            }
-        }
+                        (key, entry)
+                    })
+            })
     }
 
     /// Returns the key of the closest ancestor to the given key that can be found in the proof.
@@ -672,11 +669,70 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn closest_ancestor_in_proof<'a>(
         &'a self,
         trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
-    ) -> Result<Option<&'a [nibble::Nibble]>, IncompleteProofError> {
-        Ok(self
-            .closest_ancestor(trie_root_merkle_value, key)?
-            .map(|(key, _)| key))
+        mut key: impl Iterator<Item = nibble::Nibble>,
+    ) -> Result<Option<EntryKeyIter<'a, T>>, IncompleteProofError> {
+        let proof = self.proof.as_ref();
+
+        // If the proof doesn't contain any entry for the requested trie, then we have no
+        // information about the node whatsoever.
+        // This check is necessary because we assume below that a lack of ancestor means that the
+        // key is outside of the trie.
+        let Some(&(mut iter_entry)) = self.trie_roots.get(trie_root_merkle_value) else {
+            return Err(IncompleteProofError());
+        };
+
+        loop {
+            let Ok(iter_entry_decoded) =
+                trie_node::decode(&proof[self.entries[iter_entry].range_in_proof.clone()])
+            else {
+                unreachable!()
+            };
+
+            let mut iter_entry_partial_key_iter = iter_entry_decoded.partial_key;
+            loop {
+                match (key.next(), iter_entry_partial_key_iter.next()) {
+                    (Some(a), Some(b)) if a == b => {}
+                    (_, Some(_)) => {
+                        // Mismatch in partial key. Closest ancestor is the parent entry.
+                        let Some((parent_entry, _)) = self.entries[iter_entry].parent_entry_index
+                        else {
+                            // Key is completely outside of the trie.
+                            return Ok(None);
+                        };
+                        return Ok(Some(EntryKeyIter::new(self, parent_entry)));
+                    }
+                    (Some(child_num), None) => {
+                        if let Some(_) = iter_entry_decoded.children[usize::from(child_num)] {
+                            // Key points to child. Update `iter_entry` and continue.
+                            let children_present_in_proof_bitmap =
+                                self.entries[iter_entry].children_present_in_proof_bitmap;
+
+                            // If the child isn't present in the proof, then the proof is
+                            // incomplete.
+                            if children_present_in_proof_bitmap & (1 << u8::from(child_num)) == 0 {
+                                return Err(IncompleteProofError());
+                            }
+
+                            for c in 0..u8::from(child_num) {
+                                if children_present_in_proof_bitmap & (1 << c) != 0 {
+                                    iter_entry += 1;
+                                    iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                                }
+                            }
+                            iter_entry += 1;
+                        } else {
+                            // Key points to non-existing child. Closest ancestor is `iter_entry`.
+                            return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                        }
+                        break;
+                    }
+                    (None, None) => {
+                        // Exact match. Closest ancestor is `iter_entry`.
+                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                    }
+                }
+            }
+        }
     }
 
     /// Returns information about a trie node.
@@ -688,97 +744,144 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     pub fn trie_node_info(
         &'_ self,
         trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
-    ) -> Result<TrieNodeInfo<'_>, IncompleteProofError> {
-        match self.closest_ancestor(trie_root_merkle_value, key)? {
-            None => {
-                // Node is known to not exist.
-                Ok(TrieNodeInfo {
-                    storage_value: StorageValue::None,
-                    children: Children {
-                        children: [Child::NoChild; 16],
-                    },
-                })
-            }
-            Some((ancestor_key, (storage_value, node_value_range, children_bitmap)))
-                if ancestor_key == key =>
-            {
-                // Found exact match.
-                return Ok(TrieNodeInfo {
-                    storage_value: match storage_value {
-                        StorageValueInner::Known {
-                            offset,
-                            len,
-                            is_inline,
-                            ..
-                        } => StorageValue::Known {
-                            value: &self.proof.as_ref()[*offset..][..*len],
-                            inline: *is_inline,
-                        },
-                        StorageValueInner::None => StorageValue::None,
-                        StorageValueInner::HashKnownValueMissing { offset } => {
-                            StorageValue::HashKnownValueMissing(
-                                <&[u8; 32]>::try_from(&self.proof.as_ref()[*offset..][..32])
-                                    .unwrap(),
-                            )
+        mut key: impl Iterator<Item = nibble::Nibble>,
+    ) -> Result<TrieNodeInfo<'_, T>, IncompleteProofError> {
+        let proof = self.proof.as_ref();
+
+        // Find the starting point of the requested trie.
+        let Some((mut iter_entry_merkle_value, mut iter_entry)) = self
+            .trie_roots
+            .get_key_value(trie_root_merkle_value)
+            .map(|(k, v)| (&k[..], *v))
+        else {
+            return Err(IncompleteProofError());
+        };
+
+        loop {
+            let Ok(iter_entry_decoded) =
+                trie_node::decode(&proof[self.entries[iter_entry].range_in_proof.clone()])
+            else {
+                // Proof has been checked to be entirely decodable.
+                unreachable!()
+            };
+
+            let mut iter_entry_partial_key_iter = iter_entry_decoded.partial_key;
+            loop {
+                match (key.next(), iter_entry_partial_key_iter.next()) {
+                    (Some(a), Some(b)) if a == b => {}
+                    (Some(_), Some(_)) => {
+                        // Mismatch in partial key. No node with the requested key in the trie.
+                        return Ok(TrieNodeInfo {
+                            storage_value: StorageValue::None,
+                            children: Children {
+                                children: core::array::from_fn(|_| Child::NoChild),
+                            },
+                        });
+                    }
+                    (None, Some(a)) => {
+                        // Input key is a subslice of `iter_entry`'s key.
+                        // One has one descendant that is `iter_entry`.
+                        let mut children = core::array::from_fn(|_| Child::NoChild);
+                        children[usize::from(a)] = Child::InProof {
+                            child_key: EntryKeyIter::new(self, iter_entry),
+                            merkle_value: iter_entry_merkle_value,
+                        };
+                        return Ok(TrieNodeInfo {
+                            storage_value: StorageValue::None,
+                            children: Children { children },
+                        });
+                    }
+                    (Some(child_num), None) => {
+                        if let Some(child) = iter_entry_decoded.children[usize::from(child_num)] {
+                            // Key points in the direction of a child.
+                            let children_present_in_proof_bitmap =
+                                self.entries[iter_entry].children_present_in_proof_bitmap;
+
+                            // If the child isn't present in the proof, then the proof is
+                            // incomplete.
+                            if children_present_in_proof_bitmap & (1 << u8::from(child_num)) == 0 {
+                                return Err(IncompleteProofError());
+                            }
+
+                            // Child is present in the proof. Update `iter_entry` and continue.
+                            iter_entry_merkle_value = child;
+                            for c in 0..u8::from(child_num) {
+                                if children_present_in_proof_bitmap & (1 << c) != 0 {
+                                    iter_entry += 1;
+                                    iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                                }
+                            }
+                            iter_entry += 1;
+                            break;
+                        } else {
+                            // Key points to non-existing child.
+                            return Ok(TrieNodeInfo {
+                                storage_value: StorageValue::None,
+                                children: Children {
+                                    children: core::array::from_fn(|_| Child::NoChild),
+                                },
+                            });
                         }
-                    },
-                    children: self.children_from_key(
-                        trie_root_merkle_value,
-                        ancestor_key,
-                        &self.proof.as_ref()[node_value_range.clone()],
-                        *children_bitmap,
-                    ),
-                });
-            }
-            Some((ancestor_key, (_, _, children_bitmap))) => {
-                // Requested key is a descendant of an entry found in the proof.
-                // Check whether the entry can have a descendant in the direction towards the
-                // requested key.
-                if children_bitmap & (1 << u8::from(key[ancestor_key.len()])) == 0 {
-                    // Child absent.
-                    // It has been proven that the requested key doesn't exist in the trie.
-                    return Ok(TrieNodeInfo {
-                        storage_value: StorageValue::None,
-                        children: Children {
-                            children: [Child::NoChild; 16],
-                        },
-                    });
+                    }
+                    (None, None) => {
+                        // Exact match. Trie node is `iter_entry`.
+                        return Ok(TrieNodeInfo {
+                            storage_value: match (
+                                iter_entry_decoded.storage_value,
+                                &self.entries[iter_entry].storage_value_in_proof,
+                            ) {
+                                (trie_node::StorageValue::Unhashed(value), _) => {
+                                    StorageValue::Known {
+                                        value,
+                                        inline: true,
+                                    }
+                                }
+                                (trie_node::StorageValue::Hashed(_), Some(value_range)) => {
+                                    StorageValue::Known {
+                                        value: &proof[value_range.clone()],
+                                        inline: false,
+                                    }
+                                }
+                                (trie_node::StorageValue::Hashed(hash), None) => {
+                                    StorageValue::HashKnownValueMissing(hash)
+                                }
+                                (trie_node::StorageValue::None, _v) => {
+                                    debug_assert!(_v.is_none());
+                                    StorageValue::None
+                                }
+                            },
+                            children: Children {
+                                children: {
+                                    let mut children = core::array::from_fn(|_| Child::NoChild);
+                                    let mut i = iter_entry + 1;
+                                    for child_num in 0..16 {
+                                        let Some(child_merkle_value) =
+                                            iter_entry_decoded.children[child_num]
+                                        else {
+                                            continue;
+                                        };
+                                        if self.entries[iter_entry].children_present_in_proof_bitmap
+                                            & (1 << child_num)
+                                            != 0
+                                        {
+                                            children[child_num] = Child::InProof {
+                                                child_key: EntryKeyIter::new(self, i),
+                                                merkle_value: child_merkle_value,
+                                            };
+                                            i += self.entries[i].child_entries_follow_up;
+                                            i += 1;
+                                        } else {
+                                            children[child_num] = Child::AbsentFromProof {
+                                                merkle_value: child_merkle_value,
+                                            };
+                                        }
+                                    }
+                                    children
+                                },
+                            },
+                        });
+                    }
                 }
-
-                if self
-                    .entries
-                    .range((
-                        ops::Bound::Included((
-                            *trie_root_merkle_value,
-                            key[..ancestor_key.len() + 1].to_vec(), // TODO: stupid allocation
-                        )),
-                        ops::Bound::Unbounded,
-                    ))
-                    .next()
-                    .map_or(false, |((r, k), _)| {
-                        r == trie_root_merkle_value && k.starts_with(&key[..ancestor_key.len() + 1])
-                    })
-                {
-                    // There exists at least one node in the proof that starts with
-                    // `key[..ancestor.len() + 1]` but that isn't `key` and doesn't start
-                    // with key, and there isn't any branch node at the common ancestor between
-                    // this node and `key`, as otherwise would have found it when iterating
-                    // earlier. This branch node can't be missing from the proof as otherwise
-                    // the proof would be invalid.
-                    // Thus, the requested key doesn't exist in the trie.
-                    return Ok(TrieNodeInfo {
-                        storage_value: StorageValue::None,
-                        children: Children {
-                            children: [Child::NoChild; 16],
-                        },
-                    });
-                }
-
-                // Child present.
-                // The request key can possibly be in the trie, but we have no way of
-                // knowing because the proof doesn't have enough information.
-                Err(IncompleteProofError())
             }
         }
     }
@@ -796,11 +899,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         trie_root_merkle_value: &[u8; 32],
         key: &[u8],
     ) -> Result<Option<(&'_ [u8], TrieEntryVersion)>, IncompleteProofError> {
-        // Annoyingly we have to create a `Vec` for the key, but the API of BTreeMap gives us
-        // no other choice.
-        let key = nibble::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
         match self
-            .trie_node_info(trie_root_merkle_value, &key)?
+            .trie_node_info(
+                trie_root_merkle_value,
+                nibble::bytes_to_nibbles(key.iter().copied()),
+            )?
             .storage_value
         {
             StorageValue::Known { value, inline } => Ok(Some((
@@ -829,115 +932,253 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns an error if the proof doesn't contain enough information to determine the next key.
     /// Returns `Ok(None)` if the proof indicates that there is no next key (within the given
     /// prefix).
-    // TODO: accept params as iterators rather than slices?
     pub fn next_key(
         &'_ self,
         trie_root_merkle_value: &[u8; 32],
-        key_before: &[nibble::Nibble],
-        or_equal: bool,
-        prefix: &[nibble::Nibble],
+        key_before: impl Iterator<Item = nibble::Nibble>,
+        mut or_equal: bool,
+        prefix: impl Iterator<Item = nibble::Nibble>,
         branch_nodes: bool,
-    ) -> Result<Option<&'_ [nibble::Nibble]>, IncompleteProofError> {
-        let mut key_before = {
-            let mut k = Vec::with_capacity(key_before.len() + 4);
-            k.extend_from_slice(key_before);
-            k
+    ) -> Result<Option<EntryKeyIter<'_, T>>, IncompleteProofError> {
+        let proof = self.proof.as_ref();
+
+        // The implementation below might continue iterating `prefix` even after it has returned
+        // `None`, thus we have to fuse it.
+        let mut prefix = prefix.fuse();
+
+        // The implementation below might continue iterating `key_before` even after it has
+        // returned `None`, thus we have to fuse it.
+        // Furthermore, `key_before` might be modified in the implementation below. When that
+        // happens, de do this by setting it to `either::Right`.
+        let mut key_before = either::Left(key_before.fuse());
+
+        // Find the starting point of the requested trie.
+        let Some(&(mut iter_entry)) = self.trie_roots.get(trie_root_merkle_value) else {
+            return Err(IncompleteProofError());
         };
 
-        // First, we get rid of the question of `or_equal` by pushing an additional nibble if it
-        // is `false`. In the algorithm below, we assume that `or_equal` is `true`.
-        if !or_equal {
-            key_before.push(nibble::Nibble::zero());
-        }
+        // If `true`, then it was determined that `key_before` was after the last child of
+        // `iter_entry`. The next iteration must find `iter_entry`'s next sibling.
+        let mut iterating_up: bool = false;
+
+        // Indicates the depth of ancestors of `iter_entry` that match `prefix`.
+        // For example, if the value is 2, then `iter_entry`'s parent and grandparent match
+        //`prefix`, but `iter_entry`'s grandparent parent does not.
+        let mut prefix_match_iter_entry_ancestor_depth = 0;
 
         loop {
-            match self.closest_ancestor(trie_root_merkle_value, &key_before)? {
-                None => {
-                    // `key_before` has no ancestor, meaning that it is either the root of the
-                    // trie or out of range of the trie completely. In both cases, the only
-                    // possible candidate if the root of the trie.
-                    match self
-                        .entries
-                        .range((
-                            ops::Bound::Included((*trie_root_merkle_value, Vec::new())),
-                            ops::Bound::Unbounded,
-                        ))
-                        .next()
-                        .filter(|((h, _), _)| h == trie_root_merkle_value)
-                    {
-                        Some(((_, k), _)) if *k >= key_before => {
-                            // We still need to handle the prefix and branch nodes. To make our
-                            // life easier, we just update `key_before` and loop again.
-                            key_before = k.clone()
-                        }
-                        Some(_) => return Ok(None), // `key_before` is after every trie node.
-                        None => return Ok(None),    // Empty trie.
-                    };
+            let Ok(iter_entry_decoded) =
+                trie_node::decode(&proof[self.entries[iter_entry].range_in_proof.clone()])
+            else {
+                // Proof has been checked to be entirely decodable.
+                unreachable!()
+            };
+
+            if iterating_up {
+                debug_assert!(matches!(key_before, either::Right(_)));
+                debug_assert!(or_equal);
+
+                // It was determined that `key_before` was after the last child of `iter_entry`.
+                // The next iteration must find `iter_entry`'s next sibling.
+
+                if prefix_match_iter_entry_ancestor_depth == 0 {
+                    // `prefix` only matches `iter_entry` and not its parent and
+                    // thus wouldn't match `iter_entry`'s sibling or uncle.
+                    // Therefore, the next node is `None`.
+                    return Ok(None);
                 }
-                Some((ancestor_key, (storage_value, _, _))) if ancestor_key == key_before => {
-                    // It's a match!
 
-                    // Check for `branch_nodes`.
-                    if !branch_nodes && matches!(storage_value, StorageValueInner::None) {
-                        // Skip to next node.
-                        key_before.push(nibble::Nibble::zero());
-                        continue;
+                // Go to `iter_entry`'s next sibling, if any.
+                let Some((parent_entry, parent_to_child_nibble)) =
+                    self.entries[iter_entry].parent_entry_index
+                else {
+                    // `iter_entry` is the root of the trie. `key_before` is therefore
+                    // after the last entry of the trie.
+                    return Ok(None);
+                };
+
+                let Some(child_num) = iter_entry_decoded
+                    .children
+                    .iter()
+                    .skip(usize::from(parent_to_child_nibble) + 1)
+                    .position(|c| c.is_some())
+                    .map(|n| n + usize::from(parent_to_child_nibble) + 1)
+                else {
+                    // No child found. Continue iterating up.
+                    iterating_up = true;
+                    iter_entry = parent_entry;
+                    prefix_match_iter_entry_ancestor_depth -= 1;
+                    continue;
+                };
+
+                // Found a next sibling.
+
+                let children_present_in_proof_bitmap =
+                    self.entries[parent_entry].children_present_in_proof_bitmap;
+
+                // If the child isn't present in the proof, then the proof is
+                // incomplete. While in some situations we could prove that the child
+                // is necessarily the next key, there is no way to know its full key.
+                if children_present_in_proof_bitmap & (1 << child_num) == 0 {
+                    return Err(IncompleteProofError());
+                }
+
+                // `iter_entry` is still pointing to the child at index `parent_to_child_nibble`.
+                // Since we're jumping to its next sibling, all we have to do is skip over it
+                // and its descedants.
+                iter_entry += 1;
+                iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                iterating_up = false;
+            }
+
+            let mut iter_entry_partial_key_iter = iter_entry_decoded.partial_key;
+            loop {
+                match (
+                    key_before.next(),
+                    prefix.next(),
+                    iter_entry_partial_key_iter.next(),
+                ) {
+                    (Some(k), Some(p), Some(pk)) if k == p && p == pk => {
+                        // Continue descending down the tree.
                     }
-
-                    if !key_before.starts_with(prefix) {
+                    (None, Some(p), Some(pk)) if p == pk => {
+                        // Continue descending down the tree.
+                    }
+                    (Some(k), None, Some(pk)) if k == pk => {
+                        // Continue descending down the tree.
+                    }
+                    (None, None, Some(_)) => {
+                        // Exact match. Due to the `branch_nodes` setting, we can't just
+                        // return `iter_entry` and instead continue iterating.
+                        or_equal = true;
+                    }
+                    (Some(k), None, Some(pk)) if k < pk => {
+                        // `key_before` points to somewhere between `iter_entry`'s parent
+                        // and `iter_entry`. Due to the `branch_nodes` setting, we can't just
+                        // return `iter_entry` and instead continue iterating.
+                        key_before = either::Right(iter::empty().fuse());
+                        or_equal = true;
+                    }
+                    (Some(k), Some(p), _) if k > p => {
+                        // `key_before` is strictly superior to `prefix`. The next key is
+                        // thus necessarily `None`.
+                        // Note that this is not a situation that is expected to be common, as
+                        // doing such a call is pointless.
                         return Ok(None);
-                    } else {
-                        return Ok(Some(ancestor_key));
                     }
-                }
-                Some((ancestor_key, (_, _, children_bitmap))) => {
-                    debug_assert!(key_before.starts_with(ancestor_key));
+                    (Some(k), Some(p), Some(pk)) if k < p && p == pk => {
+                        // The key and prefix diverge.
+                        // We know that there isn't any key in the trie between `key_before`
+                        // and `prefix`.
+                        // Starting next iteration, the next node matching the prefix
+                        // will be the result.
+                        key_before = either::Right(iter::empty().fuse());
+                        or_equal = true;
+                    }
+                    (_, Some(p), Some(pk)) => {
+                        debug_assert!(p != pk); // Other situations covered by other match blocks.
 
-                    // Find which descendant of `ancestor_key` and that is after `key_before`
-                    // actually exists.
-                    let nibble_towards_key_before = key_before[ancestor_key.len()];
-                    let nibble_that_exists =
-                        iter::successors(Some(nibble_towards_key_before), |n| n.checked_add(1))
-                            .find(|n| children_bitmap & (1 << u8::from(*n)) != 0);
+                        // Mismatch between prefix and partial key. No matter the value of
+                        // `key_before` There is no node in the trie that starts with `prefix`.
+                        return Ok(None);
+                    }
+                    (Some(k), None, Some(pk)) if k < pk => {
+                        // `key_before` points to somewhere between `iter_entry`'s parent
+                        // and `iter_entry`. We know that `iter_entry` necessarily matches
+                        // the prefix. The next key is necessarily `iter_entry`.
+                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                    }
+                    (Some(k), None, Some(pk)) => {
+                        debug_assert!(k > pk); // Checked above.
 
-                    if let Some(nibble_that_exists) = nibble_that_exists {
-                        // The next key of `key_before` is the descendant of `ancestor_key` in
-                        // the direction of `nibble_that_exists`.
-                        key_before.push(nibble_that_exists);
-                        if let Some(((_, descendant_key), _)) = self
-                            .entries
-                            .range((
-                                ops::Bound::Included((
-                                    *trie_root_merkle_value,
-                                    key_before.to_vec(), // TODO: stupid allocation
-                                )),
-                                ops::Bound::Unbounded,
-                            ))
-                            .next()
-                            .filter(|((h, k), _)| {
-                                h == trie_root_merkle_value && k.starts_with(&key_before)
-                            })
-                        {
-                            key_before = descendant_key.clone();
-                        } else {
-                            // We know that there is a descendant but it is not in the proof.
-                            return Err(IncompleteProofError());
-                        }
-                    } else {
-                        // `ancestor_key` has no children that can possibly be superior
-                        // to `key_before`. Advance to finding the first sibling after
-                        // `ancestor_key`.
-                        key_before.truncate(ancestor_key.len());
-                        loop {
-                            let Some(nibble) = key_before.pop() else {
-                                // `key_before` is equal to `0xffff...` and thus can't
-                                // have any next sibling.
-                                return Ok(None);
-                            };
-                            if let Some(new_nibble) = nibble.checked_add(1) {
-                                key_before.push(new_nibble);
-                                break;
+                        // `key_before` points to somewhere between the last child of `iter_entry`
+                        // and its next sibling.
+                        // The next key is thus the next sibling of `iter_entry`.
+                        iterating_up = true;
+                        key_before = either::Right(iter::empty().fuse());
+                        or_equal = true;
+                        break;
+                    }
+                    (None, None, None)
+                        if or_equal
+                            && (branch_nodes
+                                || !matches!(
+                                    iter_entry_decoded.storage_value,
+                                    trie_node::StorageValue::None,
+                                )) =>
+                    {
+                        // Exact match. Next key is `iter_entry`.
+                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                    }
+                    (key_before_nibble, prefix_nibble, None) => {
+                        // The moment when we have finished traversing a node and go to the
+                        // next one is the most complicated situation.
+
+                        // We know for sure that `iter_entry` can't be returned, as it is covered
+                        // by the other match variants above. Therefore, `key_before_nibble` equal
+                        // to `None` is the same as if it is equal to `0`.
+                        let key_before_nibble = match key_before_nibble {
+                            Some(n) => u8::from(n),
+                            None => {
+                                or_equal = true;
+                                0
                             }
+                        };
+
+                        // Try to find the first child that is after `key_before`.
+                        if let Some(child_num) = iter_entry_decoded
+                            .children
+                            .iter()
+                            .skip(usize::from(key_before_nibble))
+                            .position(|c| c.is_some())
+                            .map(|n| n + usize::from(key_before_nibble))
+                        {
+                            // Found a child. Make sure that it matches the prefix nibble.
+                            if prefix_nibble.map_or(false, |p| child_num != usize::from(p)) {
+                                // Child doesn't match prefix. No next key.
+                                return Ok(None);
+                            }
+
+                            // Continue iterating down through the child that has been found.
+
+                            let children_present_in_proof_bitmap =
+                                self.entries[iter_entry].children_present_in_proof_bitmap;
+
+                            // If the child isn't present in the proof, then the proof is
+                            // incomplete. While in some situations we could prove that the child
+                            // is necessarily the next key, there is no way to know its full key.
+                            if children_present_in_proof_bitmap & (1 << key_before_nibble) == 0 {
+                                return Err(IncompleteProofError());
+                            }
+
+                            for c in 0..key_before_nibble {
+                                if children_present_in_proof_bitmap & (1 << c) != 0 {
+                                    iter_entry += 1;
+                                    iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                                }
+                            }
+
+                            iter_entry += 1;
+                            prefix_match_iter_entry_ancestor_depth += 1;
+                            if usize::from(key_before_nibble) != child_num {
+                                key_before = either::Right(iter::empty().fuse());
+                                or_equal = true;
+                            }
+                            break;
+                        } else {
+                            // Childless branch nodes are forbidden. This is checked when
+                            // decoding the proof.
+                            debug_assert!(!matches!(
+                                iter_entry_decoded.storage_value,
+                                trie_node::StorageValue::None,
+                            ));
+
+                            // `key_before` is after the last child of `iter_entry`. The next
+                            // node is thus a sibling or uncle of `iter_entry`.
+                            iterating_up = true;
+                            key_before = either::Right(iter::empty().fuse());
+                            or_equal = true;
+                            break;
                         }
                     }
                 }
@@ -951,74 +1192,82 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
     /// Returns an error if the proof doesn't contain enough information to determine the Merkle
     /// value.
     /// Returns `Ok(None)` if the proof indicates that there is no descendant.
-    // TODO: accept params as iterators rather than slices?
     pub fn closest_descendant_merkle_value(
         &'_ self,
         trie_root_merkle_value: &[u8; 32],
-        key: &[nibble::Nibble],
+        mut key: impl Iterator<Item = nibble::Nibble>,
     ) -> Result<Option<&'_ [u8]>, IncompleteProofError> {
-        if key.is_empty() {
-            // The closest descendant of an empty key is always the root of the trie itself,
-            // assuming that the proof contains this trie.
-            return self
-                .entries
-                .range((
-                    ops::Bound::Included((*trie_root_merkle_value, Vec::new())),
-                    ops::Bound::Unbounded,
-                ))
-                .next()
-                .and_then(|((h, _), _)| {
-                    if h == trie_root_merkle_value {
-                        Some(&h[..])
-                    } else {
-                        None
+        let proof = self.proof.as_ref();
+
+        // Find the starting point of the requested trie.
+        let Some((mut iter_entry_merkle_value, mut iter_entry)) = self
+            .trie_roots
+            .get_key_value(trie_root_merkle_value)
+            .map(|(k, v)| (&k[..], *v))
+        else {
+            return Err(IncompleteProofError());
+        };
+
+        loop {
+            let Ok(iter_entry_decoded) =
+                trie_node::decode(&proof[self.entries[iter_entry].range_in_proof.clone()])
+            else {
+                // Proof has been checked to be entirely decodable.
+                unreachable!()
+            };
+
+            let mut iter_entry_partial_key_iter = iter_entry_decoded.partial_key;
+            loop {
+                match (key.next(), iter_entry_partial_key_iter.next()) {
+                    (Some(a), Some(b)) if a == b => {}
+                    (Some(_), Some(_)) => {
+                        // Mismatch in partial key. No descendant.
+                        return Ok(None);
                     }
-                })
-                .ok_or(IncompleteProofError())
-                .map(Some);
-        }
+                    (None, Some(_)) => {
+                        // Input key is a subslice of `iter_entry`'s key.
+                        // Descendant is thus `iter_entry`.
+                        return Ok(Some(iter_entry_merkle_value));
+                    }
+                    (Some(child_num), None) => {
+                        if let Some(child) = iter_entry_decoded.children[usize::from(child_num)] {
+                            // Key points in the direction of a child.
+                            let children_present_in_proof_bitmap =
+                                self.entries[iter_entry].children_present_in_proof_bitmap;
 
-        // Call `closest_ancestor(parent(key))`.
-        match self.closest_ancestor(trie_root_merkle_value, &key[..key.len() - 1])? {
-            None => Ok(None),
-            Some((parent_key, (_, parent_node_value_range, _)))
-                if parent_key.len() == key.len() - 1 =>
-            {
-                // Exact match, meaning that `parent_key` is precisely one less nibble than `key`.
-                // This means that there's no node between `parent_key` and `key`. Consequently,
-                // the closest-descendant-or-equal of `key` is also the strict-closest-descendant
-                // of `parent_key`, and its Merkle value can be found in `parent_key`'s node
-                // value.
-                let nibble = key[key.len() - 1];
-                let parent_node_value =
-                    trie_node::decode(&self.proof.as_ref()[parent_node_value_range.clone()])
-                        .unwrap();
-                Ok(parent_node_value.children[usize::from(u8::from(nibble))])
-            }
-            Some((parent_key, (_, parent_node_value_range, _))) => {
-                // The closest parent is more than one nibble away.
-                // If the proof contains a node in this direction, then we know that there's no
-                // node in the trie between `parent_key` and `key`. If the proof doesn't contain
-                // any node in this direction, then we can't be sure of that.
-                if self
-                    .entries
-                    .range((
-                        ops::Bound::Included((*trie_root_merkle_value, key.to_vec())), // TODO: stupid allocation
-                        ops::Bound::Unbounded,
-                    ))
-                    .next()
-                    .map_or(true, |((h, k), _)| {
-                        h != trie_root_merkle_value || !k.starts_with(key)
-                    })
-                {
-                    return Ok(None);
+                            // If the child isn't present in the proof, then the proof is
+                            // incomplete, unless the input key doesn't have any nibble anymore,
+                            // in which case we know that the closest descendant is this child,
+                            // even if it's not present.
+                            if children_present_in_proof_bitmap & (1 << u8::from(child_num)) == 0 {
+                                if key.next().is_none() {
+                                    return Ok(Some(child));
+                                } else {
+                                    return Err(IncompleteProofError());
+                                }
+                            }
+
+                            // Child is present in the proof. Update `iter_entry` and continue.
+                            iter_entry_merkle_value = child;
+                            for c in 0..u8::from(child_num) {
+                                if children_present_in_proof_bitmap & (1 << c) != 0 {
+                                    iter_entry += 1;
+                                    iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                                }
+                            }
+                            iter_entry += 1;
+                            break;
+                        } else {
+                            // Key points to non-existing child. We know that there's no
+                            // descendant.
+                            return Ok(None);
+                        }
+                    }
+                    (None, None) => {
+                        // Exact match. Closest descendant is `iter_entry`.
+                        return Ok(Some(iter_entry_merkle_value));
+                    }
                 }
-
-                let nibble = key[parent_key.len()];
-                let parent_node_value =
-                    trie_node::decode(&self.proof.as_ref()[parent_node_value_range.clone()])
-                        .unwrap();
-                Ok(parent_node_value.children[usize::from(u8::from(nibble))])
             }
         }
     }
@@ -1090,13 +1339,147 @@ pub enum Error {
     /// A node has been passed separately and referred to by its hash, while its length is inferior
     /// to 32 bytes.
     UnexpectedHashedNode,
+    /// All nodes must either have children or a storage value or be the root node.
+    NonRootBranchNodeWithNoValue,
+    /// Found node with no storage value and exact one child.
+    NodeWithNoValueAndOneChild,
+}
+
+pub struct EntryKeyIter<'a, T> {
+    proof: &'a DecodedTrieProof<T>,
+    target_entry: usize,
+    /// [`EntryKeyIter::entry_key_iterator`] is the `target_entry_depth_remaining` nth ancestor
+    /// of [`EntryKeyIter::target_entry`].
+    target_entry_depth_remaining: usize,
+    /// `None` if iteration is finished.
+    entry_key_iterator: Option<trie_node::DecodedPartialKey<'a>>,
+}
+
+impl<'a, T: AsRef<[u8]>> EntryKeyIter<'a, T> {
+    fn new(proof: &'a DecodedTrieProof<T>, target_entry: usize) -> Self {
+        // Find the number of nodes between `target_entry` and the trie root.
+        let mut entry_iter = target_entry;
+        let mut target_entry_depth_remaining = 0;
+        loop {
+            if let Some((parent, _)) = proof.entries[entry_iter].parent_entry_index {
+                target_entry_depth_remaining += 1;
+                entry_iter = parent;
+            } else {
+                break;
+            }
+        }
+
+        let Ok(decoded_entry) = trie_node::decode(
+            &proof.proof.as_ref()[proof.entries[entry_iter].range_in_proof.clone()],
+        ) else {
+            unreachable!()
+        };
+
+        EntryKeyIter {
+            proof,
+            target_entry,
+            target_entry_depth_remaining,
+            entry_key_iterator: Some(decoded_entry.partial_key),
+        }
+    }
+}
+
+impl<'a, T: AsRef<[u8]>> Iterator for EntryKeyIter<'a, T> {
+    type Item = nibble::Nibble;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // `entry_key_iterator` is `None` only if the iteration is finished, as a way to fuse
+        // the iterator.
+        let Some(entry_key_iterator) = &mut self.entry_key_iterator else {
+            return None;
+        };
+
+        // Still yielding from `entry_key_iterator`.
+        if let Some(nibble) = entry_key_iterator.next() {
+            return Some(nibble);
+        }
+
+        // `entry_key_iterator` has finished iterating. Update the local state for the next node
+        // in the hierarchy.
+        if self.target_entry_depth_remaining == 0 {
+            // Iteration finished.
+            self.entry_key_iterator = None;
+            return None;
+        }
+        self.target_entry_depth_remaining -= 1;
+
+        // Find the `target_entry_depth_remaining`th ancestor of `target_entry`.
+        let mut entry_iter = self.target_entry;
+        for _ in 0..self.target_entry_depth_remaining {
+            let Some((parent, _)) = self.proof.entries[entry_iter].parent_entry_index else {
+                unreachable!()
+            };
+            entry_iter = parent;
+        }
+
+        // Store the partial key of `entry_iter` in `entry_key_iterator`, so that it starts being
+        // yielded at the next iteration.
+        self.entry_key_iterator = Some(
+            trie_node::decode(
+                &self.proof.proof.as_ref()[self.proof.entries[entry_iter].range_in_proof.clone()],
+            )
+            .unwrap_or_else(|_| unreachable!())
+            .partial_key,
+        );
+
+        // Yield the "parent-child nibble" of `entry_iter`.
+        Some(
+            self.proof.entries[entry_iter]
+                .parent_entry_index
+                .unwrap_or_else(|| unreachable!())
+                .1,
+        )
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // We know we're going to yield `self.target_entry_depth_remaining` "parent-child nibbles".
+        // We add to that the size hint of `entry_key_iterator`.
+        let entry_key_iterator = self
+            .entry_key_iterator
+            .as_ref()
+            .map_or(0, |i| i.size_hint().0);
+        (entry_key_iterator + self.target_entry_depth_remaining, None)
+    }
+}
+
+impl<'a, T: AsRef<[u8]>> iter::FusedIterator for EntryKeyIter<'a, T> {}
+
+// We need to implement `Clone` manually, otherwise Rust adds an implicit `T: Clone` requirements.
+impl<'a, T> Clone for EntryKeyIter<'a, T> {
+    fn clone(&self) -> Self {
+        EntryKeyIter {
+            proof: self.proof,
+            target_entry: self.target_entry,
+            target_entry_depth_remaining: self.target_entry_depth_remaining,
+            entry_key_iterator: self.entry_key_iterator.clone(),
+        }
+    }
+}
+
+impl<'a, T: AsRef<[u8]>> fmt::Debug for EntryKeyIter<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut any_printed = false;
+        for nibble in self.clone() {
+            any_printed = true;
+            write!(f, "{:x}", nibble)?;
+        }
+        if !any_printed {
+            write!(f, "∅")?;
+        }
+        Ok(())
+    }
 }
 
 /// Information about an entry in the proof.
-#[derive(Debug, Copy, Clone)]
-pub struct ProofEntry<'a> {
+#[derive(Debug)]
+pub struct ProofEntry<'a, T> {
     /// Information about the node of the trie associated to this entry.
-    pub trie_node_info: TrieNodeInfo<'a>,
+    pub trie_node_info: TrieNodeInfo<'a, T>,
 
     /// Node value of that proof entry.
     ///
@@ -1115,30 +1498,49 @@ pub struct ProofEntry<'a> {
     pub unhashed_storage_value: Option<&'a [u8]>,
 }
 
+// We need to implement `Clone` manually, otherwise Rust adds an implicit `T: Clone` requirements.
+impl<'a, T> Clone for ProofEntry<'a, T> {
+    fn clone(&self) -> Self {
+        ProofEntry {
+            trie_node_info: self.trie_node_info.clone(),
+            node_value: self.node_value,
+            unhashed_storage_value: self.unhashed_storage_value,
+        }
+    }
+}
+
 /// Information about a node of the trie.
 ///
 /// > **Note**: This structure might represent a node that doesn't actually exist in the trie.
-#[derive(Debug, Copy, Clone)]
-pub struct TrieNodeInfo<'a> {
+#[derive(Debug)]
+pub struct TrieNodeInfo<'a, T> {
     /// Storage value of the node, if any.
     pub storage_value: StorageValue<'a>,
     /// Which children the node has.
-    pub children: Children<'a>,
+    pub children: Children<'a, T>,
+}
+
+// We need to implement `Clone` manually, otherwise Rust adds an implicit `T: Clone` requirements.
+impl<'a, T> Clone for TrieNodeInfo<'a, T> {
+    fn clone(&self) -> Self {
+        TrieNodeInfo {
+            storage_value: self.storage_value,
+            children: self.children.clone(),
+        }
+    }
 }
 
 /// See [`TrieNodeInfo::children`].
-#[derive(Copy, Clone)]
-pub struct Children<'a> {
-    children: [Child<'a>; 16],
+pub struct Children<'a, T> {
+    children: [Child<'a, T>; 16],
 }
 
 /// Information about a specific child in the list of children.
-#[derive(Copy, Clone)]
-pub enum Child<'a> {
+pub enum Child<'a, T> {
     /// Child exists and can be found in the proof.
     InProof {
         /// Key of the child. Always starts with the key of its parent.
-        child_key: &'a [nibble::Nibble],
+        child_key: EntryKeyIter<'a, T>,
         /// Merkle value of the child.
         merkle_value: &'a [u8],
     },
@@ -1151,7 +1553,7 @@ pub enum Child<'a> {
     NoChild,
 }
 
-impl<'a> Child<'a> {
+impl<'a, T> Child<'a, T> {
     /// Returns the Merkle value of this child. `None` if the child doesn't exist.
     pub fn merkle_value(&self) -> Option<&'a [u8]> {
         match self {
@@ -1162,7 +1564,24 @@ impl<'a> Child<'a> {
     }
 }
 
-impl<'a> Children<'a> {
+// We need to implement `Clone` manually, otherwise Rust adds an implicit `T: Clone` requirements.
+impl<'a, T> Clone for Child<'a, T> {
+    fn clone(&self) -> Self {
+        match self {
+            Child::AbsentFromProof { merkle_value } => Child::AbsentFromProof { merkle_value },
+            Child::InProof {
+                child_key,
+                merkle_value,
+            } => Child::InProof {
+                child_key: child_key.clone(),
+                merkle_value,
+            },
+            Child::NoChild => Child::NoChild,
+        }
+    }
+}
+
+impl<'a, T> Children<'a, T> {
     /// Returns `true` if a child in the direction of the given nibble is present.
     pub fn has_child(&self, nibble: nibble::Nibble) -> bool {
         match self.children[usize::from(u8::from(nibble))] {
@@ -1172,25 +1591,34 @@ impl<'a> Children<'a> {
     }
 
     /// Returns the information about the child in the given direction.
-    pub fn child(&self, direction: nibble::Nibble) -> Child<'a> {
-        self.children[usize::from(u8::from(direction))]
+    pub fn child(&self, direction: nibble::Nibble) -> Child<'a, T> {
+        self.children[usize::from(u8::from(direction))].clone()
     }
 
     /// Returns an iterator of 16 items, one for each child.
     pub fn children(
         &'_ self,
-    ) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a>> + '_ {
-        self.children.iter().copied()
+    ) -> impl DoubleEndedIterator + ExactSizeIterator<Item = Child<'a, T>> + '_ {
+        self.children.iter().cloned()
     }
 }
 
-impl<'a> fmt::Debug for Children<'a> {
+// We need to implement `Clone` manually, otherwise Rust adds an implicit `T: Clone` requirements.
+impl<'a, T> Clone for Children<'a, T> {
+    fn clone(&self) -> Self {
+        Children {
+            children: self.children.clone(),
+        }
+    }
+}
+
+impl<'a, T> fmt::Debug for Children<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Binary::fmt(&self, f)
     }
 }
 
-impl<'a> fmt::Binary for Children<'a> {
+impl<'a, T> fmt::Binary for Children<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for child in &self.children {
             let chr = match child {
@@ -1207,6 +1635,7 @@ impl<'a> fmt::Binary for Children<'a> {
 
 #[cfg(test)]
 mod tests {
+    use core::iter;
     use trie::Nibble;
 
     use crate::trie;
@@ -1361,9 +1790,16 @@ mod tests {
 
         assert_eq!(
             decoded
-                .next_key(EXAMPLE_PROOF_STATE_ROOT, &[], true, &[], true)
+                .next_key(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    iter::empty(),
+                    true,
+                    iter::empty(),
+                    true
+                )
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .collect::<Vec<_>>(),
             &[]
         );
 
@@ -1371,20 +1807,20 @@ mod tests {
             decoded
                 .next_key(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &[
+                    [
                         9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4,
                         0xb, 2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
                     ]
                     .into_iter()
-                    .map(|n| Nibble::try_from(n).unwrap())
-                    .collect::<Vec<_>>(),
+                    .map(|n| Nibble::try_from(n).unwrap()),
                     true,
-                    &[],
+                    iter::empty(),
                     true
                 )
                 .unwrap()
-                .unwrap(),
-            &[
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [
                 9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
                 4, 6, 4, 0xe, 3, 3, 3, 9, 7
             ]
@@ -1393,45 +1829,43 @@ mod tests {
             .collect::<Vec<_>>()
         );
 
-        // TODO: I believe that this is supposed to pass
-        /*assert_eq!(
+        assert_eq!(
             decoded
                 .next_key(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &[
+                    [
                         9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4,
                         0xb, 2, 4, 6, 4, 0xe, 3, 3, 3, 9
                     ]
                     .into_iter()
-                    .map(|n| Nibble::try_from(n).unwrap())
-                    .collect::<Vec<_>>(),
+                    .map(|n| Nibble::try_from(n).unwrap()),
                     false,
-                    &[],
+                    iter::empty(),
                     true
                 )
                 .unwrap()
-                .unwrap(),
-            &[
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [
                 9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
                 4, 6, 4, 0xe, 3, 3, 3, 9, 7
             ]
             .into_iter()
             .map(|n| Nibble::try_from(n).unwrap())
             .collect::<Vec<_>>()
-        );*/
+        );
 
         assert!(matches!(
             decoded.next_key(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 false,
-                &[],
+                iter::empty(),
                 false
             ),
             Err(super::IncompleteProofError())
@@ -1440,21 +1874,19 @@ mod tests {
         assert!(decoded
             .next_key(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7, 0
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true
             )
             .unwrap()
@@ -1463,25 +1895,25 @@ mod tests {
         assert!(decoded
             .next_key(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true,
-                &[
+                [
                     9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
                     2, 4, 6, 4, 0xe, 3, 3, 3, 0xa
                 ]
                 .into_iter()
-                .map(|n| Nibble::try_from(n).unwrap())
-                .collect::<Vec<_>>(),
+                .map(|n| Nibble::try_from(n).unwrap()),
                 true
             )
             .unwrap()
             .is_none());
+
+        // TODO: more tests
     }
 
     #[test]
@@ -1495,7 +1927,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles([].into_iter()).collect::<Vec<_>>()
+                    trie::bytes_to_nibbles([].into_iter())
                 )
                 .unwrap()
                 .unwrap(),
@@ -1506,7 +1938,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &[super::nibble::Nibble::try_from(1).unwrap()]
+                    [super::nibble::Nibble::try_from(1).unwrap()].into_iter()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1516,22 +1948,22 @@ mod tests {
             ][..]
         );
 
-        // TODO: this check doesn't pass, even though I think it should, might be a bug in the implementation
-        /*assert!(matches!(
+        assert!(matches!(
             dbg!(decoded.closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     super::nibble::Nibble::try_from(1).unwrap(),
                     super::nibble::Nibble::try_from(0).unwrap()
                 ]
+                .into_iter()
             )),
             Err(super::IncompleteProofError())
-        ));*/
+        ));
 
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[super::nibble::Nibble::try_from(0xe).unwrap()]
+                [super::nibble::Nibble::try_from(0xe).unwrap()].into_iter()
             )
             .unwrap()
             .is_none());
@@ -1539,10 +1971,11 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &[
+                [
                     super::nibble::Nibble::try_from(0xe).unwrap(),
                     super::nibble::Nibble::try_from(0).unwrap()
                 ]
+                .into_iter()
             )
             .unwrap()
             .is_none());
@@ -1551,10 +1984,9 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227].into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1567,10 +1999,9 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &trie::bytes_to_nibbles(
+                trie::bytes_to_nibbles(
                     [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 228].into_iter()
                 )
-                .collect::<Vec<_>>()
             )
             .unwrap()
             .is_none());
@@ -1579,11 +2010,10 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151]
                             .into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1596,7 +2026,7 @@ mod tests {
         assert!(decoded
             .closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
-                &trie::bytes_to_nibbles(
+                trie::bytes_to_nibbles(
                     [
                         156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151, 99,
                         230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129, 125, 112,
@@ -1605,7 +2035,6 @@ mod tests {
                     ]
                     .into_iter()
                 )
-                .collect::<Vec<_>>()
             )
             .unwrap()
             .is_none());
@@ -1614,7 +2043,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [
                             156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151,
                             99, 230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129,
@@ -1624,7 +2053,6 @@ mod tests {
                         ]
                         .into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1638,7 +2066,7 @@ mod tests {
             decoded
                 .closest_descendant_merkle_value(
                     EXAMPLE_PROOF_STATE_ROOT,
-                    &trie::bytes_to_nibbles(
+                    trie::bytes_to_nibbles(
                         [
                             156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151,
                             99, 230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129,
@@ -1648,7 +2076,6 @@ mod tests {
                         ]
                         .into_iter()
                     )
-                    .collect::<Vec<_>>()
                 )
                 .unwrap()
                 .unwrap(),
@@ -1658,6 +2085,8 @@ mod tests {
             ][..]
         );
     }
+
+    // TODO: test closest_ancestor
 
     #[test]
     fn node_values_smaller_than_32bytes() {
@@ -1721,7 +2150,7 @@ mod tests {
                     83, 2, 191, 235, 8, 252, 233, 114, 129, 199, 229, 115, 221, 238, 15, 205, 193,
                     110, 145, 107, 12, 3, 10, 145, 117, 211, 203, 151, 182, 147, 221, 178,
                 ],
-                &[]
+                iter::empty()
             )
             .is_ok());
     }
@@ -1742,7 +2171,7 @@ mod tests {
                     15, 224, 134, 90, 11, 145, 174, 197, 185, 253, 233, 197, 95, 101, 197, 10, 78,
                     28, 137, 217, 102, 198, 242, 100, 90, 96, 9, 204, 213, 69, 174, 4,
                 ],
-                &[]
+                iter::empty()
             )
             .is_ok());
     }
