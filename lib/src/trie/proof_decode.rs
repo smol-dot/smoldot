@@ -1869,8 +1869,7 @@ mod tests {
             ][..]
         );
 
-        // TODO: this check doesn't pass, even though I think it should, might be a bug in the implementation
-        /*assert!(matches!(
+        assert!(matches!(
             dbg!(decoded.closest_descendant_merkle_value(
                 EXAMPLE_PROOF_STATE_ROOT,
                 [
@@ -1879,7 +1878,7 @@ mod tests {
                 ].into_iter()
             )),
             Err(super::IncompleteProofError())
-        ));*/
+        ));
 
         assert!(decoded
             .closest_descendant_merkle_value(
