@@ -1827,8 +1827,7 @@ mod tests {
             .collect::<Vec<_>>()
         );
 
-        // TODO: I believe that this is supposed to pass
-        /*assert_eq!(
+        assert_eq!(
             decoded
                 .next_key(
                     EXAMPLE_PROOF_STATE_ROOT,
@@ -1843,15 +1842,16 @@ mod tests {
                     true
                 )
                 .unwrap()
-                .unwrap().collect::<Vec<_>>(),
-            &[
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [
                 9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
                 4, 6, 4, 0xe, 3, 3, 3, 9, 7
             ]
             .into_iter()
             .map(|n| Nibble::try_from(n).unwrap())
             .collect::<Vec<_>>()
-        );*/
+        );
 
         assert!(matches!(
             decoded.next_key(
