@@ -732,12 +732,10 @@ impl<'a> RuntimeCall<'a> {
             None => self.block_state_root_hash,
         };
 
-        let v = match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
-            Ok(v) => v,
+        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
+            Ok(v) => Ok(v),
             Err(err) => return Err(RuntimeCallError::MissingProofEntry(err)),
-        };
-
-        Ok(v)
+        }
     }
 
     /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
