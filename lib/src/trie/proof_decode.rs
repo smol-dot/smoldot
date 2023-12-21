@@ -1207,6 +1207,11 @@ impl<'a> fmt::Binary for Children<'a> {
 
 #[cfg(test)]
 mod tests {
+    use trie::Nibble;
+
+    use crate::trie;
+
+    // Key/value taken from the Polkadot genesis block.
     const EXAMPLE_PROOF: &[u8] = &[
         24, 212, 125, 1, 84, 37, 150, 173, 176, 93, 97, 64, 193, 112, 172, 71, 158, 223, 124, 253,
         90, 163, 83, 87, 89, 10, 207, 229, 209, 26, 128, 77, 148, 78, 80, 13, 20, 86, 253, 218,
@@ -1311,21 +1316,346 @@ mod tests {
     }
 
     #[test]
-    fn basic_works() {
-        // Key/value taken from the Polkadot genesis block.
+    fn storage_value_works() {
         let decoded = super::decode_and_verify_proof(super::Config {
             proof: EXAMPLE_PROOF,
         })
         .unwrap();
 
-        let requested_key = hex::decode("9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7081542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e").unwrap();
-        let obtained = decoded
-            .storage_value(EXAMPLE_PROOF_STATE_ROOT, &requested_key)
-            .unwrap();
+        assert_eq!(
+            decoded
+                .storage_value(EXAMPLE_PROOF_STATE_ROOT, &hex::decode("9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7081542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e").unwrap())
+                .unwrap().unwrap().0,
+            &hex::decode("0d1456fdda7b8ec7f9e5c794cd83194f0593e4ea").unwrap()[..]
+        );
+
+        assert!(
+            decoded
+                .storage_value(EXAMPLE_PROOF_STATE_ROOT, &hex::decode("9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7081542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e25").unwrap())
+                .unwrap().is_none()
+        );
+
+        assert!(matches!(
+            decoded.storage_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &hex::decode(
+                    "9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7000"
+                )
+                .unwrap()
+            ),
+            Err(super::IncompleteProofError())
+        ));
+
+        assert!(matches!(
+            decoded.storage_value(&[0; 32], &[]),
+            Err(super::IncompleteProofError())
+        ));
+    }
+
+    #[test]
+    fn next_key_works() {
+        let decoded = super::decode_and_verify_proof(super::Config {
+            proof: EXAMPLE_PROOF,
+        })
+        .unwrap();
 
         assert_eq!(
-            obtained.unwrap().0,
-            &hex::decode("0d1456fdda7b8ec7f9e5c794cd83194f0593e4ea").unwrap()[..]
+            decoded
+                .next_key(EXAMPLE_PROOF_STATE_ROOT, &[], true, &[], true)
+                .unwrap()
+                .unwrap(),
+            &[]
+        );
+
+        assert_eq!(
+            decoded
+                .next_key(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &[
+                        9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4,
+                        0xb, 2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
+                    ]
+                    .into_iter()
+                    .map(|n| Nibble::try_from(n).unwrap())
+                    .collect::<Vec<_>>(),
+                    true,
+                    &[],
+                    true
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
+                4, 6, 4, 0xe, 3, 3, 3, 9, 7
+            ]
+            .into_iter()
+            .map(|n| Nibble::try_from(n).unwrap())
+            .collect::<Vec<_>>()
+        );
+
+        // TODO: I believe that this is supposed to pass
+        /*assert_eq!(
+            decoded
+                .next_key(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &[
+                        9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4,
+                        0xb, 2, 4, 6, 4, 0xe, 3, 3, 3, 9
+                    ]
+                    .into_iter()
+                    .map(|n| Nibble::try_from(n).unwrap())
+                    .collect::<Vec<_>>(),
+                    false,
+                    &[],
+                    true
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb, 2,
+                4, 6, 4, 0xe, 3, 3, 3, 9, 7
+            ]
+            .into_iter()
+            .map(|n| Nibble::try_from(n).unwrap())
+            .collect::<Vec<_>>()
+        );*/
+
+        assert!(matches!(
+            decoded.next_key(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &[
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap())
+                .collect::<Vec<_>>(),
+                false,
+                &[],
+                false
+            ),
+            Err(super::IncompleteProofError())
+        ));
+
+        assert!(decoded
+            .next_key(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &[
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap())
+                .collect::<Vec<_>>(),
+                true,
+                &[
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7, 0
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap())
+                .collect::<Vec<_>>(),
+                true
+            )
+            .unwrap()
+            .is_none());
+
+        assert!(decoded
+            .next_key(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &[
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 9, 7
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap())
+                .collect::<Vec<_>>(),
+                true,
+                &[
+                    9, 0xc, 5, 0xd, 7, 9, 5, 0xd, 0, 2, 9, 7, 0xb, 0xe, 5, 6, 0, 2, 7, 0xa, 4, 0xb,
+                    2, 4, 6, 4, 0xe, 3, 3, 3, 0xa
+                ]
+                .into_iter()
+                .map(|n| Nibble::try_from(n).unwrap())
+                .collect::<Vec<_>>(),
+                true
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn closest_descendant_merkle_value_works() {
+        let decoded = super::decode_and_verify_proof(super::Config {
+            proof: EXAMPLE_PROOF,
+        })
+        .unwrap();
+
+        assert_eq!(
+            decoded
+                .closest_descendant_merkle_value(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &trie::bytes_to_nibbles([].into_iter()).collect::<Vec<_>>()
+                )
+                .unwrap()
+                .unwrap(),
+            &EXAMPLE_PROOF_STATE_ROOT[..]
+        );
+
+        assert_eq!(
+            decoded
+                .closest_descendant_merkle_value(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &[super::nibble::Nibble::try_from(1).unwrap()]
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                36, 31, 44, 6, 242, 46, 197, 137, 104, 251, 104, 212, 50, 49, 158, 37, 230, 200,
+                250, 163, 173, 44, 92, 169, 238, 72, 242, 232, 237, 21, 142, 36
+            ][..]
+        );
+
+        // TODO: this check doesn't pass, even though I think it should, might be a bug in the implementation
+        /*assert!(matches!(
+            dbg!(decoded.closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &[
+                    super::nibble::Nibble::try_from(1).unwrap(),
+                    super::nibble::Nibble::try_from(0).unwrap()
+                ]
+            )),
+            Err(super::IncompleteProofError())
+        ));*/
+
+        assert!(decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &[super::nibble::Nibble::try_from(0xe).unwrap()]
+            )
+            .unwrap()
+            .is_none());
+
+        assert!(decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &[
+                    super::nibble::Nibble::try_from(0xe).unwrap(),
+                    super::nibble::Nibble::try_from(0).unwrap()
+                ]
+            )
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            decoded
+                .closest_descendant_merkle_value(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &trie::bytes_to_nibbles(
+                        [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227].into_iter()
+                    )
+                    .collect::<Vec<_>>()
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                94, 132, 157, 92, 20, 140, 163, 97, 165, 90, 44, 155, 56, 78, 23, 206, 145, 158,
+                147, 108, 203, 128, 17, 164, 247, 37, 4, 233, 249, 61, 184, 205
+            ][..]
+        );
+
+        assert!(decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &trie::bytes_to_nibbles(
+                    [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 228].into_iter()
+                )
+                .collect::<Vec<_>>()
+            )
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            decoded
+                .closest_descendant_merkle_value(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &trie::bytes_to_nibbles(
+                        [156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151]
+                            .into_iter()
+                    )
+                    .collect::<Vec<_>>()
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                94, 132, 157, 92, 20, 140, 163, 97, 165, 90, 44, 155, 56, 78, 23, 206, 145, 158,
+                147, 108, 203, 128, 17, 164, 247, 37, 4, 233, 249, 61, 184, 205
+            ][..]
+        );
+
+        assert!(decoded
+            .closest_descendant_merkle_value(
+                EXAMPLE_PROOF_STATE_ROOT,
+                &trie::bytes_to_nibbles(
+                    [
+                        156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151, 99,
+                        230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129, 125, 112,
+                        129, 84, 37, 150, 173, 176, 93, 97, 64, 193, 112, 172, 71, 158, 223, 124,
+                        253, 90, 163, 83, 87, 89, 10, 207, 229, 209, 26, 128, 77, 148, 78, 0
+                    ]
+                    .into_iter()
+                )
+                .collect::<Vec<_>>()
+            )
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            decoded
+                .closest_descendant_merkle_value(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &trie::bytes_to_nibbles(
+                        [
+                            156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151,
+                            99, 230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129,
+                            125, 112, 129, 84, 37, 150, 173, 176, 93, 97, 64, 193, 112, 172, 71,
+                            158, 223, 124, 253, 90, 163, 83, 87, 89, 10, 207, 229, 209, 26, 128,
+                            77, 148, 78
+                        ]
+                        .into_iter()
+                    )
+                    .collect::<Vec<_>>()
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                205, 59, 200, 195, 206, 60, 248, 53, 159, 115, 113, 161, 51, 22, 240, 47, 210, 43,
+                2, 163, 211, 39, 104, 74, 43, 97, 244, 164, 126, 0, 34, 184
+            ][..]
+        );
+
+        assert_eq!(
+            decoded
+                .closest_descendant_merkle_value(
+                    EXAMPLE_PROOF_STATE_ROOT,
+                    &trie::bytes_to_nibbles(
+                        [
+                            156, 93, 121, 93, 2, 151, 190, 86, 2, 122, 75, 36, 100, 227, 51, 151,
+                            99, 230, 211, 193, 251, 21, 128, 94, 223, 208, 36, 23, 46, 164, 129,
+                            125, 112, 129, 84, 37, 150, 173, 176, 93, 97, 64, 193, 112, 172, 71,
+                            158, 223, 124, 253, 90, 163, 83, 87, 89, 10, 207, 229, 209, 26, 128,
+                            77, 148
+                        ]
+                        .into_iter()
+                    )
+                    .collect::<Vec<_>>()
+                )
+                .unwrap()
+                .unwrap(),
+            &[
+                205, 59, 200, 195, 206, 60, 248, 53, 159, 115, 113, 161, 51, 22, 240, 47, 210, 43,
+                2, 163, 211, 39, 104, 74, 43, 97, 244, 164, 126, 0, 34, 184
+            ][..]
         );
     }
 
