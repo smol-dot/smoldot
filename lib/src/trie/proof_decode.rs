@@ -621,7 +621,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                                     merkle_value: child_merkle_value,
                                                 };
                                                 i += self.entries[i].child_entries_follow_up;
-                                                i += i;
+                                                i += 1;
                                             } else {
                                                 children[child_num] = Child::AbsentFromProof {
                                                     merkle_value: child_merkle_value,
@@ -868,7 +868,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                                 merkle_value: child_merkle_value,
                                             };
                                             i += self.entries[i].child_entries_follow_up;
-                                            i += i;
+                                            i += 1;
                                         } else {
                                             children[child_num] = Child::AbsentFromProof {
                                                 merkle_value: child_merkle_value,
