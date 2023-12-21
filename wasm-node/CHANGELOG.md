@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Decoding and analyzing a Merkle proof is now around 10% to 50% faster. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+
 ### Fixed
 
 - Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
+- Fix bugs in various corner cases when decoding and analyzing a Merkle proof. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
 
 ## 2.0.15 - 2023-12-20
 
