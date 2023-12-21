@@ -173,8 +173,14 @@ where
 
     // We repeat this operation for every trie root.
     for trie_root_hash in trie_roots {
+        struct StackEntry {
+            range_in_proof: ops::Range<usize>,
+            index_in_entries: usize,
+            num_visited_children: u8,
+        }
+
         // TODO: configurable capacity?
-        let mut visited_entries_stack: Vec<(ops::Range<usize>, usize, u8)> = Vec::with_capacity(24);
+        let mut visited_entries_stack: Vec<StackEntry> = Vec::with_capacity(24);
 
         loop {
             // Find which node to visit next.
@@ -192,18 +198,27 @@ where
                     trie_roots_with_entries.insert(*trie_root_hash, entries.len());
                     root_range
                 }
-                Some((_, _, stack_top_visited_children)) if *stack_top_visited_children == 16 => {
+                Some(StackEntry {
+                    num_visited_children: stack_top_visited_children,
+                    ..
+                }) if *stack_top_visited_children == 16 => {
                     // We have visited all the children of the top of the stack. Pop the node from
                     // the stack.
-                    let Some((_, stack_top_index_in_entries, _)) = visited_entries_stack.pop()
+                    let Some(StackEntry {
+                        index_in_entries: stack_top_index_in_entries,
+                        ..
+                    }) = visited_entries_stack.pop()
                     else {
                         unreachable!()
                     };
 
                     // Update the value of `child_entries_follow_up`
                     // and `children_present_in_proof_bitmap` of the parent.
-                    if let Some(&(_, parent_index_in_entries, parent_children_visited)) =
-                        visited_entries_stack.last()
+                    if let Some(&StackEntry {
+                        index_in_entries: parent_index_in_entries,
+                        num_visited_children: parent_children_visited,
+                        ..
+                    }) = visited_entries_stack.last()
                     {
                         entries[parent_index_in_entries].child_entries_follow_up +=
                             entries[stack_top_index_in_entries].child_entries_follow_up + 1;
@@ -218,7 +233,11 @@ where
                         continue;
                     }
                 }
-                Some((stack_top_proof_range, _, stack_top_visited_children)) => {
+                Some(StackEntry {
+                    range_in_proof: stack_top_proof_range,
+                    num_visited_children: stack_top_visited_children,
+                    ..
+                }) => {
                     // Find the next child of the top of the stack.
                     let stack_top_entry = &proof_as_ref[stack_top_proof_range.clone()];
                     let Ok(stack_top_decoded) = trie_node::decode(stack_top_entry) else {
@@ -320,14 +339,12 @@ where
 
             // Add an entry for this node in the final list of entries.
             entries.push(Entry {
-                parent_entry_index: visited_entries_stack.last().map(
-                    |(_, idx, visited_children)| {
-                        (
-                            *idx,
-                            nibble::Nibble::try_from(*visited_children - 1).unwrap(),
-                        )
-                    },
-                ),
+                parent_entry_index: visited_entries_stack.last().map(|entry| {
+                    (
+                        entry.index_in_entries,
+                        nibble::Nibble::try_from(entry.num_visited_children - 1).unwrap(),
+                    )
+                }),
                 range_in_proof: visited_node_entry_range.clone(),
                 storage_value_in_proof: match visited_node_decoded.storage_value {
                     trie_node::StorageValue::None => None,
@@ -360,7 +377,11 @@ where
 
             // Add the visited node to the stack. The next iteration will either go to its first
             // child, or pop the node from the stack.
-            visited_entries_stack.push((visited_node_entry_range, entries.len() - 1, 0));
+            visited_entries_stack.push(StackEntry {
+                range_in_proof: visited_node_entry_range,
+                index_in_entries: entries.len() - 1,
+                num_visited_children: 0,
+            });
         }
     }
 
