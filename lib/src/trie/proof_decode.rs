@@ -1453,8 +1453,13 @@ impl<'a, T> Clone for EntryKeyIter<'a, T> {
 
 impl<'a, T: AsRef<[u8]>> fmt::Debug for EntryKeyIter<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut any_printed = false;
         for nibble in self.clone() {
+            any_printed = true;
             write!(f, "{:x}", nibble)?;
+        }
+        if !any_printed {
+            write!(f, "∅")?;
         }
         Ok(())
     }
