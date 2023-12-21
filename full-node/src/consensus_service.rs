@@ -1927,7 +1927,7 @@ impl SyncBackground {
             }
             all::ProcessOne::WarpSyncBuildRuntime(build_runtime) => {
                 let (new_sync, outcome) =
-                    build_runtime.build(all::ExecHint::CompileAheadOfTime, true);
+                    build_runtime.build(all::ExecHint::ValidateAndCompile, true);
                 self.sync = new_sync;
                 if let Err(err) = outcome {
                     self.log_callback.log(
