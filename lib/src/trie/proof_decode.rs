@@ -938,7 +938,14 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
             return Err(IncompleteProofError());
         };
 
-        let mut prefix_matches_iter_entry_parent = true; // TODO: default value unclear
+        // If `true`, then it was determined that `key_before` was after the last child of
+        // `iter_entry`. The next iteration must find `iter_entry`'s next sibling.
+        let mut iterating_up: bool = false;
+
+        // Indicates the depth of ancestors of `iter_entry` that match `prefix`.
+        // For example, if the value is 2, then `iter_entry`'s parent and grandparent match
+        //`prefix`, but `iter_entry`'s grandparent parent does not.
+        let mut prefix_match_iter_entry_ancestor_depth = 0;
 
         loop {
             let Ok(iter_entry_decoded) =
@@ -947,6 +954,63 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                 // Proof has been checked to be entirely decodable.
                 unreachable!()
             };
+
+            if iterating_up {
+                debug_assert!(matches!(key_before, either::Right(_)));
+                debug_assert!(or_equal);
+
+                // It was determined that `key_before` was after the last child of `iter_entry`.
+                // The next iteration must find `iter_entry`'s next sibling.
+
+                if prefix_match_iter_entry_ancestor_depth == 0 {
+                    // `prefix` only matches `iter_entry` and not its parent and
+                    // thus wouldn't match `iter_entry`'s sibling or uncle.
+                    // Therefore, the next node is `None`.
+                    return Ok(None);
+                }
+
+                // Go to `iter_entry`'s next sibling, if any.
+                let Some((parent_entry, parent_to_child_nibble)) =
+                    self.entries[iter_entry].parent_entry_index
+                else {
+                    // `iter_entry` is the root of the trie. `key_before` is therefore
+                    // after the last entry of the trie.
+                    return Ok(None);
+                };
+
+                let Some(child_num) = iter_entry_decoded
+                    .children
+                    .iter()
+                    .skip(usize::from(parent_to_child_nibble) + 1)
+                    .position(|c| c.is_some())
+                    .map(|n| n + usize::from(parent_to_child_nibble) + 1)
+                else {
+                    // No child found. Continue iterating up.
+                    iterating_up = true;
+                    iter_entry = parent_entry;
+                    prefix_match_iter_entry_ancestor_depth -= 1;
+                    continue;
+                };
+
+                // Found a next sibling.
+
+                let children_present_in_proof_bitmap =
+                    self.entries[parent_entry].children_present_in_proof_bitmap;
+
+                // If the child isn't present in the proof, then the proof is
+                // incomplete. While in some situations we could prove that the child
+                // is necessarily the next key, there is no way to know its full key.
+                if children_present_in_proof_bitmap & (1 << child_num) == 0 {
+                    return Err(IncompleteProofError());
+                }
+
+                // `iter_entry` is still pointing to the child at index `parent_to_child_nibble`.
+                // Since we're jumping to its next sibling, all we have to do is skip over it
+                // and its descedants.
+                iter_entry += 1;
+                iter_entry += self.entries[iter_entry].child_entries_follow_up;
+                iterating_up = false;
+            }
 
             let mut iter_entry_partial_key_iter = iter_entry_decoded.partial_key;
             loop {
@@ -998,21 +1062,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
 
                         // `key_before` points to somewhere between the last child of `iter_entry`
                         // and its next sibling.
-                        // The next key is thus the next sibling of `iter_entry`, provided that
-                        //  that the prefix matches `iter_entry`'s next sibling.
-                        // Since we know that the prefix matches `iter_entry`, it matches
-                        // `iter_entry`'s next sibling if and only if it matches `iter_entry`'s
-                        // parent.
-                        if self.entries[iter_entry].parent_entry_index.is_some()
-                            && prefix_matches_iter_entry_parent
-                        {
-                            return Ok(Some(EntryKeyIter::new(
-                                self,
-                                iter_entry + 1 + self.entries[iter_entry].child_entries_follow_up,
-                            )));
-                        } else {
-                            return Ok(None);
-                        }
+                        // The next key is thus the next sibling of `iter_entry`.
+                        iterating_up = true;
+                        key_before = either::Right(iter::empty().fuse());
+                        or_equal = true;
                     }
                     (None, None, Some(_)) => {
                         // Exact match. Next key is `iter_entry`.
@@ -1029,44 +1082,22 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         // Exact match. Next key is `iter_entry`.
                         return Ok(Some(EntryKeyIter::new(self, iter_entry)));
                     }
-                    (None, None, None) => {
-                        // Exact match between `key_before` and `iter_entry`, however either
-                        // `or_equal` or `branch_nodes` prevents us from the returning this node.
-                        // Continue iterating through the first child of `iter_entry`.
-                        if let Some(child_num) =
-                            iter_entry_decoded.children.iter().position(|c| c.is_some())
-                        {
-                            if self.entries[iter_entry].children_present_in_proof_bitmap
-                                & (1 << child_num)
-                                == 0
-                            {
-                                return Err(IncompleteProofError());
+                    (key_before_nibble, prefix_nibble, None) => {
+                        // The moment when we have finished traversing a node and go to the
+                        // next one is the most complicated situation.
+
+                        // We know for sure that `iter_entry` can't be returned, as it is covered
+                        // by the other match variants above. Therefore, `key_before_nibble` equal
+                        // to `None` is the same as if it is equal to `0`.
+                        let key_before_nibble = match key_before_nibble {
+                            Some(n) => u8::from(n),
+                            None => {
+                                or_equal = true;
+                                0
                             }
+                        };
 
-                            iter_entry += 1;
-                            or_equal = true;
-                            prefix_matches_iter_entry_parent = true;
-                        } else if !prefix_matches_iter_entry_parent {
-                            // `iter_entry` has no child. The next node is thus its next sibling
-                            // or uncle, however `prefix` only matches `iter_entry` and not its
-                            // parent and thus wouldn't match `iter_entry`'s next sibling.
-                            // Therefore, the next node is `None`.
-                            return Ok(None);
-                        } else {
-                            // Childless branch nodes are forbidden.
-                            debug_assert!(!matches!(
-                                iter_entry_decoded.storage_value,
-                                trie_node::StorageValue::None,
-                            ));
-
-                            // Go to `iter_entry`'s next sibling, if any.
-                            self.entries[iter_entry].parent_entry_index;
-
-                            // TODO:
-                            todo!()
-                        }
-                    }
-                    (Some(key_before_nibble), None, None) => {
+                        // Try to find the first child that is after `key_before`.
                         if let Some(child_num) = iter_entry_decoded
                             .children
                             .iter()
@@ -1074,20 +1105,25 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             .position(|c| c.is_some())
                             .map(|n| n + usize::from(key_before_nibble))
                         {
-                            // Continue iterating down through the given child.
+                            // Found a child. Make sure that it matches the prefix nibble.
+                            if prefix_nibble.map_or(false, |p| child_num != usize::from(p)) {
+                                // Child doesn't match prefix. No next key.
+                                return Ok(None);
+                            }
+
+                            // Continue iterating down through the child that has been found.
+
                             let children_present_in_proof_bitmap =
                                 self.entries[iter_entry].children_present_in_proof_bitmap;
 
                             // If the child isn't present in the proof, then the proof is
                             // incomplete. While in some situations we could prove that the child
                             // is necessarily the next key, there is no way to know its full key.
-                            if children_present_in_proof_bitmap & (1 << u8::from(key_before_nibble))
-                                == 0
-                            {
+                            if children_present_in_proof_bitmap & (1 << key_before_nibble) == 0 {
                                 return Err(IncompleteProofError());
                             }
 
-                            for c in 0..u8::from(key_before_nibble) {
+                            for c in 0..key_before_nibble {
                                 if children_present_in_proof_bitmap & (1 << c) != 0 {
                                     iter_entry += 1;
                                     iter_entry += self.entries[iter_entry].child_entries_follow_up;
@@ -1095,74 +1131,24 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             }
 
                             iter_entry += 1;
-                            prefix_matches_iter_entry_parent = true;
-                            if usize::from(key_before_nibble) == child_num {
-                                key_before = either::Right(iter::empty().fuse());
-                                or_equal = true;
-                            }
-                            break;
-                        } else {
-                            // `key_before` points after the last child of `iter_entry`.
-                            todo!()
-                        }
-                    }
-                    (key_before_nibble, Some(child_num), None) => {
-                        // Sanity debug_assert. Checked in previous match blocks.
-                        debug_assert!(key_before_nibble.map_or(true, |n| n <= child_num));
-
-                        if let Some(key_before_nibble) = key_before_nibble {
-                            if key_before_nibble < child_num {
-                                // The key and prefix diverge.
-                                // If there exists any key in the trie between `key_before`
-                                // and `prefix`, then the next key is outside of the prefi and we
-                                // return `Ok(None)`. Otherwise, continue iterating.
-                                // Note that `branch_nodes` is irrelevant, as we know that any
-                                // existing trie path always leads to a non-branch node.
-                                if iter_entry_decoded.children
-                                    [usize::from(key_before_nibble)..usize::from(child_num)]
-                                    .iter()
-                                    .any(|c| c.is_some())
-                                {
-                                    return Ok(None);
-                                }
-
-                                // Starting next iteration, the next node matching the prefix
-                                // will be the result.
+                            prefix_match_iter_entry_ancestor_depth += 1;
+                            if usize::from(key_before_nibble) != child_num {
                                 key_before = either::Right(iter::empty().fuse());
                                 or_equal = true;
                             }
                         } else {
-                            // `key_before` has ended. Starting from next iteration, we should
-                            // include equal matches in the search.
+                            // Childless branch nodes are forbidden. This is checked when
+                            // decoding the proof.
+                            debug_assert!(!matches!(
+                                iter_entry_decoded.storage_value,
+                                trie_node::StorageValue::None,
+                            ));
+
+                            // `key_before` is after the last child of `iter_entry`. The next
+                            // node is thus a sibling or uncle of `iter_entry`.
+                            iterating_up = true;
+                            key_before = either::Right(iter::empty().fuse());
                             or_equal = true;
-                        }
-
-                        if let Some(child) = iter_entry_decoded.children[usize::from(child_num)] {
-                            // Key points in the direction of a child.
-                            let children_present_in_proof_bitmap =
-                                self.entries[iter_entry].children_present_in_proof_bitmap;
-
-                            // If the child isn't present in the proof, then the proof is
-                            // incomplete. While in some situations we could prove that the child
-                            // is necessarily the next key, there is no way to know its full key.
-                            if children_present_in_proof_bitmap & (1 << u8::from(child_num)) == 0 {
-                                return Err(IncompleteProofError());
-                            }
-
-                            // Child is present in the proof. Update the state and continue.
-                            for c in 0..u8::from(child_num) {
-                                if children_present_in_proof_bitmap & (1 << c) != 0 {
-                                    iter_entry += 1;
-                                    iter_entry += self.entries[iter_entry].child_entries_follow_up;
-                                }
-                            }
-                            iter_entry += 1;
-                            prefix_matches_iter_entry_parent = false;
-                            break;
-                        } else {
-                            // Key points to non-existing child. There's no node in the trie that
-                            // matches the given prefix.
-                            return Ok(None);
                         }
                     }
                 }
