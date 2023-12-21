@@ -43,7 +43,7 @@ use smol::{
 use smoldot::{
     database::full_sqlite,
     header,
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     libp2p::{
         connection,
         multiaddr::{self, Multiaddr, Protocol},
@@ -56,6 +56,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Instant,
+    vec,
 };
 
 pub use smoldot::network::service::ChainId;
@@ -160,19 +161,23 @@ pub struct NetworkService {
     local_peer_id: PeerId,
 
     /// Service to use to report traces.
-    jaeger_service: Arc<jaeger_service::JaegerService>,
+    // TODO: unused
+    _jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Channel to send messages to the background task.
     to_background_tx: Mutex<channel::Sender<ToBackground>>,
 
     /// Name of all the chains that have been registered, for logging purposes.
     chain_names: hashbrown::HashMap<ChainId, String, fnv::FnvBuildHasher>,
-
-    /// See [`Config::log_callback`].
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
 }
 
 enum ToBackground {
+    ForegroundDisconnectAndBan {
+        peer_id: PeerId,
+        chain_id: ChainId,
+        severity: BanSeverity,
+        reason: &'static str,
+    },
     ForegroundAnnounceBlock {
         target: PeerId,
         chain_id: ChainId,
@@ -190,6 +195,25 @@ enum ToBackground {
         chain_id: ChainId,
         config: codec::BlocksRequestConfig,
         result_tx: oneshot::Sender<Result<Vec<codec::BlockData>, BlocksRequestError>>,
+    },
+    ForegroundWarpSyncRequest {
+        target: PeerId,
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+        result_tx:
+            oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+    },
+    ForegroundStorageProofRequest {
+        target: PeerId,
+        chain_id: ChainId,
+        config: codec::StorageProofRequestConfig<vec::IntoIter<Vec<u8>>>,
+        result_tx: oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+    },
+    ForegroundCallProofRequest {
+        target: PeerId, // TODO: takes by value because of futures longevity issue
+        chain_id: ChainId,
+        config: codec::CallProofRequestConfig<'static, vec::IntoIter<Vec<u8>>>,
+        result_tx: oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
     },
     ForegroundGetNumConnections {
         result_tx: oneshot::Sender<usize>,
@@ -272,14 +296,32 @@ struct Inner {
         fnv::FnvBuildHasher,
     >,
 
+    /// List of all warp sync requests that have been started but not finished yet.
+    warp_sync_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all storage requests that have been started but not finished yet.
+    storage_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// List of all call proof requests that have been started but not finished yet.
+    call_proof_requests: HashMap<
+        service::SubstreamId,
+        oneshot::Sender<Result<service::EncodedMerkleProof, ()>>,
+        fnv::FnvBuildHasher,
+    >,
+
     /// When to start the next discovery process.
     next_discovery: smol::Timer,
 
     /// Time between [`Inner::next_discovery`] and the follow-up discovery.
     next_discovery_period: Duration,
-
-    /// List of Kademlia discovery operations that have been started but not finished yet.
-    kademlia_find_nodes_requests: HashMap<service::SubstreamId, ChainId, fnv::FnvBuildHasher>,
 }
 
 /// Extra information of a chain.
@@ -296,6 +338,13 @@ struct Chain {
     /// Maximum number of peers that have gossip links open but without having slots attributed
     /// to them.
     max_in_peers: usize,
+}
+
+/// Severity of a ban. See [`NetworkService::ban_and_disconnect`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BanSeverity {
+    Low,
+    High,
 }
 
 impl NetworkService {
@@ -448,7 +497,7 @@ impl NetworkService {
             from_connections_rx,
             from_connections_tx,
             tasks_executor: config.tasks_executor,
-            log_callback: config.log_callback.clone(),
+            log_callback: config.log_callback,
             network,
             noise_key: config.noise_key,
             peering_strategy,
@@ -456,8 +505,16 @@ impl NetworkService {
                 50, // TODO: ?
                 Default::default(),
             ),
-            kademlia_find_nodes_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                4,
+            warp_sync_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                2, // TODO: ?
+                Default::default(),
+            ),
+            storage_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                5, // TODO: ?
+                Default::default(),
+            ),
+            call_proof_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                5, // TODO: ?
                 Default::default(),
             ),
             jaeger_service: config.jaeger_service.clone(),
@@ -470,9 +527,8 @@ impl NetworkService {
         let network_service = Arc::new(NetworkService {
             local_peer_id,
             chain_names,
-            jaeger_service: config.jaeger_service,
+            _jaeger_service: config.jaeger_service,
             to_background_tx: Mutex::new(to_background_tx),
-            log_callback: config.log_callback,
         });
 
         // Adjust the receivers to keep the `network_service` alive.
@@ -562,6 +618,37 @@ impl NetworkService {
             .await;
     }
 
+    /// Starts asynchronously disconnecting the given peer. A [`Event::Disconnected`] will later be
+    /// generated. Prevents a new gossip link with the same peer from being reopened for a
+    /// little while.
+    ///
+    /// `reason` is a human-readable string printed in the logs.
+    ///
+    /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
+    /// reconnection was already happening as the call to this function is still being processed.
+    /// If that happens another [`Event::Disconnected`] will be delivered afterwards. In other
+    /// words, this function guarantees that we will be disconnected in the future rather than
+    /// guarantees that we will disconnect.
+    pub async fn ban_and_disconnect(
+        &self,
+        peer_id: PeerId,
+        chain_id: ChainId,
+        severity: BanSeverity,
+        reason: &'static str,
+    ) {
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundDisconnectAndBan {
+                peer_id,
+                chain_id,
+                severity,
+                reason,
+            })
+            .await;
+    }
+
     pub async fn send_block_announce(
         self: Arc<Self>,
         target: PeerId,
@@ -596,59 +683,6 @@ impl NetworkService {
         chain_id: ChainId,
         config: codec::BlocksRequestConfig,
     ) -> Result<Vec<codec::BlockData>, BlocksRequestError> {
-        let chain_name = self.chain_names[&chain_id].clone();
-
-        self.log_callback.log(
-            LogLevel::Debug,
-            format!(
-                "blocks-request-start; peer_id={}; chain={}; start={}; desired_count={}; direction={}",
-                target,
-                chain_name,
-                match &config.start {
-                    codec::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
-                    codec::BlocksRequestConfigStart::Number(n) => either::Right(n),
-                },
-                config.desired_count,
-                match config.direction {
-                    codec::BlocksRequestDirection::Ascending => "ascending",
-                    codec::BlocksRequestDirection::Descending => "descending",
-                },
-            ),
-        );
-
-        // Setup a guard that will print a log message in case it is dropped silently.
-        // This lets us detect if the request is cancelled.
-        struct LogIfCancel(PeerId, String, Arc<dyn LogCallback + Send + Sync>);
-        impl Drop for LogIfCancel {
-            fn drop(&mut self) {
-                self.2.log(
-                    LogLevel::Debug,
-                    format!(
-                        "blocks-request-ended; peer_id={}; chain={}; outcome=cancelled",
-                        self.0, self.1
-                    ),
-                );
-            }
-        }
-        let _log_if_cancel = LogIfCancel(
-            target.clone(),
-            chain_name.clone(),
-            self.log_callback.clone(),
-        );
-
-        let _jaeger_span = self.jaeger_service.outgoing_block_request_span(
-            &self.local_peer_id,
-            &target,
-            config.desired_count.get(),
-            if let (1, codec::BlocksRequestConfigStart::Hash(block_hash)) =
-                (config.desired_count.get(), &config.start)
-            {
-                Some(block_hash)
-            } else {
-                None
-            },
-        );
-
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -663,30 +697,102 @@ impl NetworkService {
             })
             .await;
 
-        let result = result_rx.await.unwrap();
+        result_rx.await.unwrap()
+    }
 
-        // Requet has finished. Print the log and prevent the cancellation message from being
-        // printed.
-        mem::forget(_log_if_cancel);
-        match &result {
-            Ok(success) => {
-                self.log_callback.log(LogLevel::Debug, format!(
-                    "blocks-request-ended; peer_id={}; chain={}; outcome=success; response_blocks={}",
-                    target, chain_name, success.len()
-                ));
-            }
-            Err(err) => {
-                self.log_callback.log(
-                    LogLevel::Debug,
-                    format!(
-                        "blocks-request-ended; peer_id={}; chain={}; outcome=failure; error={}",
-                        target, chain_name, err
-                    ),
-                );
-            }
-        }
+    /// Sends a warp sync request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn warp_sync_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        begin_hash: [u8; 32],
+    ) -> Result<service::EncodedGrandpaWarpSyncResponse, WarpSyncRequestError> {
+        let (result_tx, result_rx) = oneshot::channel();
 
-        result
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundWarpSyncRequest {
+                target: target.clone(),
+                chain_id,
+                begin_hash,
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
+
+    /// Sends a storage proof request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn storage_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        config: codec::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]> + Clone>>,
+    ) -> Result<service::EncodedMerkleProof, ()> {
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundStorageProofRequest {
+                target: target.clone(),
+                chain_id,
+                config: codec::StorageProofRequestConfig {
+                    block_hash: config.block_hash,
+                    keys: config
+                        .keys
+                        .map(|key| key.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
+    }
+
+    /// Sends a call proof request to the given peer.
+    // TODO: more docs
+    // TODO: proper error type
+    pub async fn call_proof_request(
+        self: Arc<Self>,
+        target: PeerId, // TODO: by value?
+        chain_id: ChainId,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+    ) -> Result<service::EncodedMerkleProof, ()> {
+        // TODO: logs and jaeger integration
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background_tx
+            .lock()
+            .await
+            .send(ToBackground::ForegroundCallProofRequest {
+                target: target.clone(),
+                chain_id,
+                config: codec::CallProofRequestConfig {
+                    block_hash: config.block_hash,
+                    method: config.method.into_owned().into(),
+                    parameter_vectored: config
+                        .parameter_vectored
+                        .map(|v| v.as_ref().to_vec()) // TODO: to_vec() overhead
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                },
+                result_tx,
+            })
+            .await;
+
+        result_rx.await.unwrap()
     }
 }
 
@@ -709,6 +815,16 @@ pub enum BlocksRequestError {
     /// Error during the request.
     #[display(fmt = "{_0}")]
     Request(service::BlocksRequestError),
+}
+
+/// Error returned by [`NetworkService::warp_sync_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum WarpSyncRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    #[display(fmt = "{_0}")]
+    Request(service::GrandpaWarpSyncRequestError),
 }
 
 fn run(mut inner: Inner) {
@@ -957,20 +1073,15 @@ async fn background_task(mut inner: Inner) {
                         .cloned();
 
                     if let Some(target) = target {
-                        let substream_id = match inner.network.start_kademlia_find_node_request(
+                        match inner.network.start_kademlia_find_node_request(
                             &target,
                             chain_id,
                             &random_peer_id,
                             Duration::from_secs(20),
                         ) {
-                            Ok(s) => s,
+                            Ok(_) => {}
                             Err(service::StartRequestError::NoConnection) => unreachable!(),
                         };
-
-                        let _prev_value = inner
-                            .kademlia_find_nodes_requests
-                            .insert(substream_id, chain_id);
-                        debug_assert!(_prev_value.is_none());
                     } else {
                         // TODO: log message
                     }
@@ -980,6 +1091,61 @@ async fn background_task(mut inner: Inner) {
             WakeUpReason::ForegroundClosed => {
                 // TODO: do a clean shutdown of all the connections
                 return;
+            }
+
+            WakeUpReason::Message(ToBackground::ForegroundDisconnectAndBan {
+                peer_id,
+                chain_id,
+                severity,
+                reason,
+            }) => {
+                // Note that peer doesn't necessarily have an out slot.
+                inner.peering_strategy.unassign_slot_and_ban(
+                    &chain_id,
+                    &peer_id,
+                    Instant::now()
+                        + Duration::from_secs(match severity {
+                            BanSeverity::Low => 10,
+                            BanSeverity::High => 40,
+                        }),
+                );
+                if inner.network.gossip_remove_desired(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "slot-unassigned; peer_id={}; chain={}; reason=user-ban; user-reason={}",
+                            peer_id, inner.network[chain_id].log_name, reason
+                        ),
+                    );
+                }
+
+                if inner.network.gossip_is_connected(
+                    chain_id,
+                    &peer_id,
+                    service::GossipKind::ConsensusTransactions,
+                ) {
+                    let _close_result = inner.network.gossip_close(
+                        chain_id,
+                        &peer_id,
+                        service::GossipKind::ConsensusTransactions,
+                    );
+                    debug_assert!(_close_result.is_ok());
+
+                    inner.log_callback.log(
+                        LogLevel::Debug,
+                        format!(
+                            "chain-disconnected; peer_id={}; chain={}",
+                            peer_id, inner.network[chain_id].log_name
+                        ),
+                    );
+
+                    debug_assert!(inner.event_pending_send.is_none());
+                    inner.event_pending_send = Some(Event::Disconnected { chain_id, peer_id });
+                }
             }
 
             WakeUpReason::Message(ToBackground::ForegroundAnnounceBlock {
@@ -1011,6 +1177,24 @@ async fn background_task(mut inner: Inner) {
                 config,
                 result_tx,
             }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "blocks-request-start; peer_id={}; chain={}; start={}; desired_count={}; direction={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        match &config.start {
+                            codec::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
+                            codec::BlocksRequestConfigStart::Number(n) => either::Right(n),
+                        },
+                        config.desired_count,
+                        match config.direction {
+                            codec::BlocksRequestDirection::Ascending => "ascending",
+                            codec::BlocksRequestDirection::Descending => "descending",
+                        },
+                    ),
+                );
+
                 match inner.network.start_blocks_request(
                     &target,
                     chain_id,
@@ -1022,7 +1206,156 @@ async fn background_task(mut inner: Inner) {
                         inner.blocks_requests.insert(request_id, result_tx);
                     }
                     Err(service::StartRequestError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "blocks-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
                         let _ = result_tx.send(Err(BlocksRequestError::NoConnection));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundWarpSyncRequest {
+                target,
+                chain_id,
+                begin_hash,
+                result_tx,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "warp-sync-request-start; peer_id={}; chain={}; begin-hash={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(&begin_hash)
+                    ),
+                );
+
+                match inner.network.start_grandpa_warp_sync_request(
+                    &target,
+                    chain_id,
+                    begin_hash,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.warp_sync_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "warp-sync-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(WarpSyncRequestError::NoConnection));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundStorageProofRequest {
+                target,
+                chain_id,
+                config,
+                result_tx,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "storage-request-start; peer_id={}; chain={}; block-hash={}; num-keys={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(&config.block_hash),
+                        config.keys.len()
+                    ),
+                );
+
+                match inner.network.start_storage_proof_request(
+                    &target,
+                    chain_id,
+                    config,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.storage_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; peer_id={}; chain={}; outcome=failure; error=request-too-large",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
+                    }
+                }
+            }
+            WakeUpReason::Message(ToBackground::ForegroundCallProofRequest {
+                target,
+                chain_id,
+                config,
+                result_tx,
+            }) => {
+                inner.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "call-proof-request-start; peer_id={}; chain={}; block-hash={}; function={}",
+                        target,
+                        inner.network[chain_id].log_name,
+                        HashDisplay(&config.block_hash),
+                        config.method
+                    ),
+                );
+
+                match inner.network.start_call_proof_request(
+                    &target,
+                    chain_id,
+                    config,
+                    Duration::from_secs(12),
+                ) {
+                    Ok(request_id) => {
+                        // TODO: somehow cancel the request if the `rx` is dropped?
+                        inner.call_proof_requests.insert(request_id, result_tx);
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::NoConnection) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; peer_id={}; chain={}; outcome=failure; error=no-connection",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
+                    }
+                    Err(service::StartRequestMaybeTooLargeError::RequestTooLarge) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; peer_id={}; chain={}; outcome=failure; error=request-too-large",
+                                target,
+                                inner.network[chain_id].log_name,
+                            ),
+                        );
+                        let _ = result_tx.send(Err(()));
                     }
                 }
             }
@@ -1438,8 +1771,30 @@ async fn background_task(mut inner: Inner) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::Blocks(response),
             }) => {
+                match &response {
+                    Ok(success) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "blocks-request-ended; outcome=success; peer_id={peer_id}; chain={}; response-blocks={}",
+                                inner.network[chain_id].log_name,
+                                success.len()
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("blocks-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                            inner.network[chain_id].log_name, err),
+                        );
+                    }
+                }
+
                 let _ = inner
                     .blocks_requests
                     .remove(&substream_id)
@@ -1448,13 +1803,112 @@ async fn background_task(mut inner: Inner) {
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
-                response: service::RequestResult::KademliaFindNode(Ok(nodes)),
+                peer_id,
+                chain_id,
+                response: service::RequestResult::GrandpaWarpSync(response),
             }) => {
-                let chain_id = inner
-                    .kademlia_find_nodes_requests
-                    .remove(&substream_id)
-                    .unwrap();
+                match &response {
+                    Ok(success) => {
+                        let decoded = success.decode();
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "warp-sync-request-ended; outcome=success; peer_id={peer_id}; chain={}; num-fragments={}; is-finished={:?}",
+                                inner.network[chain_id].log_name,
+                                decoded.fragments.len(), decoded.is_finished,
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!("warp-sync-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                            inner.network[chain_id].log_name, err),
+                        );
+                    }
+                }
 
+                let _ = inner
+                    .warp_sync_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(WarpSyncRequestError::Request));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                peer_id,
+                chain_id,
+                response: service::RequestResult::StorageProof(response),
+            }) => {
+                match &response {
+                    Ok(success) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; outcome=success; peer_id={peer_id}; chain={}; proof-size={}",
+                                inner.network[chain_id].log_name,
+                                BytesDisplay(u64::try_from(success.decode().len()).unwrap()),
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "storage-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                                inner.network[chain_id].log_name, err
+                            ),
+                        );
+                    }
+                }
+
+                let _ = inner
+                    .storage_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(|_| ()));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                substream_id,
+                peer_id,
+                chain_id,
+                response: service::RequestResult::CallProof(response),
+            }) => {
+                match &response {
+                    Ok(success) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; outcome=success; peer_id={peer_id}; chain={}; proof-size={}",
+                                inner.network[chain_id].log_name,
+                                BytesDisplay(u64::try_from(success.decode().len()).unwrap()),
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        inner.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "call-proof-request-ended; outcome=failure; peer_id={peer_id}; chain={}; error={}",
+                                inner.network[chain_id].log_name,
+                                err
+                            ),
+                        );
+                    }
+                }
+
+                let _ = inner
+                    .call_proof_requests
+                    .remove(&substream_id)
+                    .unwrap()
+                    .send(response.map_err(|_| ()));
+            }
+            WakeUpReason::NetworkEvent(service::Event::RequestResult {
+                peer_id: kademlia_request_target,
+                chain_id,
+                response: service::RequestResult::KademliaFindNode(Ok(nodes)),
+                ..
+            }) => {
                 for (peer_id, addrs) in nodes {
                     let mut valid_addrs = Vec::with_capacity(addrs.len());
                     for addr in addrs {
@@ -1464,7 +1918,7 @@ async fn background_task(mut inner: Inner) {
                                 inner.log_callback.log(
                                     LogLevel::Debug,
                                     format!(
-                                        "discovery-invalid-address; error={error}, addr={}",
+                                        "discovery-invalid-address; error={error}, addr={}, discovered_from={kademlia_request_target}",
                                         hex::encode(&addr)
                                     ),
                                 );
@@ -1497,7 +1951,7 @@ async fn background_task(mut inner: Inner) {
                         inner.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "discovered; chain={}; peer_id={peer_id}; address={addr}",
+                                "discovered; chain={}; peer_id={peer_id}; address={addr}; discovered_from={kademlia_request_target}",
                                 inner.network[chain_id].log_name
                             ),
                         );
@@ -1519,18 +1973,16 @@ async fn background_task(mut inner: Inner) {
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
-                substream_id,
+                peer_id,
+                chain_id,
                 response: service::RequestResult::KademliaFindNode(Err(error)),
+                ..
             }) => {
-                let chain_id = inner
-                    .kademlia_find_nodes_requests
-                    .remove(&substream_id)
-                    .unwrap();
                 inner.log_callback.log(
                     LogLevel::Debug,
                     format!(
-                        "discovery-error; chain={}; error={}",
-                        inner.network[chain_id].log_name, error
+                        "discovery-error; chain={}; peer_id={peer_id}; error={error}",
+                        inner.network[chain_id].log_name
                     ),
                 );
             }

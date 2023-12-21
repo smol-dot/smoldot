@@ -492,7 +492,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Removes a source from the state machine. Returns the user data of this source, and all
-    /// the requests that this source were expected to perform.
+    /// the requests that this source was expected to perform.
     ///
     /// # Panic
     ///
@@ -1140,6 +1140,27 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             AllSyncInner::WarpSync { .. } => either::Right(either::Right(iter::empty())), // TODO: not implemented properly
             AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        match (&self.inner, &self.shared.requests[request_id.0]) {
+            (AllSyncInner::AllForks(inner), RequestMapping::AllForks(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            (AllSyncInner::WarpSync { inner, .. }, RequestMapping::WarpSync(rq)) => {
+                inner[inner.request_source_id(*rq)].outer_source_id
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -2476,6 +2497,20 @@ enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
+    /// Returns the source the justification was obtained from.
+    pub fn sender(&self) -> (SourceId, &TSrc) {
+        match &self.inner {
+            FinalityProofVerifyInner::AllForks(inner) => {
+                let sender = inner.sender().1;
+                (sender.outer_source_id, &sender.user_data)
+            }
+            FinalityProofVerifyInner::Optimistic(inner) => {
+                let sender = inner.sender().1;
+                (sender.outer_source_id, &sender.user_data)
+            }
+        }
+    }
+
     /// Perform the verification.
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
@@ -2889,9 +2924,7 @@ impl<TRq> Shared<TRq> {
                 }
             };
 
-            if let Some(finalized_block_height) = finalized_block_height {
-                all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
-            }
+            all_forks.update_source_finality_state(updated_source_id, finalized_block_height);
 
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }
