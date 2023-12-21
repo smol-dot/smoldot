@@ -1436,7 +1436,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             let merkle_value = {
                                                 let child_trie = mv.child_trie();
                                                 runtime_call_lock
-                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), &mv.key().collect::<Vec<_>>())
+                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), mv.key())
                                             };
                                             let merkle_value = match merkle_value {
                                                 Ok(v) => v,
@@ -1465,9 +1465,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 let child_trie = nk.child_trie();
                                                 runtime_call_lock.next_key(
                                                     child_trie.as_ref().map(|c| c.as_ref()),
-                                                    &nk.key().collect::<Vec<_>>(),
+                                                    nk.key(),
                                                     nk.or_equal(),
-                                                    &nk.prefix().collect::<Vec<_>>(),
+                                                    nk.prefix(),
                                                     nk.branch_nodes(),
                                                 )
                                             };
@@ -1490,7 +1490,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     break;
                                                 }
                                             };
-                                            runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                                            runtime_call = nk.inject_key(next_key);
                                         }
                                         runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
                                             runtime_call = req.resume();

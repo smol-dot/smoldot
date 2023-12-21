@@ -712,11 +712,11 @@ impl<'a> RuntimeCall<'a> {
     pub fn next_key(
         &'_ self,
         child_trie: Option<&[u8]>,
-        key_before: &[trie::Nibble],
+        key_before: impl Iterator<Item = trie::Nibble>,
         or_equal: bool,
-        prefix: &[trie::Nibble],
+        prefix: impl Iterator<Item = trie::Nibble>,
         branch_nodes: bool,
-    ) -> Result<Option<&'_ [trie::Nibble]>, RuntimeCallError> {
+    ) -> Result<Option<proof_decode::EntryKeyIter<'_, Vec<u8>>>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
@@ -732,10 +732,12 @@ impl<'a> RuntimeCall<'a> {
             None => self.block_state_root_hash,
         };
 
-        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
-            Ok(v) => Ok(v),
-            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
-        }
+        let v = match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
+            Ok(v) => v,
+            Err(err) => return Err(RuntimeCallError::MissingProofEntry(err)),
+        };
+
+        Ok(v)
     }
 
     /// Find in the proof the closest trie node that descends from `key` and returns its Merkle

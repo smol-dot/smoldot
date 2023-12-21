@@ -703,10 +703,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         }
                     }
                     RequestImpl::ValueOrHash { key, hash } => {
-                        // TODO: overhead
                         match decoded_proof.trie_node_info(
                             main_trie_root_hash,
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
+                            trie::bytes_to_nibbles(key.iter().copied()),
                         ) {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
@@ -762,7 +761,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 main_trie_root_hash,
                                 key_nibbles.clone(),
                             ) {
-                            Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
+                            Ok(Some(merkle_value)) => Some(merkle_value.to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 requests_remaining
@@ -774,7 +773,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         let found_closest_ancestor_excluding = match decoded_proof
                             .closest_ancestor_in_proof(main_trie_root_hash, key_nibbles)
                         {
-                            Ok(Some(ancestor)) => Some(ancestor.to_vec()),
+                            Ok(Some(ancestor)) => Some(ancestor.collect::<Vec<_>>()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 requests_remaining
