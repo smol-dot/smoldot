@@ -40,8 +40,8 @@
 
 use super::{nibble, trie_node, TrieEntryVersion};
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::{fmt, iter, mem, ops};
+use alloc::vec::Vec;
+use core::{fmt, iter, ops};
 
 /// Configuration to pass to [`decode_and_verify_proof`].
 pub struct Config<I> {

@@ -29,7 +29,7 @@
 
 use super::{nibble, proof_decode};
 
-use alloc::{borrow::ToOwned as _, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{fmt, iter, mem};
 
 mod tests;
