@@ -927,7 +927,11 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
         // `None`, thus we have to fuse it.
         let mut prefix = prefix.fuse();
 
-        let mut key_before = either::Left(key_before);
+        // The implementation below might continue iterating `key_before` even after it has
+        // returned `None`, thus we have to fuse it.
+        // Furthermore, `key_before` might be modified in the implementation below. When that
+        // happens, de do this by setting it to `either::Right`.
+        let mut key_before = either::Left(key_before.fuse());
 
         // Find the starting point of the requested trie.
         let Some(&(mut iter_entry)) = self.trie_roots.get(trie_root_merkle_value) else {
@@ -951,24 +955,23 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                     prefix.next(),
                     iter_entry_partial_key_iter.next(),
                 ) {
-                    (Some(a), Some(b), Some(c)) if a == b && b == c => {
+                    (Some(k), Some(p), Some(pk)) if k == p && p == pk => {
                         // Continue descending down the tree.
                     }
-                    (Some(a), Some(b), _) if a > b => {
+                    (None, Some(p), Some(pk)) if p == pk => {
+                        // Continue descending down the tree.
+                    }
+                    (Some(k), None, Some(pk)) if k == pk => {
+                        // Continue descending down the tree.
+                    }
+                    (Some(k), Some(p), _) if k > p => {
                         // `key_before` is strictly superior to `prefix`. The next key is
                         // thus necessarily `None`.
                         // Note that this is not a situation that is expected to be common, as
                         // doing such a call is pointless.
                         return Ok(None);
                     }
-                    (_, Some(a), Some(b)) if a != b => {
-                        // Mismatch between prefix and partial key. There is no node in the trie
-                        // that starts with `prefix`.
-                        return Ok(None);
-                    }
-                    (Some(a), Some(b), Some(c)) if a < b => {
-                        debug_assert!(b == c); // Checked above.
-
+                    (Some(k), Some(p), Some(pk)) if k < p && p == pk => {
                         // The key and prefix diverge.
                         // We know that there isn't any key in the trie between `key_before`
                         // and `prefix`.
@@ -977,23 +980,26 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         key_before = either::Right(iter::empty().fuse());
                         or_equal = true;
                     }
-                    (Some(a), None, Some(c)) if a == c => {
-                        // Continue descending down the tree.
+                    (_, Some(p), Some(pk)) => {
+                        debug_assert!(p != pk); // Other situations covered by other match blocks.
+
+                        // Mismatch between prefix and partial key. No matter the value of
+                        // `key_before` There is no node in the trie that starts with `prefix`.
+                        return Ok(None);
                     }
-                    (Some(a), None, Some(c)) if a < c => {
+                    (Some(k), None, Some(pk)) if k < pk => {
                         // `key_before` points to somewhere between `iter_entry`'s parent
                         // and `iter_entry`. We know that `iter_entry` necessarily matches
                         // the prefix. The next key is necessarily `iter_entry`.
                         return Ok(Some(EntryKeyIter::new(self, iter_entry)));
                     }
-                    (Some(a), _, Some(c)) => {
-                        debug_assert!(a > c); // Checked above.
+                    (Some(k), None, Some(pk)) => {
+                        debug_assert!(k > pk); // Checked above.
 
                         // `key_before` points to somewhere between the last child of `iter_entry`
                         // and its next sibling.
                         // The next key is thus the next sibling of `iter_entry`, provided that
-                        // `iter_entry` isn't a trie root and that the prefix matches
-                        // `iter_entry`'s next sibling.
+                        //  that the prefix matches `iter_entry`'s next sibling.
                         // Since we know that the prefix matches `iter_entry`, it matches
                         // `iter_entry`'s next sibling if and only if it matches `iter_entry`'s
                         // parent.
@@ -1008,6 +1014,10 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             return Ok(None);
                         }
                     }
+                    (None, None, Some(_)) => {
+                        // Exact match. Next key is `iter_entry`.
+                        return Ok(Some(EntryKeyIter::new(self, iter_entry)));
+                    }
                     (None, None, None)
                         if or_equal
                             && (branch_nodes
@@ -1016,7 +1026,7 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                                     trie_node::StorageValue::None,
                                 )) =>
                     {
-                        // Exact match. Closest descendant is `iter_entry`.
+                        // Exact match. Next key is `iter_entry`.
                         return Ok(Some(EntryKeyIter::new(self, iter_entry)));
                     }
                     (None, None, None) => {
@@ -1036,8 +1046,21 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                             iter_entry += 1;
                             or_equal = true;
                             prefix_matches_iter_entry_parent = true;
+                        } else if !prefix_matches_iter_entry_parent {
+                            // `iter_entry` has no child. The next node is thus its next sibling
+                            // or uncle, however `prefix` only matches `iter_entry` and not its
+                            // parent and thus wouldn't match `iter_entry`'s next sibling.
+                            // Therefore, the next node is `None`.
+                            return Ok(None);
                         } else {
-                            debug_assert!(!or_equal);
+                            // Childless branch nodes are forbidden.
+                            debug_assert!(!matches!(
+                                iter_entry_decoded.storage_value,
+                                trie_node::StorageValue::None,
+                            ));
+
+                            // Go to `iter_entry`'s next sibling, if any.
+                            self.entries[iter_entry].parent_entry_index;
 
                             // TODO:
                             todo!()
