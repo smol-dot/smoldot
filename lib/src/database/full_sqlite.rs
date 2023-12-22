@@ -945,9 +945,9 @@ impl SqliteFullDatabase {
                 -- continue was missing from the database, in which case the values of
                 -- `node_hash` and `node_is_branch` have irrelevant values, and the value of
                 -- `node_full_key` is the "best known key".
-                -- If `:skip_branches` is false, the search ends when `key_search_remain` is empty.
-                -- If `:skip_branches` is true, the search ends when `key_search_remain` is empty
-                -- and `node_is_branch` is false.
+                -- If `:skip_branches` is false, the search ends when `key_search_remain` is null
+                -- or empty. If `:skip_branches` is true, the search ends when `key_search_remain`
+                -- is null or empty and that `node_is_branch` is false.
                 --
                 -- `next_key` has zero elements if the block can't be found in the database or if
                 -- the trie has no next key at all. These two situations need to be differentiated
