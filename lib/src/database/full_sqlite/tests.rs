@@ -697,6 +697,17 @@ fn storage_next_key_partial() {
         db.block_storage_next_key(
             &db.block_hash_by_number(0).unwrap().next().unwrap(),
             iter::empty::<iter::Empty<_>>(),
+            [1, 1, 0].into_iter(),
+            [1, 1, 0].into_iter(),
+            true
+        ),
+        Ok(None)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
             [1, 1, 2].into_iter(),
             iter::empty(),
             true
