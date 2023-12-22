@@ -940,14 +940,14 @@ impl SqliteFullDatabase {
                 -- At each iteration, `node_hash` is the root where to continue the search,
                 -- `node_is_branch` is true if `node_hash` is a branch node, `node_full_key` is
                 -- the key of `node_hash` (that we build along the way) and serves as the final
-                -- result, and `search_remain` contains the `:key` that remains to be matched. Can
-                -- also be NULL to indicate that the search ended because the node necessary to
+                -- result, and `key_search_remain` contains the `:key` that remains to be matched.
+                -- Can also be NULL to indicate that the search ended because the node necessary to
                 -- continue was missing from the database, in which case the values of
                 -- `node_hash` and `node_is_branch` have irrelevant values, and the value of
                 -- `node_full_key` is the "best known key".
-                -- If `:skip_branches` is false, the search ends when `search_remain` is empty.
-                -- If `:skip_branches` is true, the search ends when `search_remain` is empty and
-                -- `node_is_branch` is false.
+                -- If `:skip_branches` is false, the search ends when `key_search_remain` is null
+                -- or empty. If `:skip_branches` is true, the search ends when `key_search_remain`
+                -- is null or empty and that `node_is_branch` is false.
                 --
                 -- `next_key` has zero elements if the block can't be found in the database or if
                 -- the trie has no next key at all. These two situations need to be differentiated
@@ -966,7 +966,7 @@ impl SqliteFullDatabase {
                 -- is because, for some reason, `SUBSTR(X'', ...)` always produces `NULL`. For this
                 -- reason, it is also not possible to automatically pass NULL values
                 -- through `SUSBTR`, and we have to use CASE/IIFs instead.
-                next_key(node_hash, node_is_branch, node_full_key, search_remain) AS (
+                next_key(node_hash, node_is_branch, node_full_key, key_search_remain) AS (
                         SELECT
                             CASE
                                 WHEN trie_node.hash IS NULL
@@ -1006,14 +1006,14 @@ impl SqliteFullDatabase {
                             CASE
                                 WHEN trie_node_child.child_num IS NOT NULL AND trie_node.partial_key IS NULL
                                     THEN NULL    -- Child exists but is missing from database
-                                WHEN HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND trie_node_trieref.hash IS NULL
+                                WHEN HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' AND trie_node_trieref.hash IS NULL
                                     THEN NULL    -- Trie reference exists but is missing from database
-                                WHEN SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                                    THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))    -- Equal match, continue iterating
-                                WHEN SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) < trie_node.partial_key
+                                WHEN SUBSTR(next_key.key_search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                                    THEN SUBSTR(next_key.key_search_remain, 2 + LENGTH(trie_node.partial_key))    -- Equal match, continue iterating
+                                WHEN SUBSTR(next_key.key_search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node.partial_key)) < trie_node.partial_key
                                     THEN X''     -- Searched key is before the node we are iterating to, thus we cut the search short
-                                WHEN HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
-                                    THEN COALESCE(SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
+                                WHEN HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
+                                    THEN COALESCE(SUBSTR(next_key.key_search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
                                 ELSE
                                     X''          -- Shouldn't be reachable.
                             END
@@ -1021,8 +1021,8 @@ impl SqliteFullDatabase {
 
                         LEFT JOIN trie_node_child
                             ON next_key.node_hash = trie_node_child.hash
-                            AND CASE WHEN LENGTH(next_key.search_remain) = 0 THEN TRUE
-                                ELSE SUBSTR(next_key.search_remain, 1, 1) <= trie_node_child.child_num END
+                            AND CASE WHEN LENGTH(next_key.key_search_remain) = 0 THEN TRUE
+                                ELSE SUBSTR(next_key.key_search_remain, 1, 1) <= trie_node_child.child_num END
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
 
                         -- We want to keep only situations where `trie_node_child` is either
@@ -1033,32 +1033,35 @@ impl SqliteFullDatabase {
                         LEFT JOIN trie_node_child AS trie_node_child_before
                             ON next_key.node_hash = trie_node_child_before.hash
                             AND trie_node_child_before.child_num < trie_node_child.child_num
-                            AND (next_key.search_remain = X'' OR trie_node_child_before.child_num > SUBSTR(next_key.search_remain, 1, 1))
+                            AND (next_key.key_search_remain = X'' OR trie_node_child_before.child_num > SUBSTR(next_key.key_search_remain, 1, 1))
 
                         LEFT JOIN trie_node_storage AS trie_node_storage_trieref
-                            ON HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND next_key.node_hash = trie_node_storage_trieref.node_hash AND trie_node_storage_trieref.trie_root_ref IS NOT NULL
+                            ON HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' AND next_key.node_hash = trie_node_storage_trieref.node_hash AND trie_node_storage_trieref.trie_root_ref IS NOT NULL
                         LEFT JOIN trie_node AS trie_node_trieref
                             ON trie_node_trieref.hash = trie_node_storage_trieref.node_hash
-                            AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') <= trie_node_trieref.partial_key
+                            AND COALESCE(SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') <= trie_node_trieref.partial_key
 
                         LEFT JOIN trie_node_storage
                             ON trie_node_storage.node_hash = COALESCE(trie_node.hash, trie_node_trieref.hash)
 
                         WHERE
                             -- Don't pull items that have already finished searching.
-                            next_key.node_hash IS NOT NULL AND next_key.search_remain IS NOT NULL AND (next_key.search_remain != X'' OR (next_key.node_is_branch AND :skip_branches))
+                            next_key.node_hash IS NOT NULL AND next_key.key_search_remain IS NOT NULL AND (next_key.key_search_remain != X'' OR (next_key.node_is_branch AND :skip_branches))
                             -- See explanation above.
                             AND trie_node_child_before.hash IS NULL
                             -- Don't generate an item if there's nowhere to go to.
-                            AND (HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' OR trie_node_child.child_num IS NOT NULL)
+                            AND (HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' OR trie_node_child.child_num IS NOT NULL)
                             -- Stop iterating if the child's partial key is before the searched key.
-                            AND (trie_node.hash IS NULL OR NOT (COALESCE(SUBSTR(next_key.search_remain, 1, 1), X'') = trie_node_child.child_num AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)), X'') > trie_node.partial_key))
+                            AND (trie_node.hash IS NULL OR NOT (COALESCE(SUBSTR(next_key.key_search_remain, 1, 1), X'') = trie_node_child.child_num AND COALESCE(SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node.partial_key)), X'') > trie_node.partial_key))
                 ),
 
                 -- Now keep only the entries of `next_key` which have finished iterating.
                 terminal_next_key(incomplete_storage, node_full_key, output) AS (
                     SELECT
-                        search_remain IS NULL,
+                        CASE
+                            WHEN COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') != :prefix THEN FALSE
+                            ELSE key_search_remain IS NULL
+                        END,
                         node_full_key,
                         CASE
                             WHEN node_hash IS NULL THEN NULL
@@ -1066,7 +1069,7 @@ impl SqliteFullDatabase {
                             ELSE NULL
                         END
                     FROM next_key
-                    WHERE search_remain IS NULL OR (LENGTH(search_remain) = 0 AND (NOT :skip_branches OR NOT node_is_branch))
+                    WHERE key_search_remain IS NULL OR (LENGTH(key_search_remain) = 0 AND (NOT :skip_branches OR NOT node_is_branch))
                 )
 
             SELECT
