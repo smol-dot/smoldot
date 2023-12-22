@@ -1555,14 +1555,6 @@ pub struct ProofEntry<'a, T> {
     /// >           works, you most likely don't need this.
     pub merkle_value: &'a [u8],
 
-    /// Merkle value of the entry.
-    ///
-    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
-    /// >           works, you most likely don't need this.
-    pub merkle_value: Vec<u8>,
-
-    pub partial_key_nibbles: Vec<nibble::Nibble>,
-
     /// Node value of that proof entry.
     ///
     /// > **Note**: This is a low-level information. If you're not familiar with how the trie
