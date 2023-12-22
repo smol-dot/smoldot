@@ -597,7 +597,23 @@ impl<T: AsRef<[u8]>> DecodedTrieProof<T> {
                         };
 
                         let entry = ProofEntry {
+                            merkle_value: if let Some((parent_index, parent_nibble)) =
+                                self.entries[entry_index].parent_entry_index
+                            {
+                                let Ok(parent_decoded) = trie_node::decode(
+                                    &proof[self.entries[parent_index].range_in_proof.clone()],
+                                ) else {
+                                    // Proof has been checked to be entirely decodable.
+                                    unreachable!()
+                                };
+                                parent_decoded.children[usize::from(parent_nibble)]
+                                    .as_ref()
+                                    .unwrap()
+                            } else {
+                                trie_root_hash
+                            },
                             node_value: &self.proof.as_ref()[entry.range_in_proof.clone()],
+                            partial_key_nibbles: entry_index_decoded.partial_key,
                             unhashed_storage_value: entry
                                 .storage_value_in_proof
                                 .as_ref()
@@ -1481,11 +1497,23 @@ pub struct ProofEntry<'a, T> {
     /// Information about the node of the trie associated to this entry.
     pub trie_node_info: TrieNodeInfo<'a, T>,
 
+    /// Merkle value of that proof entry.
+    ///
+    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
+    /// >           works, you most likely don't need this.
+    pub merkle_value: &'a [u8],
+
     /// Node value of that proof entry.
     ///
     /// > **Note**: This is a low-level information. If you're not familiar with how the trie
     /// >           works, you most likely don't need this.
     pub node_value: &'a [u8],
+
+    /// Partial key of that proof entry.
+    ///
+    /// > **Note**: This is a low-level information. If you're not familiar with how the trie
+    /// >           works, you most likely don't need this.
+    pub partial_key_nibbles: trie_node::DecodedPartialKey<'a>,
 
     /// If [`ProofEntry::node_value`] indicates that the storage value is hashed, then this field
     /// contains the unhashed storage value that is found in the proof, if any.
@@ -1503,7 +1531,9 @@ impl<'a, T> Clone for ProofEntry<'a, T> {
     fn clone(&self) -> Self {
         ProofEntry {
             trie_node_info: self.trie_node_info.clone(),
+            merkle_value: self.merkle_value,
             node_value: self.node_value,
+            partial_key_nibbles: self.partial_key_nibbles.clone(),
             unhashed_storage_value: self.unhashed_storage_value,
         }
     }
