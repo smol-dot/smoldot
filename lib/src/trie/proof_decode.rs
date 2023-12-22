@@ -189,130 +189,140 @@ where
             // This is the next child of the node at the top of the stack, or if the node at
             // the top of the stack doesn't have any child, we pop it and continue iterating.
             // If the stack is empty, we are necessarily at the first iteration.
-            let visited_node_entry_range = match visited_entries_stack.last_mut() {
-                None => {
-                    // Stack is empty.
-                    // Because we immediately `break` after popping the last element, the stack
-                    // can only ever be empty at the very start.
-                    let InProgressEntry {
-                        index_in_proof: root_position,
-                        range_in_proof: root_range,
-                        ..
-                    } = entries_by_merkle_value.get(&trie_root_hash[..]).unwrap();
-                    let _ = unvisited_proof_entries.remove(root_position);
-                    trie_roots_with_entries.insert(*trie_root_hash, entries.len());
-                    root_range.clone()
-                }
-                Some(StackEntry {
-                    num_visited_children: stack_top_visited_children,
-                    ..
-                }) if *stack_top_visited_children == 16 => {
-                    // We have visited all the children of the top of the stack. Pop the node from
-                    // the stack.
-                    let Some(StackEntry {
-                        index_in_entries: stack_top_index_in_entries,
-                        ..
-                    }) = visited_entries_stack.pop()
-                    else {
-                        unreachable!()
-                    };
-
-                    // Update the value of `child_entries_follow_up`
-                    // and `children_present_in_proof_bitmap` of the parent.
-                    if let Some(&StackEntry {
-                        index_in_entries: parent_index_in_entries,
-                        num_visited_children: parent_children_visited,
-                        ..
-                    }) = visited_entries_stack.last()
-                    {
-                        entries[parent_index_in_entries].child_entries_follow_up +=
-                            entries[stack_top_index_in_entries].child_entries_follow_up + 1;
-                        entries[parent_index_in_entries].children_present_in_proof_bitmap |=
-                            1 << (parent_children_visited - 1);
+            let (visited_node_entry_range, visited_node_decoded) =
+                match visited_entries_stack.last_mut() {
+                    None => {
+                        // Stack is empty.
+                        // Because we immediately `break` after popping the last element, the stack
+                        // can only ever be empty at the very start.
+                        let InProgressEntry {
+                            index_in_proof: root_position,
+                            range_in_proof: root_range,
+                            decode_result,
+                        } = entries_by_merkle_value.get(&trie_root_hash[..]).unwrap();
+                        let _ = unvisited_proof_entries.remove(root_position);
+                        trie_roots_with_entries.insert(*trie_root_hash, entries.len());
+                        (
+                            root_range.clone(),
+                            decode_result.clone().map_err(Error::InvalidNodeValue)?,
+                        )
                     }
-
-                    // If we popped the last node of the stack, we have finished the iteration.
-                    if visited_entries_stack.is_empty() {
-                        break;
-                    } else {
-                        continue;
-                    }
-                }
-                Some(StackEntry {
-                    range_in_proof: stack_top_proof_range,
-                    num_visited_children: stack_top_visited_children,
-                    children_node_values: stack_top_children,
-                    ..
-                }) => {
-                    // Find the next child of the top of the stack.
-                    let stack_top_entry = &proof_as_ref[stack_top_proof_range.clone()];
-
-                    // Find the index of the next child (that we are about to visit).
-                    let next_child_to_visit = stack_top_children
-                        .iter()
-                        .skip(usize::from(*stack_top_visited_children))
-                        .position(|c| c.is_some())
-                        .map(|idx| u8::try_from(idx).unwrap() + *stack_top_visited_children)
-                        .unwrap_or(16);
-
-                    // `continue` if all children have been visited. The next iteration will
-                    // pop the stack entry.
-                    if next_child_to_visit == 16 {
-                        *stack_top_visited_children = 16;
-                        continue;
-                    }
-                    *stack_top_visited_children = next_child_to_visit + 1;
-
-                    // The value of the child node is either directly inlined (if less
-                    // than 32 bytes) or is a hash.
-                    let child_node_value =
-                        stack_top_children[usize::from(next_child_to_visit)].unwrap();
-                    debug_assert!(child_node_value.len() <= 32); // Guaranteed by decoding API.
-                    if child_node_value.len() < 32 {
-                        let offset = stack_top_proof_range.start
-                            + if !child_node_value.is_empty() {
-                                child_node_value.as_ptr() as usize
-                                    - stack_top_entry.as_ptr() as usize
-                            } else {
-                                0
-                            };
-                        debug_assert!(offset == 0 || offset >= stack_top_proof_range.start);
-                        debug_assert!(
-                            offset <= (stack_top_proof_range.start + stack_top_entry.len())
-                        );
-                        offset..(offset + child_node_value.len())
-                    } else if let Some(&InProgressEntry {
-                        index_in_proof: child_position,
-                        range_in_proof: ref child_entry_range,
+                    Some(StackEntry {
+                        num_visited_children: stack_top_visited_children,
                         ..
-                    }) = entries_by_merkle_value.get(child_node_value)
-                    {
-                        // If the node value of the child is less than 32 bytes long, it should
-                        // have been inlined instead of given separately.
-                        if child_entry_range.end - child_entry_range.start < 32 {
-                            return Err(Error::UnexpectedHashedNode);
+                    }) if *stack_top_visited_children == 16 => {
+                        // We have visited all the children of the top of the stack. Pop the node from
+                        // the stack.
+                        let Some(StackEntry {
+                            index_in_entries: stack_top_index_in_entries,
+                            ..
+                        }) = visited_entries_stack.pop()
+                        else {
+                            unreachable!()
+                        };
+
+                        // Update the value of `child_entries_follow_up`
+                        // and `children_present_in_proof_bitmap` of the parent.
+                        if let Some(&StackEntry {
+                            index_in_entries: parent_index_in_entries,
+                            num_visited_children: parent_children_visited,
+                            ..
+                        }) = visited_entries_stack.last()
+                        {
+                            entries[parent_index_in_entries].child_entries_follow_up +=
+                                entries[stack_top_index_in_entries].child_entries_follow_up + 1;
+                            entries[parent_index_in_entries].children_present_in_proof_bitmap |=
+                                1 << (parent_children_visited - 1);
                         }
 
-                        // Remove the entry from `unvisited_proof_entries`.
-                        // Note that it is questionable what to do if the same entry is visited
-                        // multiple times. In case where multiple storage branches are identical,
-                        // the sender of the proof should de-duplicate the identical nodes. For
-                        // this reason, it could be legitimate for the same proof entry to be
-                        // visited multiple times.
-                        let _ = unvisited_proof_entries.remove(&child_position);
-                        child_entry_range.clone()
-                    } else {
-                        // Child is a hash that was not found in the proof. Simply continue
-                        // iterating, in order to try to find the follow-up child.
-                        continue;
+                        // If we popped the last node of the stack, we have finished the iteration.
+                        if visited_entries_stack.is_empty() {
+                            break;
+                        } else {
+                            continue;
+                        }
                     }
-                }
-            };
+                    Some(StackEntry {
+                        range_in_proof: stack_top_proof_range,
+                        num_visited_children: stack_top_visited_children,
+                        children_node_values: stack_top_children,
+                        ..
+                    }) => {
+                        // Find the next child of the top of the stack.
+                        let stack_top_entry = &proof_as_ref[stack_top_proof_range.clone()];
 
-            // Decodes the proof entry.
-            let visited_node_entry = &proof_as_ref[visited_node_entry_range.clone()];
-            let visited_node_decoded =
-                trie_node::decode(visited_node_entry).map_err(Error::InvalidNodeValue)?;
+                        // Find the index of the next child (that we are about to visit).
+                        let next_child_to_visit = stack_top_children
+                            .iter()
+                            .skip(usize::from(*stack_top_visited_children))
+                            .position(|c| c.is_some())
+                            .map(|idx| u8::try_from(idx).unwrap() + *stack_top_visited_children)
+                            .unwrap_or(16);
+
+                        // `continue` if all children have been visited. The next iteration will
+                        // pop the stack entry.
+                        if next_child_to_visit == 16 {
+                            *stack_top_visited_children = 16;
+                            continue;
+                        }
+                        *stack_top_visited_children = next_child_to_visit + 1;
+
+                        // The value of the child node is either directly inlined (if less
+                        // than 32 bytes) or is a hash.
+                        let child_node_value =
+                            stack_top_children[usize::from(next_child_to_visit)].unwrap();
+                        debug_assert!(child_node_value.len() <= 32); // Guaranteed by decoding API.
+                        if child_node_value.len() < 32 {
+                            let offset = stack_top_proof_range.start
+                                + if !child_node_value.is_empty() {
+                                    child_node_value.as_ptr() as usize
+                                        - stack_top_entry.as_ptr() as usize
+                                } else {
+                                    0
+                                };
+                            debug_assert!(offset == 0 || offset >= stack_top_proof_range.start);
+                            debug_assert!(
+                                offset <= (stack_top_proof_range.start + stack_top_entry.len())
+                            );
+
+                            let child_range_in_proof = offset..(offset + child_node_value.len());
+
+                            // Decodes the child.
+                            let child_decoded =
+                                trie_node::decode(&proof_as_ref[child_range_in_proof.clone()])
+                                    .map_err(Error::InvalidNodeValue)?;
+
+                            (child_range_in_proof, child_decoded)
+                        } else if let Some(&InProgressEntry {
+                            index_in_proof: child_position,
+                            range_in_proof: ref child_entry_range,
+                            ref decode_result,
+                        }) = entries_by_merkle_value.get(child_node_value)
+                        {
+                            // If the node value of the child is less than 32 bytes long, it should
+                            // have been inlined instead of given separately.
+                            if child_entry_range.end - child_entry_range.start < 32 {
+                                return Err(Error::UnexpectedHashedNode);
+                            }
+
+                            // Remove the entry from `unvisited_proof_entries`.
+                            // Note that it is questionable what to do if the same entry is visited
+                            // multiple times. In case where multiple storage branches are identical,
+                            // the sender of the proof should de-duplicate the identical nodes. For
+                            // this reason, it could be legitimate for the same proof entry to be
+                            // visited multiple times.
+                            let _ = unvisited_proof_entries.remove(&child_position);
+                            (
+                                child_entry_range.clone(),
+                                decode_result.clone().map_err(Error::InvalidNodeValue)?,
+                            )
+                        } else {
+                            // Child is a hash that was not found in the proof. Simply continue
+                            // iterating, in order to try to find the follow-up child.
+                            continue;
+                        }
+                    }
+                };
 
             // All nodes must either have a child or a storage value or be the root.
             if visited_node_decoded.children_bitmap() == 0
@@ -371,9 +381,7 @@ where
                             0
                         };
                         debug_assert!(offset == 0 || offset >= visited_node_entry_range.start);
-                        debug_assert!(
-                            offset <= (visited_node_entry_range.start + visited_node_entry.len())
-                        );
+                        debug_assert!(offset <= visited_node_entry_range.end);
                         Some(offset..offset + v.len())
                     }
                 },
