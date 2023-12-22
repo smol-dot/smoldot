@@ -1058,7 +1058,10 @@ impl SqliteFullDatabase {
                 -- Now keep only the entries of `next_key` which have finished iterating.
                 terminal_next_key(incomplete_storage, node_full_key, output) AS (
                     SELECT
-                    key_search_remain IS NULL,
+                        CASE
+                            WHEN COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') != :prefix THEN FALSE
+                            ELSE key_search_remain IS NULL
+                        END,
                         node_full_key,
                         CASE
                             WHEN node_hash IS NULL THEN NULL
