@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- Decoding and analyzing a Merkle proof is now around 10% to 50% faster. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+
+### Fixed
+
+- Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
+- Fix bugs in various corner cases when decoding and analyzing a Merkle proof. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+- Fix Merkle proofs being considered as invalid if they contain a storage value that happens to successfully decode as a trie node with an inline child. ([#1504](https://github.com/smol-dot/smoldot/pull/1504))
+
 ## 2.0.15 - 2023-12-20
 
 ### Changed
@@ -14,6 +24,8 @@
 
 - Fix pings never being sent to peers, which means that smoldot would fail to detect when a connection is no longer responsive. ([#1461](https://github.com/smol-dot/smoldot/pull/1461))
 - Fix connection being properly killed when the ping substream fails to be negotiated. ([#1459](https://github.com/smol-dot/smoldot/pull/1459))
+- Fix Merkle proofs with nodes that have one child and no storage value being considered as valid.
+- Fix Merkle proofs with nodes that have no children or storage value and aren't the root being considered as valid.
 
 ## 2.0.13 - 2023-11-28
 

@@ -211,11 +211,6 @@ struct Source<TSrc> {
     /// Best block that the source has reported having.
     best_block_number: u64,
 
-    /// If `true`, this source is banned and shouldn't use be used to request blocks.
-    /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
-    /// defense against malicious peers but rather an optimization.
-    banned: bool,
-
     /// Number of requests that use this source.
     num_ongoing_requests: u32,
 }
@@ -384,7 +379,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             Source {
                 user_data: source,
                 best_block_number,
-                banned: false,
                 num_ongoing_requests: 0,
             },
         );
@@ -658,15 +652,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .unwrap()
             .num_ongoing_requests -= 1;
 
-        self.inner.sources.get_mut(&source_id).unwrap().banned = true;
-
-        // If all sources are banned, unban them.
-        if self.inner.sources.iter().all(|(_, s)| s.banned) {
-            for src in self.inner.sources.values_mut() {
-                src.banned = false;
-            }
-        }
-
         user_data
     }
 
@@ -870,24 +855,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                         verified_header,
                         scale_encoded_justifications: block.scale_encoded_justifications,
-                        source_id,
                     },
                     new_best_hash,
                     new_best_number,
                 }
             }
             Err(reason) => {
-                if let Some(src) = self.inner.sources.get_mut(&source_id) {
-                    src.banned = true;
-                }
-
-                // If all sources are banned, unban them.
-                if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                    for src in self.inner.sources.values_mut() {
-                        src.banned = false;
-                    }
-                }
-
                 self.inner.make_requests_obsolete(&self.chain);
 
                 let previous_best_height = self.chain.best_block_header().number;
@@ -944,7 +917,6 @@ pub struct BlockVerifySuccess<TRq, TSrc, TBl> {
     verified_header: blocks_tree::VerifiedHeader,
     scale_encoded_extrinsics: Vec<Vec<u8>>,
     scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
-    source_id: SourceId,
 }
 
 impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
@@ -1014,19 +986,7 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
 
     /// Reject the block and mark it as bad.
     pub fn reject_bad_block(mut self) -> OptimisticSync<TRq, TSrc, TBl> {
-        if let Some(src) = self.parent.inner.sources.get_mut(&self.source_id) {
-            src.banned = true;
-        }
-
-        // If all sources are banned, unban them.
-        if self.parent.inner.sources.iter().all(|(_, s)| s.banned) {
-            for src in self.parent.inner.sources.values_mut() {
-                src.banned = false;
-            }
-        }
-
         self.parent.inner.make_requests_obsolete(&self.parent.chain);
-
         self.parent
     }
 
@@ -1083,7 +1043,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         OptimisticSync<TRq, TSrc, TBl>,
         JustificationVerification<TBl>,
     ) {
-        let (consensus_engine_id, justification, source_id) =
+        let (consensus_engine_id, justification, _) =
             self.inner.pending_encoded_justifications.next().unwrap();
 
         let mut apply = match self.chain.verify_justification(
@@ -1093,17 +1053,6 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         ) {
             Ok(a) => a,
             Err(error) => {
-                if let Some(source) = self.inner.sources.get_mut(&source_id) {
-                    source.banned = true;
-                }
-
-                // If all sources are banned, unban them.
-                if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                    for src in self.inner.sources.values_mut() {
-                        src.banned = false;
-                    }
-                }
-
                 let chain = blocks_tree::NonFinalizedTree::new(
                     self.inner.finalized_chain_information.clone(),
                 );
