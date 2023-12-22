@@ -78,7 +78,7 @@ where
     // we assume it isn't). So while an attacker can slightly increase the time that this function
     // takes, it is always cause this function to return an error and is actually likely to make
     // the function actually take less time than if it was a legitimate proof.
-    let merkle_values = {
+    let entries_by_merkle_value = {
         // TODO: don't use a Vec?
         let (_, decoded_proof) = nom::combinator::all_consuming(nom::combinator::flat_map(
             crate::util::nom_scale_compact_usize,
@@ -86,12 +86,12 @@ where
         ))(config.proof.as_ref())
         .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidFormat)?;
 
-        let merkle_values = decoded_proof
+        let entries_by_merkle_value = decoded_proof
             .iter()
             .copied()
             .enumerate()
             .map(
-                |(proof_entry_num, proof_entry)| -> ([u8; 32], (usize, ops::Range<usize>)) {
+                |(proof_entry_num, proof_entry)| -> ([u8; 32], (usize, ops::Range<usize>, Result<_, _>)) {
                     // The merkle value of a trie node is normally either its hash or the node
                     // itself if its length is < 32. In the context of a proof, however, nodes
                     // whose length is < 32 aren't supposed to be their own entry. For this reason,
@@ -100,6 +100,8 @@ where
                         blake2_rfc::blake2b::blake2b(32, &[], proof_entry).as_bytes(),
                     )
                     .unwrap();
+
+                    let decoded = trie_node::decode(proof_entry);
 
                     let proof_entry_offset = if proof_entry.is_empty() {
                         0
@@ -112,6 +114,7 @@ where
                         (
                             proof_entry_num,
                             proof_entry_offset..(proof_entry_offset + proof_entry.len()),
+                            decoded,
                         ),
                     )
                 },
@@ -119,24 +122,23 @@ where
             .collect::<hashbrown::HashMap<_, _, fnv::FnvBuildHasher>>();
 
         // Using a hashmap has the consequence that if multiple proof entries were identical, only
-        // one would be tracked. For this reason, we make sure that the proof doesn't contain
+        // one would be tracked. This allows us to make sure that the proof doesn't contain
         // multiple identical entries.
-        if merkle_values.len() != decoded_proof.len() {
+        if entries_by_merkle_value.len() != decoded_proof.len() {
             return Err(Error::DuplicateProofEntry);
         }
 
-        merkle_values
+        entries_by_merkle_value
     };
 
     // Start by iterating over each element of the proof, and keep track of elements that are
     // decodable but aren't mentioned in any other element. This gives us the tries roots.
     let trie_roots = {
-        let mut maybe_trie_roots = merkle_values
+        let mut maybe_trie_roots = entries_by_merkle_value
             .keys()
             .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
-        for (hash, (_, proof_entry_range)) in merkle_values.iter() {
-            let node_value = &config.proof.as_ref()[proof_entry_range.clone()];
-            let Ok(decoded) = trie_node::decode(node_value) else {
+        for (hash, (_, _, decoded)) in entries_by_merkle_value.iter() {
+            let Ok(decoded) = decoded else {
                 maybe_trie_roots.remove(hash);
                 continue;
             };
@@ -153,14 +155,14 @@ where
     // note of the traversed elements.
 
     // Keep track of all the entries found in the proof.
-    let mut entries: Vec<Entry> = Vec::with_capacity(merkle_values.len());
+    let mut entries: Vec<Entry> = Vec::with_capacity(entries_by_merkle_value.len());
 
     let mut trie_roots_with_entries =
         hashbrown::HashMap::with_capacity_and_hasher(trie_roots.len(), Default::default());
 
     // Keep track of the proof entries that haven't been visited when traversing.
     let mut unvisited_proof_entries =
-        (0..merkle_values.len()).collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
+        (0..entries_by_merkle_value.len()).collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
 
     // We repeat this operation for every trie root.
     for trie_root_hash in trie_roots {
@@ -184,8 +186,10 @@ where
                     // Stack is empty.
                     // Because we immediately `break` after popping the last element, the stack
                     // can only ever be empty at the very start.
-                    let (root_position, root_range) =
-                        merkle_values.get(&trie_root_hash[..]).unwrap().clone();
+                    let (root_position, root_range, _) = entries_by_merkle_value
+                        .get(&trie_root_hash[..])
+                        .unwrap()
+                        .clone();
                     let _ = unvisited_proof_entries.remove(&root_position);
                     trie_roots_with_entries.insert(*trie_root_hash, entries.len());
                     root_range
@@ -268,8 +272,8 @@ where
                             offset <= (stack_top_proof_range.start + stack_top_entry.len())
                         );
                         offset..(offset + child_node_value.len())
-                    } else if let Some(&(child_position, ref child_entry_range)) =
-                        merkle_values.get(child_node_value)
+                    } else if let Some(&(child_position, ref child_entry_range, _)) =
+                        entries_by_merkle_value.get(child_node_value)
                     {
                         // If the node value of the child is less than 32 bytes long, it should
                         // have been inlined instead of given separately.
@@ -336,8 +340,8 @@ where
                 storage_value_in_proof: match visited_node_decoded.storage_value {
                     trie_node::StorageValue::None => None,
                     trie_node::StorageValue::Hashed(value_hash) => {
-                        if let Some(&(value_position, ref value_entry_range)) =
-                            merkle_values.get(&value_hash[..])
+                        if let Some(&(value_position, ref value_entry_range, _)) =
+                            entries_by_merkle_value.get(&value_hash[..])
                         {
                             let _ = unvisited_proof_entries.remove(&value_position);
                             Some(value_entry_range.clone())
@@ -379,6 +383,7 @@ where
         return Err(Error::UnusedProofEntry);
     }
 
+    drop(entries_by_merkle_value);
     Ok(DecodedTrieProof {
         proof: config.proof,
         entries,
