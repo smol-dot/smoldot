@@ -181,6 +181,14 @@ where
             children_node_values: [Option<&'a [u8]>; 16],
         }
 
+        // Keep track of the number of entries before this trie root.
+        // This allows us to truncate `entries` to this value in case of decoding failure.
+        let num_entries_before_current_trie_root = entries.len();
+
+        // Keep track of the indices of the proof entries that are visited when traversing this trie.
+        let mut visited_proof_entries_during_trie =
+            Vec::with_capacity(entries_by_merkle_value.len());
+
         // TODO: configurable capacity?
         let mut visited_entries_stack: Vec<StackEntry> = Vec::with_capacity(24);
 
@@ -200,12 +208,14 @@ where
                             range_in_proof: root_range,
                             decode_result,
                         } = entries_by_merkle_value.get(&trie_root_hash[..]).unwrap();
-                        let _ = unvisited_proof_entries.remove(root_position);
-                        trie_roots_with_entries.insert(*trie_root_hash, entries.len());
-                        (
-                            root_range.clone(),
-                            decode_result.clone().map_err(Error::InvalidNodeValue)?,
-                        )
+                        visited_proof_entries_during_trie.push(*root_position);
+                        // If the node can't be decoded, we ignore the entire trie and jump
+                        // to the next one.
+                        let Ok(decoded) = decode_result.clone() else {
+                            debug_assert_eq!(num_entries_before_current_trie_root, entries.len());
+                            break;
+                        };
+                        (root_range.clone(), decoded)
                     }
                     Some(StackEntry {
                         num_visited_children: stack_top_visited_children,
@@ -237,6 +247,17 @@ where
 
                         // If we popped the last node of the stack, we have finished the iteration.
                         if visited_entries_stack.is_empty() {
+                            trie_roots_with_entries
+                                .insert(*trie_root_hash, num_entries_before_current_trie_root);
+                            // Remove the visited entries from `unvisited_proof_entries`.
+                            // Note that it is questionable what to do if the same entry is visited
+                            // multiple times. In case where multiple storage branches are identical,
+                            // the sender of the proof should de-duplicate the identical nodes. For
+                            // this reason, it could be legitimate for the same proof entry to be
+                            // visited multiple times.
+                            for entry_num in visited_proof_entries_during_trie {
+                                unvisited_proof_entries.remove(&entry_num);
+                            }
                             break;
                         } else {
                             continue;
@@ -288,9 +309,14 @@ where
                             let child_range_in_proof = offset..(offset + child_node_value.len());
 
                             // Decodes the child.
-                            let child_decoded =
+                            // If the node can't be decoded, we ignore the entire trie and jump
+                            // to the next one.
+                            let Ok(child_decoded) =
                                 trie_node::decode(&proof_as_ref[child_range_in_proof.clone()])
-                                    .map_err(Error::InvalidNodeValue)?;
+                            else {
+                                entries.truncate(num_entries_before_current_trie_root);
+                                break;
+                            };
 
                             (child_range_in_proof, child_decoded)
                         } else if let Some(&InProgressEntry {
@@ -305,17 +331,15 @@ where
                                 return Err(Error::UnexpectedHashedNode);
                             }
 
-                            // Remove the entry from `unvisited_proof_entries`.
-                            // Note that it is questionable what to do if the same entry is visited
-                            // multiple times. In case where multiple storage branches are identical,
-                            // the sender of the proof should de-duplicate the identical nodes. For
-                            // this reason, it could be legitimate for the same proof entry to be
-                            // visited multiple times.
-                            let _ = unvisited_proof_entries.remove(&child_position);
-                            (
-                                child_entry_range.clone(),
-                                decode_result.clone().map_err(Error::InvalidNodeValue)?,
-                            )
+                            visited_proof_entries_during_trie.push(child_position);
+
+                            // If the node can't be decoded, we ignore the entire trie and jump
+                            // to the next one.
+                            let Ok(decoded) = decode_result.clone() else {
+                                entries.truncate(num_entries_before_current_trie_root);
+                                break;
+                            };
+                            (child_entry_range.clone(), decoded)
                         } else {
                             // Child is a hash that was not found in the proof. Simply continue
                             // iterating, in order to try to find the follow-up child.
@@ -368,7 +392,7 @@ where
                             ..
                         }) = entries_by_merkle_value.get(&value_hash[..])
                         {
-                            let _ = unvisited_proof_entries.remove(&value_position);
+                            visited_proof_entries_during_trie.push(value_position);
                             Some(value_entry_range.clone())
                         } else {
                             None
