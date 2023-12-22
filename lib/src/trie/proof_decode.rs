@@ -66,6 +66,15 @@ where
     // location.
     let proof_as_ref = config.proof.as_ref();
 
+    struct InProgressEntry<'a> {
+        index_in_proof: usize,
+        range_in_proof: ops::Range<usize>,
+        decode_result: Result<
+            trie_node::Decoded<'a, trie_node::DecodedPartialKey<'a>, &'a [u8]>,
+            trie_node::Error,
+        >,
+    }
+
     // A Merkle proof is a SCALE-encoded `Vec<Vec<u8>>`.
     //
     // This `Vec` contains two types of items: trie node values, and standalone storage items. In
@@ -91,7 +100,7 @@ where
             .copied()
             .enumerate()
             .map(
-                |(proof_entry_num, proof_entry)| -> ([u8; 32], (usize, ops::Range<usize>, Result<_, _>)) {
+                |(proof_entry_num, proof_entry)| -> ([u8; 32], InProgressEntry) {
                     // The merkle value of a trie node is normally either its hash or the node
                     // itself if its length is < 32. In the context of a proof, however, nodes
                     // whose length is < 32 aren't supposed to be their own entry. For this reason,
@@ -101,8 +110,6 @@ where
                     )
                     .unwrap();
 
-                    let decoded = trie_node::decode(proof_entry);
-
                     let proof_entry_offset = if proof_entry.is_empty() {
                         0
                     } else {
@@ -111,11 +118,12 @@ where
 
                     (
                         hash,
-                        (
-                            proof_entry_num,
-                            proof_entry_offset..(proof_entry_offset + proof_entry.len()),
-                            decoded,
-                        ),
+                        InProgressEntry {
+                            index_in_proof: proof_entry_num,
+                            range_in_proof: proof_entry_offset
+                                ..(proof_entry_offset + proof_entry.len()),
+                            decode_result: trie_node::decode(proof_entry),
+                        },
                     )
                 },
             )
@@ -137,8 +145,8 @@ where
         let mut maybe_trie_roots = entries_by_merkle_value
             .keys()
             .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
-        for (hash, (_, _, decoded)) in entries_by_merkle_value.iter() {
-            let Ok(decoded) = decoded else {
+        for (hash, InProgressEntry { decode_result, .. }) in entries_by_merkle_value.iter() {
+            let Ok(decoded) = decode_result else {
                 maybe_trie_roots.remove(hash);
                 continue;
             };
@@ -186,13 +194,14 @@ where
                     // Stack is empty.
                     // Because we immediately `break` after popping the last element, the stack
                     // can only ever be empty at the very start.
-                    let (root_position, root_range, _) = entries_by_merkle_value
-                        .get(&trie_root_hash[..])
-                        .unwrap()
-                        .clone();
-                    let _ = unvisited_proof_entries.remove(&root_position);
+                    let InProgressEntry {
+                        index_in_proof: root_position,
+                        range_in_proof: root_range,
+                        ..
+                    } = entries_by_merkle_value.get(&trie_root_hash[..]).unwrap();
+                    let _ = unvisited_proof_entries.remove(root_position);
                     trie_roots_with_entries.insert(*trie_root_hash, entries.len());
-                    root_range
+                    root_range.clone()
                 }
                 Some(StackEntry {
                     num_visited_children: stack_top_visited_children,
@@ -272,8 +281,11 @@ where
                             offset <= (stack_top_proof_range.start + stack_top_entry.len())
                         );
                         offset..(offset + child_node_value.len())
-                    } else if let Some(&(child_position, ref child_entry_range, _)) =
-                        entries_by_merkle_value.get(child_node_value)
+                    } else if let Some(&InProgressEntry {
+                        index_in_proof: child_position,
+                        range_in_proof: ref child_entry_range,
+                        ..
+                    }) = entries_by_merkle_value.get(child_node_value)
                     {
                         // If the node value of the child is less than 32 bytes long, it should
                         // have been inlined instead of given separately.
@@ -340,8 +352,11 @@ where
                 storage_value_in_proof: match visited_node_decoded.storage_value {
                     trie_node::StorageValue::None => None,
                     trie_node::StorageValue::Hashed(value_hash) => {
-                        if let Some(&(value_position, ref value_entry_range, _)) =
-                            entries_by_merkle_value.get(&value_hash[..])
+                        if let Some(&InProgressEntry {
+                            index_in_proof: value_position,
+                            range_in_proof: ref value_entry_range,
+                            ..
+                        }) = entries_by_merkle_value.get(&value_hash[..])
                         {
                             let _ = unvisited_proof_entries.remove(&value_position);
                             Some(value_entry_range.clone())
