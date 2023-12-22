@@ -10,6 +10,7 @@
 
 - Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
 - Fix bugs in various corner cases when decoding and analyzing a Merkle proof. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+- Fix Merkle proofs being considered as invalid if they contain a storage value that happens to successfully decode as a trie node with an inline child. ([#1504](https://github.com/smol-dot/smoldot/pull/1504))
 
 ## 2.0.15 - 2023-12-20
 
