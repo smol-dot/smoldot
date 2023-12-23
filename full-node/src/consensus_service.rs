@@ -342,8 +342,11 @@ impl ConsensusService {
             finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
             network_service: config.network_service.0,
             network_chain_id: config.network_service.1,
+            network_local_chain_update_needed: true,
+            pending_block_announce: None,
             to_background_rx,
             blocks_notifications: Vec::with_capacity(8),
+            pending_notification: None,
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
@@ -629,6 +632,9 @@ struct SyncBackground {
     /// List of senders to report events to when they happen.
     blocks_notifications: Vec<async_channel::Sender<Notification>>,
 
+    /// Notification ready to be sent to [`SyncBackground::blocks_notifications`].
+    pending_notification: Option<Notification>,
+
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
 
@@ -636,6 +642,13 @@ struct SyncBackground {
     /// is syncing from. This value must be passed as parameter when starting requests on the
     /// network service.
     network_chain_id: network_service::ChainId,
+
+    /// If `true`, [`network_service::NetworkService::set_local_best_block`] should be called in
+    /// the near future.
+    network_local_chain_update_needed: bool,
+
+    /// SCALE-encoded header, hash, and height of a block waiting to be announced to other peers.
+    pending_block_announce: Option<(Vec<u8>, [u8; 32], u64)>,
 
     /// Stream of events coming from the [`SyncBackground::network_service`]. Used to know what
     /// happens on the peer-to-peer network.
@@ -720,7 +733,10 @@ impl SyncBackground {
                 ReadyToAuthor,
                 FrontendEvent(ToBackground),
                 FrontendClosed,
+                SendPendingNotification(Notification),
                 NetworkEvent(network_service::Event),
+                NetworkLocalChainUpdate,
+                AnnounceBlock(Vec<u8>, [u8; 32], u64),
                 SubtaskFinished(SubtaskFinished),
                 SyncProcess,
             }
@@ -818,10 +834,17 @@ impl SyncBackground {
                     }
                 };
 
-                async move {
+                async {
+                    if let Some(notification) = self.pending_notification.take() {
+                        WakeUpReason::SendPendingNotification(notification)
+                    } else {
+                        future::pending().await
+                    }
+                }
+                .or(async move {
                     authoring_ready_future.await;
                     WakeUpReason::ReadyToAuthor
-                }
+                })
                 .or(async {
                     self.to_background_rx
                         .next()
@@ -830,6 +853,21 @@ impl SyncBackground {
                 })
                 .or(async {
                     WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
+                })
+                .or(async {
+                    if self.network_local_chain_update_needed {
+                        self.network_local_chain_update_needed = false;
+                        WakeUpReason::NetworkLocalChainUpdate
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    if let Some((header, hash, height)) = self.pending_block_announce.take() {
+                        WakeUpReason::AnnounceBlock(header, hash, height)
+                    } else {
+                        future::pending().await
+                    }
                 })
                 .or(async {
                     let Some(subtask_finished) = self.sub_tasks.next().await else {
@@ -944,6 +982,18 @@ impl SyncBackground {
                         new_blocks,
                     });
                 }
+                WakeUpReason::SendPendingNotification(notification) => {
+                    // Elements in `blocks_notifications` are removed one by one and inserted
+                    // back if the channel is still open.
+                    for index in (0..self.blocks_notifications.len()).rev() {
+                        let subscription = self.blocks_notifications.swap_remove(index);
+                        if subscription.try_send(notification.clone()).is_err() {
+                            continue;
+                        }
+                        self.blocks_notifications.push(subscription);
+                    }
+                }
+
                 WakeUpReason::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
                     let _ = result_tx.send(SyncState {
                         best_block_hash: self.sync.best_block_hash(),
@@ -968,6 +1018,65 @@ impl SyncBackground {
                     };
 
                     let _ = result_tx.send(result);
+                }
+
+                WakeUpReason::NetworkLocalChainUpdate => {
+                    let best_hash = self.sync.best_block_hash();
+                    let best_number = self.sync.best_block_number();
+                    self.network_service
+                        .set_local_best_block(self.network_chain_id, best_hash, best_number)
+                        .await;
+                }
+
+                WakeUpReason::AnnounceBlock(header, hash, height) => {
+                    // We can never be guaranteed that a certain source does *not* know about a
+                    // block, however it is not a big problem to send a block announce to a source
+                    // that already knows about that block. For this reason, the list of sources
+                    // we send the block announce to is `all_sources - sources_that_know_it`.
+                    //
+                    // Note that not sending block announces to sources that already
+                    // know that block means that these sources might also miss the
+                    // fact that our local best block has been updated. This is in
+                    // practice not a problem either.
+                    let sources_to_announce_to = {
+                        let mut all_sources = self
+                            .sync
+                            .sources()
+                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                        for knows in self.sync.knows_non_finalized_block(height, &hash) {
+                            all_sources.remove(&knows);
+                        }
+                        all_sources
+                    };
+
+                    let is_best = self.sync.best_block_hash() == hash;
+
+                    for source_id in sources_to_announce_to {
+                        let peer_id = match &self.sync[source_id] {
+                            Some(info) if !info.is_disconnected => &info.peer_id,
+                            _ => continue,
+                        };
+
+                        if self
+                            .network_service
+                            .clone()
+                            .send_block_announce(
+                                peer_id.clone(),
+                                self.network_chain_id,
+                                header.clone(),
+                                is_best,
+                            )
+                            .await
+                            .is_ok()
+                        {
+                            // Note that `try_add_known_block_to_source` might have
+                            // no effect, which is not a problem considering that this
+                            // block tracking is mostly about optimizations and
+                            // politeness.
+                            self.sync
+                                .try_add_known_block_to_source(source_id, height, hash);
+                        }
+                    }
                 }
 
                 WakeUpReason::NetworkEvent(network_service::Event::Connected {
@@ -1290,6 +1399,13 @@ impl SyncBackground {
                 }
 
                 WakeUpReason::SyncProcess => {
+                    // Given that processing blocks might generate a notification, and that
+                    // only one notification can be queued at a time, this path must never be
+                    // reached if a notification is already waiting.
+                    debug_assert!(self.pending_notification.is_none());
+                    // Similarly, verifying a block might generate a block announce.
+                    debug_assert!(self.pending_block_announce.is_none());
+
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
                     self = new_self;
@@ -2161,31 +2277,19 @@ impl SyncBackground {
                             );
 
                             // Notify the subscribers.
-                            // Elements in `blocks_notifications` are removed one by one and
-                            // inserted back if the channel is still open.
-                            let runtime_to_notify = new_runtime
-                                .as_ref()
-                                .map(|new_runtime| Arc::new(new_runtime.clone()));
-                            for index in (0..self.blocks_notifications.len()).rev() {
-                                let subscription = self.blocks_notifications.swap_remove(index);
-                                if subscription
-                                    .try_send(Notification::Block {
-                                        block: BlockNotification {
-                                            is_new_best,
-                                            scale_encoded_header: scale_encoded_header.clone(),
-                                            block_hash: header_verification_success.hash(),
-                                            runtime_update: runtime_to_notify.clone(),
-                                            parent_hash,
-                                        },
-                                        storage_changes: storage_changes.clone(),
-                                    })
-                                    .is_err()
-                                {
-                                    continue;
-                                }
-
-                                self.blocks_notifications.push(subscription);
-                            }
+                            debug_assert!(self.pending_notification.is_none());
+                            self.pending_notification = Some(Notification::Block {
+                                block: BlockNotification {
+                                    is_new_best,
+                                    scale_encoded_header: scale_encoded_header.clone(),
+                                    block_hash: header_verification_success.hash(),
+                                    runtime_update: new_runtime
+                                        .as_ref()
+                                        .map(|new_runtime| Arc::new(new_runtime.clone())),
+                                    parent_hash,
+                                },
+                                storage_changes: storage_changes.clone(),
+                            });
 
                             // Processing has made a step forward.
 
@@ -2205,71 +2309,17 @@ impl SyncBackground {
 
                             if is_new_best {
                                 // Update the networking.
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_id,
-                                    self.sync.best_block_hash(),
-                                    self.sync.best_block_number(),
-                                );
-                                fut.await;
-
+                                self.network_local_chain_update_needed = true;
                                 // Reset the block authoring, in order to potentially build a
                                 // block on top of this new best.
                                 self.block_authoring = None;
                             }
 
                             // Announce the newly-verified block to all the sources that might
-                            // not be aware of it. We can never be guaranteed that a certain
-                            // source does *not* know about a block, however it is not a big
-                            // problem to send a block announce to a source that already knows
-                            // about that block. For this reason, the list of sources we send
-                            // the block announce to is `all_sources - sources_that_know_it`.
-                            //
-                            // Note that not sending block announces to sources that already
-                            // know that block means that these sources might also miss the
-                            // fact that our local best block has been updated. This is in
-                            // practice not a problem either.
-                            let sources_to_announce_to = {
-                                let mut all_sources =
-                                    self.sync
-                                        .sources()
-                                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                for knows in
-                                    self.sync.knows_non_finalized_block(height, &hash_to_verify)
-                                {
-                                    all_sources.remove(&knows);
-                                }
-                                all_sources
-                            };
-
-                            for source_id in sources_to_announce_to {
-                                let peer_id = match &self.sync[source_id] {
-                                    Some(info) if !info.is_disconnected => &info.peer_id,
-                                    _ => continue,
-                                };
-
-                                if self
-                                    .network_service
-                                    .clone()
-                                    .send_block_announce(
-                                        peer_id.clone(),
-                                        self.network_chain_id,
-                                        scale_encoded_header.clone(),
-                                        is_new_best,
-                                    )
-                                    .await
-                                    .is_ok()
-                                {
-                                    // Note that `try_add_known_block_to_source` might have
-                                    // no effect, which is not a problem considering that this
-                                    // block tracking is mostly about optimizations and
-                                    // politeness.
-                                    self.sync.try_add_known_block_to_source(
-                                        source_id,
-                                        height,
-                                        hash_to_verify,
-                                    );
-                                }
-                            }
+                            // not be aware of it.
+                            debug_assert!(self.pending_block_announce.is_none());
+                            self.pending_block_announce =
+                                Some((scale_encoded_header, hash_to_verify, height));
 
                             return (self, true);
                         }
@@ -2426,13 +2476,8 @@ impl SyncBackground {
                         );
 
                         if updates_best_block {
-                            let fut = self.network_service.set_local_best_block(
-                                self.network_chain_id,
-                                self.sync.best_block_hash(),
-                                self.sync.best_block_number(),
-                            );
-                            fut.await;
-
+                            // Update the networking.
+                            self.network_local_chain_update_needed = true;
                             // Reset the block authoring, in order to potentially build a
                             // block on top of this new best.
                             self.block_authoring = None;
@@ -2449,27 +2494,18 @@ impl SyncBackground {
                                 database.set_finalized(&new_finalized_hash).unwrap();
                             })
                             .await;
-                        // Elements in `blocks_notifications` are removed one by one and inserted
-                        // back if the channel is still open.
-                        for index in (0..self.blocks_notifications.len()).rev() {
-                            let subscription = self.blocks_notifications.swap_remove(index);
-                            if subscription
-                                .try_send(Notification::Finalized {
-                                    finalized_blocks_newest_to_oldest:
-                                        finalized_blocks_newest_to_oldest
-                                            .iter()
-                                            .map(|b| b.header.hash(self.sync.block_number_bytes()))
-                                            .collect::<Vec<_>>(),
-                                    pruned_blocks_hashes: pruned_blocks.clone(),
-                                    best_block_hash: self.sync.best_block_hash(),
-                                })
-                                .is_err()
-                            {
-                                continue;
-                            }
 
-                            self.blocks_notifications.push(subscription);
-                        }
+                        // Notify the subscribers.
+                        debug_assert!(self.pending_notification.is_none());
+                        self.pending_notification = Some(Notification::Finalized {
+                            finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
+                                .iter()
+                                .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                .collect::<Vec<_>>(),
+                            pruned_blocks_hashes: pruned_blocks.clone(),
+                            best_block_hash: self.sync.best_block_hash(),
+                        });
+
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
