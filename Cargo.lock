@@ -2867,8 +2867,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.1"
-source = "git+https://github.com/paritytech/wasmi#f96475ef1135d11858e0859cee97ea07f93c6d3d"
+version = "0.32.0-beta.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aab06f5b4dadd225f47efe41308550ab01f0b6aa2585d7823c3f215e5777ebd"
 dependencies = [
  "multi-stash",
  "num-derive",
@@ -2883,12 +2884,14 @@ dependencies = [
 [[package]]
 name = "wasmi_arena"
 version = "0.4.0"
-source = "git+https://github.com/paritytech/wasmi#f96475ef1135d11858e0859cee97ea07f93c6d3d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "401c1f35e413fac1846d4843745589d9ec678977ab35a384db8ae7830525d468"
 
 [[package]]
 name = "wasmi_core"
 version = "0.15.0"
-source = "git+https://github.com/paritytech/wasmi#f96475ef1135d11858e0859cee97ea07f93c6d3d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ac482df6761020b2b75c9aade41c105993c5b9f64156c349bb7ccad226a6ecd"
 dependencies = [
  "downcast-rs",
  "libm",
