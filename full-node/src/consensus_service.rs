@@ -2077,6 +2077,11 @@ impl SyncBackground {
                 ..
             } => {
                 self.sync = sync;
+
+                // Destory all existing subscriptions due to the gap in the chain.
+                self.pending_notification = None;
+                self.blocks_notifications.clear();
+
                 self.finalized_runtime = Arc::new(Mutex::new(Some(finalized_block_runtime)));
                 let chain_info: chain_information::ValidChainInformation =
                     self.sync.as_chain_information().into();
