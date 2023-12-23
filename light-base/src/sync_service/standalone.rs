@@ -1008,7 +1008,11 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Warp syncing compiles the runtime. The compiled runtime will later be yielded
                 // in the `WarpSyncFinished` variant, which is then provided as an event.
                 let before_instant = self.platform.now();
-                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                // Because the runtime being compiled has been validated by 2/3rds of the
+                // validators of the chain, we can assume that it is valid. Doing so significantly
+                // increases the compilation speed.
+                let (new_sync, error) =
+                    req.build(all::ExecHint::CompileWithNonDeterministicValidation, true);
                 let elapsed = self.platform.now() - before_instant;
                 match error {
                     Ok(()) => {

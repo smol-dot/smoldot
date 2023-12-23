@@ -322,7 +322,7 @@ impl ConsensusService {
             executor::host::HostVmPrototype::new(executor::host::Config {
                 module: finalized_code,
                 heap_pages,
-                exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                exec_hint: executor::vm::ExecHint::ValidateAndCompile, // TODO: probably should be decided by the optimisticsync
                 allow_unresolved_imports: false,
             })
             .map_err(InitError::FinalizedRuntimeInit)?
@@ -1927,7 +1927,7 @@ impl SyncBackground {
             }
             all::ProcessOne::WarpSyncBuildRuntime(build_runtime) => {
                 let (new_sync, outcome) =
-                    build_runtime.build(all::ExecHint::CompileAheadOfTime, true);
+                    build_runtime.build(all::ExecHint::ValidateAndCompile, true);
                 self.sync = new_sync;
                 if let Err(err) = outcome {
                     self.log_callback.log(
