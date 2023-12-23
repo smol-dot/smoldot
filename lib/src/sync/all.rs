@@ -42,7 +42,7 @@ use crate::{
 
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
-    cmp, iter, marker, mem,
+    iter, marker, mem,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,

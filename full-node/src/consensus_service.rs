@@ -875,12 +875,13 @@ impl SyncBackground {
                     };
                     WakeUpReason::SubtaskFinished(subtask_finished)
                 })
-                .or(async {
+                .or({
                     // TODO: handle obsolete requests
                     // `desired_requests()` returns, in decreasing order of priority, the requests
                     // that should be started in order for the syncing to proceed. We simply pick the
                     // first request, but enforce one ongoing request per source.
-                    let Some((source_id, _, request_info)) = self.sync.desired_requests().find(
+                    // TODO: desired_requests() is expensive and done at every iteration
+                    let request_to_start = self.sync.desired_requests().find(
                         |(source_id, source_info, request_details)| {
                             if source_info
                                 .as_ref()
@@ -918,11 +919,14 @@ impl SyncBackground {
                                 }
                             }
                         },
-                    ) else {
-                        future::pending().await
-                    };
+                    );
 
-                    WakeUpReason::StartNetworkRequest(source_id, request_info)
+                    async move {
+                        let Some((source_id, _, request_info)) = request_to_start else {
+                            future::pending().await
+                        };
+                        WakeUpReason::StartNetworkRequest(source_id, request_info)
+                    }
                 })
                 .or(async {
                     if !process_sync {
