@@ -497,8 +497,16 @@ impl SqliteFullDatabase {
 
     /// Returns a list of trie nodes that are missing from the database and that belong to the
     /// state of a block whose number is superior or equal to the finalized block.
+    ///
+    /// The ordering of the returned trie nodes is unspecified.
+    ///
+    /// Only up to `limit` entries are returned.
+    ///
+    /// > **Note**: This function call is relatively expensive, and the API user is expected to
+    /// >           cache the return value.
     pub fn finalized_and_above_missing_trie_nodes_unordered(
         &self,
+        limit: usize,
     ) -> Result<Vec<MissingTrieNode>, CorruptedError> {
         let database = self.database.lock();
 
@@ -552,6 +560,7 @@ impl SqliteFullDatabase {
 
             SELECT trie_nodes.block_hash, trie_nodes.node_hash, trie_nodes.node_key
             FROM trie_nodes WHERE is_present = false
+            LIMIT ?
             "#)
             .map_err(|err| {
                 CorruptedError::Internal(
@@ -560,7 +569,7 @@ impl SqliteFullDatabase {
             })?;
 
         let results = statement
-            .query_map((), |row| {
+            .query_map((limit,), |row| {
                 let block_hash = row.get::<_, Vec<u8>>(0)?;
                 let node_hash = row.get::<_, Vec<u8>>(1)?;
                 let node_key = row.get::<_, Vec<u8>>(2)?;
