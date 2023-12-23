@@ -360,7 +360,7 @@ impl NetworkService {
         InitError,
     > {
         let (event_senders, event_receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
-            .map(|_| channel::bounded(16))
+            .map(|_| channel::bounded(256))     // TODO: revert this change, see <https://github.com/smol-dot/smoldot/issues/1506>
             .unzip();
 
         let mut network = service::ChainNetwork::new(service::Config {
