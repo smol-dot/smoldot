@@ -343,6 +343,7 @@ impl ConsensusService {
             network_service: config.network_service.0,
             network_chain_id: config.network_service.1,
             network_local_chain_update_needed: true,
+            pending_block_announce: None,
             to_background_rx,
             blocks_notifications: Vec::with_capacity(8),
             pending_notification: None,
@@ -646,6 +647,9 @@ struct SyncBackground {
     /// the near future.
     network_local_chain_update_needed: bool,
 
+    /// SCALE-encoded header, hash, and height of a block waiting to be announced to other peers.
+    pending_block_announce: Option<(Vec<u8>, [u8; 32], u64)>,
+
     /// Stream of events coming from the [`SyncBackground::network_service`]. Used to know what
     /// happens on the peer-to-peer network.
     from_network_service: stream::BoxStream<'static, network_service::Event>,
@@ -732,6 +736,7 @@ impl SyncBackground {
                 SendPendingNotification(Notification),
                 NetworkEvent(network_service::Event),
                 NetworkLocalChainUpdate,
+                AnnounceBlock(Vec<u8>, [u8; 32], u64),
                 SubtaskFinished(SubtaskFinished),
                 SyncProcess,
             }
@@ -853,6 +858,13 @@ impl SyncBackground {
                     if self.network_local_chain_update_needed {
                         self.network_local_chain_update_needed = false;
                         WakeUpReason::NetworkLocalChainUpdate
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    if let Some((header, hash, height)) = self.pending_block_announce.take() {
+                        WakeUpReason::AnnounceBlock(header, hash, height)
                     } else {
                         future::pending().await
                     }
@@ -1014,6 +1026,57 @@ impl SyncBackground {
                     self.network_service
                         .set_local_best_block(self.network_chain_id, best_hash, best_number)
                         .await;
+                }
+
+                WakeUpReason::AnnounceBlock(header, hash, height) => {
+                    // We can never be guaranteed that a certain source does *not* know about a
+                    // block, however it is not a big problem to send a block announce to a source
+                    // that already knows about that block. For this reason, the list of sources
+                    // we send the block announce to is `all_sources - sources_that_know_it`.
+                    //
+                    // Note that not sending block announces to sources that already
+                    // know that block means that these sources might also miss the
+                    // fact that our local best block has been updated. This is in
+                    // practice not a problem either.
+                    let sources_to_announce_to = {
+                        let mut all_sources = self
+                            .sync
+                            .sources()
+                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                        for knows in self.sync.knows_non_finalized_block(height, &hash) {
+                            all_sources.remove(&knows);
+                        }
+                        all_sources
+                    };
+
+                    let is_best = self.sync.best_block_hash() == hash;
+
+                    for source_id in sources_to_announce_to {
+                        let peer_id = match &self.sync[source_id] {
+                            Some(info) if !info.is_disconnected => &info.peer_id,
+                            _ => continue,
+                        };
+
+                        if self
+                            .network_service
+                            .clone()
+                            .send_block_announce(
+                                peer_id.clone(),
+                                self.network_chain_id,
+                                header.clone(),
+                                is_best,
+                            )
+                            .await
+                            .is_ok()
+                        {
+                            // Note that `try_add_known_block_to_source` might have
+                            // no effect, which is not a problem considering that this
+                            // block tracking is mostly about optimizations and
+                            // politeness.
+                            self.sync
+                                .try_add_known_block_to_source(source_id, height, hash);
+                        }
+                    }
                 }
 
                 WakeUpReason::NetworkEvent(network_service::Event::Connected {
@@ -1340,6 +1403,8 @@ impl SyncBackground {
                     // only one notification can be queued at a time, this path must never be
                     // reached if a notification is already waiting.
                     debug_assert!(self.pending_notification.is_none());
+                    // Similarly, verifying a block might generate a block announce.
+                    debug_assert!(self.pending_block_announce.is_none());
 
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
@@ -2251,58 +2316,10 @@ impl SyncBackground {
                             }
 
                             // Announce the newly-verified block to all the sources that might
-                            // not be aware of it. We can never be guaranteed that a certain
-                            // source does *not* know about a block, however it is not a big
-                            // problem to send a block announce to a source that already knows
-                            // about that block. For this reason, the list of sources we send
-                            // the block announce to is `all_sources - sources_that_know_it`.
-                            //
-                            // Note that not sending block announces to sources that already
-                            // know that block means that these sources might also miss the
-                            // fact that our local best block has been updated. This is in
-                            // practice not a problem either.
-                            let sources_to_announce_to = {
-                                let mut all_sources =
-                                    self.sync
-                                        .sources()
-                                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                for knows in
-                                    self.sync.knows_non_finalized_block(height, &hash_to_verify)
-                                {
-                                    all_sources.remove(&knows);
-                                }
-                                all_sources
-                            };
-
-                            for source_id in sources_to_announce_to {
-                                let peer_id = match &self.sync[source_id] {
-                                    Some(info) if !info.is_disconnected => &info.peer_id,
-                                    _ => continue,
-                                };
-
-                                if self
-                                    .network_service
-                                    .clone()
-                                    .send_block_announce(
-                                        peer_id.clone(),
-                                        self.network_chain_id,
-                                        scale_encoded_header.clone(),
-                                        is_new_best,
-                                    )
-                                    .await
-                                    .is_ok()
-                                {
-                                    // Note that `try_add_known_block_to_source` might have
-                                    // no effect, which is not a problem considering that this
-                                    // block tracking is mostly about optimizations and
-                                    // politeness.
-                                    self.sync.try_add_known_block_to_source(
-                                        source_id,
-                                        height,
-                                        hash_to_verify,
-                                    );
-                                }
-                            }
+                            // not be aware of it.
+                            debug_assert!(self.pending_block_announce.is_none());
+                            self.pending_block_announce =
+                                Some((scale_encoded_header, hash_to_verify, height));
 
                             return (self, true);
                         }
