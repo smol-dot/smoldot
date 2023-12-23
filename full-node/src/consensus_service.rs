@@ -342,6 +342,7 @@ impl ConsensusService {
             finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
             network_service: config.network_service.0,
             network_chain_id: config.network_service.1,
+            network_local_chain_update_needed: true,
             to_background_rx,
             blocks_notifications: Vec::with_capacity(8),
             pending_notification: None,
@@ -641,6 +642,10 @@ struct SyncBackground {
     /// network service.
     network_chain_id: network_service::ChainId,
 
+    /// If `true`, [`network_service::NetworkService::set_local_best_block`] should be called in
+    /// the near future.
+    network_local_chain_update_needed: bool,
+
     /// Stream of events coming from the [`SyncBackground::network_service`]. Used to know what
     /// happens on the peer-to-peer network.
     from_network_service: stream::BoxStream<'static, network_service::Event>,
@@ -726,6 +731,7 @@ impl SyncBackground {
                 FrontendClosed,
                 SendPendingNotification(Notification),
                 NetworkEvent(network_service::Event),
+                NetworkLocalChainUpdate,
                 SubtaskFinished(SubtaskFinished),
                 SyncProcess,
             }
@@ -842,6 +848,14 @@ impl SyncBackground {
                 })
                 .or(async {
                     WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
+                })
+                .or(async {
+                    if self.network_local_chain_update_needed {
+                        self.network_local_chain_update_needed = false;
+                        WakeUpReason::NetworkLocalChainUpdate
+                    } else {
+                        future::pending().await
+                    }
                 })
                 .or(async {
                     let Some(subtask_finished) = self.sub_tasks.next().await else {
@@ -992,6 +1006,14 @@ impl SyncBackground {
                     };
 
                     let _ = result_tx.send(result);
+                }
+
+                WakeUpReason::NetworkLocalChainUpdate => {
+                    let best_hash = self.sync.best_block_hash();
+                    let best_number = self.sync.best_block_number();
+                    self.network_service
+                        .set_local_best_block(self.network_chain_id, best_hash, best_number)
+                        .await;
                 }
 
                 WakeUpReason::NetworkEvent(network_service::Event::Connected {
@@ -2217,13 +2239,7 @@ impl SyncBackground {
 
                             if is_new_best {
                                 // Update the networking.
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_id,
-                                    self.sync.best_block_hash(),
-                                    self.sync.best_block_number(),
-                                );
-                                fut.await;
-
+                                self.network_local_chain_update_needed = true;
                                 // Reset the block authoring, in order to potentially build a
                                 // block on top of this new best.
                                 self.block_authoring = None;
@@ -2438,13 +2454,8 @@ impl SyncBackground {
                         );
 
                         if updates_best_block {
-                            let fut = self.network_service.set_local_best_block(
-                                self.network_chain_id,
-                                self.sync.best_block_hash(),
-                                self.sync.best_block_number(),
-                            );
-                            fut.await;
-
+                            // Update the networking.
+                            self.network_local_chain_update_needed = true;
                             // Reset the block authoring, in order to potentially build a
                             // block on top of this new best.
                             self.block_authoring = None;
