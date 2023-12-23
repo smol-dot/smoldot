@@ -776,7 +776,7 @@ impl RuntimeCompilation {
         let new_runtime = match host::HostVmPrototype::new(host::Config {
             module: code,
             heap_pages: self.heap_pages,
-            exec_hint: vm::ExecHint::CompileAheadOfTime,
+            exec_hint: vm::ExecHint::ValidateAndCompile, // TODO: let API user choose this
             allow_unresolved_imports: false,
         }) {
             Ok(vm) => vm,

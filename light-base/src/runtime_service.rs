@@ -2533,13 +2533,16 @@ impl SuccessfulRuntime {
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
         let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
             .map_err(RuntimeError::InvalidHeapPages)?;
-        let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
+        // Because the runtime has been validated by at least the author of the block, we assume
+        // that it is valid. This significantly speeds up the compilation.
+        let exec_hint = executor::vm::ExecHint::CompileWithNonDeterministicValidation;
 
         // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
         // import, we try again but with `allowed_unresolved_imports: true`.
         // Having unresolved imports might cause errors later on, for example when validating
         // transactions or getting the parachain heads, but for now we continue the execution
         // and print a warning.
+        // TODO: should log the fact that we're compiling a runtime and the time it takes, as this is a heavy operation
         match executor::host::HostVmPrototype::new(executor::host::Config {
             module,
             heap_pages,
