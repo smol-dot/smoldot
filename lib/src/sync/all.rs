@@ -1900,23 +1900,6 @@ pub enum DesiredRequest {
     },
 }
 
-impl DesiredRequest {
-    /// Caps the number of blocks to request to `max`.
-    // TODO: consider removing due to the many types of requests
-    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
-        if let DesiredRequest::BlocksRequest { num_blocks, .. } = self {
-            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
-        }
-    }
-
-    /// Caps the number of blocks to request to `max`.
-    // TODO: consider removing due to the many types of requests
-    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
-        self.num_blocks_clamp(max);
-        self
-    }
-}
-
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -1971,21 +1954,6 @@ pub enum RequestDetail {
         /// Concatenated SCALE-encoded parameters to provide to the call.
         parameter_vectored: Cow<'static, [u8]>,
     },
-}
-
-impl RequestDetail {
-    /// Caps the number of blocks to request to `max`.
-    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
-        if let RequestDetail::BlocksRequest { num_blocks, .. } = self {
-            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
-        }
-    }
-
-    /// Caps the number of blocks to request to `max`.
-    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
-        self.num_blocks_clamp(max);
-        self
-    }
 }
 
 impl From<DesiredRequest> for RequestDetail {
