@@ -67,17 +67,17 @@ fn validate_from_proof() {
                 let next_key = call_proof
                     .next_key(
                         main_trie_root,
-                        &nk.key().collect::<Vec<_>>(),
+                        nk.key(),
                         nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.prefix(),
                         nk.branch_nodes(),
                     )
                     .unwrap();
-                validation_in_progress = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                validation_in_progress = nk.inject_key(next_key);
             }
             super::Query::ClosestDescendantMerkleValue(mv) => {
                 let value = call_proof
-                    .closest_descendant_merkle_value(main_trie_root, &mv.key().collect::<Vec<_>>())
+                    .closest_descendant_merkle_value(main_trie_root, mv.key())
                     .unwrap();
                 validation_in_progress = mv.inject_merkle_value(value);
             }

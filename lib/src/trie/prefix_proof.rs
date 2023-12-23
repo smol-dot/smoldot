@@ -29,7 +29,7 @@
 
 use super::{nibble, proof_decode};
 
-use alloc::{borrow::ToOwned as _, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{fmt, iter, mem};
 
 mod tests;
@@ -169,7 +169,8 @@ impl PrefixScan {
                     };
 
                     match (
-                        decoded_proof.trie_node_info(&self.trie_root_hash, info_of_node),
+                        decoded_proof
+                            .trie_node_info(&self.trie_root_hash, info_of_node.iter().copied()),
                         query_ty,
                     ) {
                         (Ok(info), QueryTy::Exact) => info,
@@ -179,7 +180,7 @@ impl PrefixScan {
                                     // Rather than complicate this code, we just add the child to
                                     // `next` (this time an `Exact` query) and process it during
                                     // the next iteration.
-                                    next.push((child_key.to_owned(), QueryTy::Exact));
+                                    next.push((child_key.collect::<Vec<_>>(), QueryTy::Exact));
                                     continue;
                                 }
                                 proof_decode::Child::AbsentFromProof { .. } => {
@@ -258,7 +259,7 @@ impl PrefixScan {
                             next.push((direction, QueryTy::Direction));
                         }
                         proof_decode::Child::InProof { child_key, .. } => {
-                            next.push((child_key.to_owned(), QueryTy::Exact))
+                            next.push((child_key.collect::<Vec<_>>(), QueryTy::Exact))
                         }
                     }
                 }
