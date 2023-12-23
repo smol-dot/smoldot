@@ -1336,6 +1336,11 @@ impl SyncBackground {
                 }
 
                 WakeUpReason::SyncProcess => {
+                    // Given that processing blocks might generate a notification, and that
+                    // only one notification can be queued at a time, this path must never be
+                    // reached if a notification is already waiting.
+                    debug_assert!(self.pending_notification.is_none());
+
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
                     self = new_self;
