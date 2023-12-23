@@ -23,6 +23,7 @@ use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
+    boxed::Box,
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -31,6 +32,7 @@ use alloc::{
 use core::{
     iter,
     num::{NonZeroU32, NonZeroUsize},
+    pin,
     time::Duration,
 };
 use futures_lite::FutureExt as _;
@@ -41,7 +43,7 @@ use smoldot::{
     executor::{self, runtime_host},
     header,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -96,7 +98,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     "Rejected `chainHead_unstable_follow` subscription due to limit reached."
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ApplicationDefined(
-                    -32100,
+                    -32800,
                     "Maximum number of `chainHead_unstable_follow` subscriptions reached",
                 ));
                 return;
@@ -112,7 +114,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let events = if with_runtime {
             let subscribe_all = self
                 .runtime_service
-                .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
+                .subscribe_all(32, NonZeroUsize::new(32).unwrap())
                 .await;
             let id = subscribe_all.new_blocks.id();
             either::Left((subscribe_all, id))
@@ -289,6 +291,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 let sync_service = self.sync_service.clone();
                 let platform = self.platform.clone();
                 let (to_operation_handlers, from_operation_handlers) = async_channel::bounded(8);
+                let from_operation_handlers = Box::pin(from_operation_handlers);
 
                 ChainHeadFollowTask {
                     platform,
@@ -299,7 +302,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             notifications: sub.new_blocks,
                             subscription_id: id,
                         },
-                        either::Right(sub) => Subscription::WithoutRuntime(sub.new_blocks),
+                        either::Right(sub) => {
+                            Subscription::WithoutRuntime(Box::pin(sub.new_blocks))
+                        }
                     },
                     log_target,
                     runtime_service,
@@ -510,7 +515,7 @@ struct ChainHeadFollowTask<TPlat: PlatformRef> {
 
     to_main_task: async_channel::Sender<OperationEvent>,
 
-    from_operation_handlers: async_channel::Receiver<OperationEvent>,
+    from_operation_handlers: pin::Pin<Box<async_channel::Receiver<OperationEvent>>>,
 
     /// Identifier to assign to the next body/call/storage operation.
     next_operation_id: u128,
@@ -538,7 +543,7 @@ enum Subscription<TPlat: PlatformRef> {
         subscription_id: runtime_service::SubscriptionId,
     },
     // TODO: better typing?
-    WithoutRuntime(async_channel::Receiver<sync_service::Notification>),
+    WithoutRuntime(pin::Pin<Box<async_channel::Receiver<sync_service::Notification>>>),
 }
 
 impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
@@ -549,7 +554,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         mut messages_rx: service::DeliverReceiver<service::RequestProcess>,
     ) {
         loop {
-            enum WhatHappened {
+            enum WakeUpReason {
                 SubscriptionDead,
                 NotificationWithRuntime(runtime_service::Notification),
                 NotificationWithoutRuntime(sync_service::Notification),
@@ -562,19 +567,19 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 NewRequest(service::RequestProcess),
             }
 
-            let outcome: WhatHappened = {
+            let outcome: WakeUpReason = {
                 let next_block = async {
                     match &mut self.subscription {
                         Subscription::WithRuntime { notifications, .. } => {
                             match notifications.next().await {
-                                Some(n) => WhatHappened::NotificationWithRuntime(n),
-                                None => WhatHappened::SubscriptionDead,
+                                Some(n) => WakeUpReason::NotificationWithRuntime(n),
+                                None => WakeUpReason::SubscriptionDead,
                             }
                         }
                         Subscription::WithoutRuntime(notifications) => {
                             match notifications.next().await {
-                                Some(n) => WhatHappened::NotificationWithoutRuntime(n),
-                                None => WhatHappened::SubscriptionDead,
+                                Some(n) => WakeUpReason::NotificationWithoutRuntime(n),
+                                None => WakeUpReason::SubscriptionDead,
                             }
                         }
                     }
@@ -582,7 +587,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 let operation_event = async {
                     let event = self.from_operation_handlers.next().await.unwrap();
-                    WhatHappened::OperationEvent {
+                    WakeUpReason::OperationEvent {
                         operation_id: event.operation_id,
                         notification: event.notification,
                         is_done: event.is_done,
@@ -591,8 +596,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 let message = async {
                     match messages_rx.next().await {
-                        Some(rq) => WhatHappened::NewRequest(rq),
-                        None => WhatHappened::Unsubscribed,
+                        Some(rq) => WakeUpReason::NewRequest(rq),
+                        None => WakeUpReason::Unsubscribed,
                     }
                 };
 
@@ -601,15 +606,15 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     .or(operation_event)
                     .or(async {
                         subscription.wait_until_stale().await;
-                        WhatHappened::Unsubscribed
+                        WakeUpReason::Unsubscribed
                     })
                     .await
             };
 
             // TODO: doesn't enforce any maximum number of pinned blocks
             match outcome {
-                WhatHappened::Unsubscribed => return,
-                WhatHappened::SubscriptionDead => {
+                WakeUpReason::Unsubscribed => return,
+                WakeUpReason::SubscriptionDead => {
                     subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {
@@ -621,7 +626,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     break;
                 }
 
-                WhatHappened::OperationEvent {
+                WakeUpReason::OperationEvent {
                     operation_id,
                     notification,
                     is_done,
@@ -649,14 +654,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     }
                 }
 
-                WhatHappened::NotificationWithRuntime(
+                WakeUpReason::NotificationWithRuntime(
                     runtime_service::Notification::Finalized {
                         best_block_hash,
                         hash,
                         ..
                     },
                 )
-                | WhatHappened::NotificationWithoutRuntime(
+                | WakeUpReason::NotificationWithoutRuntime(
                     sync_service::Notification::Finalized {
                         best_block_hash,
                         hash,
@@ -698,10 +703,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         )
                         .await;
                 }
-                WhatHappened::NotificationWithoutRuntime(
+                WakeUpReason::NotificationWithoutRuntime(
                     sync_service::Notification::BestBlockChanged { hash },
                 )
-                | WhatHappened::NotificationWithRuntime(
+                | WakeUpReason::NotificationWithRuntime(
                     runtime_service::Notification::BestBlockChanged { hash },
                 ) => {
                     subscription
@@ -715,7 +720,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         )
                         .await;
                 }
-                WhatHappened::NotificationWithRuntime(runtime_service::Notification::Block(
+                WakeUpReason::NotificationWithRuntime(runtime_service::Notification::Block(
                     block,
                 )) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -760,7 +765,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             .await;
                     }
                 }
-                WhatHappened::NotificationWithoutRuntime(sync_service::Notification::Block(
+                WakeUpReason::NotificationWithoutRuntime(sync_service::Notification::Block(
                     block,
                 )) => {
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -802,7 +807,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             .await;
                     }
                 }
-                WhatHappened::NewRequest(rq) => self.on_foreground_message(rq).await,
+                WakeUpReason::NewRequest(rq) => self.on_foreground_message(rq).await,
             }
         }
     }
@@ -835,9 +840,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
             methods::MethodCall::chainHead_unstable_unpin {
                 follow_subscription: _,
-                hash,
+                hash_or_hashes,
             } => {
-                let all_hashes = match &hash {
+                let all_hashes = match &hash_or_hashes {
                     methods::HashHexStringSingleOrArray::Single(hash) => {
                         either::Left(iter::once(&hash.0))
                     }
@@ -858,7 +863,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         } = self.subscription
                         {
                             self.runtime_service
-                                .unpin_block(subscription_id, hash)
+                                .unpin_block(subscription_id, *hash)
                                 .await;
                         }
                     }
@@ -877,12 +882,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             unreachable!()
         };
 
-        // Determine whether the requested block hash is valid, and if yes its number.
-        let block_number = {
+        // Determine whether the requested block hash is valid, and if yes its number and
+        // extrinsics trie root. The extrinsics trie root is used to verify whether the body we
+        // download is correct.
+        let (block_number, extrinsics_root) = {
             if let Some(header) = self.pinned_blocks_headers.get(&hash.0) {
                 let decoded =
                     header::decode(header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
-                decoded.number
+                (decoded.number, *decoded.extrinsics_root)
             } else {
                 // Block isn't pinned. Request is invalid.
                 request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
@@ -932,7 +939,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     let future = sync_service.clone().block_query(
                         block_number,
                         hash.0,
-                        protocol::BlocksRequestFields {
+                        codec::BlocksRequestFields {
                             header: true,
                             body: true,
                             justifications: false,
@@ -949,20 +956,33 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                     };
 
-                    match outcome {
-                        Ok(block_data) => {
+                    // We must check whether the body is present in the response and valid.
+                    // TODO: should try the request again with a different peer instead of failing immediately
+                    let body = match outcome {
+                        Ok(outcome) => {
+                            if let Some(body) = outcome.body {
+                                if header::extrinsics_root(&body) == extrinsics_root {
+                                    Ok(body)
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        Err(err) => Err(err),
+                    };
+
+                    // Send back the response.
+                    match body {
+                        Ok(body) => {
                             let _ = to_main_task
                                 .send(OperationEvent {
                                     operation_id: operation_id.clone(),
                                     is_done: true,
                                     notification: methods::FollowEvent::OperationBodyDone {
                                         operation_id: operation_id.clone().into(),
-                                        value: block_data
-                                            .body
-                                            .unwrap()
-                                            .into_iter()
-                                            .map(methods::HexString)
-                                            .collect(),
+                                        value: body.into_iter().map(methods::HexString).collect(),
                                     },
                                 })
                                 .await;
@@ -1272,7 +1292,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 match self
                     .runtime_service
-                    .pinned_block_runtime_access(subscription_id, &hash.0)
+                    .pinned_block_runtime_access(subscription_id, hash.0)
                     .await
                 {
                     Ok(c) => c,
@@ -1416,7 +1436,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             let merkle_value = {
                                                 let child_trie = mv.child_trie();
                                                 runtime_call_lock
-                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), &mv.key().collect::<Vec<_>>())
+                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), mv.key())
                                             };
                                             let merkle_value = match merkle_value {
                                                 Ok(v) => v,
@@ -1445,9 +1465,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 let child_trie = nk.child_trie();
                                                 runtime_call_lock.next_key(
                                                     child_trie.as_ref().map(|c| c.as_ref()),
-                                                    &nk.key().collect::<Vec<_>>(),
+                                                    nk.key(),
                                                     nk.or_equal(),
-                                                    &nk.prefix().collect::<Vec<_>>(),
+                                                    nk.prefix(),
                                                     nk.branch_nodes(),
                                                 )
                                             };
@@ -1470,7 +1490,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     break;
                                                 }
                                             };
-                                            runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                                            runtime_call = nk.inject_key(next_key);
                                         }
                                         runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
                                             runtime_call = req.resume();
@@ -1489,6 +1509,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 }
                                             }).await;
                                             break;
+                                        }
+                                        runtime_host::RuntimeHostVm::LogEmit(log) => {
+                                            // Logs are ignored. 
+                                            runtime_call = log.resume();
                                         }
                                     }
                                 }

@@ -66,16 +66,14 @@ struct Background<TPlat: PlatformRef> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`StartConfig::peer_id`]. The only use for this field is to send the Base58 encoding of
-    /// the [`PeerId`]. Consequently, we store the conversion to Base58 ahead of time.
-    peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
     system_name: String,
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
 
     /// See [`StartConfig::network_service`].
-    network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+
     /// See [`StartConfig::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`StartConfig::runtime_service`].
@@ -142,7 +140,6 @@ pub(super) fn start<TPlat: PlatformRef>(
         chain_ty: config.chain_spec.chain_type().to_owned(),
         chain_is_live: config.chain_spec.has_live_network(),
         chain_properties_json: config.chain_spec.properties().to_owned(),
-        peer_id_base58: config.peer_id.to_base58(),
         system_name: config.system_name.clone(),
         system_version: config.system_version.clone(),
         network_service: config.network_service.clone(),
@@ -425,9 +422,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::system_localListenAddresses {} => {
                 self.system_local_listen_addresses(request).await;
             }
-            methods::MethodCall::system_localPeerId {} => {
-                self.system_local_peer_id(request).await;
-            }
             methods::MethodCall::system_name {} => {
                 self.system_name(request).await;
             }
@@ -505,6 +499,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::state_queryStorage { .. }
             | methods::MethodCall::system_addReservedPeer { .. }
             | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_localPeerId { .. }
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
@@ -673,9 +668,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         match multiaddr.parse::<multiaddr::Multiaddr>() {
-            Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
+            Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::Protocol::P2p(_))) => {
                 let peer_id_bytes = match addr.iter().last() {
-                    Some(multiaddr::ProtocolRef::P2p(peer_id)) => peer_id.into_owned(),
+                    Some(multiaddr::Protocol::P2p(peer_id)) => peer_id.into_bytes().to_owned(),
                     _ => unreachable!(),
                 };
                 addr.pop();
@@ -683,13 +678,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 match PeerId::from_bytes(peer_id_bytes) {
                     Ok(peer_id) => {
                         self.network_service
-                            .0
-                            .discover(
-                                &self.platform.now(),
-                                self.network_service.1,
-                                iter::once((peer_id, iter::once(addr))),
-                                false,
-                            )
+                            .discover(iter::once((peer_id, iter::once(addr))), false)
                             .await;
                         request.respond(methods::Response::sudo_unstable_p2pDiscover(()));
                     }
@@ -918,7 +907,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 code_merkle_value,
                 code_closest_ancestor_excluding,
             )
-            .await;
+            .await
+            .map_err(|err| match err {
+                runtime_service::CompileAndPinRuntimeError::Crash => {
+                    RuntimeCallError::RuntimeServiceCrash
+                }
+            })?;
 
         let precall = self
             .runtime_service
@@ -1096,7 +1090,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         let child_trie = mv.child_trie();
                         runtime_call_lock.closest_descendant_merkle_value(
                             child_trie.as_ref().map(|c| c.as_ref()),
-                            &mv.key().collect::<Vec<_>>(),
+                            mv.key(),
                         )
                     };
                     let merkle_value = match merkle_value {
@@ -1116,9 +1110,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         let child_trie = nk.child_trie();
                         runtime_call_lock.next_key(
                             child_trie.as_ref().map(|c| c.as_ref()),
-                            &nk.key().collect::<Vec<_>>(),
+                            nk.key(),
                             nk.or_equal(),
-                            &nk.prefix().collect::<Vec<_>>(),
+                            nk.prefix(),
                             nk.branch_nodes(),
                         )
                     };
@@ -1130,7 +1124,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             break Err(RuntimeCallError::Call(err));
                         }
                     };
-                    runtime_call = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                    runtime_call = nk.inject_key(next_key);
                 }
                 runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
                     runtime_call = req.resume();
@@ -1142,6 +1136,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_call_lock
                         .unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
                     break Err(RuntimeCallError::ForbiddenHostCall);
+                }
+                runtime_host::RuntimeHostVm::LogEmit(log) => {
+                    // Logs are ignored.
+                    runtime_call = log.resume();
                 }
             }
         }
@@ -1181,6 +1179,8 @@ enum RuntimeCallError {
     },
     /// Runtime called a forbidden host function.
     ForbiddenHostCall,
+    /// Runtime service has crashed while compiling the runtime.
+    RuntimeServiceCrash,
 }
 
 #[derive(Debug)]

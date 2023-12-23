@@ -300,14 +300,12 @@ impl Noise {
                 } else {
                     break;
                 }
+            } else if let Ok(Some(next_frame_length)) =
+                outer_read_write.incoming_bytes_take_array::<2>()
+            {
+                self.next_in_message_size = Some(u16::from_be_bytes(next_frame_length));
             } else {
-                if let Ok(Some(next_frame_length)) =
-                    outer_read_write.incoming_bytes_take_array::<2>()
-                {
-                    self.next_in_message_size = Some(u16::from_be_bytes(next_frame_length));
-                } else {
-                    break;
-                }
+                break;
             }
         }
 

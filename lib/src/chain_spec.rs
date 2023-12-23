@@ -85,6 +85,12 @@ impl ChainSpec {
         Ok(ChainSpec { client_spec })
     }
 
+    /// Turns this chain specification into a JSON document representing it.
+    pub fn serialize(&self) -> String {
+        // Can only panic in case of a bug in this module.
+        serde_json::to_string_pretty(&self.client_spec).unwrap()
+    }
+
     /// Builds the [`ChainInformation`] corresponding to the genesis block contained in this chain
     /// spec.
     ///
@@ -110,7 +116,7 @@ impl ChainSpec {
         let vm_prototype = executor::host::HostVmPrototype::new(executor::host::Config {
             module: &wasm_code,
             heap_pages,
-            exec_hint: executor::vm::ExecHint::Oneshot,
+            exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
             allow_unresolved_imports: true,
         })
         .map_err(FromGenesisStorageError::VmInitialization)?;
@@ -248,8 +254,10 @@ impl ChainSpec {
         // not tie the code that parses chain specifications to the libp2p code.
         self.client_spec.boot_nodes.iter().map(|unparsed| {
             if let Ok(mut addr) = unparsed.parse::<libp2p::Multiaddr>() {
-                if let Some(libp2p::multiaddr::ProtocolRef::P2p(peer_id)) = addr.iter().last() {
-                    if let Ok(peer_id) = libp2p::peer_id::PeerId::from_bytes(peer_id.to_vec()) {
+                if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = addr.iter().last() {
+                    if let Ok(peer_id) =
+                        libp2p::peer_id::PeerId::from_bytes(peer_id.into_bytes().to_vec())
+                    {
                         addr.pop();
                         return Bootnode::Parsed {
                             multiaddr: addr.to_string(),

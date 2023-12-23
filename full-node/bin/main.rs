@@ -25,9 +25,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::StreamExt as _;
-use smol::future;
-
 mod cli;
 
 fn main() {
@@ -318,7 +315,7 @@ async fn run(cli_options: cli::CliOptionsRun) {
 
         let spawn_result = thread::Builder::new()
             .name(format!("tasks-pool-{}", n))
-            .spawn(move || smol::block_on(executor.run(future::pending::<()>())));
+            .spawn(move || smol::block_on(executor.run(smol::future::pending::<()>())));
 
         // Ignore a failure to spawn a thread, as we're going to run tasks on the current thread
         // later down this function.
@@ -438,9 +435,10 @@ async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // Spawn a task that prints the informant at a regular interval.
+    // The interval is fast enough that the informant should be visible roughly at any time,
+    // even if the terminal is filled with logs.
     // Note that this task also holds the smoldot `client` alive, and thus we spawn it even if
     // the informant is disabled.
-    // TODO: also print immediately after a log line?
     let main_task = executor.spawn({
         let show_informant = matches!(cli_output, cli::Output::Informant);
         let informant_colors = match cli_options.color {
@@ -450,13 +448,14 @@ async fn run(cli_options: cli::CliOptionsRun) {
 
         async move {
             let mut informant_timer = if show_informant {
-                smol::Timer::interval(Duration::from_millis(100))
+                smol::Timer::after(Duration::new(0, 0))
             } else {
                 smol::Timer::never()
             };
 
             loop {
-                let _ = informant_timer.next().await;
+                informant_timer =
+                    smol::Timer::at(informant_timer.await + Duration::from_millis(100));
 
                 // We end the informant line with a `\r` so that it overwrites itself
                 // every time. If any other line gets printed, it will overwrite the

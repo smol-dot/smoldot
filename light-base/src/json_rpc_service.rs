@@ -49,7 +49,7 @@ use alloc::{
     sync::Arc,
 };
 use core::num::NonZeroU32;
-use smoldot::{chain_spec, json_rpc::service, libp2p::PeerId};
+use smoldot::{chain_spec, json_rpc::service};
 
 /// Configuration for [`service()`].
 pub struct Config {
@@ -134,7 +134,7 @@ impl Frontend {
     /// isn't called often enough.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let log_friendly_request =
-            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
+            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 250)
                 .to_string();
 
         match self
@@ -177,7 +177,7 @@ impl Frontend {
             "JSON-RPC <= {}",
             crate::util::truncated_str(
                 message.chars().filter(|c| !c.is_control()),
-                100,
+                250,
             )
         );
 
@@ -204,9 +204,9 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
     pub platform: TPlat,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -219,9 +219,6 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
-
-    /// Network identity of the node.
-    pub peer_id: &'a PeerId,
 
     /// Value to return when the `system_name` RPC is called. Should be set to the name of the
     /// final executable.

@@ -24,7 +24,12 @@ use smoldot::{
     executor,
     json_rpc::{methods, service},
 };
-use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    num::NonZeroUsize,
+    pin::{self, Pin},
+    sync::Arc,
+};
 
 use crate::{consensus_service, database_thread, LogCallback};
 
@@ -66,17 +71,21 @@ pub enum Message {
 /// Spawns a new tasks dedicated to handling a `chainHead_unstable_follow` subscription.
 ///
 /// Returns the identifier of the subscription.
-pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
+pub async fn spawn_chain_head_subscription_task(config: Config) -> String {
     let mut json_rpc_subscription = config.chain_head_follow_subscription.accept();
     let json_rpc_subscription_id = json_rpc_subscription.subscription_id().to_owned();
     let return_value = json_rpc_subscription_id.clone();
 
     let tasks_executor = config.tasks_executor.clone();
     tasks_executor(Box::pin(async move {
-        let mut consensus_service_subscription = config
+        let consensus_service_subscription = config
             .consensus_service
             .subscribe_all(32, NonZeroUsize::new(32).unwrap())
             .await;
+        let mut consensus_service_subscription_new_blocks =
+            pin::pin!(consensus_service_subscription.new_blocks);
+
+        let mut foreground_receiver = pin::pin!(config.receiver);
 
         let mut pinned_blocks =
             hashbrown::HashSet::with_capacity_and_hasher(32, fnv::FnvBuildHasher::default());
@@ -136,35 +145,33 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
         }
 
         loop {
-            enum WhatHappened {
+            enum WakeUpReason {
                 ConsensusNotification(consensus_service::Notification),
                 ConsensusSubscriptionStop,
                 Foreground(Message),
                 ForegroundClosed,
             }
 
-            let what_happened = async {
-                consensus_service_subscription
-                    .new_blocks
+            let wake_up_reason = async {
+                consensus_service_subscription_new_blocks
                     .next()
                     .await
                     .map_or(
-                        WhatHappened::ConsensusSubscriptionStop,
-                        WhatHappened::ConsensusNotification,
+                        WakeUpReason::ConsensusSubscriptionStop,
+                        WakeUpReason::ConsensusNotification,
                     )
             }
             .or(async {
-                config
-                    .receiver
+                foreground_receiver
                     .next()
                     .await
-                    .map_or(WhatHappened::ForegroundClosed, WhatHappened::Foreground)
+                    .map_or(WakeUpReason::ForegroundClosed, WakeUpReason::Foreground)
             })
             .await;
 
-            match what_happened {
-                WhatHappened::ForegroundClosed => return,
-                WhatHappened::Foreground(Message::Header { request }) => {
+            match wake_up_reason {
+                WakeUpReason::ForegroundClosed => return,
+                WakeUpReason::Foreground(Message::Header { request }) => {
                     let methods::MethodCall::chainHead_unstable_header { hash, .. } =
                         request.request()
                     else {
@@ -198,7 +205,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                         }
                     }
                 }
-                WhatHappened::Foreground(Message::Unpin {
+                WakeUpReason::Foreground(Message::Unpin {
                     block_hashes,
                     outcome,
                 }) => {
@@ -215,7 +222,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                         let _ = outcome.send(Ok(()));
                     }
                 }
-                WhatHappened::ConsensusNotification(consensus_service::Notification::Block {
+                WakeUpReason::ConsensusNotification(consensus_service::Notification::Block {
                     block,
                     ..
                 }) => {
@@ -253,7 +260,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                             .await;
                     }
                 }
-                WhatHappened::ConsensusNotification(
+                WakeUpReason::ConsensusNotification(
                     consensus_service::Notification::Finalized {
                         finalized_blocks_newest_to_oldest,
                         pruned_blocks_hashes,
@@ -296,7 +303,7 @@ pub async fn spawn_chain_head_subscription_task(mut config: Config) -> String {
                             .await;
                     }
                 }
-                WhatHappened::ConsensusSubscriptionStop => {
+                WakeUpReason::ConsensusSubscriptionStop => {
                     json_rpc_subscription
                         .send_notification(
                             methods::ServerToClient::chainHead_unstable_followEvent {

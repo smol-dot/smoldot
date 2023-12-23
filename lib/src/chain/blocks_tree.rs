@@ -56,7 +56,7 @@
 //! >           forever remain part of the chain.
 //!
 //! Additionally, a [`NonFinalizedTree::verify_justification`] method is provided in order to
-//! verify the correctness of a [justification](crate::finality::justification).
+//! verify the correctness of a [justification](crate::finality).
 
 // TODO: expand this doc ^
 
@@ -440,6 +440,15 @@ impl<T> NonFinalizedTree<T> {
     pub fn non_finalized_block_user_data(&self, hash: &[u8; 32]) -> Option<&T> {
         let node_index = *self.blocks_by_hash.get(hash)?;
         Some(&self.blocks.get(node_index).unwrap().user_data)
+    }
+
+    /// Returns the SCALE-encoded header of a block stored by the [`NonFinalizedTree`], identified
+    /// by its hash.
+    ///
+    /// Returns `None` if the block can't be found.
+    pub fn non_finalized_block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        let node_index = *self.blocks_by_hash.get(hash)?;
+        Some(&self.blocks.get(node_index).unwrap().header)
     }
 
     /// Gives access to a block stored by the [`NonFinalizedTree`], identified by its hash.

@@ -15,13 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{alloc, bindings, platform, timers::Delay};
+use crate::{allocator, bindings, platform, timers::Delay};
 
-use core::time::Duration;
+use alloc::{boxed::Box, format, string::String};
+use core::{sync::atomic::Ordering, time::Duration};
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
 use smoldot_light::platform::PlatformRef;
-use std::{panic, sync::atomic::Ordering};
 
 pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
@@ -55,8 +55,8 @@ pub(crate) enum Chain {
 }
 
 pub(crate) fn init(max_log_level: u32) {
-    // Try initialize the logging and the panic hook.
-    let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
+    // Try initialize the logging.
+    if let Ok(_) = log::set_logger(&LOGGER) {
         log::set_max_level(match max_log_level {
             0 => log::LevelFilter::Off,
             1 => log::LevelFilter::Error,
@@ -65,10 +65,7 @@ pub(crate) fn init(max_log_level: u32) {
             4 => log::LevelFilter::Debug,
             _ => log::LevelFilter::Trace,
         })
-    });
-    panic::set_hook(Box::new(|info| {
-        panic(info.to_string());
-    }));
+    }
 
     // First things first, print the version in order to make it easier to debug issues by
     // reading logs provided by third parties.
@@ -82,7 +79,7 @@ pub(crate) fn init(max_log_level: u32) {
     // the node.
     platform::PLATFORM_REF.spawn_task(
         "memory-printer".into(),
-        Box::pin(async move {
+        async move {
             let mut previous_read_bytes = 0;
             let mut previous_sent_bytes = 0;
             let interval = 60;
@@ -92,7 +89,7 @@ pub(crate) fn init(max_log_level: u32) {
 
                 // For the unwrap below to fail, the quantity of allocated would have to
                 // not fit in a `u64`, which as of 2021 is basically impossible.
-                let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                let mem = u64::try_from(allocator::total_alloc_bytes()).unwrap();
 
                 // Due to the way the calculation below is performed, sending or receiving
                 // more than `type_of(TOTAL_BYTES_RECEIVED or TOTAL_BYTES_SENT)::max_value`
@@ -120,12 +117,16 @@ pub(crate) fn init(max_log_level: u32) {
                     BytesDisplay(avg_up)
                 );
             }
-        }),
+        },
     );
 }
 
 /// Stops execution, providing a string explaining what happened.
-fn panic(message: String) -> ! {
+#[cfg(not(any(test, feature = "std")))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let message = alloc::string::ToString::to_string(info);
+
     unsafe {
         bindings::panic(
             u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
@@ -144,6 +145,7 @@ fn panic(message: String) -> ! {
 
 /// Implementation of [`log::Log`] that sends out logs to the FFI.
 struct Logger;
+static LOGGER: Logger = Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, _: &log::Metadata) -> bool {

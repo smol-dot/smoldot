@@ -91,8 +91,6 @@
 //! previously been downloaded.
 //!
 
-// TODO: this module is "vulnerable" to situations where new malicious sources are continuously added with a high finalized block, as the state machine will repeatedly try to download from that source and fail
-
 use crate::{
     chain::chain_information::{
         self, ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
@@ -103,7 +101,7 @@ use crate::{
         host::{self, HostVmPrototype},
         vm::ExecHint,
     },
-    finality::justification,
+    finality::{decode, verify},
     header,
     informant::HashDisplay,
     trie::{self, proof_decode},
@@ -278,8 +276,7 @@ pub struct Deconstructed<TSrc, TRq> {
     /// height and user data.
     /// The list is ordered by [`SourceId`].
     // TODO: use a struct?
-    // TODO: this `Option` is weird
-    pub sources_ordered: Vec<(SourceId, Option<u64>, TSrc)>,
+    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -367,9 +364,8 @@ pub struct WarpSync<TSrc, TRq> {
 struct Source<TSrc> {
     /// User data chosen by the API user.
     user_data: TSrc,
-    /// Height of the finalized block of the source, as reported by the source. Contains `Err`
-    /// if the source has sent invalid fragments or proofs in the past.
-    finalized_block_height: Result<u64, ()>,
+    /// Height of the finalized block of the source, as reported by the source.
+    finalized_block_height: u64,
 }
 
 /// See [`WarpSync::warped_block_ty`].
@@ -566,7 +562,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 .map(|(id, source)| {
                     (
                         SourceId(id),
-                        source.finalized_block_height.ok(),
+                        source.finalized_block_height,
                         source.user_data,
                     )
                 })
@@ -583,6 +579,19 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         self.sources.iter().map(|(id, _)| SourceId(id))
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        assert!(self.sources.contains(source_id.0));
+        self.in_progress_requests_by_source
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
+            .count()
+    }
+
     /// Add a source to the list of sources.
     ///
     /// The source has a finalized block height of 0, which should later be updated using
@@ -590,7 +599,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
-            finalized_block_height: Ok(0),
+            finalized_block_height: 0,
         }));
 
         let _inserted = self.sources_by_finalized_height.insert((0, source_id));
@@ -614,13 +623,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         debug_assert!(self.sources.contains(to_remove.0));
         let removed = self.sources.remove(to_remove.0);
-
-        if let Ok(finalized_block_height) = removed.finalized_block_height {
-            let _was_in = self
-                .sources_by_finalized_height
-                .remove(&(finalized_block_height, to_remove));
-            debug_assert!(_was_in);
-        }
+        let _was_in = self
+            .sources_by_finalized_height
+            .remove(&(removed.finalized_block_height, to_remove));
+        debug_assert!(_was_in);
         debug_assert!(self.sources.len() >= self.sources_by_finalized_height.len());
 
         // We make sure to not leave invalid source IDs in the state of `self`.
@@ -694,29 +700,29 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if `source_id` is invalid.
     ///
     pub fn set_source_finality_state(&mut self, source_id: SourceId, finalized_block_height: u64) {
-        if let Ok(stored_height) = self.sources[source_id.0].finalized_block_height.as_mut() {
-            // Small optimization. No need to do anything more if the block doesn't actuall change.
-            if *stored_height == finalized_block_height {
-                return;
-            }
+        let stored_height = &mut self.sources[source_id.0].finalized_block_height;
 
-            // Note that if the new finalized block is below the former one (which is not something
-            // that is ever supposed to happen), we should in principle cancel the requests
-            // targeting that source that require a specific block height. In practice, however,
-            // we don't care as again this isn't supposed to ever happen. While ongoing requests
-            // might fail as a result, this is handled the same way as a regular request failure.
-
-            let _was_in = self
-                .sources_by_finalized_height
-                .remove(&(*stored_height, source_id));
-            debug_assert!(_was_in);
-            let _inserted = self
-                .sources_by_finalized_height
-                .insert((finalized_block_height, source_id));
-            debug_assert!(_inserted);
-
-            *stored_height = finalized_block_height;
+        // Small optimization. No need to do anything more if the block doesn't actuall change.
+        if *stored_height == finalized_block_height {
+            return;
         }
+
+        // Note that if the new finalized block is below the former one (which is not something
+        // that is ever supposed to happen), we should in principle cancel the requests
+        // targeting that source that require a specific block height. In practice, however,
+        // we don't care as again this isn't supposed to ever happen. While ongoing requests
+        // might fail as a result, this is handled the same way as a regular request failure.
+
+        let _was_in = self
+            .sources_by_finalized_height
+            .remove(&(*stored_height, source_id));
+        debug_assert!(_was_in);
+        let _inserted = self
+            .sources_by_finalized_height
+            .insert((finalized_block_height, source_id));
+        debug_assert!(_inserted);
+
+        *stored_height = finalized_block_height;
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
@@ -769,11 +775,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 if let Some(verify_queue_tail_block_number) = verify_queue_tail_block_number {
                     // Combine the request with every single available source.
                     either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
-                        if src.finalized_block_height.map_or(true, |h| {
-                            h <= verify_queue_tail_block_number.saturating_add(
+                        if src.finalized_block_height
+                            <= verify_queue_tail_block_number.saturating_add(
                                 u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::max_value()),
                             )
-                        }) {
+                        {
                             return None;
                         }
 
@@ -943,9 +949,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     Cow::Borrowed(&b":code"[..])
                 };
 
-                if self.sources[source_id.0]
-                    .finalized_block_height
-                    .map_or(false, |h| h >= self.warped_header_number)
+                if self.sources[source_id.0].finalized_block_height >= self.warped_header_number
                     && *block_hash == self.warped_header_hash
                     && keys.iter().any(|k| *k == *code_key_to_request)
                     && keys.iter().any(|k| k == b":heappages")
@@ -966,9 +970,8 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             ) => {
                 for (info, status) in &mut self.runtime_calls {
                     if matches!(status, CallProof::NotStarted)
-                        && self.sources[source_id.0]
-                            .finalized_block_height
-                            .map_or(false, |h| h >= self.warped_header_number)
+                        && self.sources[source_id.0].finalized_block_height
+                            >= self.warped_header_number
                         && *block_hash == self.warped_header_hash
                         && function_name == info.function_name()
                         && parameters_equal(parameter_vectored, info.parameter_vectored())
@@ -1027,6 +1030,16 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
         debug_assert!(_was_removed);
         user_data
+    }
+
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        self.in_progress_requests[request_id.0].0
     }
 
     /// Injects a successful Merkle proof and removes the given request from the state machine.
@@ -1154,33 +1167,31 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             .last()
             .and_then(|h| header::decode(&h.scale_encoded_header, self.block_number_bytes).ok())
         {
-            if let Ok(src_finalized_height) =
-                self.sources[rq_source_id.0].finalized_block_height.as_mut()
-            {
-                let new_height = if final_set_of_fragments {
-                    // If the source indicated that this is the last fragment, then we know that
-                    // it's also equal to their finalized block.
-                    last_header.number
-                } else {
-                    // If this is not the last fragment, we know that the finalized block of the
-                    // source is *at least* the one provided.
-                    // TODO: could maybe do + gap or something?
-                    cmp::max(*src_finalized_height, last_header.number.saturating_add(1))
-                };
+            let src_finalized_height = &mut self.sources[rq_source_id.0].finalized_block_height;
 
-                if *src_finalized_height != new_height {
-                    let _was_in = self
-                        .sources_by_finalized_height
-                        .remove(&(*src_finalized_height, rq_source_id));
-                    debug_assert!(_was_in);
+            let new_height = if final_set_of_fragments {
+                // If the source indicated that this is the last fragment, then we know that
+                // it's also equal to their finalized block.
+                last_header.number
+            } else {
+                // If this is not the last fragment, we know that the finalized block of the
+                // source is *at least* the one provided.
+                // TODO: could maybe do + gap or something?
+                cmp::max(*src_finalized_height, last_header.number.saturating_add(1))
+            };
 
-                    *src_finalized_height = new_height;
+            if *src_finalized_height != new_height {
+                let _was_in = self
+                    .sources_by_finalized_height
+                    .remove(&(*src_finalized_height, rq_source_id));
+                debug_assert!(_was_in);
 
-                    let _inserted = self
-                        .sources_by_finalized_height
-                        .insert((*src_finalized_height, rq_source_id));
-                    debug_assert!(_inserted);
-                }
+                *src_finalized_height = new_height;
+
+                let _inserted = self
+                    .sources_by_finalized_height
+                    .insert((*src_finalized_height, rq_source_id));
+                debug_assert!(_inserted);
             }
         }
 
@@ -1391,9 +1402,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
         // The source has sent an empty list of fragments. This is invalid.
         if fragments_to_verify.fragments.is_empty() {
-            if let Some(SourceId(downloaded_source)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[downloaded_source].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.pop_front().unwrap();
             return (self.inner, Err(VerifyFragmentError::EmptyProof));
         }
@@ -1426,23 +1434,17 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         ) {
             Ok(j) => j,
             Err(err) => {
-                if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                    self.inner.sources[source_id].finalized_block_height = Err(());
-                }
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
                 return (self.inner, Err(VerifyFragmentError::InvalidHeader(err)));
             }
         };
-        let fragment_decoded_justification = match justification::decode::decode_grandpa(
+        let fragment_decoded_justification = match decode::decode_grandpa_justification(
             &fragment_to_verify.scale_encoded_justification,
             self.inner.block_number_bytes,
         ) {
             Ok(j) => j,
             Err(err) => {
-                if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                    self.inner.sources[source_id].finalized_block_height = Err(());
-                }
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
                 return (
@@ -1454,9 +1456,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
         // Make sure that the header would actually advance the warp sync process forward.
         if fragment_decoded_header.number <= self.inner.warped_header_number {
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (
@@ -1475,17 +1474,14 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 header_hash: fragment_header_hash,
                 header_height: fragment_decoded_header.number,
             };
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (self.inner, Err(error));
         }
 
         // Check whether the justification is valid.
-        if let Err(err) = justification::verify::verify(justification::verify::Config {
-            justification: fragment_decoded_justification,
+        if let Err(err) = verify::verify_justification(verify::JustificationVerifyConfig {
+            justification: &fragment_to_verify.scale_encoded_justification,
             block_number_bytes: self.inner.block_number_bytes,
             authorities_list: finalized_triggered_authorities
                 .iter()
@@ -1493,9 +1489,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             authorities_set_id: *after_finalized_block_authorities_set_id,
             randomness_seed,
         }) {
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (
@@ -1532,9 +1525,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 || fragments_to_verify.next_fragment_to_verify_index
                     != fragments_to_verify.fragments.len() - 1)
         {
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (self.inner, Err(VerifyFragmentError::NonMinimalProof));
@@ -1556,13 +1546,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             *finalized_triggered_authorities = new_authorities_list;
             *after_finalized_block_authorities_set_id += 1;
         }
-        if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-            let src_finalized = &mut self.inner.sources[source_id].finalized_block_height;
-            if src_finalized.is_err() {
-                self.inner.sources[source_id].finalized_block_height =
-                    Ok(self.inner.warped_header_number);
-            }
-        }
         if fragments_to_verify.next_fragment_to_verify_index == fragments_to_verify.fragments.len()
         {
             self.inner.verify_queue.pop_front().unwrap();
@@ -1581,7 +1564,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 #[derive(Debug)]
 pub enum VerifyFragmentError {
     /// Justification found within the fragment is invalid.
-    JustificationVerify(justification::verify::Error),
+    JustificationVerify(verify::JustificationVerifyError),
     /// Mismatch between the block targeted by the justification and the header.
     TargetHashMismatch {
         /// Hash of the block the justification targets.
@@ -1603,7 +1586,7 @@ pub enum VerifyFragmentError {
     /// Failed to decode header.
     InvalidHeader(header::Error),
     /// Failed to decode justification.
-    InvalidJustification(justification::decode::Error),
+    InvalidJustification(decode::JustificationDecodeError),
 }
 
 impl fmt::Display for VerifyFragmentError {
@@ -1712,9 +1695,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 Ok(p) => p,
                 Err(err) => {
                     let downloaded_source = *downloaded_source;
-                    if let Some(SourceId(downloaded_source)) = downloaded_source {
-                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                    }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1735,19 +1715,23 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
             match decoded_downloaded_runtime.closest_ancestor_in_proof(
                 &self.inner.warped_header_state_root,
-                &code_nibbles[..code_nibbles.len() - 1],
+                code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
             ) {
                 Ok(Some(closest_ancestor_key)) => {
+                    let closest_ancestor_key = closest_ancestor_key.collect::<Vec<_>>();
                     let next_nibble = code_nibbles[closest_ancestor_key.len()];
                     let merkle_value = decoded_downloaded_runtime
-                        .trie_node_info(&self.inner.warped_header_state_root, closest_ancestor_key)
+                        .trie_node_info(
+                            &self.inner.warped_header_state_root,
+                            closest_ancestor_key.iter().copied(),
+                        )
                         .unwrap()
                         .children
                         .child(next_nibble)
                         .merkle_value();
 
                     match merkle_value {
-                        Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
+                        Some(mv) => (mv.to_owned(), closest_ancestor_key),
                         None => {
                             self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
@@ -1766,9 +1750,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
                     let downloaded_source = *downloaded_source;
-                    if let Some(SourceId(downloaded_source)) = downloaded_source {
-                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                    }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1808,9 +1789,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
                     let downloaded_source = *downloaded_source;
-                    if let Some(SourceId(downloaded_source)) = downloaded_source {
-                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                    }
                     return (
                         self.inner,
                         Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
@@ -1828,9 +1806,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             Ok(val) => val.map(|(v, _)| v),
             Err(proof_decode::IncompleteProofError { .. }) => {
                 let downloaded_source = *downloaded_source;
-                if let Some(SourceId(downloaded_source)) = downloaded_source {
-                    self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                }
                 return (
                     self.inner,
                     Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
@@ -1971,10 +1946,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     }) {
                         Ok(d) => d,
                         Err(err) => {
-                            if let Some(SourceId(downloaded_source)) = downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(
@@ -2048,10 +2019,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(
@@ -2071,17 +2038,13 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let (proof, downloaded_source) = calls.get(&nk.call_in_progress()).unwrap();
                     let value = match proof.next_key(
                         &self.inner.warped_header_state_root,
-                        &nk.key().collect::<Vec<_>>(), // TODO: overhead
+                        nk.key(),
                         nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(), // TODO: overhead
+                        nk.prefix(),
                         nk.branch_nodes(),
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(
@@ -2093,21 +2056,17 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             );
                         }
                     };
-                    nk.inject_key(value.map(|v| v.iter().copied()))
+                    nk.inject_key(value)
                 }
                 chain_information::build::InProgress::ClosestDescendantMerkleValue(mv) => {
                     // TODO: child tries not supported
                     let (proof, downloaded_source) = calls.get(&mv.call_in_progress()).unwrap();
                     let value = match proof.closest_descendant_merkle_value(
                         &self.inner.warped_header_state_root,
-                        &mv.key().collect::<Vec<_>>(), // TODO: overhead
+                        mv.key(),
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(

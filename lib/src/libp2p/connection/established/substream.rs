@@ -27,8 +27,12 @@ use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
-use core::mem;
-use core::{fmt, num::NonZeroUsize};
+use core::{
+    fmt, mem,
+    num::NonZeroUsize,
+    ops::{Add, Sub},
+    time::Duration,
+};
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -101,8 +105,9 @@ enum SubstreamInner<TNow> {
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
-        /// If true, the local node wants to shut down the substream.
-        close_desired: bool,
+        /// If `Some`, the local node wants to shut down the substream. If the given timeout is
+        /// reached, the closing is forced.
+        close_desired_timeout: Option<TNow>,
         /// Size of the next notification, if known. If `Some`, we have already extracted the
         /// length from the incoming buffer.
         next_notification_size: Option<usize>,
@@ -155,7 +160,7 @@ enum SubstreamInner<TNow> {
     /// Failed to negotiate a protocol for an outgoing ping substream.
     PingOutFailed {
         /// FIFO queue of pings that will immediately fail.
-        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+        queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
     },
     /// Outbound ping substream.
     PingOut {
@@ -166,15 +171,15 @@ enum SubstreamInner<TNow> {
         /// Data waiting to be received from the remote. Any mismatch will cause an error.
         /// Contains even the data that is still queued in `outgoing_payload`.
         expected_payload: VecDeque<Vec<u8>>,
-        /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occurred.
-        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+        /// FIFO queue of pings waiting to be answered. For each ping, when the ping was queued
+        /// and after how long it will time out, or `None` if the timeout has already occurred.
+        queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
     },
 }
 
 impl<TNow> Substream<TNow>
 where
-    TNow: Clone + Ord,
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Initializes an new `ingoing` substream.
     ///
@@ -218,7 +223,7 @@ where
     ///
     /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
     /// [`Substream::notification_substream_queued_bytes`] and
-    /// [`Substream::close_notifications_substream`] can be used, and
+    /// [`Substream::close_out_notifications_substream`] can be used, and
     /// [`Event::NotificationsOutCloseDemanded`] and [`Event::NotificationsOutReset`] can be
     /// generated.
     pub fn notifications_out(
@@ -903,14 +908,27 @@ where
                 )
             }
             SubstreamInner::NotificationsIn {
-                close_desired,
+                close_desired_timeout,
                 mut next_notification_size,
                 mut handshake,
                 max_notification_size,
             } => {
                 read_write.write_from_vec_deque(&mut handshake);
 
-                if close_desired && handshake.is_empty() {
+                if close_desired_timeout
+                    .as_ref()
+                    .map_or(false, |timeout| *timeout >= read_write.now)
+                {
+                    read_write.wake_up_asap();
+                    return (
+                        Some(SubstreamInner::NotificationsInClosed),
+                        Some(Event::NotificationsInClose {
+                            outcome: Err(NotificationsInClosedErr::CloseDesiredTimeout),
+                        }),
+                    );
+                }
+
+                if close_desired_timeout.is_some() && handshake.is_empty() {
                     read_write.close_write();
                 }
 
@@ -952,7 +970,7 @@ where
 
                 (
                     Some(SubstreamInner::NotificationsIn {
-                        close_desired,
+                        close_desired_timeout,
                         next_notification_size,
                         handshake,
                         max_notification_size,
@@ -1019,10 +1037,12 @@ where
                         }
                         Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
-                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                            read_write.wake_up_asap();
+                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                         Err(_) => {
-                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                            read_write.wake_up_asap();
+                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                     }
                 }
@@ -1037,7 +1057,9 @@ where
                 // We check the timeouts before checking the incoming data, as otherwise pings
                 // might succeed after their timeout.
                 for timeout in queued_pings.iter_mut() {
-                    if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
+                    if timeout.as_ref().map_or(false, |(when_started, timeout)| {
+                        (read_write.now.clone() - when_started.clone()) >= *timeout
+                    }) {
                         *timeout = None;
                         read_write.wake_up_asap();
                         return (
@@ -1053,8 +1075,8 @@ where
                         );
                     }
 
-                    if let Some(timeout) = timeout {
-                        read_write.wake_up_after(timeout);
+                    if let Some((when_started, timeout)) = timeout {
+                        read_write.wake_up_after(&(when_started.clone() + *timeout));
                     }
                 }
 
@@ -1064,9 +1086,10 @@ where
                             .pop_front()
                             .map_or(true, |expected| pong != *expected)
                         {
+                            read_write.wake_up_asap();
                             return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
-                        if queued_pings.remove(0).is_some() {
+                        if let Some((when_started, _)) = queued_pings.remove(0) {
                             return (
                                 Some(SubstreamInner::PingOut {
                                     negotiation,
@@ -1074,7 +1097,9 @@ where
                                     outgoing_payload,
                                     queued_pings,
                                 }),
-                                Some(Event::PingOutSuccess),
+                                Some(Event::PingOutSuccess {
+                                    ping_time: read_write.now.clone() - when_started,
+                                }),
                             );
                         }
                     }
@@ -1144,7 +1169,7 @@ where
     ) {
         if let SubstreamInner::NotificationsInWait = &mut self.inner {
             self.inner = SubstreamInner::NotificationsIn {
-                close_desired: false,
+                close_desired_timeout: None,
                 next_notification_size: None,
                 handshake: {
                     let handshake_len = handshake.len();
@@ -1209,30 +1234,46 @@ where
         }
     }
 
-    /// Closes a notifications substream opened after a successful
-    /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`Substream::accept_in_notifications_substream`].
+    /// Closes a outgoing notifications substream opened after a successful
+    /// [`Event::NotificationsOutResult`].
     ///
-    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
-    /// in other words before the remote has accepted/refused the substream.
-    ///
-    /// In the case of an inbound substream, notifications can continue to be received. Calling
-    /// this function only asynchronously signals to the remote that the substream should be
-    /// closed. It does not enforce the closing.
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the substream isn't a notifications substream, or if the notifications substream
     /// isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self) {
+    pub fn close_out_notifications_substream(&mut self) {
         match &mut self.inner {
             SubstreamInner::NotificationsOutHandshakeRecv { .. }
             | SubstreamInner::NotificationsOut { .. } => {
                 self.inner = SubstreamInner::NotificationsOutClosed;
             }
-            SubstreamInner::NotificationsIn { close_desired, .. } if !*close_desired => {
-                *close_desired = true
+            _ => panic!(),
+        };
+    }
+
+    /// Closes an ingoing notifications substream that was accepted using
+    /// [`Substream::accept_in_notifications_substream`].
+    ///
+    /// Notifications can continue to be received. Calling this function only asynchronously
+    /// signals to the remote that the substream should be closed. The closing is enforced only
+    /// after the given timeout elapses.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn close_in_notifications_substream(&mut self, timeout: TNow) {
+        match &mut self.inner {
+            SubstreamInner::NotificationsIn {
+                close_desired_timeout,
+                ..
+            } if close_desired_timeout.is_none() => {
+                *close_desired_timeout = Some(timeout);
             }
             _ => panic!(),
         };
@@ -1245,11 +1286,11 @@ where
     ///
     /// Panics if the substream isn't an outgoing ping substream.
     ///
-    pub fn queue_ping(&mut self, payload: &[u8; 32], timeout: TNow) {
+    pub fn queue_ping(&mut self, payload: &[u8; 32], now: TNow, timeout: Duration) {
         match &mut self.inner {
             SubstreamInner::PingOut { queued_pings, .. }
             | SubstreamInner::PingOutFailed { queued_pings, .. } => {
-                queued_pings.push(Some(timeout));
+                queued_pings.push(Some((now, timeout)));
             }
             _ => panic!(),
         }
@@ -1454,7 +1495,10 @@ pub enum Event {
     NotificationsOutReset,
 
     /// A ping has been successfully answered by the remote.
-    PingOutSuccess,
+    PingOutSuccess {
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
     /// Remote has failed to answer one or more pings.
     PingOutError {
         /// Number of pings that the remote has failed to answer.
@@ -1469,6 +1513,7 @@ pub enum InboundTy {
         /// Maximum allowed size of the request.
         /// If `None`, then no data is expected on the substream, not even the length of the
         /// request.
+        // TODO: use a proper enum
         request_max_size: Option<usize>,
     },
     Notifications {
@@ -1577,4 +1622,6 @@ pub enum NotificationsInClosedErr {
     SubstreamClosed,
     /// Substream has been reset.
     SubstreamReset,
+    /// Substream has been force-closed because the graceful timeout has been reached.
+    CloseDesiredTimeout,
 }

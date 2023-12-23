@@ -112,11 +112,6 @@ pub enum VerifyError {
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
-///
-/// # Panic
-///
-/// Panics if `config.parent_block_header` is invalid.
-///
 pub fn verify_header<'a>(
     mut config: VerifyConfig<'a, impl ExactSizeIterator<Item = header::AuraAuthorityRef<'a>>>,
 ) -> Result<VerifySuccess, VerifyError> {
@@ -191,14 +186,19 @@ pub fn verify_header<'a>(
     };
 
     // Fetch the authority that has supposedly signed the block.
-    // It is assumed that no more than 2^64 authorities are passed.
     if config.current_authorities.len() == 0 {
         // Checked beforehand in order to not do a modulo 0 operation.
         return Err(VerifyError::EmptyAuthorities);
     }
-    let signing_authority =
-        usize::try_from(slot_number % u64::try_from(config.current_authorities.len()).unwrap())
-            .unwrap();
+    // About overflows:
+    // If `config.current_authorities.len()` doesn't fit in a `u64`, then
+    // `slot_number % config.current_authorities.len()` is necessarily equal to `slot_number`.
+    // Since we're using a modulo operation, `signing_authority` is always inferior to
+    // `current_authorities.len()`, meaning that it always fits in a `usize`.
+    let signing_authority = usize::try_from(
+        slot_number % u64::try_from(config.current_authorities.len()).unwrap_or(u64::max_value()),
+    )
+    .unwrap_or_else(|_| unreachable!());
 
     // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
     // happen as it's of type `[u8; 32]`.

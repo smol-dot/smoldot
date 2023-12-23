@@ -432,6 +432,17 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         )
     }
 
+    /// Returns an iterator to all the requests that are inside of the queue.
+    pub fn requests(&'_ self) -> impl Iterator<Item = (&'_ TRq, SourceId)> + '_ {
+        self.verification_queue.iter().filter_map(|queue_elem| {
+            if let VerificationQueueEntryTy::Requested { user_data, source } = &queue_elem.ty {
+                Some((user_data, *source))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Consumes the queue and returns an iterator to all the requests that were inside of it.
     pub fn into_requests(self) -> impl Iterator<Item = (TRq, SourceId)> {
         self.verification_queue

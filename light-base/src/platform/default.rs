@@ -18,13 +18,26 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
+//! Implementation of the [`PlatformRef`] trait that leverages the operating system.
+//!
+//! This module contains the [`DefaultPlatform`] struct, which implements [`PlatformRef`].
+//!
+//! # Example
+//!
+//! ```rust
+//! use smoldot_light::{Client, platform::DefaultPlatform};
+//! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
+//! # let _: Client<_, ()> = client;  // Used in this example to infer the generic parameters of the Client
+//! ```
+//!
+
 use super::{
-    with_buffers, Address, ConnectError, ConnectionType, IpAddr, MultiStreamAddress,
-    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
+    with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
+    PlatformRef, SubstreamDirection,
 };
 
 use alloc::{borrow::Cow, sync::Arc};
-use core::{pin::Pin, str, time::Duration};
+use core::{panic, pin::Pin, str, time::Duration};
 use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
 use std::{
@@ -43,11 +56,18 @@ pub struct DefaultPlatform {
 }
 
 impl DefaultPlatform {
-    /// Creates a new [`DefaultPlatform`]. Spawns threads to executor background tasks.
+    /// Creates a new [`DefaultPlatform`].
+    ///
+    /// This function spawns threads in order to execute the background tasks that will later be
+    /// spawned.
+    ///
+    /// Must be passed as "client name" and "client version" that are used in various places
+    /// such as to answer some JSON-RPC requests. Passing `env!("CARGO_PKG_NAME")` and
+    /// `env!("CARGO_PKG_VERSION")` is typically very reasonable.
     ///
     /// # Panic
     ///
-    /// Panics if it wasn't possible to spawn background threads to execute background tasks.
+    /// Panics if it wasn't possible to spawn background threads.
     ///
     pub fn new(client_name: String, client_version: String) -> Arc<Self> {
         let tasks_executor = Arc::new(smol::Executor::new());
@@ -63,7 +83,7 @@ impl DefaultPlatform {
             let tasks_executor = tasks_executor.clone();
 
             let spawn_result = thread::Builder::new()
-                .name(format!("tasks-pool-{}", n))
+                .name(format!("smoldot-light-{}", n))
                 .spawn(move || smol::block_on(tasks_executor.run(on_shutdown)));
 
             if let Err(err) = spawn_result {
@@ -85,12 +105,9 @@ impl PlatformRef for Arc<DefaultPlatform> {
     type Instant = Instant;
     type MultiStream = std::convert::Infallible; // TODO: replace with `!` once stable: https://github.com/rust-lang/rust/issues/35121
     type Stream = Stream;
-    type StreamConnectFuture = future::BoxFuture<'static, Result<Self::Stream, ConnectError>>;
-    type MultiStreamConnectFuture = future::BoxFuture<
-        'static,
-        Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
-    >;
-    type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a>;
+    type StreamConnectFuture = future::Ready<Self::Stream>;
+    type MultiStreamConnectFuture = future::Pending<MultiStreamWebRtcConnection<Self::MultiStream>>;
+    type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a, Instant>;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
     type StreamErrorRef<'a> = &'a io::Error;
     type NextSubstreamFuture<'a> = future::Pending<Option<(Self::Stream, SubstreamDirection)>>;
@@ -121,7 +138,19 @@ impl PlatformRef for Arc<DefaultPlatform> {
         _task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
     ) {
-        self.tasks_executor.spawn(task).detach();
+        // In order to make sure that the execution threads don't stop if there are still
+        // tasks to execute, we hold a copy of the `Arc<DefaultPlatform>` inside of the task until
+        // it is finished.
+        let _dummy_keep_alive = self.clone();
+        self.tasks_executor
+            .spawn(
+                panic::AssertUnwindSafe(async move {
+                    task.await;
+                    drop(_dummy_keep_alive);
+                })
+                .catch_unwind(),
+            )
+            .detach();
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -189,7 +218,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
             _ => unreachable!(),
         };
 
-        Box::pin(async move {
+        let socket_future = async {
             let tcp_socket = match tcp_socket_addr {
                 either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
                 either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
@@ -199,28 +228,25 @@ impl PlatformRef for Arc<DefaultPlatform> {
                 let _ = tcp_socket.set_nodelay(true);
             }
 
-            let socket: TcpOrWs = match (tcp_socket, host_if_websocket) {
-                (Ok(tcp_socket), Some(host)) => future::Either::Right(
+            match (tcp_socket, host_if_websocket) {
+                (Ok(tcp_socket), Some(host)) => {
                     websocket::websocket_client_handshake(websocket::Config {
                         tcp_socket,
                         host: &host,
                         url: "/",
                     })
                     .await
-                    .map_err(|err| ConnectError {
-                        message: format!("Failed to negotiate WebSocket: {err}"),
-                    })?,
-                ),
-                (Ok(tcp_socket), None) => future::Either::Left(tcp_socket),
-                (Err(err), _) => {
-                    return Err(ConnectError {
-                        message: format!("Failed to reach peer: {err}"),
-                    })
+                    .map(TcpOrWs::Right)
                 }
-            };
 
-            Ok(Stream(with_buffers::WithBuffers::new(socket)))
-        })
+                (Ok(tcp_socket), None) => Ok(TcpOrWs::Left(tcp_socket)),
+                (Err(err), _) => Err(err),
+            }
+        };
+
+        future::ready(Stream(with_buffers::WithBuffers::new(Box::pin(
+            socket_future,
+        ))))
     }
 
     fn connect_multistream(&self, _address: MultiStreamAddress) -> Self::MultiStreamConnectFuture {
@@ -266,6 +292,38 @@ impl Drop for DefaultPlatform {
 
 /// Implementation detail of [`DefaultPlatform`].
 #[pin_project::pin_project]
-pub struct Stream(#[pin] with_buffers::WithBuffers<TcpOrWs>);
+pub struct Stream(
+    #[pin]
+    with_buffers::WithBuffers<
+        future::BoxFuture<'static, Result<TcpOrWs, io::Error>>,
+        TcpOrWs,
+        Instant,
+    >,
+);
 
 type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;
+
+#[cfg(test)]
+mod tests {
+    use super::{DefaultPlatform, PlatformRef as _};
+
+    #[test]
+    fn tasks_run_indefinitely() {
+        let platform_destroyed = event_listener::Event::new();
+        let (tx, mut rx) = futures_channel::oneshot::channel();
+
+        {
+            let platform = DefaultPlatform::new("".to_string(), "".to_string());
+            let when_platform_destroyed = platform_destroyed.listen();
+            platform.spawn_task("".into(), async move {
+                when_platform_destroyed.await;
+                tx.send(()).unwrap();
+            })
+        }
+
+        // The platform is destroyed, but the task must still be running.
+        assert!(matches!(rx.try_recv(), Ok(None)));
+        platform_destroyed.notify(usize::max_value());
+        assert!(matches!(smol::block_on(rx), Ok(())));
+    }
+}

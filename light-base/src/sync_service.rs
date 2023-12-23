@@ -29,16 +29,15 @@
 use crate::{network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::{fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
+use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
 use futures_channel::oneshot;
-use futures_lite::stream;
 use rand::seq::IteratorRandom as _;
 use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     chain,
     executor::host,
     libp2p::PeerId,
-    network::{protocol, service},
+    network::{codec, service},
     trie::{self, prefix_proof, proof_decode, Nibble},
 };
 
@@ -61,12 +60,7 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
-
-    /// Receiver for events coming from the network, as returned by
-    /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: Pin<Box<dyn stream::Stream<Item = network_service::Event> + Send>>,
-
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// Extra fields depending on whether the chain is a relay chain or a parachain.
     pub chain_type: ConfigChainType<TPlat>,
 }
@@ -139,16 +133,15 @@ pub struct SyncService<TPlat: PlatformRef> {
     platform: TPlat,
 
     /// See [`Config::network_service`].
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    /// See [`Config::network_service`].
-    network_chain_index: usize,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
 }
 
 impl<TPlat: PlatformRef> SyncService<TPlat> {
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = async_channel::bounded(16);
+        let from_foreground = Box::pin(from_foreground);
 
         let log_target = format!("sync-service-{}", config.log_name);
 
@@ -162,9 +155,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.relay_chain_block_number_bytes,
                 config_parachain.para_id,
                 from_foreground,
-                config.network_service.0.clone(),
-                config.network_service.1,
-                config.network_events_receiver,
+                config.network_service.clone(),
             )),
             ConfigChainType::RelayChain(config_relay_chain) => {
                 Box::pin(standalone::start_standalone_chain(
@@ -174,9 +165,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     config.block_number_bytes,
                     config_relay_chain.runtime_code_hint,
                     from_foreground,
-                    config.network_service.0.clone(),
-                    config.network_service.1,
-                    config.network_events_receiver,
+                    config.network_service.clone(),
                 ))
             }
         };
@@ -191,8 +180,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         SyncService {
             to_background,
             platform: config.platform,
-            network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_service: config.network_service,
             block_number_bytes: config.block_number_bytes,
         }
     }
@@ -277,7 +265,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     /// meaningful logic
     pub async fn syncing_peers(
         &self,
-    ) -> impl ExactSizeIterator<Item = (PeerId, protocol::Role, u64, [u8; 32])> {
+    ) -> impl ExactSizeIterator<Item = (PeerId, codec::Role, u64, [u8; 32])> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -323,16 +311,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         self: Arc<Self>,
         block_number: u64,
         hash: [u8; 32],
-        fields: protocol::BlocksRequestFields,
+        fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<protocol::BlockData, ()> {
+    ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
-        let request_config = protocol::BlocksRequestConfig {
-            start: protocol::BlocksRequestConfigStart::Hash(hash),
+        let request_config = codec::BlocksRequestConfig {
+            start: codec::BlocksRequestConfigStart::Hash(hash),
             desired_count: NonZeroU32::new(1).unwrap(),
-            direction: protocol::BlocksRequestDirection::Ascending,
+            direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
 
@@ -346,16 +334,20 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(
-                    target,
-                    self.network_chain_index,
-                    request_config.clone(),
-                    timeout_per_request,
-                )
+                .blocks_request(target.clone(), request_config.clone(), timeout_per_request)
                 .await
             {
-                Ok(b) => b,
-                Err(_) => continue,
+                Ok(b) if !b.is_empty() => b,
+                Ok(_) | Err(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "blocks-request-failed",
+                        )
+                        .await;
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -368,16 +360,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn block_query_unknown_number(
         self: Arc<Self>,
         hash: [u8; 32],
-        fields: protocol::BlocksRequestFields,
+        fields: codec::BlocksRequestFields,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<protocol::BlockData, ()> {
+    ) -> Result<codec::BlockData, ()> {
         // TODO: better error?
-        let request_config = protocol::BlocksRequestConfig {
-            start: protocol::BlocksRequestConfigStart::Hash(hash),
+        let request_config = codec::BlocksRequestConfig {
+            start: codec::BlocksRequestConfigStart::Hash(hash),
             desired_count: NonZeroU32::new(1).unwrap(),
-            direction: protocol::BlocksRequestDirection::Ascending,
+            direction: codec::BlocksRequestDirection::Ascending,
             fields: fields.clone(),
         };
 
@@ -392,16 +384,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(
-                    target,
-                    self.network_chain_index,
-                    request_config.clone(),
-                    timeout_per_request,
-                )
+                .blocks_request(target, request_config.clone(), timeout_per_request)
                 .await
             {
-                Ok(b) => b,
-                Err(_) => continue,
+                Ok(b) if !b.is_empty() => b,
+                Ok(_) | Err(_) => {
+                    // Because we have no idea whether the block is canonical, it might be
+                    // totally legitimate for the peer to refuse the request. For this reason,
+                    // we don't ban it.
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -434,7 +426,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         _max_parallel: NonZeroU32,
     ) -> Result<Vec<StorageResultItem>, StorageQueryError> {
         // TODO: this should probably be extracted to a state machine in `/lib`, with unit tests
-        // TODO: big requests should be split into multiple smaller ones
         // TODO: handle max_parallel
         enum RequestImpl {
             PrefixScan {
@@ -484,6 +475,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
         let mut final_results =
             Vec::<StorageResultItem>::with_capacity(requests_remaining.len() * 4);
 
+        // Number of nodes that are possible in a response before exceeding the response size
+        // limit. Because the size of a trie node is unknown, this can only ever be a gross
+        // estimate.
+        let mut response_nodes_cap = (16 * 1024 * 1024) / 164;
+
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed({
             let mut seed = [0; 32];
             self.platform.fill_random_bytes(&mut seed);
@@ -517,27 +513,48 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
 
             // Build the list of keys to request.
             let keys_to_request = {
+                // Keep track of the number of nodes that might be found in the response.
+                // This is a generous overestimation of the actual number.
+                let mut max_reponse_nodes = 0;
+
                 let mut keys = hashbrown::HashSet::with_capacity_and_hasher(
                     requests_remaining.len() * 4,
                     fnv::FnvBuildHasher::default(),
                 );
 
                 for request in &requests_remaining {
+                    if max_reponse_nodes >= response_nodes_cap {
+                        break;
+                    }
+
                     match request {
                         RequestImpl::PrefixScan { scan, .. } => {
-                            keys.extend(scan.requested_keys().map(|nibbles| {
-                                trie::nibbles_to_bytes_suffix_extend(nibbles).collect::<Vec<_>>()
-                            }));
+                            for scan_key in scan.requested_keys() {
+                                if max_reponse_nodes >= response_nodes_cap {
+                                    break;
+                                }
+
+                                let scan_key = trie::nibbles_to_bytes_suffix_extend(scan_key)
+                                    .collect::<Vec<_>>();
+                                let scan_key_len = scan_key.len();
+                                if keys.insert(scan_key) {
+                                    max_reponse_nodes += scan_key_len * 2;
+                                }
+                            }
                         }
                         RequestImpl::ValueOrHash { key, .. } => {
-                            keys.insert(key.clone());
+                            if keys.insert(key.clone()) {
+                                max_reponse_nodes += key.len() * 2;
+                            }
                         }
                         RequestImpl::ClosestDescendantMerkleValue { key } => {
                             // We query the parent of `key`.
                             if key.is_empty() {
-                                keys.insert(Vec::new());
-                            } else {
-                                keys.insert(key[..key.len() - 1].to_owned());
+                                if keys.insert(Vec::new()) {
+                                    max_reponse_nodes += 1;
+                                }
+                            } else if keys.insert(key[..key.len() - 1].to_owned()) {
+                                max_reponse_nodes += key.len() * 2 - 1;
                             }
                         }
                     }
@@ -550,9 +567,8 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .storage_proof_request(
-                    self.network_chain_index,
-                    target,
-                    protocol::StorageProofRequestConfig {
+                    target.clone(),
+                    codec::StorageProofRequestConfig {
                         block_hash: *block_hash,
                         keys: keys_to_request.into_iter(),
                     },
@@ -563,7 +579,35 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let proof = match result {
                 Ok(r) => r,
                 Err(err) => {
-                    outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    // In case of error that isn't a protocol error, we reduce the number of
+                    // trie node items to request.
+                    let reduce_max = match &err {
+                        network_service::StorageProofRequestError::RequestTooLarge => true,
+                        network_service::StorageProofRequestError::Request(
+                            service::StorageProofRequestError::Request(err),
+                        ) => !err.is_protocol_error(),
+                        _ => false,
+                    };
+
+                    if !matches!(
+                        err,
+                        network_service::StorageProofRequestError::RequestTooLarge
+                    ) || response_nodes_cap == 1
+                    {
+                        self.network_service
+                            .ban_and_disconnect(
+                                target,
+                                network_service::BanSeverity::Low,
+                                "storage-request-failed",
+                            )
+                            .await;
+                        outcome_errors.push(StorageQueryErrorDetail::Network(err));
+                    }
+
+                    if reduce_max {
+                        response_nodes_cap = cmp::max(1, response_nodes_cap / 2);
+                    }
+
                     continue;
                 }
             };
@@ -573,10 +617,19 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }) {
                 Ok(d) => d,
                 Err(err) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::High,
+                            "bad-merkle-proof",
+                        )
+                        .await;
                     outcome_errors.push(StorageQueryErrorDetail::ProofVerification(err));
                     continue;
                 }
             };
+
+            let mut proof_has_advanced_verification = false;
 
             for request in mem::take(&mut requests_remaining) {
                 match request {
@@ -584,8 +637,10 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         scan,
                         requested_key,
                     } => {
-                        match scan.resume(proof.decode()) {
+                        // TODO: how "partial" do we accept that the proof is? it should be considered malicious if the full node might return the minimum amount of information
+                        match scan.resume_partial(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                proof_has_advanced_verification = true;
                                 requests_remaining.push(RequestImpl::PrefixScan {
                                     scan,
                                     requested_key,
@@ -595,6 +650,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 entries,
                                 full_storage_values_required,
                             }) => {
+                                proof_has_advanced_verification = true;
                                 // The value of `full_storage_values_required` determines whether
                                 // we wanted full values (`true`) or hashes (`false`).
                                 for (key, value) in entries {
@@ -633,35 +689,37 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                     }
                                 }
                             }
-                            Err((_, prefix_proof::Error::InvalidProof(err))) => {
+                            Err((_, prefix_proof::Error::InvalidProof(_))) => {
                                 // Since we decode the proof above, this is never supposed to
                                 // be reachable.
-                                debug_assert!(false);
-                                outcome_errors
-                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                                unreachable!()
                             }
-                            Err((_, prefix_proof::Error::MissingProofEntry)) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                            Err((scan, prefix_proof::Error::MissingProofEntry)) => {
+                                requests_remaining.push(RequestImpl::PrefixScan {
+                                    requested_key,
+                                    scan,
+                                });
                             }
                         }
                     }
                     RequestImpl::ValueOrHash { key, hash } => {
-                        // TODO: overhead
                         match decoded_proof.trie_node_info(
                             main_trie_root_hash,
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
+                            trie::bytes_to_nibbles(key.iter().copied()),
                         ) {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
+                                    proof_has_advanced_verification = true;
                                     final_results.push(StorageResultItem::Hash {
                                         key,
                                         hash: Some(*h),
                                     });
                                 }
                                 proof_decode::StorageValue::HashKnownValueMissing(_) => {
-                                    outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                    requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
                                 }
                                 proof_decode::StorageValue::Known { value, .. } => {
+                                    proof_has_advanced_verification = true;
                                     if hash {
                                         let hashed_value =
                                             blake2_rfc::blake2b::blake2b(32, &[], value);
@@ -680,6 +738,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                     }
                                 }
                                 proof_decode::StorageValue::None => {
+                                    proof_has_advanced_verification = true;
                                     if hash {
                                         final_results
                                             .push(StorageResultItem::Hash { key, hash: None });
@@ -690,21 +749,23 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                                 }
                             },
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining.push(RequestImpl::ValueOrHash { key, hash });
                             }
                         }
                     }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
-                        let key_nibbles =
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+                        let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());
 
                         let closest_descendant_merkle_value = match decoded_proof
-                            .closest_descendant_merkle_value(main_trie_root_hash, key_nibbles)
-                        {
-                            Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
+                            .closest_descendant_merkle_value(
+                                main_trie_root_hash,
+                                key_nibbles.clone(),
+                            ) {
+                            Ok(Some(merkle_value)) => Some(merkle_value.to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining
+                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
                                 continue;
                             }
                         };
@@ -712,13 +773,16 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         let found_closest_ancestor_excluding = match decoded_proof
                             .closest_ancestor_in_proof(main_trie_root_hash, key_nibbles)
                         {
-                            Ok(Some(ancestor)) => Some(ancestor.to_vec()),
+                            Ok(Some(ancestor)) => Some(ancestor.collect::<Vec<_>>()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+                                requests_remaining
+                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
                                 continue;
                             }
                         };
+
+                        proof_has_advanced_verification = true;
 
                         final_results.push(StorageResultItem::ClosestDescendantMerkleValue {
                             requested_key: key,
@@ -728,6 +792,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     }
                 }
             }
+
+            // If the proof doesn't contain any item that reduces the number of things to request,
+            // then we push an error.
+            if !proof_has_advanced_verification {
+                outcome_errors.push(StorageQueryErrorDetail::MissingProofEntry);
+            }
         }
     }
 
@@ -736,10 +806,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn call_proof_query(
         self: Arc<Self>,
         block_number: u64,
-        config: protocol::CallProofRequestConfig<
-            '_,
-            impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-        >,
+        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
@@ -757,25 +824,36 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let result = self
                 .network_service
                 .clone()
-                .call_proof_request(
-                    self.network_chain_index,
-                    target,
-                    config.clone(),
-                    timeout_per_request,
-                )
+                .call_proof_request(target.clone(), config.clone(), timeout_per_request)
                 .await;
 
             match result {
                 Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
-                Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
+                Ok(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "call-proof-request-failed",
+                        )
+                        .await;
+                    outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
-                        smoldot::libp2p::peers::RequestError::Substream(
+                        smoldot::network::service::RequestError::Substream(
                             smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                         ),
                     ),
-                )),
+                ))
+                }
                 Err(err) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "call-proof-request-failed",
+                        )
+                        .await;
                     outcome_errors.push(err);
                 }
             }
@@ -1109,7 +1187,7 @@ enum ToBackground {
     },
     /// See [`SyncService::syncing_peers`].
     SyncingPeers {
-        send_back: oneshot::Sender<Vec<(PeerId, protocol::Role, u64, [u8; 32])>>,
+        send_back: oneshot::Sender<Vec<(PeerId, codec::Role, u64, [u8; 32])>>,
     },
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {

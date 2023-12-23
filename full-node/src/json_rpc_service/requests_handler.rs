@@ -22,7 +22,12 @@ use smoldot::{
     json_rpc::{methods, parse, service},
     trie,
 };
-use std::{future::Future, iter, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    iter,
+    pin::{self, Pin},
+    sync::Arc,
+};
 
 use crate::{
     consensus_service, database_thread,
@@ -44,9 +49,12 @@ pub struct Config {
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Name of the chain, as found in the chain specification.
     pub chain_name: String,
@@ -76,11 +84,12 @@ pub enum Message {
     SubscriptionStart(service::SubscriptionStartProcess),
 }
 
-pub fn spawn_requests_handler(mut config: Config) {
+pub fn spawn_requests_handler(config: Config) {
     let tasks_executor = config.tasks_executor.clone();
     tasks_executor(Box::pin(async move {
+        let mut receiver = pin::pin!(config.receiver);
         loop {
-            match config.receiver.next().await {
+            match receiver.next().await {
                 Some(Message::Request(request)) => match request.request() {
                     methods::MethodCall::rpc_methods {} => {
                         request.respond(methods::Response::rpc_methods(methods::RpcMethods {
@@ -270,7 +279,7 @@ pub fn spawn_requests_handler(mut config: Config) {
                             Ok(out) => {
                                 request.respond(methods::Response::state_getKeysPaged(out));
                             }
-                            Err(database_thread::StorageAccessError::StoragePruned)
+                            Err(database_thread::StorageAccessError::IncompleteStorage)
                             | Err(database_thread::StorageAccessError::UnknownBlock) => {
                                 // Note that it is unclear how the function should behave in
                                 // that situation.
@@ -466,7 +475,11 @@ pub fn spawn_requests_handler(mut config: Config) {
                                 executor::runtime_host::RuntimeHostVm::Offchain(_) => {
                                     request.fail(service::ErrorResponse::InternalError);
                                     break;
-                                },
+                                }
+                                executor::runtime_host::RuntimeHostVm::LogEmit(req) => {
+                                    // Logs are ignored.
+                                    call = req.resume();
+                                }
                             }
                         }
                     }
@@ -501,6 +514,89 @@ pub fn spawn_requests_handler(mut config: Config) {
                             | Err(runtime_caches_service::GetError::InvalidHeapPages)
                             | Err(runtime_caches_service::GetError::CorruptedDatabase) => {
                                 request.fail(service::ErrorResponse::InternalError)
+                            }
+                        }
+                    }
+                    methods::MethodCall::state_queryStorageAt { keys, at } => {
+                        // TODO: add a limit to the number of keys?
+
+                        // Convert the list of keys into a format suitable for the database.
+                        let keys_nibbles = keys
+                            .iter()
+                            .map(|key| {
+                                trie::bytes_to_nibbles(key.0.iter().copied())
+                                    .map(u8::from)
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>();
+
+                        // The bulk of the request is performed in the database thread.
+                        let result = config
+                            .database
+                            .with_database(move |db| {
+                                let at = match at {
+                                    Some(h) => h.0,
+                                    None => db.best_block_hash()?,
+                                };
+
+                                let parent = db
+                                    .block_parent(&at)?
+                                    .ok_or(database_thread::StorageAccessError::UnknownBlock)?;
+
+                                let mut out = methods::StorageChangeSet {
+                                    block: methods::HashHexString(at),
+                                    changes: Vec::with_capacity(keys_nibbles.len()),
+                                };
+
+                                for (key_nibbles, key) in
+                                    keys_nibbles.into_iter().zip(keys.into_iter())
+                                {
+                                    let before = match db.block_storage_get(
+                                        &parent,
+                                        iter::empty::<iter::Empty<_>>(),
+                                        key_nibbles.iter().copied(),
+                                    ) {
+                                        Ok(v) => v,
+                                        Err(database_thread::StorageAccessError::UnknownBlock)
+                                            if parent == [0; 32] =>
+                                        {
+                                            // In case where `at` is the genesis block, we
+                                            // assume that its "parent" (which doesn't exist)
+                                            // has an empty storage.
+                                            None
+                                        }
+                                        Err(err) => return Err(err),
+                                    };
+
+                                    let after = db.block_storage_get(
+                                        &at,
+                                        iter::empty::<iter::Empty<_>>(),
+                                        key_nibbles.iter().copied(),
+                                    )?;
+
+                                    if before != after {
+                                        out.changes
+                                            .push((key, after.map(|(v, _)| methods::HexString(v))));
+                                    }
+                                }
+
+                                Ok(out)
+                            })
+                            .await;
+
+                        // Send back the response.
+                        match result {
+                            Ok(out) => {
+                                request.respond(methods::Response::state_queryStorageAt(vec![out]));
+                            }
+                            Err(database_thread::StorageAccessError::IncompleteStorage)
+                            | Err(database_thread::StorageAccessError::UnknownBlock) => {
+                                // Note that it is unclear how the function should behave in
+                                // that situation.
+                                request.fail(service::ErrorResponse::InvalidParams);
+                            }
+                            Err(database_thread::StorageAccessError::Corrupted(_)) => {
+                                request.fail(service::ErrorResponse::InternalError);
                             }
                         }
                     }
@@ -643,7 +739,7 @@ pub fn spawn_requests_handler(mut config: Config) {
 
                                 let json_rpc_header =
                                     match methods::Header::from_scale_encoded_header(
-                                        &scale_encoded_header,
+                                        scale_encoded_header,
                                         block_number_bytes,
                                     ) {
                                         Ok(h) => h,

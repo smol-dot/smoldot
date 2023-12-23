@@ -24,6 +24,8 @@
 
 use crate::bindings;
 
+use alloc::collections::BTreeSet;
+use async_lock::Mutex;
 use core::{
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     future, mem,
@@ -31,7 +33,6 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use std::{collections::BTreeSet, sync::Mutex};
 
 pub(crate) fn timer_finished() {
     process_timers();

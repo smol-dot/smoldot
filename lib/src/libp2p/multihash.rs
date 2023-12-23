@@ -27,108 +27,109 @@ use crate::util;
 
 /// A multihash made of a code and a slice of data.
 ///
-/// This type is a *reference* to a multihash stored somewhere else, such as in a `Vec<u8>`. You
-/// are supposed to store a `MultihashRef` for long term usage. Instead, store a `Vec<u8>` for
-/// example. The `MultihashRef` can be constructed from that `Vec<u8>` if it needs decoding.
-pub struct MultihashRef<'a>(u32, &'a [u8]);
+/// This type contains a generic parameter `T` that stores the multihash itself, for example
+/// `Vec<u8>` or `&[u8]`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Multihash<T = Vec<u8>>(T);
 
-impl<'a> MultihashRef<'a> {
-    /// Builds a multihash from the "identity" hash algorithm code and the provided data.
-    ///
-    /// Calling [`MultihashRef::data`] on the returned value will always yield back the same data
-    /// as was passed as parameter.
-    pub fn identity(data: &'a [u8]) -> Self {
-        MultihashRef(0, data)
-    }
-
+impl<T: AsRef<[u8]>> Multihash<T> {
     /// Returns the code stored in this multihash.
     pub fn hash_algorithm_code(&self) -> u32 {
-        self.0
+        decode(&self.0.as_ref()).unwrap().0
     }
 
     /// Returns the data stored in this multihash.
-    pub fn data(&self) -> &'a [u8] {
-        self.1
+    pub fn data(&self) -> &[u8] {
+        decode(&self.0.as_ref()).unwrap().1
     }
 
     /// Checks whether `input` is a valid multihash.
-    pub fn from_bytes(input: &'a [u8]) -> Result<MultihashRef, FromBytesError> {
-        match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(input) {
-            Ok((_rest, multihash)) => {
-                debug_assert!(_rest.is_empty());
-                Ok(multihash)
-            }
-            Err(_) => Err(FromBytesError::DecodeError),
+    pub fn from_bytes(input: T) -> Result<Self, (FromBytesError, T)> {
+        if let Err(err) = decode(input.as_ref()) {
+            return Err((err, input));
         }
+
+        Ok(Multihash(input))
     }
 
-    /// Checks whether `input` is a valid multihash.
-    ///
-    /// Contrary to [`MultihashRef::from_bytes`], doesn't return an error if the slice is too long
-    /// but returns the remainder.
-    pub fn from_bytes_partial(input: &'a [u8]) -> Result<(MultihashRef, &'a [u8]), FromBytesError> {
-        match multihash::<nom::error::Error<&[u8]>>(input) {
-            Ok((rest, multihash)) => Ok((multihash, rest)),
-            Err(_) => Err(FromBytesError::DecodeError),
-        }
-    }
-
-    /// Returns an iterator to a list of buffers that, when concatenated together, form the
-    /// binary representation of this multihash.
-    pub fn as_bytes(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        let code = util::leb128::encode(self.0).collect::<arrayvec::ArrayVec<u8, 40>>(); // TODO: actual length?
-        let len = util::leb128::encode_usize(self.1.len()).collect::<arrayvec::ArrayVec<u8, 40>>(); // TODO: actual length?
-        [either::Left(code), either::Left(len), either::Right(self.1)].into_iter()
-    }
-
-    /// Turns this multihash into a `Vec<u8>`.
-    pub fn to_vec(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(7 + 7 + self.1.len());
-        for slice in self.as_bytes() {
-            out.extend_from_slice(slice.as_ref());
-        }
-        out
+    /// Destroys the [`Multihash`] and returns the underlying buffer.
+    pub fn into_bytes(self) -> T {
+        self.0
     }
 }
 
-/// Error when turning bytes into a [`MultihashRef`].
+impl<'a> Multihash<&'a [u8]> {
+    /// Checks whether `input` is a valid multihash.
+    ///
+    /// Contrary to [`Multihash::from_bytes`], doesn't return an error if the slice is too long
+    /// but returns the remainder.
+    pub fn from_bytes_partial(
+        input: &'a [u8],
+    ) -> Result<(Multihash<&'a [u8]>, &'a [u8]), FromBytesError> {
+        match multihash::<nom::error::Error<&[u8]>>(input) {
+            Ok((rest, _)) => Ok((Multihash(&input.as_ref()[..rest.len()]), rest)),
+            Err(_) => Err(FromBytesError::DecodeError),
+        }
+    }
+}
+
+impl Multihash<Vec<u8>> {
+    /// Builds a multihash from the "identity" hash algorithm code and the provided data.
+    ///
+    /// Calling [`Multihash::data`] on the returned value will always yield back the same data
+    /// as was passed as parameter.
+    pub fn identity<'a>(data: &'a [u8]) -> Self {
+        let mut out = Vec::with_capacity(data.len() + 8);
+        out.extend(util::leb128::encode(0u32));
+        out.extend(util::leb128::encode_usize(data.len()));
+        out.extend_from_slice(data);
+        Multihash(out)
+    }
+}
+
+impl<T> AsRef<T> for Multihash<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
+/// Error when turning bytes into a [`Multihash`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum FromBytesError {
     /// The multihash is invalid.
     DecodeError,
 }
 
-impl<'a> fmt::Debug for MultihashRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Debug for Multihash<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl<'a> fmt::Display for MultihashRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Display for Multihash<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base58 = bs58::encode(&self.to_vec()).into_string();
+        let base58 = bs58::encode(self.0.as_ref()).into_string();
         write!(f, "{base58}")
     }
 }
 
-impl<'a> TryFrom<&'a [u8]> for MultihashRef<'a> {
-    type Error = FromBytesError;
-
-    fn try_from(input: &'a [u8]) -> Result<Self, Self::Error> {
-        Self::from_bytes(input)
+fn decode<'a>(bytes: &'a [u8]) -> Result<(u32, &'a [u8]), FromBytesError> {
+    match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(bytes) {
+        Ok((_rest, multihash)) => {
+            debug_assert!(_rest.is_empty());
+            Ok(multihash)
+        }
+        Err(_) => Err(FromBytesError::DecodeError),
     }
 }
 
 fn multihash<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], MultihashRef<'a>, E> {
-    nom::combinator::map(
-        nom::sequence::tuple((
-            nom::combinator::map_opt(crate::util::leb128::nom_leb128_usize, |c| {
-                u32::try_from(c).ok()
-            }),
-            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-        )),
-        |(code, data)| MultihashRef(code, data),
-    )(bytes)
+) -> nom::IResult<&'a [u8], (u32, &'a [u8]), E> {
+    nom::sequence::tuple((
+        nom::combinator::map_opt(crate::util::leb128::nom_leb128_usize, |c| {
+            u32::try_from(c).ok()
+        }),
+        nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+    ))(bytes)
 }

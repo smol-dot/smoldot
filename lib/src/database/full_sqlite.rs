@@ -145,6 +145,24 @@ impl SqliteFullDatabase {
         Ok(out)
     }
 
+    /// Returns the hash of the parent of the given block, or `None` if the block is unknown.
+    ///
+    /// > **Note**: If this method is called twice times in a row with the same block hash, it
+    /// >           is possible for the first time to return `Some` and the second time to return
+    /// >           `None`, in case the block has since been removed from the database.
+    pub fn block_parent(&self, block_hash: &[u8; 32]) -> Result<Option<[u8; 32]>, CorruptedError> {
+        let connection = self.database.lock();
+
+        let out = connection
+            .prepare_cached(r#"SELECT parent_hash FROM blocks WHERE hash = ?"#)
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .query_row((&block_hash[..],), |row| row.get::<_, [u8; 32]>(0))
+            .optional()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        Ok(out)
+    }
+
     /// Returns the list of extrinsics of the given block, or `None` if the block is unknown.
     ///
     /// > **Note**: The list of extrinsics of a block is also known as its *body*.
@@ -218,14 +236,15 @@ impl SqliteFullDatabase {
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`StorageAccessError::StoragePruned`] error is returned.
+    /// [`StorageAccessError::IncompleteStorage`] error is returned.
+    // TODO: an IncompleteStorage error doesn't seem appropriate; also, why is it even a problem given that the chain information contains the finalized block anyway
     pub fn to_chain_information(
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<chain_information::ValidChainInformation, StorageAccessError> {
         let connection = self.database.lock();
         if finalized_hash(&connection)? != *finalized_block_hash {
-            return Err(StorageAccessError::StoragePruned);
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         let finalized_block_header = block_header(&connection, finalized_block_hash)?
@@ -312,8 +331,7 @@ impl SqliteFullDatabase {
 
     /// Insert a new block in the database.
     ///
-    /// Must pass the header and body of the block, and the changes to the storage that this block
-    /// performs relative to its parent.
+    /// Must pass the header and body of the block.
     ///
     /// Blocks must be inserted in the correct order. An error is returned if the parent of the
     /// newly-inserted block isn't present in the database.
@@ -326,8 +344,6 @@ impl SqliteFullDatabase {
         scale_encoded_header: &[u8],
         is_new_best: bool,
         body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
-        new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
-        trie_entries_version: u8,
     ) -> Result<(), InsertError> {
         // Calculate the hash of the new best block.
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
@@ -354,13 +370,6 @@ impl SqliteFullDatabase {
         if !has_block(&transaction, header.parent_hash)? {
             return Err(InsertError::MissingParent);
         }
-
-        // Temporarily disable foreign key checks in order to make the insertion easier, as we
-        // don't have to make sure that trie nodes are sorted.
-        // Note that this is immediately disabled again when we `COMMIT` later down below.
-        transaction
-            .execute("PRAGMA defer_foreign_keys = ON", ())
-            .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
 
         transaction
             .prepare_cached(
@@ -391,15 +400,6 @@ impl SqliteFullDatabase {
             }
         }
 
-        // Insert the changes in trie nodes.
-        insert_storage(
-            &transaction,
-            Some(&header.parent_hash[..]),
-            new_trie_nodes,
-            trie_entries_version,
-        )
-        .map_err(InsertError::Corrupted)?;
-
         // Change the best chain to be the new block.
         if is_new_best {
             // It would be illegal to change the best chain to not overlay with the
@@ -415,6 +415,82 @@ impl SqliteFullDatabase {
         transaction
             .commit()
             .map_err(|err| InsertError::Corrupted(CorruptedError::Internal(InternalError(err))))?;
+
+        Ok(())
+    }
+
+    // TODO: needs documentation
+    // TODO: should we refuse inserting disjoint storage nodes?
+    pub fn insert_trie_nodes<'a>(
+        &self,
+        new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
+        trie_entries_version: u8,
+    ) -> Result<(), CorruptedError> {
+        let mut database = self.database.lock();
+
+        let transaction = database
+            .transaction()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        {
+            // TODO: should check whether the existing merkle values that are referenced from inserted nodes exist in the parent's storage
+            // TODO: is it correct to have OR IGNORE everywhere?
+            let mut insert_node_statement = transaction
+                .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            let mut insert_node_storage_statement = transaction
+                .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            let mut insert_child_statement = transaction
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
+                )
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+            // TODO: if the iterator's `next()` function accesses the database, we deadlock
+            for trie_node in new_trie_nodes {
+                assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
+                insert_node_statement
+                    .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
+                    .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
+                match trie_node.storage_value {
+                    InsertTrieNodeStorageValue::Value {
+                        value,
+                        references_merkle_value,
+                    } => {
+                        insert_node_storage_statement
+                            .execute((
+                                &trie_node.merkle_value,
+                                if !references_merkle_value {
+                                    Some(&value)
+                                } else {
+                                    None
+                                },
+                                if references_merkle_value {
+                                    Some(&value)
+                                } else {
+                                    None
+                                },
+                                trie_entries_version,
+                            ))
+                            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+                    }
+                    InsertTrieNodeStorageValue::NoValue => {}
+                }
+                for (child_num, child) in trie_node.children_merkle_values.iter().enumerate() {
+                    if let Some(child) = child {
+                        let child_num =
+                            vec![u8::try_from(child_num).unwrap_or_else(|_| unreachable!())];
+                        insert_child_statement
+                            .execute((&trie_node.merkle_value, child_num, child))
+                            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+                    }
+                }
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         Ok(())
     }
@@ -656,31 +732,69 @@ impl SqliteFullDatabase {
         parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<(Vec<u8>, u8)>, StorageAccessError> {
+        // Process the iterators at the very beginning and before locking the database, in order
+        // to avoid a deadlock in case the `next()` function of one of the iterators accesses
+        // the database as well.
+        let key_vectored = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
+            .collect::<Vec<_>>();
+
         let connection = self.database.lock();
 
         // TODO: could be optimized by having a different request when `parent_tries_paths_nibbles` is empty and when it isn't
         // TODO: trie_root_ref system untested
+        // TODO: infinite loop if there's a loop in the trie; detect this
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
+                -- At the end of the recursive statement, `node_with_key` must always contain
+                -- one and exactly one item where `search_remain` is either empty or null. Empty
+                -- indicates that we have found a match, while null means that the search has
+                -- been interrupted due to a storage entry not being in the database. If
+                -- `search_remain` is empty, then `node_hash` is either a hash in case of a match
+                -- or null in case there is no entry with the requested key. If `search_remain`
+                -- is null, then `node_hash` is irrelevant.
+                --
+                -- In order to properly handle the situation where the key is empty, the initial
+                -- request of the recursive table building must check whether the partial key of
+                -- the root matches. In other words, all the entries of `node_with_key` (where
+                -- `node_hash` is non-null) contain entries that are known to be in the database
+                -- and after the partial key has already been verified to be correct.
                 node_with_key(node_hash, search_remain) AS (
-                    SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
-                        FROM blocks, trie_node
-                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
+                        SELECT
+                            IIF(COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key, trie_node.hash, NULL),
+                            IIF(trie_node.partial_key IS NULL, NULL, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X''))
+                        FROM blocks
+                        LEFT JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
+                        WHERE blocks.hash = :block_hash
                     UNION ALL
-                    SELECT COALESCE(trie_node.hash, trie_node_storage.trie_root_ref), COALESCE(SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key)), SUBSTR(node_with_key.search_remain, 1))
-                        FROM node_with_key
-                        LEFT JOIN trie_node_child ON node_with_key.node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
-                        LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                        LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL AND HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10'
-                        WHERE LENGTH(node_with_key.search_remain) >= 1 AND (trie_node.hash IS NOT NULL OR trie_node_storage.trie_root_ref IS NOT NULL)
+                    SELECT
+                        CASE
+                            WHEN HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10' THEN trie_node_storage.trie_root_ref
+                            WHEN SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key THEN trie_node_child.child_hash
+                            ELSE NULL END,
+                        CASE
+                            WHEN HEX(SUBSTR(node_with_key.search_remain, 1, 1)) = '10' THEN SUBSTR(node_with_key.search_remain, 1)
+                            WHEN trie_node_child.child_hash IS NULL THEN X''
+                            WHEN trie_node.partial_key IS NULL THEN NULL
+                            WHEN SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key THEN SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
+                            ELSE X'' END
+                    FROM node_with_key
+                        LEFT JOIN trie_node_child
+                            ON node_with_key.node_hash = trie_node_child.hash
+                            AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
+                        LEFT JOIN trie_node
+                            ON trie_node.hash = trie_node_child.child_hash
+                        LEFT JOIN trie_node_storage
+                            ON node_with_key.node_hash = trie_node_storage.node_hash
+                        WHERE LENGTH(node_with_key.search_remain) >= 1
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, COALESCE(trie_node_storage.value, trie_node_storage.trie_root_ref), trie_node_storage.trie_entry_version
+            SELECT COUNT(blocks.hash) >= 1, node_with_key.search_remain IS NULL, COALESCE(trie_node_storage.value, trie_node_storage.trie_root_ref), trie_node_storage.trie_entry_version
             FROM blocks
-            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN node_with_key ON LENGTH(node_with_key.search_remain) = 0
-            LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash
+            JOIN node_with_key ON LENGTH(node_with_key.search_remain) = 0 OR node_with_key.search_remain IS NULL
+            LEFT JOIN trie_node_storage ON node_with_key.node_hash = trie_node_storage.node_hash AND node_with_key.search_remain IS NOT NULL
             WHERE blocks.hash = :block_hash;
             "#)
             .map_err(|err| {
@@ -689,12 +803,34 @@ impl SqliteFullDatabase {
                 ))
             })?;
 
-        let key_vectored = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
-            .collect::<Vec<_>>();
+        // In order to debug the SQL query above (for example in case of a failing test),
+        // uncomment this block:
+        //
+        /*println!("{:?}", {
+            let mut statement = connection
+                    .prepare_cached(
+                        r#"
+                    WITH RECURSIVE
+                        copy-paste the definition of node_with_key here
 
-        let (has_block, block_has_storage, value, trie_entry_version) = statement
+                    SELECT * FROM node_with_key"#).unwrap();
+            statement
+                .query_map(
+                    rusqlite::named_params! {
+                        ":block_hash": &block_hash[..],
+                        ":key": key_vectored,
+                    },
+                    |row| {
+                        let node_hash = row.get::<_, Option<Vec<u8>>>(0)?.map(hex::encode);
+                        let search_remain = row.get::<_, Option<Vec<u8>>>(1)?;
+                        Ok((node_hash, search_remain))
+                    },
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+        });*/
+
+        let (has_block, incomplete_storage, value, trie_entry_version) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -702,10 +838,10 @@ impl SqliteFullDatabase {
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
-                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let incomplete_storage = row.get::<_, i64>(1)? != 0;
                     let value = row.get::<_, Option<Vec<u8>>>(2)?;
                     let trie_entry_version = row.get::<_, Option<i64>>(3)?;
-                    Ok((has_block, block_has_storage, value, trie_entry_version))
+                    Ok((has_block, incomplete_storage, value, trie_entry_version))
                 },
             )
             .map_err(|err| {
@@ -716,8 +852,8 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::UnknownBlock);
         }
 
-        if !block_has_storage {
-            return Err(StorageAccessError::StoragePruned);
+        if incomplete_storage {
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         let Some(value) = value else { return Ok(None) };
@@ -765,79 +901,190 @@ impl SqliteFullDatabase {
         prefix_nibbles: impl Iterator<Item = u8>,
         branch_nodes: bool,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
+        // Process the iterators at the very beginning and before locking the database, in order
+        // to avoid a deadlock in case the `next()` function of one of the iterators accesses
+        // the database as well.
+        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .collect::<Vec<_>>();
+        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
+        let key_nibbles = {
+            let mut v = parent_tries_paths_nibbles.clone();
+            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
+        let prefix_nibbles = {
+            let mut v = parent_tries_paths_nibbles;
+            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
+            v
+        };
+
         let connection = self.database.lock();
 
+        // Sorry for that extremely complicated SQL statement. While the logic isn't actually very
+        // complicated, we have to jump through many hoops in order to go around quirks in the
+        // SQL language.
+        // If you want to work on this SQL code, there is no miracle: write tests, and if a test
+        // fails debug the content of `next_key` to find out where the iteration doesn't behave
+        // as expected.
         // TODO: this algorithm relies the fact that leaf nodes always have a storage value, which isn't exactly clear in the schema ; however not relying on this makes it way harder to write
         // TODO: trie_root_ref system untested and most likely not working
+        // TODO: infinite loop if there's a loop in the trie; detect this
+        // TODO: could also check the prefix while iterating instead of only at the very end, which could maybe save many lookups
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
-                next_key(node_hash, node_is_branch, node_full_key, search_remain) AS (
+                -- We build a temporary table `next_key`, inserting entries one after one as we
+                -- descend the trie by trying to match entries with `:key`.
+                -- At each iteration, `node_hash` is the root where to continue the search,
+                -- `node_is_branch` is true if `node_hash` is a branch node, `node_full_key` is
+                -- the key of `node_hash` (that we build along the way) and serves as the final
+                -- result, and `key_search_remain` contains the `:key` that remains to be matched.
+                -- Can also be NULL to indicate that the search ended because the node necessary to
+                -- continue was missing from the database, in which case the values of
+                -- `node_hash` and `node_is_branch` have irrelevant values, and the value of
+                -- `node_full_key` is the "best known key".
+                -- If `:skip_branches` is false, the search ends when `key_search_remain` is null
+                -- or empty. If `:skip_branches` is true, the search ends when `key_search_remain`
+                -- is null or empty and that `node_is_branch` is false.
+                --
+                -- `next_key` has zero elements if the block can't be found in the database or if
+                -- the trie has no next key at all. These two situations need to be differentiated
+                -- in the final SELECT statement.
+                --
+                -- When encountering a node, we follow both the child that exactly matches `:key`
+                -- and also the first child that is strictly superior to `:key`. This is necessary
+                -- because `:key` might be equal to something like `ffffffff...`, in which case the
+                -- result will be after any equal match.
+                -- This means that the number of entries in `next_key` at the end of the recursion
+                -- is something like `2 * depth_in_trie(key)`.
+                -- In order to obtain the final result, we take the entry in `next_key` with the
+                -- minimal `node_full_key` amongst the ones that have finished the search.
+                --
+                -- Note that in the code below we do a lot of `COALESCE(SUBSTR(...), X'')`. This
+                -- is because, for some reason, `SUBSTR(X'', ...)` always produces `NULL`. For this
+                -- reason, it is also not possible to automatically pass NULL values
+                -- through `SUSBTR`, and we have to use CASE/IIFs instead.
+                next_key(node_hash, node_is_branch, node_full_key, key_search_remain) AS (
                         SELECT
-                            trie_node.hash,
+                            CASE
+                                WHEN trie_node.hash IS NULL
+                                    THEN NULL
+                                WHEN COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
+                                    THEN trie_node.hash
+                                ELSE
+                                    NULL
+                            END,
                             trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL,
-                            trie_node.partial_key,
-                            COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
+                            COALESCE(trie_node.partial_key, X''),
+                            CASE
+                                WHEN trie_node.partial_key IS NULL
+                                    THEN NULL
+                                WHEN COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
+                                    THEN COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
+                                ELSE
+                                    X''   -- The partial key is strictly inferior to `:key`
+                            END
                         FROM blocks
-                        JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
-                            AND COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') <= trie_node.partial_key
+                        LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
                         LEFT JOIN trie_node_storage ON trie_node_storage.node_hash = trie_node.hash
                         WHERE blocks.hash = :block_hash
-                            AND COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:prefix)), X'') = COALESCE(SUBSTR(:prefix, 1, LENGTH(trie_node.partial_key)), X'')
+
                     UNION ALL
                         SELECT
                             COALESCE(trie_node.hash, trie_node_trieref.hash),
                             trie_node_storage.value IS NULL AND trie_node_storage.trie_root_ref IS NULL,
-                            CAST(next_key.node_full_key || trie_node_child.child_num || COALESCE(trie_node.partial_key, trie_node_trieref.partial_key) AS BLOB)
-                                AS node_full_key,
-                            CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                                WHEN TRUE THEN SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                                ELSE CASE HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
-                                    WHEN TRUE THEN COALESCE(SUBSTR(next_key.search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
-                                    ELSE X'' END
-                                END
+                            CASE
+                                WHEN trie_node_child.child_num IS NULL
+                                    THEN next_key.node_full_key
+                                WHEN trie_node.partial_key IS NULL AND trie_node_trieref.partial_key IS NULL
+                                    THEN CAST(next_key.node_full_key || trie_node_child.child_num AS BLOB)
+                                ELSE
+                                    CAST(next_key.node_full_key || trie_node_child.child_num || COALESCE(trie_node.partial_key, trie_node_trieref.partial_key) AS BLOB)
+                            END,
+                            CASE
+                                WHEN trie_node_child.child_num IS NOT NULL AND trie_node.partial_key IS NULL
+                                    THEN NULL    -- Child exists but is missing from database
+                                WHEN HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' AND trie_node_trieref.hash IS NULL
+                                    THEN NULL    -- Trie reference exists but is missing from database
+                                WHEN SUBSTR(next_key.key_search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
+                                    THEN SUBSTR(next_key.key_search_remain, 2 + LENGTH(trie_node.partial_key))    -- Equal match, continue iterating
+                                WHEN SUBSTR(next_key.key_search_remain, 1, 1) = trie_node_child.child_num AND SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node.partial_key)) < trie_node.partial_key
+                                    THEN X''     -- Searched key is before the node we are iterating to, thus we cut the search short
+                                WHEN HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' AND COALESCE(SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') = trie_node_trieref.partial_key
+                                    THEN COALESCE(SUBSTR(next_key.key_search_remain, 2 + LENGTH(trie_node_trieref.partial_key)), X'')
+                                ELSE
+                                    X''          -- Shouldn't be reachable.
+                            END
                         FROM next_key
 
                         LEFT JOIN trie_node_child
                             ON next_key.node_hash = trie_node_child.hash
-                            AND CASE LENGTH(next_key.search_remain)
-                                WHEN 0 THEN next_key.node_is_branch AND :skip_branches
-                                ELSE SUBSTR(next_key.search_remain, 1, 1) <= trie_node_child.child_num END
+                            AND CASE WHEN LENGTH(next_key.key_search_remain) = 0 THEN TRUE
+                                ELSE SUBSTR(next_key.key_search_remain, 1, 1) <= trie_node_child.child_num END
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
-                            AND CASE SUBSTR(next_key.search_remain, 1, 1) = trie_node_child.child_num
-                                WHEN TRUE THEN SUBSTR(next_key.search_remain, 2, LENGTH(trie_node.partial_key)) <= trie_node.partial_key
-                                ELSE TRUE END
 
+                        -- We want to keep only situations where `trie_node_child` is either
+                        -- equal to the key, or the first child strictly superior to the key. In
+                        -- order to do that, we try to find another child that is strictly
+                        -- in-between the key and `trie_node_child`. In the `WHERE` clause at the
+                        -- bottom, we only keep rows where `trie_node_child_before` is NULL.
                         LEFT JOIN trie_node_child AS trie_node_child_before
                             ON next_key.node_hash = trie_node_child_before.hash
                             AND trie_node_child_before.child_num < trie_node_child.child_num
-                            AND trie_node_child_before.child_num > SUBSTR(next_key.search_remain, 1, 1)
+                            AND (next_key.key_search_remain = X'' OR trie_node_child_before.child_num > SUBSTR(next_key.key_search_remain, 1, 1))
 
                         LEFT JOIN trie_node_storage AS trie_node_storage_trieref
-                            ON next_key.node_hash = trie_node_storage_trieref.node_hash AND trie_node_storage_trieref.trie_root_ref IS NOT NULL AND HEX(SUBSTR(next_key.search_remain, 1, 1)) = '10'
+                            ON HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' AND next_key.node_hash = trie_node_storage_trieref.node_hash AND trie_node_storage_trieref.trie_root_ref IS NOT NULL
                         LEFT JOIN trie_node AS trie_node_trieref
                             ON trie_node_trieref.hash = trie_node_storage_trieref.node_hash
-                            AND COALESCE(SUBSTR(next_key.search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') <= trie_node_trieref.partial_key
+                            AND COALESCE(SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node_trieref.partial_key)), X'') <= trie_node_trieref.partial_key
 
                         LEFT JOIN trie_node_storage
                             ON trie_node_storage.node_hash = COALESCE(trie_node.hash, trie_node_trieref.hash)
 
-                        WHERE trie_node_child_before.hash IS NULL
-                            AND (trie_node.hash IS NOT NULL OR trie_node_trieref.hash IS NOT NULL)
-                            AND COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') <= COALESCE(SUBSTR(:prefix, 1, LENGTH(node_full_key)), X'')
+                        WHERE
+                            -- Don't pull items that have already finished searching.
+                            next_key.node_hash IS NOT NULL AND next_key.key_search_remain IS NOT NULL AND (next_key.key_search_remain != X'' OR (next_key.node_is_branch AND :skip_branches))
+                            -- See explanation above.
+                            AND trie_node_child_before.hash IS NULL
+                            -- Don't generate an item if there's nowhere to go to.
+                            AND (HEX(SUBSTR(next_key.key_search_remain, 1, 1)) = '10' OR trie_node_child.child_num IS NOT NULL)
+                            -- Stop iterating if the child's partial key is before the searched key.
+                            AND (trie_node.hash IS NULL OR NOT (COALESCE(SUBSTR(next_key.key_search_remain, 1, 1), X'') = trie_node_child.child_num AND COALESCE(SUBSTR(next_key.key_search_remain, 2, LENGTH(trie_node.partial_key)), X'') > trie_node.partial_key))
+                ),
+
+                -- Now keep only the entries of `next_key` which have finished iterating.
+                terminal_next_key(incomplete_storage, node_full_key, output) AS (
+                    SELECT
+                        CASE
+                            WHEN COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') != :prefix THEN FALSE
+                            ELSE key_search_remain IS NULL
+                        END,
+                        node_full_key,
+                        CASE
+                            WHEN node_hash IS NULL THEN NULL
+                            WHEN COALESCE(SUBSTR(node_full_key, 1, LENGTH(:prefix)), X'') = :prefix THEN node_full_key
+                            ELSE NULL
+                        END
+                    FROM next_key
+                    WHERE key_search_remain IS NULL OR (LENGTH(key_search_remain) = 0 AND (NOT :skip_branches OR NOT node_is_branch))
                 )
 
             SELECT
-                COUNT(trie_node.hash) >= 1,
-                CASE COALESCE(SUBSTR(MIN(next_key.node_full_key), 1, LENGTH(:prefix)), X'') = :prefix
-                    WHEN TRUE THEN MIN(next_key.node_full_key)
-                    ELSE NULL END
+                COUNT(blocks.hash) >= 1,
+                COALESCE(terminal_next_key.incomplete_storage, FALSE),
+                terminal_next_key.output
             FROM blocks
-            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN next_key ON LENGTH(next_key.search_remain) = 0
+            LEFT JOIN terminal_next_key
             WHERE blocks.hash = :block_hash
-            GROUP BY blocks.hash, trie_node.hash
+                -- We pick the entry of `terminal_next_key` with the smallest full key. Note that
+                -- it might seem like a good idea to not using any GROUP BY and instead just do
+                -- `ORDER BY node_full_key ASC LIMIT 1`, but doing so sometimes leads to SQLite
+                -- not picking the entry with the smallest full key for a reason I couldn't
+                -- figure out.
+                AND (terminal_next_key.node_full_key IS NULL OR terminal_next_key.node_full_key = (SELECT MIN(node_full_key) FROM terminal_next_key))
             LIMIT 1"#,
             )
             .map_err(|err| {
@@ -846,22 +1093,36 @@ impl SqliteFullDatabase {
                 ))
             })?;
 
-        let parent_tries_paths_nibbles = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .collect::<Vec<_>>();
-        let parent_tries_paths_nibbles_length = parent_tries_paths_nibbles.len();
+        // In order to debug the SQL query above (for example in case of a failing test),
+        // uncomment this block:
+        //
+        /*println!("{:?}", {
+            let mut statement = connection
+                    .prepare_cached(
+                        r#"
+                    WITH RECURSIVE
+                        copy-paste the definition of next_key here
 
-        let key_nibbles = {
-            let mut v = parent_tries_paths_nibbles.clone();
-            v.extend(key_nibbles.inspect(|n| assert!(*n < 16)));
-            v
-        };
-
-        let prefix_nibbles = {
-            let mut v = parent_tries_paths_nibbles;
-            v.extend(prefix_nibbles.inspect(|n| assert!(*n < 16)));
-            v
-        };
+                    SELECT * FROM next_key"#).unwrap();
+            statement
+                .query_map(
+                    rusqlite::named_params! {
+                        ":block_hash": &block_hash[..],
+                        ":key": key_nibbles,
+                        //":prefix": prefix_nibbles,
+                        ":skip_branches": !branch_nodes
+                    },
+                    |row| {
+                        let node_hash = row.get::<_, Option<Vec<u8>>>(0)?.map(hex::encode);
+                        let node_is_branch = row.get::<_, Option<i64>>(1)?.map(|n| n != 0);
+                        let node_full_key = row.get::<_, Option<Vec<u8>>>(2)?;
+                        let search_remain = row.get::<_, Option<Vec<u8>>>(3)?;
+                        Ok((node_hash, node_is_branch, node_full_key, search_remain))
+                    },
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+        });*/
 
         let result = statement
             .query_row(
@@ -872,9 +1133,10 @@ impl SqliteFullDatabase {
                     ":skip_branches": !branch_nodes
                 },
                 |row| {
-                    let block_has_storage = row.get::<_, i64>(0)? != 0;
-                    let next_key = row.get::<_, Option<Vec<u8>>>(1)?;
-                    Ok((block_has_storage, next_key))
+                    let block_is_known = row.get::<_, i64>(0)? != 0;
+                    let incomplete_storage = row.get::<_, i64>(1)? != 0;
+                    let next_key = row.get::<_, Option<Vec<u8>>>(2)?;
+                    Ok((block_is_known, incomplete_storage, next_key))
                 },
             )
             .optional()
@@ -882,12 +1144,16 @@ impl SqliteFullDatabase {
                 StorageAccessError::Corrupted(CorruptedError::Internal(InternalError(err)))
             })?;
 
-        let Some((block_has_storage, mut next_key)) = result else {
-            return Err(StorageAccessError::UnknownBlock);
+        let Some((block_is_known, incomplete_storage, mut next_key)) = result else {
+            return Ok(None);
         };
 
-        if !block_has_storage {
-            return Err(StorageAccessError::StoragePruned);
+        if !block_is_known {
+            return Err(StorageAccessError::UnknownBlock);
+        }
+
+        if incomplete_storage {
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         if parent_tries_paths_nibbles_length != 0 {
@@ -919,40 +1185,84 @@ impl SqliteFullDatabase {
         parent_tries_paths_nibbles: impl Iterator<Item = impl Iterator<Item = u8>>,
         key_nibbles: impl Iterator<Item = u8>,
     ) -> Result<Option<Vec<u8>>, StorageAccessError> {
+        // Process the iterators at the very beginning and before locking the database, in order
+        // to avoid a deadlock in case the `next()` function of one of the iterators accesses
+        // the database as well.
+        let key_vectored = parent_tries_paths_nibbles
+            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
+            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
+            .collect::<Vec<_>>();
+
         let connection = self.database.lock();
 
         // TODO: trie_root_ref system untested
+        // TODO: infinite loop if there's a loop in the trie; detect this
         let mut statement = connection
             .prepare_cached(
                 r#"
             WITH RECURSIVE
+                -- At the end of the recursive statement, `closest_descendant` must always contain
+                -- at most one item where `search_remain` is either empty or null. Empty
+                -- indicates that we have found a match, while null means that the search has
+                -- been interrupted due to a storage entry not being in the database. If
+                -- `search_remain` is null, then `node_hash` is irrelevant.
+                -- If `closest_descendant` doesn't have any entry where `search_remain` is empty
+                -- or null, then the request key doesn't have any descendant.
                 closest_descendant(node_hash, search_remain) AS (
-                    SELECT trie_node.hash, COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
-                        FROM blocks, trie_node
-                        WHERE blocks.hash = :block_hash AND blocks.state_trie_root_hash = trie_node.hash
+                    SELECT
+                            blocks.state_trie_root_hash,
+                            CASE
+                                WHEN trie_node.partial_key IS NULL AND LENGTH(:key) = 0
+                                    THEN X''   -- Trie root node isn't in database, but since key is empty we have a match anyway
+                                WHEN trie_node.partial_key IS NULL AND LENGTH(:key) != 0
+                                    THEN NULL  -- Trie root node isn't in database and we can't iterate further
+                                ELSE
+                                    COALESCE(SUBSTR(:key, 1 + LENGTH(trie_node.partial_key)), X'')
+                            END
+                        FROM blocks
+                        LEFT JOIN trie_node ON blocks.state_trie_root_hash = trie_node.hash
+                        WHERE blocks.hash = :block_hash
                             AND (
-                                COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:key)), X'') = :key
+                                trie_node.partial_key IS NULL
+                                OR COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(:key)), X'') = :key
                                 OR COALESCE(SUBSTR(:key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
+
                     UNION ALL
                     SELECT
-                            COALESCE(trie_node.hash, trie_node_storage.trie_root_ref),
-                            COALESCE(SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key)), SUBSTR(closest_descendant.search_remain, 1), X'')
+                            COALESCE(trie_node_child.child_hash, trie_node_storage.trie_root_ref),
+                            CASE
+                                WHEN trie_node_child.child_hash IS NULL AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) != '10'
+                                    THEN X''      -- No child matching the key.
+                                WHEN trie_node_child.child_hash IS NOT NULL AND trie_node.hash IS NULL AND LENGTH(closest_descendant.search_remain) = 1
+                                    THEN X''      -- Descendant node not in trie but we know that it's the result.
+                                WHEN trie_node_child.child_hash IS NOT NULL AND trie_node.hash IS NULL
+                                    THEN NULL     -- Descendant node not in trie.
+                                WHEN COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
+                                        OR COALESCE(SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
+                                    THEN SUBSTR(closest_descendant.search_remain, 2 + LENGTH(trie_node.partial_key))
+                                ELSE
+                                    X''           -- Unreachable.
+                            END
                         FROM closest_descendant
                         LEFT JOIN trie_node_child ON closest_descendant.node_hash = trie_node_child.hash
                             AND SUBSTR(closest_descendant.search_remain, 1, 1) = trie_node_child.child_num
                         LEFT JOIN trie_node ON trie_node.hash = trie_node_child.child_hash
+                        LEFT JOIN trie_node_storage
+                            ON closest_descendant.node_hash = trie_node_storage.node_hash
+                            AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) = '10'
+                            AND trie_node_storage.trie_root_ref IS NOT NULL
+                        WHERE
+                            LENGTH(closest_descendant.search_remain) >= 1
                             AND (
-                                COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
+                                trie_node.hash IS NULL
+                                OR COALESCE(SUBSTR(trie_node.partial_key, 1, LENGTH(closest_descendant.search_remain) - 1), X'') = COALESCE(SUBSTR(closest_descendant.search_remain, 2), X'')
                                 OR COALESCE(SUBSTR(closest_descendant.search_remain, 2, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
                             )
-                        LEFT JOIN trie_node_storage ON closest_descendant.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL AND HEX(SUBSTR(closest_descendant.search_remain, 1, 1)) = '10'
-                        WHERE LENGTH(closest_descendant.search_remain) >= 1 AND (trie_node.hash IS NOT NULL OR trie_node_storage.trie_root_ref IS NOT NULL)
                 )
-            SELECT COUNT(blocks.hash) >= 1, COUNT(trie_node.hash) >= 1, closest_descendant.node_hash
+            SELECT COUNT(blocks.hash) >= 1, closest_descendant.node_hash IS NOT NULL AND closest_descendant.search_remain IS NULL, closest_descendant.node_hash
             FROM blocks
-            LEFT JOIN trie_node ON trie_node.hash = blocks.state_trie_root_hash
-            LEFT JOIN closest_descendant ON LENGTH(closest_descendant.search_remain) = 0
+            LEFT JOIN closest_descendant ON LENGTH(closest_descendant.search_remain) = 0 OR closest_descendant.search_remain IS NULL
             WHERE blocks.hash = :block_hash
             LIMIT 1"#,
             )
@@ -962,12 +1272,34 @@ impl SqliteFullDatabase {
                 ))
             })?;
 
-        let key_vectored = parent_tries_paths_nibbles
-            .flat_map(|t| t.inspect(|n| assert!(*n < 16)).chain(iter::once(0x10)))
-            .chain(key_nibbles.inspect(|n| assert!(*n < 16)))
-            .collect::<Vec<_>>();
+        // In order to debug the SQL query above (for example in case of a failing test),
+        // uncomment this block:
+        //
+        /*println!("{:?}", {
+            let mut statement = connection
+                    .prepare_cached(
+                        r#"
+                    WITH RECURSIVE
+                        copy-paste the definition of closest_descendant here
 
-        let (has_block, block_has_storage, merkle_value) = statement
+                    SELECT * FROM closest_descendant"#).unwrap();
+            statement
+                .query_map(
+                    rusqlite::named_params! {
+                        ":block_hash": &block_hash[..],
+                        ":key": key_vectored,
+                    },
+                    |row| {
+                        let node_hash = row.get::<_, Option<Vec<u8>>>(0)?.map(hex::encode);
+                        let search_remain = row.get::<_, Option<Vec<u8>>>(1)?;
+                        Ok((node_hash, search_remain))
+                    },
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+        });*/
+
+        let (has_block, incomplete_storage, merkle_value) = statement
             .query_row(
                 rusqlite::named_params! {
                     ":block_hash": &block_hash[..],
@@ -975,9 +1307,9 @@ impl SqliteFullDatabase {
                 },
                 |row| {
                     let has_block = row.get::<_, i64>(0)? != 0;
-                    let block_has_storage = row.get::<_, i64>(1)? != 0;
+                    let incomplete_storage = row.get::<_, i64>(1)? != 0;
                     let merkle_value = row.get::<_, Option<Vec<u8>>>(2)?;
-                    Ok((has_block, block_has_storage, merkle_value))
+                    Ok((has_block, incomplete_storage, merkle_value))
                 },
             )
             .map_err(|err| {
@@ -988,11 +1320,207 @@ impl SqliteFullDatabase {
             return Err(StorageAccessError::UnknownBlock);
         }
 
-        if !block_has_storage {
-            return Err(StorageAccessError::StoragePruned);
+        if incomplete_storage {
+            return Err(StorageAccessError::IncompleteStorage);
         }
 
         Ok(merkle_value)
+    }
+
+    /// Inserts a block in the database and sets it as the finalized block.
+    ///
+    /// The parent of the block doesn't need to be present in the database.
+    ///
+    /// If the block is already in the database, it is replaced by the one provided.
+    pub fn reset<'a>(
+        &self,
+        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
+        finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
+        finalized_block_justification: Option<Vec<u8>>,
+    ) -> Result<(), CorruptedError> {
+        // Start a transaction to insert everything in one go.
+        let mut database = self.database.lock();
+        let transaction = database
+            .transaction()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        // Temporarily disable foreign key checks in order to make the initial insertion easier,
+        // as we don't have to make sure that trie nodes are sorted.
+        // Note that this is immediately disabled again when we `COMMIT`.
+        transaction
+            .execute("PRAGMA defer_foreign_keys = ON", ())
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        let chain_information = chain_information.into();
+
+        let finalized_block_hash = chain_information
+            .finalized_block_header
+            .hash(self.block_number_bytes);
+
+        let scale_encoded_finalized_block_header = chain_information
+            .finalized_block_header
+            .scale_encoding(self.block_number_bytes)
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+
+        transaction
+            .prepare_cached(
+                "INSERT OR REPLACE INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, is_best_chain, justification) VALUES(?, ?, ?, ?, ?, TRUE, ?)",
+            )
+            .unwrap()
+            .execute((
+                &finalized_block_hash[..],
+                if chain_information.finalized_block_header.number != 0 {
+                    Some(&chain_information.finalized_block_header.parent_hash[..])
+                } else { None },
+                &chain_information.finalized_block_header.state_root[..],
+                i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                &scale_encoded_finalized_block_header[..],
+                finalized_block_justification.as_deref(),
+            ))
+            .unwrap();
+
+        transaction
+            .execute(
+                "DELETE FROM blocks_body WHERE hash = ?",
+                (&finalized_block_hash[..],),
+            )
+            .unwrap();
+
+        {
+            let mut statement = transaction
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)",
+                )
+                .unwrap();
+            for (index, item) in finalized_block_body.enumerate() {
+                statement
+                    .execute((
+                        &finalized_block_hash[..],
+                        i64::try_from(index).unwrap(),
+                        item,
+                    ))
+                    .unwrap();
+            }
+        }
+
+        meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
+        meta_set_number(
+            &transaction,
+            "finalized",
+            chain_information.finalized_block_header.number,
+        )?;
+
+        meta_clear(&transaction, "grandpa_authorities_set_id")?;
+        meta_clear(&transaction, "grandpa_scheduled_target")?;
+        transaction
+            .execute("DELETE FROM grandpa_triggered_authorities WHERE TRUE;", ())
+            .unwrap();
+        transaction
+            .execute("DELETE FROM grandpa_scheduled_authorities WHERE TRUE;", ())
+            .unwrap();
+
+        match &chain_information.finality {
+            chain_information::ChainInformationFinalityRef::Outsourced => {}
+            chain_information::ChainInformationFinalityRef::Grandpa {
+                finalized_triggered_authorities,
+                after_finalized_block_authorities_set_id,
+                finalized_scheduled_change,
+            } => {
+                meta_set_number(
+                    &transaction,
+                    "grandpa_authorities_set_id",
+                    *after_finalized_block_authorities_set_id,
+                )?;
+
+                let mut statement = transaction
+                    .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
+                    .unwrap();
+                for (index, item) in finalized_triggered_authorities.iter().enumerate() {
+                    statement
+                        .execute((
+                            i64::try_from(index).unwrap(),
+                            &item.public_key[..],
+                            i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
+                        ))
+                        .unwrap();
+                }
+
+                if let Some((height, list)) = finalized_scheduled_change {
+                    meta_set_number(&transaction, "grandpa_scheduled_target", *height)?;
+
+                    let mut statement = transaction
+                        .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
+                        .unwrap();
+                    for (index, item) in list.iter().enumerate() {
+                        statement
+                            .execute((
+                                i64::try_from(index).unwrap(),
+                                &item.public_key[..],
+                                i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
+                            ))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+
+        meta_clear(&transaction, "aura_slot_duration")?;
+        transaction
+            .execute("DELETE FROM aura_finalized_authorities WHERE TRUE;", ())
+            .unwrap();
+        meta_clear(&transaction, "babe_slots_per_epoch")?;
+        meta_clear(&transaction, "babe_finalized_next_epoch")?;
+        meta_clear(&transaction, "babe_finalized_epoch")?;
+
+        match &chain_information.consensus {
+            chain_information::ChainInformationConsensusRef::Unknown => {}
+            chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list,
+                slot_duration,
+            } => {
+                meta_set_number(&transaction, "aura_slot_duration", slot_duration.get()).unwrap();
+
+                let mut statement = transaction
+                    .prepare_cached(
+                        "INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)",
+                    )
+                    .unwrap();
+                for (index, item) in finalized_authorities_list.clone().enumerate() {
+                    statement
+                        .execute((i64::try_from(index).unwrap(), &item.public_key[..]))
+                        .unwrap();
+                }
+            }
+            chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch,
+                finalized_next_epoch_transition,
+                finalized_block_epoch_information,
+            } => {
+                meta_set_number(&transaction, "babe_slots_per_epoch", slots_per_epoch.get())
+                    .unwrap();
+                meta_set_blob(
+                    &transaction,
+                    "babe_finalized_next_epoch",
+                    &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
+                )
+                .unwrap();
+
+                if let Some(finalized_block_epoch_information) = finalized_block_epoch_information {
+                    meta_set_blob(&transaction, "babe_finalized_epoch", &encode_babe_epoch_information(
+                    finalized_block_epoch_information.clone(),
+                    )[..]).unwrap();
+                }
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+
+        Ok(())
     }
 }
 
@@ -1027,7 +1555,6 @@ pub enum InsertTrieNodeStorageValue<'a> {
         /// If `true`, the value is equal to the Merkle value of the root of another trie.
         references_merkle_value: bool,
     },
-    SameAsParent,
 }
 
 /// Error while calling [`SqliteFullDatabase::insert`].
@@ -1063,8 +1590,8 @@ pub enum SetFinalizedError {
 pub enum StorageAccessError {
     /// Error accessing the database.
     Corrupted(CorruptedError),
-    /// Storage of the block hash passed as parameter is no longer in the database.
-    StoragePruned,
+    /// Some trie nodes of the storage of the requested block hash are missing.
+    IncompleteStorage,
     /// Requested block couldn't be found in the database.
     UnknownBlock,
 }
@@ -1131,6 +1658,15 @@ fn meta_get_number(
         .optional()
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(value.map(|value| u64::from_ne_bytes(value.to_ne_bytes())))
+}
+
+fn meta_clear(database: &rusqlite::Connection, key: &str) -> Result<(), CorruptedError> {
+    database
+        .prepare_cached(r#"DELETE FROM meta WHERE key = ?"#)
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+        .execute((key,))
+        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
+    Ok(())
 }
 
 fn meta_set_blob(
@@ -1282,149 +1818,6 @@ fn set_best_chain(
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
     meta_set_blob(database, "best", new_best_block_hash)?;
-    Ok(())
-}
-
-// TODO: foreign keys checks should temporarily be disabled because we insert entries in the wrong order; either clearly document this or solve this programmatically
-fn insert_storage<'a>(
-    database: &rusqlite::Connection,
-    parent_block_hash: Option<&[u8]>,
-    new_trie_nodes: impl Iterator<Item = InsertTrieNode<'a>>,
-    entries_version: u8,
-) -> Result<(), CorruptedError> {
-    // Create a temporary table where we store the newly-created trie nodes that must inherit the
-    // storage value of the parent block. These trie nodes are processed later.
-    database
-        .execute(
-            r#"
-        CREATE TEMPORARY TABLE temp_pending_parent_copies(
-            node_hash BLOB NOT NULL PRIMARY KEY
-        );
-    "#,
-            (),
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-    // TODO: should check whether the existing merkle values that are referenced from inserted nodes exist in the parent's storage
-    // TODO: is it correct to have OR IGNORE everywhere?
-    let mut insert_node_statement = database
-        .prepare_cached("INSERT OR IGNORE INTO trie_node(hash, partial_key) VALUES(?, ?)")
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_node_storage_statement = database
-        .prepare_cached("INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version) VALUES(?, ?, ?, ?)")
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_node_storage_copy_statement = database
-        .prepare_cached(r#"INSERT OR IGNORE INTO temp_pending_parent_copies(node_hash) VALUES (?)"#)
-        .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
-    let mut insert_child_statement = database
-        .prepare_cached(
-            "INSERT OR IGNORE INTO trie_node_child(hash, child_num, child_hash) VALUES(?, ?, ?)",
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    for trie_node in new_trie_nodes {
-        assert!(trie_node.partial_key_nibbles.iter().all(|n| *n < 16)); // TODO: document
-        insert_node_statement
-            .execute((&trie_node.merkle_value, trie_node.partial_key_nibbles))
-            .map_err(|err: rusqlite::Error| CorruptedError::Internal(InternalError(err)))?;
-        match trie_node.storage_value {
-            InsertTrieNodeStorageValue::Value {
-                value,
-                references_merkle_value,
-            } => {
-                insert_node_storage_statement
-                    .execute((
-                        &trie_node.merkle_value,
-                        if !references_merkle_value {
-                            Some(&value)
-                        } else {
-                            None
-                        },
-                        if references_merkle_value {
-                            Some(&value)
-                        } else {
-                            None
-                        },
-                        entries_version,
-                    ))
-                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            }
-            InsertTrieNodeStorageValue::SameAsParent => {
-                // TODO: error if parent_block_hash is None
-
-                insert_node_storage_copy_statement
-                    .execute((&trie_node.merkle_value,))
-                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            }
-            InsertTrieNodeStorageValue::NoValue => {}
-        }
-        for (child_num, child) in trie_node.children_merkle_values.iter().enumerate() {
-            if let Some(child) = child {
-                let child_num = vec![u8::try_from(child_num).unwrap_or_else(|_| unreachable!())];
-                insert_child_statement
-                    .execute((&trie_node.merkle_value, child_num, child))
-                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            }
-        }
-    }
-
-    // For each node in `temp_pending_parent_copies`, determine its full key by walking up the
-    // trie, find the corresponding node in the parent block, and copy the value from there.
-    // Note that the algorithm below ignores orphan nodes (i.e. trie nodes that aren't connected
-    // to the graph), as it is detected above.
-    // TODO: not detected above yet ^
-    // TODO: consider reference counting the storage values?
-    // TODO: DRY with getting a value?
-    // TODO: doesn't properly work with feature `trie_root_ref`
-    // TODO: will be an infinite loop if trie is recursive, can this happen?
-    database
-        .prepare_cached(
-            r#"
-        WITH RECURSIVE
-            insertions(node_hash, copy_from_base, copy_from_relative_key) AS (
-                SELECT node_hash, node_hash, X'' FROM temp_pending_parent_copies
-                UNION ALL
-                SELECT insertions.node_hash, COALESCE(trie_node_child.hash, trie_node_storage.node_hash), CAST(COALESCE(trie_node_child.child_num, X'') || trie_node.partial_key || insertions.copy_from_relative_key AS BLOB)
-                    FROM insertions
-                    JOIN trie_node ON trie_node.hash = insertions.copy_from_base
-                    LEFT JOIN trie_node_child ON trie_node_child.child_hash = insertions.copy_from_base
-                    LEFT JOIN trie_node_storage ON trie_node_storage.trie_root_ref = insertions.copy_from_base
-                    WHERE insertions.copy_from_base IS NOT NULL
-            ),
-            node_with_key(node_hash, search_node_hash, search_remain) AS (
-                SELECT insertions.node_hash, trie_node.hash, COALESCE(SUBSTR(insertions.copy_from_relative_key, 1 + LENGTH(trie_node.partial_key)), X'')
-                    FROM insertions
-                    JOIN trie_node ON COALESCE(SUBSTR(insertions.copy_from_relative_key, 1, LENGTH(trie_node.partial_key)), X'') = trie_node.partial_key
-                    JOIN blocks ON blocks.hash = :parent_block_hash AND blocks.state_trie_root_hash = trie_node.hash
-                    WHERE insertions.copy_from_base IS NULL
-                UNION ALL
-                SELECT node_with_key.node_hash, trie_node.hash, SUBSTR(node_with_key.search_remain, 2 + LENGTH(trie_node.partial_key))
-                    FROM node_with_key
-                    JOIN trie_node_child ON node_with_key.search_node_hash = trie_node_child.hash AND SUBSTR(node_with_key.search_remain, 1, 1) = trie_node_child.child_num
-                    JOIN trie_node ON trie_node.hash = trie_node_child.child_hash AND SUBSTR(node_with_key.search_remain, 2, LENGTH(trie_node.partial_key)) = trie_node.partial_key
-                    WHERE LENGTH(node_with_key.search_remain) >= 1
-            )
-        INSERT OR IGNORE INTO trie_node_storage(node_hash, value, trie_root_ref, trie_entry_version)
-        SELECT node_with_key.node_hash, trie_node_storage.value, trie_node_storage.trie_root_ref, trie_node_storage.trie_entry_version
-        FROM node_with_key
-        JOIN trie_node_storage ON node_with_key.search_node_hash = trie_node_storage.node_hash
-        WHERE LENGTH(node_with_key.search_remain) = 0;
-            "#,
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute(rusqlite::named_params! {
-            ":parent_block_hash": parent_block_hash,
-        })
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
-    database
-        .execute(
-            r#"
-        DROP TABLE temp_pending_parent_copies;
-    "#,
-            (),
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-
     Ok(())
 }
 

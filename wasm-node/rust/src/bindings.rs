@@ -50,6 +50,8 @@
 //! they are treated as unsigned integers by the JavaScript.
 //!
 
+use alloc::vec::Vec;
+
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
     /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of
@@ -196,20 +198,15 @@ extern "C" {
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
     ///
-    /// At any time, a connection can be in one of the three following states:
+    /// At any time, a connection can be in either the `Open` (the initial state) or the `Reset`
+    /// state.
+    /// When in the `Open` state, the connection can transition to the `Reset` state if the remote
+    /// closes the connection or refuses the connection altogether. When that happens,
+    /// [`connection_reset`] must be called. Once in the `Reset` state, the connection cannot
+    /// transition back to the `Open` state.
     ///
-    /// - `Opening` (initial state)
-    /// - `Open`
-    /// - `Reset`
-    ///
-    /// When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
-    /// if the remote closes the connection or refuses the connection altogether. When that
-    /// happens, [`connection_reset`] must be called. Once in the `Reset` state, the connection
-    /// cannot transition back to another state.
-    ///
-    /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
-    /// remote accepts the connection. When that happens, [`connection_open_single_stream`] or
-    /// [`connection_open_multi_stream`] must be called depending on the type of connection.
+    /// If the connection is a multistream connection, then
+    /// [`connection_multi_stream_set_handshake_info`] must later be called as soon as possible.
     ///
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
     /// connections are assumed to have a single stream open at all time and the encryption and
@@ -254,8 +251,16 @@ extern "C" {
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
     pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
-    /// Queues data on the given stream. The data is found in the memory of the WebAssembly
-    /// virtual machine, at the given pointer.
+    /// Queues data on the given stream.
+    ///
+    /// `ptr` is a memory address where `len` consecutive elements of type [`StreamSendIoVector`]
+    /// are found. Each element consists in two little-endian 32 bits unsigned integers: the first
+    /// one is a pointer, and the second one is a length in bytes. The data to write on the stream
+    /// consists in the concatenation of all these buffers.
+    ///
+    /// > **Note**: This interface is similar the famous UNIX function `writev`. `ptr` is the same
+    /// >           as `iov`, and `len` the same as `iovcnt`.
+    /// >           See <https://linux.die.net/man/2/writev>.
     ///
     /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
     /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
@@ -299,6 +304,16 @@ extern "C" {
     ///
     /// Only one task can be currently executing at any time.
     pub fn current_task_exit();
+}
+
+/// See [`stream_send`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(C)]
+pub struct StreamSendIoVector {
+    /// Pointer to a buffer of data to write.
+    pub ptr: u32,
+    /// Length of the buffer of data.
+    pub len: u32,
 }
 
 /// Initializes the client.
@@ -490,22 +505,7 @@ pub extern "C" fn timer_finished() {
     crate::timers::timer_finished();
 }
 
-/// Called by the JavaScript code if the connection switches to the `Open` state. The connection
-/// must be in the `Opening` state.
-///
-/// Must be called at most once per connection object.
-///
-/// See also [`connection_new`].
-///
-/// When in the `Open` state, the connection can receive messages. Use [`stream_message`] in order
-/// to provide to the Rust code the messages received by the connection.
-#[no_mangle]
-pub extern "C" fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
-    crate::platform::connection_open_single_stream(connection_id, initial_writable_bytes);
-}
-
-/// Called by the JavaScript code if the connection switches to the `Open` state. The connection
-/// must be in the `Opening` state.
+/// Called by the JavaScript code in order to provide information about a multistream connection.
 ///
 /// Must be called at most once per connection object.
 ///
@@ -517,11 +517,13 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32, initial_writ
 /// de-assigned and buffer destroyed once this function returns.
 ///
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the SHA-256 hash of
-/// the local node's TLS certificate, followed with the SHA-256 hash of the remote node's TLS
-/// certificate.
+/// the local node's TLS certificate.
 #[no_mangle]
-pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_buffer_index: u32) {
-    crate::platform::connection_open_multi_stream(
+pub extern "C" fn connection_multi_stream_set_handshake_info(
+    connection_id: u32,
+    handshake_ty_buffer_index: u32,
+) {
+    crate::platform::connection_multi_stream_set_handshake_info(
         connection_id,
         get_buffer(handshake_ty_buffer_index),
     );
@@ -539,7 +541,7 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
-/// See also [`connection_open_single_stream`] and [`connection_open_multi_stream`].
+/// See also [`connection_new`].
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
@@ -549,13 +551,8 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 /// stream (and, in the case of a multi-stream connection, the stream itself) must be in the
 /// `Open` state.
 ///
-/// `total_sent - total_reported_writable_bytes` must always be `>= 0`, where `total_sent` is the
-/// total number of bytes sent on the stream using [`stream_send`] and
-/// `total_reported_writable_bytes` is the total number of bytes reported using
-/// [`stream_writable_bytes`].
-/// In other words, this function is meant to notify that data sent using [`stream_send`̀] has
-/// effectively been sent out. It is not possible to exceed the `initial_writable_bytes` provided
-/// when the stream was created.
+/// The total of writable bytes must not go beyond reasonable values (e.g. a few megabytes). It
+/// is not legal to provide a dummy implementation that simply passes an exceedingly large value.
 ///
 /// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
@@ -576,18 +573,8 @@ pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
 #[no_mangle]
-pub extern "C" fn connection_stream_opened(
-    connection_id: u32,
-    stream_id: u32,
-    outbound: u32,
-    initial_writable_bytes: u32,
-) {
-    crate::platform::connection_stream_opened(
-        connection_id,
-        stream_id,
-        outbound,
-        initial_writable_bytes,
-    );
+pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
+    crate::platform::connection_stream_opened(connection_id, stream_id, outbound);
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
@@ -617,10 +604,15 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 ///
 /// It is illegal to call this function on a single-stream connections.
 ///
-/// See also [`connection_open_multi_stream`].
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
+/// reason for closing, then provide this buffer index to the function. The Rust code will call
+/// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
+/// index can be de-assigned and buffer destroyed once this function returns.
+///
+/// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
-    crate::platform::stream_reset(connection_id, stream_id);
+pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32, buffer_index: u32) {
+    crate::platform::stream_reset(connection_id, stream_id, get_buffer(buffer_index));
 }
 
 pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {

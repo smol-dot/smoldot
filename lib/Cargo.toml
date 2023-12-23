@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "0.12.0"
+version = "0.15.0"
 description = "Primitives to build a client for Substrate-based blockchains"
 documentation = "https://docs.rs/smoldot"
 keywords = ["blockchain", "peer-to-peer"]
@@ -36,7 +36,7 @@ wasmtime = [
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
 arrayvec = { version = "0.7.3", default-features = false }
-async-lock = { version = "2.7.0", default-features = false }  # TODO: no-std-ize; this is has been done and is just waiting for a release: https://github.com/smol-rs/event-listener/pull/34
+async-lock = { version = "3.0.0", default-features = false }
 atomic-take = { version = "1.1.0" }
 base64 = { version = "0.21.2", default-features = false, features = ["alloc"] }
 bip39 = { version = "2.0.0", default-features = false }
@@ -47,13 +47,14 @@ crossbeam-queue = { version = "0.3.8", default-features = false, features = ["al
 derive_more = "0.99.17"
 ed25519-zebra = { version = "4.0.1", default-features = false }
 either = { version = "1.9.0", default-features = false }
-event-listener = { version = "3.0.0", default-features = false }
+event-listener = { version = "4.0.0", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
-futures-lite = { version = "1.13.0", default-features = false, features = ["alloc"] }
+futures-lite = { version = "2.0.0", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
-itertools = { version = "0.11.0", default-features = false }
+itertools = { version = "0.12.0", default-features = false }
+libm = { version = "0.2.8", default-features = false }
 libsecp256k1 = { version = "0.7.1", default-features = false, features = ["static-context", "hmac"] }
 # The log` crate is forbidden, as it is very impolite to emit logs from a library.
 merlin = { version = "3.0", default-features = false }
@@ -66,7 +67,7 @@ pbkdf2 = { version = "0.12.1", default-features = false }
 poly1305 = { version = "0.8.0", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
 rand_chacha = { version = "0.3.1", default-features = false }
-ruzstd = { version = "0.4.0" }  # TODO: uses `#![feature(error_in_core)]` when the `std` feature is disabled, see https://github.com/rust-lang/rust/issues/103765
+ruzstd = { version = "0.5.0", default-features = false }
 schnorrkel = { version = "0.11.2", default-features = false, features = ["preaudit_deprecated", "alloc"] }
 serde = { version = "1.0.183", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc", "raw_value"] }
@@ -76,12 +77,12 @@ siphasher = { version = "1.0.0", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smallvec = { version = "1.11.0", default-features = false }
 twox-hash = { version = "1.6.3", default-features = false }
-wasmi = { version = "0.31.0", default-features = false }
+wasmi = { version = "0.32.0-beta.2", default-features = false }
 x25519-dalek = { version = "2.0.0-rc.3", default-features = false, features = ["alloc", "precomputed-tables", "static_secrets", "zeroize"] }
 zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 
 # `database-sqlite` feature
-rusqlite = { version = "0.29.0", optional = true, default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.30.0", optional = true, default-features = false, features = ["bundled"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
@@ -94,7 +95,7 @@ soketto = { version = "0.7.1", optional = true }
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", target_os = "linux", target_os = "macos")), all(target_arch = "aarch64", target_os = "linux"), all(target_arch = "s390x", target_os = "linux")))'.dependencies]
 # `wasmtime` feature
-wasmtime = { version = "12.0.1", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "15.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
@@ -108,4 +109,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [[bench]]
 name = "header"
+harness = false
+[[bench]]
+name = "proof-decode"
 harness = false

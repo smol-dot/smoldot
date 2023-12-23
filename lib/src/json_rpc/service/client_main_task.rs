@@ -218,12 +218,12 @@ impl ClientMainTask {
     /// Processes the task's internals and waits until something noteworthy happens.
     pub async fn run_until_event(mut self) -> Event {
         loop {
-            enum WhatHappened {
+            enum WakeUpReason {
                 NewRequest(String),
                 Message(ToMainTask),
             }
 
-            let what_happened = {
+            let wake_up_reason = {
                 let serialized_requests_io_destroyed = async {
                     (&mut self.inner.on_serialized_requests_io_destroyed).await;
                     Err(())
@@ -237,7 +237,7 @@ impl ClientMainTask {
                                 .serialized_io
                                 .on_request_pulled_or_task_destroyed
                                 .notify(usize::max_value());
-                            break Ok(WhatHappened::NewRequest(elem));
+                            break Ok(WakeUpReason::NewRequest(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
@@ -251,7 +251,7 @@ impl ClientMainTask {
                     let mut wait = None;
                     loop {
                         if let Some(elem) = self.inner.responses_notifications_queue.queue.pop() {
-                            break Ok(WhatHappened::Message(elem));
+                            break Ok(WakeUpReason::Message(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
@@ -267,15 +267,15 @@ impl ClientMainTask {
                     .or(response_notif)
                     .await
                 {
-                    Ok(what_happened) => what_happened,
+                    Ok(wake_up_reason) => wake_up_reason,
                     Err(()) => return Event::SerializedRequestsIoClosed,
                 }
             };
 
             // Immediately handle every event apart from `NewRequest`.
-            let new_request = match what_happened {
-                WhatHappened::NewRequest(request) => request,
-                WhatHappened::Message(ToMainTask::SubscriptionDestroyed { subscription_id }) => {
+            let new_request = match wake_up_reason {
+                WakeUpReason::NewRequest(request) => request,
+                WakeUpReason::Message(ToMainTask::SubscriptionDestroyed { subscription_id }) => {
                     let InnerSubscription {
                         unsubscribe_response,
                         ..
@@ -312,7 +312,7 @@ impl ClientMainTask {
                         subscription_id,
                     };
                 }
-                WhatHappened::Message(ToMainTask::RequestResponse(response)) => {
+                WakeUpReason::Message(ToMainTask::RequestResponse(response)) => {
                     let mut responses_queue = self.inner.serialized_io.responses_queue.lock().await;
                     let pos = responses_queue
                         .pending_serialized_responses
@@ -326,7 +326,7 @@ impl ClientMainTask {
                         .notify(usize::max_value());
                     continue;
                 }
-                WhatHappened::Message(ToMainTask::Notification(notification)) => {
+                WakeUpReason::Message(ToMainTask::Notification(notification)) => {
                     // TODO: filter out redundant notifications, as it's the entire point of this module
                     let mut responses_queue = self.inner.serialized_io.responses_queue.lock().await;
                     let pos = responses_queue

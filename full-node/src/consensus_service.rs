@@ -29,7 +29,11 @@ use crate::{database_thread, jaeger_service, network_service, LogCallback, LogLe
 use core::num::NonZeroU32;
 use futures_channel::{mpsc, oneshot};
 use futures_lite::FutureExt as _;
-use futures_util::{future, stream, SinkExt as _, StreamExt as _};
+use futures_util::{
+    future,
+    stream::{self, FuturesUnordered},
+    SinkExt as _, StreamExt as _,
+};
 use hashbrown::HashSet;
 use smol::lock::Mutex;
 use smoldot::{
@@ -40,7 +44,7 @@ use smoldot::{
     identity::keystore,
     informant::HashDisplay,
     libp2p,
-    network::{self, protocol::BlockData},
+    network::{self, codec::BlockData},
     sync::all,
     trie,
     verify::body_only::{self, StorageChanges, TrieEntryVersion},
@@ -48,8 +52,10 @@ use smoldot::{
 use std::{
     array,
     borrow::Cow,
-    iter, mem,
+    future::Future,
+    iter,
     num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -77,9 +83,12 @@ pub struct Config {
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// Access to the network, and identifier of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
@@ -171,7 +180,7 @@ pub enum InitError {
 
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
-    pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
+    pub async fn new(mut config: Config) -> Result<Arc<Self>, InitError> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_number,
@@ -219,7 +228,7 @@ impl ConsensusService {
                             Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                                 return Err(InitError::DatabaseCorruption(err))
                             }
-                            Err(full_sqlite::StorageAccessError::StoragePruned)
+                            Err(full_sqlite::StorageAccessError::IncompleteStorage)
                             | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                         };
                     let finalized_code = match database.block_storage_get(
@@ -232,7 +241,7 @@ impl ConsensusService {
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseCorruption(err))
                         }
-                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     let finalized_heap_pages = match database.block_storage_get(
@@ -245,7 +254,7 @@ impl ConsensusService {
                         Err(full_sqlite::StorageAccessError::Corrupted(err)) => {
                             return Err(InitError::DatabaseCorruption(err))
                         }
-                        Err(full_sqlite::StorageAccessError::StoragePruned)
+                        Err(full_sqlite::StorageAccessError::IncompleteStorage)
                         | Err(full_sqlite::StorageAccessError::UnknownBlock) => unreachable!(),
                     };
                     Ok((
@@ -313,7 +322,7 @@ impl ConsensusService {
             executor::host::HostVmPrototype::new(executor::host::Config {
                 module: finalized_code,
                 heap_pages,
-                exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                exec_hint: executor::vm::ExecHint::ValidateAndCompile, // TODO: probably should be decided by the optimisticsync
                 allow_unresolved_imports: false,
             })
             .map_err(InitError::FinalizedRuntimeInit)?
@@ -321,7 +330,6 @@ impl ConsensusService {
 
         let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
 
-        let (block_requests_finished_tx, block_requests_finished_rx) = mpsc::channel(0);
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
         let background_sync = SyncBackground {
@@ -333,20 +341,21 @@ impl ConsensusService {
             keystore: config.keystore,
             finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
             network_service: config.network_service.0,
-            network_chain_index: config.network_service.1,
+            network_chain_id: config.network_service.1,
+            network_local_chain_update_needed: true,
+            pending_block_announce: None,
             to_background_rx,
             blocks_notifications: Vec::with_capacity(8),
+            pending_notification: None,
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
-            tasks_executor: config.tasks_executor,
+            sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
-            block_requests_finished_tx,
-            block_requests_finished_rx,
             jaeger_service: config.jaeger_service,
         };
 
-        background_sync.start();
+        (config.tasks_executor)(Box::pin(background_sync.run()));
 
         Ok(Arc::new(ConsensusService {
             block_number_bytes: config.block_number_bytes,
@@ -581,8 +590,7 @@ struct SyncBackground {
     /// This "trick" is necessary in order to not cancel requests that have already been started
     /// against a peer when it disconnects and that might already have a response.
     ///
-    /// Each on-going request has a corresponding background task that sends its result to
-    /// [`SyncBackground::block_requests_finished_rx`].
+    /// Each on-going request has a corresponding background task in [`SyncBackground::sub_tasks`].
     sync: all::AllSync<(), Option<NetworkSourceInfo>, NonFinalizedBlock>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
@@ -624,13 +632,23 @@ struct SyncBackground {
     /// List of senders to report events to when they happen.
     blocks_notifications: Vec<async_channel::Sender<Notification>>,
 
+    /// Notification ready to be sent to [`SyncBackground::blocks_notifications`].
+    pending_notification: Option<Notification>,
+
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
 
     /// Index, within the [`SyncBackground::network_service`], of the chain that this sync service
     /// is syncing from. This value must be passed as parameter when starting requests on the
     /// network service.
-    network_chain_index: usize,
+    network_chain_id: network_service::ChainId,
+
+    /// If `true`, [`network_service::NetworkService::set_local_best_block`] should be called in
+    /// the near future.
+    network_local_chain_update_needed: bool,
+
+    /// SCALE-encoded header, hash, and height of a block waiting to be announced to other peers.
+    pending_block_announce: Option<(Vec<u8>, [u8; 32], u64)>,
 
     /// Stream of events coming from the [`SyncBackground::network_service`]. Used to know what
     /// happens on the peer-to-peer network.
@@ -643,26 +661,11 @@ struct SyncBackground {
     /// source are removed.
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
 
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    /// Futures that get executed by the background task.
+    sub_tasks: FuturesUnordered<Pin<Box<dyn Future<Output = SubtaskFinished> + Send>>>,
 
     /// See [`Config::log_callback`].
     log_callback: Arc<dyn LogCallback + Send + Sync>,
-
-    /// Block requests that have been emitted on the networking service and that are still in
-    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
-    block_requests_finished_rx: mpsc::Receiver<(
-        all::RequestId,
-        all::SourceId,
-        Result<Vec<BlockData>, network_service::BlocksRequestError>,
-    )>,
-
-    /// Sending side of [`SyncBackground::block_requests_finished_rx`].
-    block_requests_finished_tx: mpsc::Sender<(
-        all::RequestId,
-        all::SourceId,
-        Result<Vec<BlockData>, network_service::BlocksRequestError>,
-    )>,
 
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
@@ -693,42 +696,52 @@ struct NetworkSourceInfo {
     is_disconnected: bool,
 }
 
-impl SyncBackground {
-    fn start(mut self) {
-        // This function is a small hack because I didn't find a better way to store the executor
-        // within `Background` while at the same time spawning the `Background` using said
-        // executor.
-        let mut actual_executor =
-            mem::replace(&mut self.tasks_executor, Box::new(|_| unreachable!()));
-        let (tx, rx) = oneshot::channel();
-        actual_executor(Box::pin(async move {
-            let actual_executor = rx.await.unwrap();
-            self.tasks_executor = actual_executor;
-            self.run().await;
-        }));
-        tx.send(actual_executor).unwrap_or_else(|_| panic!());
-    }
+enum SubtaskFinished {
+    BlocksRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<Vec<BlockData>, network_service::BlocksRequestError>,
+    },
+    WarpSyncRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<
+            network::service::EncodedGrandpaWarpSyncResponse,
+            network_service::WarpSyncRequestError,
+        >,
+    },
+    StorageRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<network::service::EncodedMerkleProof, ()>,
+    },
+    CallProofRequestFinished {
+        request_id: all::RequestId,
+        source_id: all::SourceId,
+        result: Result<network::service::EncodedMerkleProof, ()>,
+    },
+}
 
+impl SyncBackground {
     async fn run(mut self) {
         let mut process_sync = true;
 
         loop {
             self.start_network_requests().await;
 
-            enum WhatHappened {
+            enum WakeUpReason {
                 ReadyToAuthor,
                 FrontendEvent(ToBackground),
                 FrontendClosed,
+                SendPendingNotification(Notification),
                 NetworkEvent(network_service::Event),
-                RequestFinished(
-                    all::RequestId,
-                    all::SourceId,
-                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
-                ),
+                NetworkLocalChainUpdate,
+                AnnounceBlock(Vec<u8>, [u8; 32], u64),
+                SubtaskFinished(SubtaskFinished),
                 SyncProcess,
             }
 
-            let what_happened: WhatHappened = {
+            let wake_up_reason: WakeUpReason = {
                 // Creating the block authoring state and prepare a future that is ready when something
                 // related to the block authoring is ready.
                 // TODO: refactor as a separate task?
@@ -821,35 +834,58 @@ impl SyncBackground {
                     }
                 };
 
-                async move {
-                    authoring_ready_future.await;
-                    WhatHappened::ReadyToAuthor
+                async {
+                    if let Some(notification) = self.pending_notification.take() {
+                        WakeUpReason::SendPendingNotification(notification)
+                    } else {
+                        future::pending().await
+                    }
                 }
+                .or(async move {
+                    authoring_ready_future.await;
+                    WakeUpReason::ReadyToAuthor
+                })
                 .or(async {
                     self.to_background_rx
                         .next()
                         .await
-                        .map_or(WhatHappened::FrontendClosed, WhatHappened::FrontendEvent)
+                        .map_or(WakeUpReason::FrontendClosed, WakeUpReason::FrontendEvent)
                 })
                 .or(async {
-                    WhatHappened::NetworkEvent(self.from_network_service.next().await.unwrap())
+                    WakeUpReason::NetworkEvent(self.from_network_service.next().await.unwrap())
                 })
                 .or(async {
-                    let (request_id, source_id, result) =
-                        self.block_requests_finished_rx.select_next_some().await;
-                    WhatHappened::RequestFinished(request_id, source_id, result)
+                    if self.network_local_chain_update_needed {
+                        self.network_local_chain_update_needed = false;
+                        WakeUpReason::NetworkLocalChainUpdate
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    if let Some((header, hash, height)) = self.pending_block_announce.take() {
+                        WakeUpReason::AnnounceBlock(header, hash, height)
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .or(async {
+                    let Some(subtask_finished) = self.sub_tasks.next().await else {
+                        future::pending().await
+                    };
+                    WakeUpReason::SubtaskFinished(subtask_finished)
                 })
                 .or(async {
                     if !process_sync {
                         future::pending().await
                     }
-                    WhatHappened::SyncProcess
+                    WakeUpReason::SyncProcess
                 })
                 .await
             };
 
-            match what_happened {
-                WhatHappened::ReadyToAuthor => {
+            match wake_up_reason {
+                WakeUpReason::ReadyToAuthor => {
                     // Ready to author a block. Call `author_block()`.
                     // While a block is being authored, the whole syncing state machine is
                     // deliberately frozen.
@@ -875,12 +911,12 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WhatHappened::FrontendClosed => {
+                WakeUpReason::FrontendClosed => {
                     // Shutdown.
                     return;
                 }
 
-                WhatHappened::FrontendEvent(ToBackground::SubscribeAll {
+                WakeUpReason::FrontendEvent(ToBackground::SubscribeAll {
                     buffer_size,
                     _max_finalized_pinned_blocks: _,
                     result_tx,
@@ -946,7 +982,19 @@ impl SyncBackground {
                         new_blocks,
                     });
                 }
-                WhatHappened::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
+                WakeUpReason::SendPendingNotification(notification) => {
+                    // Elements in `blocks_notifications` are removed one by one and inserted
+                    // back if the channel is still open.
+                    for index in (0..self.blocks_notifications.len()).rev() {
+                        let subscription = self.blocks_notifications.swap_remove(index);
+                        if subscription.try_send(notification.clone()).is_err() {
+                            continue;
+                        }
+                        self.blocks_notifications.push(subscription);
+                    }
+                }
+
+                WakeUpReason::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
                     let _ = result_tx.send(SyncState {
                         best_block_hash: self.sync.best_block_hash(),
                         best_block_number: self.sync.best_block_number(),
@@ -957,11 +1005,11 @@ impl SyncBackground {
                         finalized_block_number: self.sync.finalized_block_header().number,
                     });
                 }
-                WhatHappened::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
+                WakeUpReason::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
                     // TODO: check whether block was indeed pinned, and prune blocks that aren't pinned anymore from the database
                     let _ = result_tx.send(());
                 }
-                WhatHappened::FrontendEvent(ToBackground::IsMajorSyncingHint { result_tx }) => {
+                WakeUpReason::FrontendEvent(ToBackground::IsMajorSyncingHint { result_tx }) => {
                     // As documented, the value returned doesn't need to be precise.
                     let result = match self.sync.status() {
                         all::Status::Sync => false,
@@ -972,12 +1020,71 @@ impl SyncBackground {
                     let _ = result_tx.send(result);
                 }
 
-                WhatHappened::NetworkEvent(network_service::Event::Connected {
+                WakeUpReason::NetworkLocalChainUpdate => {
+                    let best_hash = self.sync.best_block_hash();
+                    let best_number = self.sync.best_block_number();
+                    self.network_service
+                        .set_local_best_block(self.network_chain_id, best_hash, best_number)
+                        .await;
+                }
+
+                WakeUpReason::AnnounceBlock(header, hash, height) => {
+                    // We can never be guaranteed that a certain source does *not* know about a
+                    // block, however it is not a big problem to send a block announce to a source
+                    // that already knows about that block. For this reason, the list of sources
+                    // we send the block announce to is `all_sources - sources_that_know_it`.
+                    //
+                    // Note that not sending block announces to sources that already
+                    // know that block means that these sources might also miss the
+                    // fact that our local best block has been updated. This is in
+                    // practice not a problem either.
+                    let sources_to_announce_to = {
+                        let mut all_sources = self
+                            .sync
+                            .sources()
+                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                        for knows in self.sync.knows_non_finalized_block(height, &hash) {
+                            all_sources.remove(&knows);
+                        }
+                        all_sources
+                    };
+
+                    let is_best = self.sync.best_block_hash() == hash;
+
+                    for source_id in sources_to_announce_to {
+                        let peer_id = match &self.sync[source_id] {
+                            Some(info) if !info.is_disconnected => &info.peer_id,
+                            _ => continue,
+                        };
+
+                        if self
+                            .network_service
+                            .clone()
+                            .send_block_announce(
+                                peer_id.clone(),
+                                self.network_chain_id,
+                                header.clone(),
+                                is_best,
+                            )
+                            .await
+                            .is_ok()
+                        {
+                            // Note that `try_add_known_block_to_source` might have
+                            // no effect, which is not a problem considering that this
+                            // block tracking is mostly about optimizations and
+                            // politeness.
+                            self.sync
+                                .try_add_known_block_to_source(source_id, height, hash);
+                        }
+                    }
+                }
+
+                WakeUpReason::NetworkEvent(network_service::Event::Connected {
                     peer_id,
-                    chain_index,
+                    chain_id,
                     best_block_number,
                     best_block_hash,
-                }) if chain_index == self.network_chain_index => {
+                }) if chain_id == self.network_chain_id => {
                     // Most of the time, we insert a new source in the state machine.
                     // However, a source of that `PeerId` might already exist but be considered as
                     // disconnected. If that is the case, we simply mark it as no
@@ -1003,10 +1110,10 @@ impl SyncBackground {
                         }
                     }
                 }
-                WhatHappened::NetworkEvent(network_service::Event::Disconnected {
+                WakeUpReason::NetworkEvent(network_service::Event::Disconnected {
                     peer_id,
-                    chain_index,
-                }) if chain_index == self.network_chain_index => {
+                    chain_id,
+                }) if chain_id == self.network_chain_id => {
                     // Sources that disconnect are only immediately removed from the sync state
                     // machine if they have no request in progress. If that is not the case, they
                     // are instead only marked as disconnected.
@@ -1021,12 +1128,12 @@ impl SyncBackground {
                         *is_disconnected = true;
                     }
                 }
-                WhatHappened::NetworkEvent(network_service::Event::BlockAnnounce {
-                    chain_index,
+                WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                    chain_id,
                     peer_id,
                     scale_encoded_header,
                     is_best,
-                }) if chain_index == self.network_chain_index => {
+                }) if chain_id == self.network_chain_id => {
                     let _jaeger_span = self.jaeger_service.block_announce_process_span(
                         &header::hash_from_scale_encoded_header(&scale_encoded_header),
                     );
@@ -1040,20 +1147,32 @@ impl SyncBackground {
                         all::BlockAnnounceOutcome::NotFinalizedChain => {}
                         all::BlockAnnounceOutcome::Discarded => {}
                         all::BlockAnnounceOutcome::StoredForLater {} => {}
-                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
+                        all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(), // TODO: ?!?! why unreachable? also, ban the peer
                     }
                 }
-                WhatHappened::NetworkEvent(_) => {
+                WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {
+                    chain_id,
+                    peer_id,
+                    finalized_block_height,
+                }) if chain_id == self.network_chain_id => {
+                    let source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                    self.sync
+                        .update_source_finality_state(source_id, finalized_block_height);
+                }
+                WakeUpReason::NetworkEvent(_) => {
                     // Different chain index.
                 }
 
-                WhatHappened::RequestFinished(request_id, source_id, result) => {
-                    // TODO: clarify this piece of code
-                    let result = result.map_err(|_| ());
-                    let (_, response_outcome) = self.sync.blocks_request_response(
+                WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Ok(blocks),
+                }) => {
+                    let _ = self.sync.blocks_request_response(
                         request_id,
-                        result.map(|v| {
-                            v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        Ok(blocks
+                            .into_iter()
+                            .map(|block| all::BlockRequestSuccessBlock {
                                 scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                                 scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
                                 scale_encoded_justifications: block
@@ -1066,19 +1185,12 @@ impl SyncBackground {
                                     })
                                     .collect(),
                                 user_data: NonFinalizedBlock::NotVerified,
-                            })
-                        }),
+                            })),
                     );
-
-                    match response_outcome {
-                        all::ResponseOutcome::Outdated
-                        | all::ResponseOutcome::Queued
-                        | all::ResponseOutcome::NotFinalizedChain { .. }
-                        | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-                    }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
+                    // TODO: DRY
                     if self.sync[source_id]
                         .as_ref()
                         .map_or(false, |info| info.is_disconnected)
@@ -1094,7 +1206,206 @@ impl SyncBackground {
                     process_sync = true;
                 }
 
-                WhatHappened::SyncProcess => {
+                WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Err(_),
+                }) => {
+                    // Note that we perform the ban even if the source is now disconnected.
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                    self.network_service
+                        .ban_and_disconnect(
+                            peer_id,
+                            self.network_chain_id,
+                            network_service::BanSeverity::Low,
+                            "blocks-request-error",
+                        )
+                        .await;
+
+                    let _ = self
+                        .sync
+                        .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::WarpSyncRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Ok(result),
+                }) => {
+                    let decoded = result.decode();
+                    let fragments = decoded
+                        .fragments
+                        .into_iter()
+                        .map(|f| all::WarpSyncFragment {
+                            scale_encoded_header: f.scale_encoded_header.to_vec(),
+                            scale_encoded_justification: f.scale_encoded_justification.to_vec(),
+                        })
+                        .collect();
+                    let _ = self.sync.grandpa_warp_sync_response_ok(
+                        request_id,
+                        fragments,
+                        decoded.is_finished,
+                    );
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::WarpSyncRequestFinished {
+                    request_id,
+                    source_id,
+                    result: Err(_),
+                }) => {
+                    // Note that we perform the ban even if the source is now disconnected.
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                    self.network_service
+                        .ban_and_disconnect(
+                            peer_id,
+                            self.network_chain_id,
+                            network_service::BanSeverity::Low,
+                            "warp-sync-request-error",
+                        )
+                        .await;
+
+                    let _ = self.sync.grandpa_warp_sync_response_err(request_id);
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::StorageRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
+                    if result.is_err() {
+                        // Note that we perform the ban even if the source is now disconnected.
+                        let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                        self.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                self.network_chain_id,
+                                network_service::BanSeverity::Low,
+                                "storage-proof-request-error",
+                            )
+                            .await;
+                    }
+
+                    let _ = self
+                        .sync
+                        .storage_get_response(request_id, result.map(|r| r.decode().to_owned()));
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SubtaskFinished(SubtaskFinished::CallProofRequestFinished {
+                    request_id,
+                    source_id,
+                    result,
+                }) => {
+                    if result.is_err() {
+                        // Note that we perform the ban even if the source is now disconnected.
+                        let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
+                        self.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                self.network_chain_id,
+                                network_service::BanSeverity::Low,
+                                "call-proof-request-error",
+                            )
+                            .await;
+                    }
+
+                    self.sync
+                        .call_proof_response(request_id, result.map(|r| r.decode().to_owned()));
+                    // TODO: need help from networking service to avoid this to_owned
+
+                    // If the source was actually disconnected and has no other request in
+                    // progress, we clean it up.
+                    // TODO: DRY
+                    if self.sync[source_id]
+                        .as_ref()
+                        .map_or(false, |info| info.is_disconnected)
+                        && self.sync.source_num_ongoing_requests(source_id) == 0
+                    {
+                        let (info, mut _requests) = self.sync.remove_source(source_id);
+                        debug_assert!(_requests.next().is_none());
+                        self.peers_source_id_map
+                            .remove(&info.unwrap().peer_id)
+                            .unwrap();
+                    }
+
+                    process_sync = true;
+                }
+
+                WakeUpReason::SyncProcess => {
+                    // Given that processing blocks might generate a notification, and that
+                    // only one notification can be queued at a time, this path must never be
+                    // reached if a notification is already waiting.
+                    debug_assert!(self.pending_notification.is_none());
+                    // Similarly, verifying a block might generate a block announce.
+                    debug_assert!(self.pending_block_announce.is_none());
+
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
                     self = new_self;
@@ -1534,25 +1845,23 @@ impl SyncBackground {
 
                     let request = self.network_service.clone().blocks_request(
                         peer_id,
-                        self.network_chain_index,
-                        network::protocol::BlocksRequestConfig {
+                        self.network_chain_id,
+                        network::codec::BlocksRequestConfig {
                             start: if let Some(first_block_hash) = first_block_hash {
-                                network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
+                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
                             } else {
-                                network::protocol::BlocksRequestConfigStart::Number(
-                                    first_block_height,
-                                )
+                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
                             },
                             desired_count: NonZeroU32::new(
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                             )
                             .unwrap(),
                             direction: if ascending {
-                                network::protocol::BlocksRequestDirection::Ascending
+                                network::codec::BlocksRequestDirection::Ascending
                             } else {
-                                network::protocol::BlocksRequestDirection::Descending
+                                network::codec::BlocksRequestDirection::Descending
                             },
-                            fields: network::protocol::BlocksRequestFields {
+                            fields: network::codec::BlocksRequestFields {
                                 header: request_headers,
                                 body: request_bodies,
                                 justifications: request_justification,
@@ -1562,22 +1871,110 @@ impl SyncBackground {
 
                     let request_id = self.sync.add_request(source_id, request_info.into(), ());
 
-                    (self.tasks_executor)(Box::pin({
-                        let mut block_requests_finished_tx =
-                            self.block_requests_finished_tx.clone();
-                        async move {
-                            let result = request.await;
-                            let _ = block_requests_finished_tx
-                                .send((request_id, source_id, result))
-                                .await;
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::BlocksRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
                         }
                     }));
                 }
-                all::DesiredRequest::GrandpaWarpSync { .. }
-                | all::DesiredRequest::StorageGetMerkleProof { .. }
-                | all::DesiredRequest::RuntimeCallMerkleProof { .. } => {
-                    // Not used in "full" mode.
-                    unreachable!()
+                all::DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().warp_sync_request(
+                        peer_id,
+                        self.network_chain_id,
+                        sync_start_block_hash,
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::WarpSync {
+                            sync_start_block_hash,
+                        },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::WarpSyncRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+                all::DesiredRequest::StorageGetMerkleProof {
+                    block_hash, keys, ..
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().storage_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::StorageProofRequestConfig {
+                            block_hash,
+                            keys: keys.clone().into_iter(),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::StorageGet { block_hash, keys },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::StorageRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+                all::DesiredRequest::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().call_proof_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::CallProofRequestConfig {
+                            block_hash,
+                            method: function_name.clone(),
+                            parameter_vectored: iter::once(parameter_vectored.clone()),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::RuntimeCallMerkleProof {
+                            block_hash,
+                            function_name,
+                            parameter_vectored,
+                        },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::CallProofRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
                 }
             }
         }
@@ -1601,11 +1998,78 @@ impl SyncBackground {
                 self.sync = idle;
                 (self, false)
             }
-            all::ProcessOne::VerifyWarpSyncFragment(_)
-            | all::ProcessOne::WarpSyncBuildRuntime(_)
-            | all::ProcessOne::WarpSyncBuildChainInformation(_)
-            | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
+            all::ProcessOne::VerifyWarpSyncFragment(verify) => {
+                let sender = verify
+                    .proof_sender()
+                    .map(|(_, s)| s.as_ref().unwrap().peer_id.clone());
+
+                let (new_sync, outcome) = verify.perform(rand::random());
+                self.sync = new_sync;
+                match outcome {
+                    Ok((fragment_hash, fragment_height)) => {
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "warp-sync-fragment-verification-success; peer_id={}, fragment-hash={}, fragment-height={fragment_height}",
+                                sender.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_owned()),
+                                hex::encode(&fragment_hash)
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        if let Some(sender) = &sender {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender.clone(),
+                                    self.network_chain_id,
+                                    network_service::BanSeverity::High,
+                                    "bad-warp-sync-fragment",
+                                )
+                                .await;
+                        }
+
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!(
+                                "failed-warp-sync-fragment-verification; peer_id={}, error={err}",
+                                sender
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "unknown".to_owned()),
+                            ),
+                        );
+                    }
+                }
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncBuildRuntime(build_runtime) => {
+                let (new_sync, outcome) =
+                    build_runtime.build(all::ExecHint::ValidateAndCompile, true);
+                self.sync = new_sync;
+                if let Err(err) = outcome {
+                    self.log_callback.log(
+                        LogLevel::Warn,
+                        format!("failed-warp-sync-runtime-compilation; error={err}"),
+                    );
+                }
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncBuildChainInformation(build_chain_information) => {
+                let (new_sync, outcome) = build_chain_information.build();
+                self.sync = new_sync;
+                if let Err(err) = outcome {
+                    self.log_callback.log(
+                        LogLevel::Warn,
+                        format!("failed-warp-sync-chain-information-build; error={err}"),
+                    );
+                }
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncFinished { .. } => {
+                // Warp syncing is currently disabled for the full node.
+                unimplemented!()
+            }
             all::ProcessOne::VerifyBlock(verify) => {
+                // TODO: ban peer in case of verification failure
                 let when_verification_started = Instant::now();
                 let mut database_accesses_duration = Duration::new(0, 0);
                 let mut runtime_build_duration = Duration::new(0, 0);
@@ -1710,62 +2174,83 @@ impl SyncBackground {
                                 .with_database_detached({
                                     let storage_changes = storage_changes.clone();
                                     let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
+                                    let body = header_verification_success
+                                        .scale_encoded_extrinsics().unwrap()
+                                        .map(|tx| tx.as_ref().to_owned())
+                                        .collect::<Vec<_>>();
                                     move |database| {
-                                        // TODO: overhead for building the SCALE encoding of the header
                                         let result = database.insert(
                                             &scale_encoded_header,
                                             is_new_best,
-                                            iter::empty::<Vec<u8>>(), // TODO:,no /!\
-                                            storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
-                                                |(_child_trie, key, change)| {
-                                                    let body_only::TrieChange::InsertUpdate {
-                                                        new_merkle_value,
-                                                        partial_key,
-                                                        children_merkle_values,
-                                                        new_storage_value
-                                                    } = &change
-                                                        else { return None };
-
-                                                    // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
-                                                    let references_merkle_value = key.iter().copied()
-                                                        .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
-                                                        .all(|(a, b)| a == b);
-
-                                                    Some(full_sqlite::InsertTrieNode {
-                                                        merkle_value: (&new_merkle_value[..]).into(),
-                                                        children_merkle_values: array::from_fn(|n| {
-                                                            children_merkle_values[n]
-                                                                .as_ref()
-                                                                .map(|v| From::from(&v[..]))
-                                                        }),
-                                                        storage_value: match new_storage_value {
-                                                            body_only::TrieChangeStorageValue::Modified {
-                                                                new_value: Some(value),
-                                                            } => full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                                value: Cow::Borrowed(value),
-                                                                references_merkle_value,
-                                                            },
-                                                            body_only::TrieChangeStorageValue::Modified {
-                                                                new_value: None,
-                                                            } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                                            body_only::TrieChangeStorageValue::Unmodified => {
-                                                                full_sqlite::InsertTrieNodeStorageValue::SameAsParent
-                                                            }
-                                                        },
-                                                        partial_key_nibbles: partial_key
-                                                            .iter()
-                                                            .map(|n| u8::from(*n))
-                                                            .collect::<Vec<_>>()
-                                                            .into(),
-                                                    })
-                                                },
-                                            ),
-                                            u8::from(state_trie_version),
+                                            body.into_iter(),
                                         );
 
                                         match result {
                                             Ok(()) => {}
                                             Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                            Err(err) => panic!("{}", err),
+                                        }
+
+                                        let trie_nodes = storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
+                                            |(_child_trie, key, change)| {
+                                                let body_only::TrieChange::InsertUpdate {
+                                                    new_merkle_value,
+                                                    partial_key,
+                                                    children_merkle_values,
+                                                    new_storage_value
+                                                } = &change
+                                                    else { return None };
+
+                                                // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                                                let references_merkle_value = key.iter().copied()
+                                                    .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                                                    .all(|(a, b)| a == b);
+
+                                                Some(full_sqlite::InsertTrieNode {
+                                                    merkle_value: (&new_merkle_value[..]).into(),
+                                                    children_merkle_values: array::from_fn(|n| {
+                                                        children_merkle_values[n]
+                                                            .as_ref()
+                                                            .map(|v| From::from(&v[..]))
+                                                    }),
+                                                    storage_value: match new_storage_value {
+                                                        body_only::TrieChangeStorageValue::Modified {
+                                                            new_value: Some(value),
+                                                        } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                            value: Cow::Borrowed(value),
+                                                            references_merkle_value,
+                                                        },
+                                                        body_only::TrieChangeStorageValue::Modified {
+                                                            new_value: None,
+                                                        } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                                        body_only::TrieChangeStorageValue::Unmodified => {
+                                                            // TODO: overhead, and no child trie support
+                                                            if let Some((value_in_parent, _)) = database.block_storage_get(&parent_hash, iter::empty::<iter::Empty<_>>(), key.iter().map(|n| u8::from(*n))).unwrap() {
+                                                                full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                                    value: Cow::Owned(value_in_parent),
+                                                                    references_merkle_value,
+                                                                }
+                                                            } else {
+                                                                full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                                            }
+                                                        }
+                                                    },
+                                                    partial_key_nibbles: partial_key
+                                                        .iter()
+                                                        .map(|n| u8::from(*n))
+                                                        .collect::<Vec<_>>()
+                                                        .into(),
+                                                })
+                                           },
+                                        ).collect::<Vec<_>>();
+
+                                        let result = database.insert_trie_nodes(
+                                            trie_nodes.into_iter(),
+                                            u8::from(state_trie_version),
+                                        );
+
+                                        match result {
+                                            Ok(()) => {}
                                             Err(err) => panic!("{}", err),
                                         }
                                     }
@@ -1792,33 +2277,19 @@ impl SyncBackground {
                             );
 
                             // Notify the subscribers.
-                            // Elements in `blocks_notifications` are removed one by one and
-                            // inserted back if the channel is still open.
-                            let runtime_to_notify = if let Some(new_runtime) = &new_runtime {
-                                Some(Arc::new(new_runtime.clone()))
-                            } else {
-                                None
-                            };
-                            for index in (0..self.blocks_notifications.len()).rev() {
-                                let subscription = self.blocks_notifications.swap_remove(index);
-                                if subscription
-                                    .try_send(Notification::Block {
-                                        block: BlockNotification {
-                                            is_new_best,
-                                            scale_encoded_header: scale_encoded_header.clone(),
-                                            block_hash: header_verification_success.hash(),
-                                            runtime_update: runtime_to_notify.clone(),
-                                            parent_hash,
-                                        },
-                                        storage_changes: storage_changes.clone(),
-                                    })
-                                    .is_err()
-                                {
-                                    continue;
-                                }
-
-                                self.blocks_notifications.push(subscription);
-                            }
+                            debug_assert!(self.pending_notification.is_none());
+                            self.pending_notification = Some(Notification::Block {
+                                block: BlockNotification {
+                                    is_new_best,
+                                    scale_encoded_header: scale_encoded_header.clone(),
+                                    block_hash: header_verification_success.hash(),
+                                    runtime_update: new_runtime
+                                        .as_ref()
+                                        .map(|new_runtime| Arc::new(new_runtime.clone())),
+                                    parent_hash,
+                                },
+                                storage_changes: storage_changes.clone(),
+                            });
 
                             // Processing has made a step forward.
 
@@ -1838,71 +2309,17 @@ impl SyncBackground {
 
                             if is_new_best {
                                 // Update the networking.
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_index,
-                                    self.sync.best_block_hash(),
-                                    self.sync.best_block_number(),
-                                );
-                                fut.await;
-
+                                self.network_local_chain_update_needed = true;
                                 // Reset the block authoring, in order to potentially build a
                                 // block on top of this new best.
                                 self.block_authoring = None;
                             }
 
                             // Announce the newly-verified block to all the sources that might
-                            // not be aware of it. We can never be guaranteed that a certain
-                            // source does *not* know about a block, however it is not a big
-                            // problem to send a block announce to a source that already knows
-                            // about that block. For this reason, the list of sources we send
-                            // the block announce to is `all_sources - sources_that_know_it`.
-                            //
-                            // Note that not sending block announces to sources that already
-                            // know that block means that these sources might also miss the
-                            // fact that our local best block has been updated. This is in
-                            // practice not a problem either.
-                            let sources_to_announce_to = {
-                                let mut all_sources =
-                                    self.sync
-                                        .sources()
-                                        .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-                                for knows in
-                                    self.sync.knows_non_finalized_block(height, &hash_to_verify)
-                                {
-                                    all_sources.remove(&knows);
-                                }
-                                all_sources
-                            };
-
-                            for source_id in sources_to_announce_to {
-                                let peer_id = match &self.sync[source_id] {
-                                    Some(info) if !info.is_disconnected => &info.peer_id,
-                                    _ => continue,
-                                };
-
-                                if self
-                                    .network_service
-                                    .clone()
-                                    .send_block_announce(
-                                        peer_id.clone(),
-                                        0,
-                                        scale_encoded_header.clone(),
-                                        is_new_best,
-                                    )
-                                    .await
-                                    .is_ok()
-                                {
-                                    // Note that `try_add_known_block_to_source` might have
-                                    // no effect, which is not a problem considering that this
-                                    // block tracking is mostly about optimizations and
-                                    // politeness.
-                                    self.sync.try_add_known_block_to_source(
-                                        source_id,
-                                        height,
-                                        hash_to_verify,
-                                    );
-                                }
-                            }
+                            // not be aware of it.
+                            debug_assert!(self.pending_block_announce.is_none());
+                            self.pending_block_announce =
+                                Some((scale_encoded_header, hash_to_verify, height));
 
                             return (self, true);
                         }
@@ -2018,11 +2435,22 @@ impl SyncBackground {
                             runtime_build_duration += before_runtime_build.elapsed();
                             body_verification = outcome;
                         }
+                        body_only::Verify::LogEmit(req) => {
+                            // Logs are ignored.
+                            body_verification = req.resume();
+                        }
                     }
                 }
             }
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
+                let sender = verify
+                    .sender()
+                    .1
+                    .as_ref()
+                    .map(|s| s.peer_id.clone())
+                    .unwrap();
+
                 match verify.perform(rand::random()) {
                     (
                         sync_out,
@@ -2042,19 +2470,14 @@ impl SyncBackground {
                         self.log_callback.log(
                             LogLevel::Debug,
                             format!(
-                                "finality-proof-verification; outcome=success; new-finalized={}",
+                                "finality-proof-verification; outcome=success, sender={sender}, new-finalized={}",
                                 HashDisplay(&new_finalized_hash)
                             ),
                         );
 
                         if updates_best_block {
-                            let fut = self.network_service.set_local_best_block(
-                                self.network_chain_index,
-                                self.sync.best_block_hash(),
-                                self.sync.best_block_number(),
-                            );
-                            fut.await;
-
+                            // Update the networking.
+                            self.network_local_chain_update_needed = true;
                             // Reset the block authoring, in order to potentially build a
                             // block on top of this new best.
                             self.block_authoring = None;
@@ -2071,33 +2494,25 @@ impl SyncBackground {
                                 database.set_finalized(&new_finalized_hash).unwrap();
                             })
                             .await;
-                        // Elements in `blocks_notifications` are removed one by one and inserted
-                        // back if the channel is still open.
-                        for index in (0..self.blocks_notifications.len()).rev() {
-                            let subscription = self.blocks_notifications.swap_remove(index);
-                            if subscription
-                                .try_send(Notification::Finalized {
-                                    finalized_blocks_newest_to_oldest:
-                                        finalized_blocks_newest_to_oldest
-                                            .iter()
-                                            .map(|b| b.header.hash(self.sync.block_number_bytes()))
-                                            .collect::<Vec<_>>(),
-                                    pruned_blocks_hashes: pruned_blocks.clone(),
-                                    best_block_hash: self.sync.best_block_hash(),
-                                })
-                                .is_err()
-                            {
-                                continue;
-                            }
 
-                            self.blocks_notifications.push(subscription);
-                        }
+                        // Notify the subscribers.
+                        debug_assert!(self.pending_notification.is_none());
+                        self.pending_notification = Some(Notification::Finalized {
+                            finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
+                                .iter()
+                                .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                .collect::<Vec<_>>(),
+                            pruned_blocks_hashes: pruned_blocks.clone(),
+                            best_block_hash: self.sync.best_block_hash(),
+                        });
+
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
                         self.log_callback.log(
                             LogLevel::Debug,
-                            "finality-proof-verification; outcome=pending".to_string(),
+                            "finality-proof-verification; outcome=pending, sender={sender}"
+                                .to_string(),
                         );
                         self.sync = sync_out;
                         (self, true)
@@ -2105,23 +2520,45 @@ impl SyncBackground {
                     (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
                         self.log_callback.log(
                             LogLevel::Debug,
-                            "finality-proof-verification; outcome=already-finalized".to_string(),
+                            "finality-proof-verification; outcome=already-finalized, sender={sender}".to_string(),
                         );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender.clone(),
+                                self.network_chain_id,
+                                network_service::BanSeverity::High,
+                                "bad-warp-sync-fragment",
+                            )
+                            .await;
                         self.log_callback.log(
                             LogLevel::Warn,
-                            format!("finality-proof-verification-failure; error={}", error),
+                            format!(
+                                "finality-proof-verification-failure; sender={sender}, error={}",
+                                error
+                            ),
                         );
                         self.sync = sync_out;
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender.clone(),
+                                self.network_chain_id,
+                                network_service::BanSeverity::High,
+                                "bad-warp-sync-fragment",
+                            )
+                            .await;
                         self.log_callback.log(
                             LogLevel::Warn,
-                            format!("finality-proof-verification-failure; error={}", error),
+                            format!(
+                                "finality-proof-verification-failure; sender={sender}, error={}",
+                                error
+                            ),
                         );
                         self.sync = sync_out;
                         (self, true)

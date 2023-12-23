@@ -29,6 +29,7 @@ const chainSpecsFiles = [
     '../../demo-chain-specs/westend.json',
     '../../demo-chain-specs/westend-westmint.json',
     '../../demo-chain-specs/polkadot.json',
+    '../../demo-chain-specs/polkadot-asset-hub.json',
     '../../demo-chain-specs/polkadot-acala.json',
     '../../demo-chain-specs/kusama.json',
     '../../demo-chain-specs/kusama-statemine.json',
@@ -58,7 +59,7 @@ worker.postMessage(port2, [port2]);
 
 const client = smoldot.start({
     portToWorker: port1,
-    maxLogLevel: 3,  // Can be increased for more verbosity
+    maxLogLevel: process.stdout.isTTY ? 3 : 4,  // Can be modified manually for more verbosity
     forbidTcp: false,
     forbidWs: false,
     forbidNonLocalWs: false,

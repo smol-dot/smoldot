@@ -21,7 +21,12 @@ use futures_channel::oneshot;
 use futures_lite::{Future, StreamExt as _};
 use smol::lock::Mutex;
 use smoldot::{executor, trie};
-use std::{iter, num::NonZeroUsize, pin::Pin, sync::Arc};
+use std::{
+    iter,
+    num::NonZeroUsize,
+    pin::{self, Pin},
+    sync::Arc,
+};
 
 /// Configuration of the service.
 pub struct Config {
@@ -54,9 +59,10 @@ enum Message {
 impl RuntimeCachesService {
     /// Start a new service.
     pub fn new(config: Config) -> Self {
-        let (to_background, mut from_foreground) = async_channel::bounded(16);
+        let (to_background, from_foreground) = async_channel::bounded(16);
 
         (config.tasks_executor)(Box::pin(async move {
+            let mut from_foreground = pin::pin!(from_foreground);
             let mut cache =
                 lru::LruCache::<[u8; 32], Result<_, GetError>>::new(config.num_cache_entries);
 
@@ -99,7 +105,7 @@ impl RuntimeCachesService {
                                         executor::host::Config {
                                             module: &code,
                                             heap_pages,
-                                            exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
+                                            exec_hint: executor::vm::ExecHint::ValidateAndCompile,
                                             allow_unresolved_imports: true, // TODO: configurable? or if not, document
                                         },
                                     )
@@ -115,8 +121,8 @@ impl RuntimeCachesService {
                                 let _ = result_tx.send(Err(GetError::UnknownBlock));
                                 continue;
                             }
-                            (Err(database_thread::StorageAccessError::StoragePruned), _)
-                            | (_, Err(database_thread::StorageAccessError::StoragePruned)) => {
+                            (Err(database_thread::StorageAccessError::IncompleteStorage), _)
+                            | (_, Err(database_thread::StorageAccessError::IncompleteStorage)) => {
                                 // Note that we don't put the `CorruptedError` in the cache, in
                                 // case the database somehow recovers.
                                 let _ = result_tx.send(Err(GetError::Pruned));

@@ -15,8 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{borrow::Cow, string::String};
-use core::{fmt, future::Future, ops, pin::Pin, str, time::Duration};
+use alloc::borrow::Cow;
+use core::{fmt, future::Future, ops, panic::UnwindSafe, pin::Pin, str, time::Duration};
 use futures_util::future;
 
 pub use smoldot::libp2p::read_write;
@@ -25,16 +25,29 @@ pub use smoldot::libp2p::read_write;
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use smoldot::libp2p::with_buffers;
 
+// TODO: this module should probably not be public?
 pub mod address_parse;
 pub mod default;
+
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use default::DefaultPlatform;
 
 /// Access to a platform's capabilities.
 ///
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
-pub trait PlatformRef: Clone + Send + Sync + 'static {
+pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
+    /// `Future` that resolves once a certain amount of time has passed or a certain point in time
+    /// is reached. See [`PlatformRef::sleep`] and [`PlatformRef::sleep_until`].
     type Delay: Future<Output = ()> + Send + 'static;
+
+    /// A certain point in time. Typically `std::time::Instant`, but one can also
+    /// use `core::time::Duration`.
+    ///
+    /// The implementations of the `Add` and `Sub` traits must panic in case of overflow or
+    /// underflow, similar to the ones of `std::time::Instant` and `core::time::Duration`.
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -52,6 +65,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// the `MultiStream` and all its associated substream objects ([`PlatformRef::Stream`]) have
     /// been dropped.
     type MultiStream: Send + Sync + 'static;
+
     /// Opaque object representing either a single-stream connection or a substream in a
     /// multi-stream connection.
     ///
@@ -59,13 +73,28 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>> + Send + 'static;
-    type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
+
+    /// Object that dereferences to [`read_write::ReadWrite`] and gives access to the stream's
+    /// buffers. See the [`read_write`] module for more information.
+    /// See also [`PlatformRef::read_write_access`].
+    type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
+
+    /// Reference to an error that happened on a stream.
+    ///
+    /// Potentially returned by [`PlatformRef::read_write_access`].
+    ///
+    /// Typically `&'a std::io::Error`.
+    type StreamErrorRef<'a>: fmt::Display + fmt::Debug;
+
+    /// `Future` returned by [`PlatformRef::connect_stream`].
+    type StreamConnectFuture: Future<Output = Self::Stream> + Send + 'static;
+    /// `Future` returned by [`PlatformRef::connect_multistream`].
+    type MultiStreamConnectFuture: Future<Output = MultiStreamWebRtcConnection<Self::MultiStream>>
         + Send
         + 'static;
-    type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
+    /// `Future` returned by [`PlatformRef::wait_read_write_again`].
     type StreamUpdateFuture<'a>: Future<Output = ()> + Send + 'a;
-    type StreamErrorRef<'a>: fmt::Display + fmt::Debug;
+    /// `Future` returned by [`PlatformRef::next_substream`].
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
         + Send
         + 'a;
@@ -102,6 +131,17 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     ///
     /// The `Future` must be run until it yields a value.
+    ///
+    /// Implementers should be aware of the fact that polling the `Future` might panic (never
+    /// intentionally, but in case of a bug). Many tasks can be restarted if they panic, and
+    /// implementers are encouraged to absorb the panics that happen when polling. If a panic
+    /// happens, the `Future` that has panicked must never be polled again.
+    ///
+    /// > **Note**: Ideally, the `task` parameter would require the `UnwindSafe` trait.
+    /// >           Unfortunately, at the time of writing of this comment, it is extremely
+    /// >           difficult if not impossible to implement this trait on `Future`s. It is for
+    /// >           the same reason that the `std::thread::spawn` function of the standard library
+    /// >           doesn't require its parameter to implement `UnwindSafe`.
     fn spawn_task(
         &self,
         task_name: Cow<str>,
@@ -124,7 +164,15 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// >           disabling certain connection types after start-up is not supported.
     fn supports_connection_type(&self, connection_type: ConnectionType) -> bool;
 
-    /// Starts a connection attempt to the given multiaddress.
+    /// Starts a connection attempt to the given address.
+    ///
+    /// This function is only ever called with an `address` of a type for which
+    /// [`PlatformRef::supports_connection_type`] returned `true` in the past.
+    ///
+    /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
+    /// must **not** wait for the connection to be established.
+    /// In most scenarios, the `Future` returned by this function should immediately produce
+    /// an output.
     ///
     /// # Panic
     ///
@@ -133,7 +181,22 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     ///
     fn connect_stream(&self, address: Address) -> Self::StreamConnectFuture;
 
-    /// Starts a connection attempt to the given multiaddress.
+    /// Starts a connection attempt to the given address.
+    ///
+    /// This function is only ever called with an `address` of a type for which
+    /// [`PlatformRef::supports_connection_type`] returned `true` in the past.
+    ///
+    /// > **Note**: A so-called "multistream connection" is a connection made of multiple
+    /// >           substreams, and for which the opening and closing or substreams is handled by
+    /// >           the environment rather than by smoldot itself. Most platforms do not need to
+    /// >           support multistream connections. This function is in practice used in order
+    /// >           to support WebRTC connections when embedding smoldot-light within a web
+    /// >           browser.
+    ///
+    /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
+    /// must **not** wait for the connection to be established.
+    /// In most scenarios, the `Future` returned by this function should immediately produce
+    /// an output.
     ///
     /// # Panic
     ///
@@ -187,6 +250,9 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// Returns a future that becomes ready when [`PlatformRef::read_write_access`] should be
     /// called again on this stream.
     ///
+    /// Must always returned immediately if [`PlatformRef::read_write_access`] has never been
+    /// called on this stream.
+    ///
     /// See the documentation of [`read_write`] for more information.
     ///
     /// > **Note**: The `with_buffers` module provides a helper to more easily implement this
@@ -204,9 +270,6 @@ pub struct MultiStreamWebRtcConnection<TConnection> {
     pub connection: TConnection,
     /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
     pub local_tls_certificate_sha256: [u8; 32],
-    /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
-    // TODO: consider caching the information that was passed in the address instead of passing it back
-    pub remote_tls_certificate_sha256: [u8; 32],
 }
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
@@ -377,16 +440,12 @@ pub enum MultiStreamAddress {
 }
 
 /// Either an IPv4 or IPv6 address.
+///
+/// > **Note**: This enum is the same as `std::net::IpAddr`, but is copy-pasted here in order to
+/// >           be no-std-compatible.
 // TODO: replace this with `core::net::IpAddr` once it's stable: https://github.com/rust-lang/rust/issues/108443
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum IpAddr {
     V4([u8; 4]),
     V6([u8; 16]),
-}
-
-/// Error potentially returned by [`PlatformRef::connect_stream`] or
-/// [`PlatformRef::connect_multistream`].
-pub struct ConnectError {
-    /// Human-readable error message.
-    pub message: String,
 }

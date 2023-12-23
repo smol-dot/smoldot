@@ -69,7 +69,7 @@ export type Event =
     { ty: "connection-reset", connectionId: number } |
     { ty: "connection-stream-open", connectionId: number } |
     { ty: "connection-stream-reset", connectionId: number, streamId: number } |
-    { ty: "stream-send", connectionId: number, streamId?: number, data: Uint8Array } |
+    { ty: "stream-send", connectionId: number, streamId?: number, data: Array<Uint8Array> } |
     { ty: "stream-send-close", connectionId: number, streamId?: number };
 
 export type ParsedMultiaddr =
@@ -91,12 +91,12 @@ export interface Instance {
      * all connections.
      */
     shutdownExecutor: () => void,
-    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => void,
+    connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
-    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void,
-    streamReset: (connectionId: number, streamId: number) => void,
+    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => void,
+    streamReset: (connectionId: number, streamId: number, message: string) => void,
 }
 
 /**
@@ -120,16 +120,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         currentTask: string | null,
         bufferIndices: Uint8Array[],
         advanceExecutionPromise: null | (() => void),
-        stdoutBuffer: string,
-        stderrBuffer: string,
         onShutdownExecutorOrWasmPanic: () => void,
     } = {
         instance: null,
         currentTask: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
-        stdoutBuffer: "",
-        stderrBuffer: "",
         onShutdownExecutorOrWasmPanic: () => { }
     };
 
@@ -359,11 +355,18 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
             const instance = state.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
 
             ptr >>>= 0;
             len >>>= 0;
 
-            const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
+            const data = new Array();
+            for (let i = 0; i < len; ++i) {
+                const bufPtr = buffer.readUInt32LE(mem, ptr + 8 * i);
+                const bufLen = buffer.readUInt32LE(mem, ptr + 8 * i + 4);
+                data.push(mem.slice(bufPtr, bufPtr + bufLen));
+            } 
+
             // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
             eventCallback({ ty: "stream-send", connectionId, streamId, data });
         },
@@ -550,25 +553,16 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             cb();
         },
 
-        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => {
+        connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => {
             if (!state.instance)
                 return;
-            switch (info.type) {
-                case 'single-stream': {
-                    state.instance.exports.connection_open_single_stream(connectionId, info.initialWritableBytes);
-                    break
-                }
-                case 'multi-stream': {
-                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length + info.remoteTlsCertificateSha256.length);
-                    buffer.writeUInt8(handshakeTy, 0, 0);
-                    handshakeTy.set(info.localTlsCertificateSha256, 1)
-                    handshakeTy.set(info.remoteTlsCertificateSha256, 1 + info.localTlsCertificateSha256.length)
-                    state.bufferIndices[0] = handshakeTy;
-                    state.instance.exports.connection_open_multi_stream(connectionId, 0);
-                    delete state.bufferIndices[0]
-                    break
-                }
-            }
+
+            const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length);
+            buffer.writeUInt8(handshakeTy, 0, 0);
+            handshakeTy.set(info.localTlsCertificateSha256, 1)
+            state.bufferIndices[0] = handshakeTy;
+            state.instance.exports.connection_multi_stream_set_handshake_info(connectionId, 0);
+            delete state.bufferIndices[0]
         },
 
         connectionReset: (connectionId: number, message: string) => {
@@ -597,21 +591,22 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             delete state.bufferIndices[0]
         },
 
-        streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => {
+        streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => {
             if (!state.instance)
                 return;
             state.instance.exports.connection_stream_opened(
                 connectionId,
                 streamId,
-                direction === 'outbound' ? 1 : 0,
-                initialWritableBytes
+                direction === 'outbound' ? 1 : 0
             );
         },
 
-        streamReset: (connectionId: number, streamId: number) => {
+        streamReset: (connectionId: number, streamId: number, message: string) => {
             if (!state.instance)
                 return;
-            state.instance.exports.stream_reset(connectionId, streamId);
+            state.bufferIndices[0] = new TextEncoder().encode(message);
+            state.instance.exports.stream_reset(connectionId, streamId, 0);
+            delete state.bufferIndices[0]
         },
     };
 }
@@ -635,13 +630,12 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
     json_rpc_responses_peek: (chainId: number) => number,
     json_rpc_responses_pop: (chainId: number) => void,
     timer_finished: () => void,
-    connection_open_single_stream: (connectionId: number, initialWritableBytes: number) => void,
-    connection_open_multi_stream: (connectionId: number, handshakeTyBufferIndex: number) => void,
+    connection_multi_stream_set_handshake_info: (connectionId: number, handshakeTyBufferIndex: number) => void,
     stream_writable_bytes: (connectionId: number, streamId: number, numBytes: number) => void,
     stream_message: (connectionId: number, streamId: number, bufferIndex: number) => void,
-    connection_stream_opened: (connectionId: number, streamId: number, outbound: number, initialWritableBytes: number) => void,
+    connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
     connection_reset: (connectionId: number, bufferIndex: number) => void,
-    stream_reset: (connectionId: number, streamId: number) => void,
+    stream_reset: (connectionId: number, streamId: number, bufferIndex: number) => void,
 }
 
 interface SmoldotWasmInstance extends WebAssembly.Instance {

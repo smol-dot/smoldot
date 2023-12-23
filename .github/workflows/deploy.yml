@@ -44,7 +44,7 @@ jobs:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v5.0.0
+    - uses: docker/build-push-action@v5.1.0
       with:
         context: .
         file: ./full-node/Dockerfile
@@ -56,13 +56,13 @@ jobs:
   build-js-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.72
+      image: rust:1.74
     steps:
       - uses: actions/checkout@v4
         with:
           path: repo
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v3.8.1
+      - uses: actions/setup-node@v4.0.1
         with:
           node-version: current
       - run: npm install
@@ -75,7 +75,7 @@ jobs:
       - run: |
           mkdir -p ./doc
           mv ./repo/wasm-node/javascript/dist/doc/* ./doc
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: javascript-documentation
           path: ./doc/
@@ -83,7 +83,7 @@ jobs:
   build-rust-doc:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.72
+      image: rust:1.74
     steps:
       - uses: actions/checkout@v4
         with:
@@ -96,7 +96,7 @@ jobs:
       - run: |
           mkdir -p ./doc
           mv ./repo/target/doc/* ./doc
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: rust-documentation
           path: ./doc/
@@ -104,7 +104,7 @@ jobs:
   build-tests-coverage:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.72
+      image: rust:1.74
     steps:
       - run: apt update && apt install -y jq
       - run: rustup component add llvm-tools-preview
@@ -123,7 +123,7 @@ jobs:
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata merge -sparse ./coverage/default_*.profraw -o ./coverage/tests-coverage.profdata
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov show --format=html --output-dir=./html-out --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' --show-instantiations --show-line-counts-or-regions $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
           `rustc --print sysroot`/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov report --instr-profile=./coverage/tests-coverage.profdata --ignore-filename-regex='cargo/registry' --ignore-filename-regex='/rustc/' $(for file in `cat ./coverage/binaries-list`; do printf "%s %s " -object $file; done)
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: code-coverage-report
           path: ./html-out/
@@ -142,15 +142,15 @@ jobs:
           mkdir -p ./upload/doc-rust
           mkdir -p ./upload/tests-coverage
           touch ./upload/.nojekyll
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: javascript-documentation
           path: ./upload/doc-javascript
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: rust-documentation
           path: ./upload/doc-rust
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: code-coverage-report
           path: ./upload/tests-coverage
@@ -174,11 +174,11 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.72
+      image: rust:1.74
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v3.8.1
+      - uses: actions/setup-node@v4.0.1
         with:
           # Set the oldest version still maintained, in order to ensure compatibility. See <https://nodejs.dev/en/about/releases/>
           node-version: 16
@@ -187,7 +187,7 @@ jobs:
         working-directory: ./wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./wasm-node/javascript
-      - uses: JS-DevTools/npm-publish@v2
+      - uses: JS-DevTools/npm-publish@v3
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
         # the `npm publish --dry-run` done right above is important to ensure this.
@@ -207,7 +207,7 @@ jobs:
         with:
           fetch-depth: 0   # Necessary below for checking if the tag exists.
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/setup-node@v3.8.1
+      - uses: actions/setup-node@v4.0.1
         with:
           node-version: 16
       - uses: denoland/setup-deno@v1
@@ -217,7 +217,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
-          toolchain: 1.72
+          toolchain: 1.74
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - id: compute-tag  # Compute the tag that we might push.
@@ -244,7 +244,7 @@ jobs:
   crates-io-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.72
+      image: rust:1.74
     steps:
       - uses: actions/checkout@v4
       - run: cargo publish --dry-run --locked

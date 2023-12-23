@@ -35,6 +35,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             randomness_seed: [0; 32],
             capacity: 0,
             max_inbound_substreams: 10,
+            max_protocol_name_len: 128,
             // This timeout doesn't matter as we pass dummy time values.
             handshake_timeout: Duration::from_secs(5),
             ping_protocol: "ping".into(),
@@ -58,7 +59,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             noise_key: &smoldot::libp2p::connection::NoiseKey::new(&[0; 32], &[0; 32]),
         },
         0,
-        128,
         (),
     );
 

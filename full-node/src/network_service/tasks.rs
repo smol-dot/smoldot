@@ -26,7 +26,7 @@ use smol::{
 };
 use smoldot::{
     libp2p::{
-        multiaddr::{Multiaddr, ProtocolRef},
+        multiaddr::{Multiaddr, Protocol},
         websocket, with_buffers,
     },
     network::service::{self, CoordinatorToConnection},
@@ -42,47 +42,21 @@ use std::{
 pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 
-/// Asynchronous task managing a specific connection, including the dialing process.
-pub(super) async fn opening_connection_task(
-    start_connect: service::StartConnect<Instant>,
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
-) -> Result<impl AsyncReadWrite, ()> {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-        Ok(socket) => socket,
-        Err(_) => {
-            log_callback.log(
-                LogLevel::Debug,
-                format!("not-tcp; address={}", start_connect.multiaddr),
-            );
-            return Err(());
-        }
-    };
-
-    // Finishing ongoing connection process.
-    let socket = async move { socket.await.map_err(|_| ()) }
-        .or(async move {
-            smol::Timer::at(start_connect.timeout).await;
-            Err(())
-        })
-        .await?;
-
-    Ok(socket)
-}
-
 /// Asynchronous task managing a specific connection.
-pub(super) async fn established_connection_task(
+pub(super) async fn connection_task(
     log_callback: Arc<dyn LogCallback + Send + Sync>,
     address: String,
-    socket: impl AsyncReadWrite,
+    socket: impl Future<Output = Result<impl AsyncReadWrite, io::Error>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection<Instant>>,
-    connection_to_coordinator: channel::Sender<super::ToBackground>,
+    mut coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
+    connection_to_coordinator: channel::Sender<(
+        service::ConnectionId,
+        Option<service::ConnectionToCoordinator>,
+    )>,
 ) {
-    // The socket is wrapped around an object containing a read buffer and a write buffer and
-    // allowing easier usage.
+    // The socket future is wrapped around an object containing a read buffer and a write buffer
+    // and allowing easier usage.
     let mut socket = pin::pin!(with_buffers::WithBuffers::new(socket));
 
     // Future that sends a message to the coordinator. Only one message is sent to the coordinator
@@ -140,21 +114,12 @@ pub(super) async fn established_connection_task(
                 connection_task = task_update;
                 debug_assert!(message_sending.is_none());
                 if let Some(opaque_message) = opaque_message {
-                    message_sending = Some(connection_to_coordinator.send(
-                        super::ToBackground::FromConnectionTask {
-                            connection_id,
-                            opaque_message: Some(opaque_message),
-                            connection_now_dead: false,
-                        },
-                    ));
+                    message_sending =
+                        Some(connection_to_coordinator.send((connection_id, Some(opaque_message))));
                 }
             } else {
                 let _ = connection_to_coordinator
-                    .send(super::ToBackground::FromConnectionTask {
-                        connection_id,
-                        opaque_message,
-                        connection_now_dead: true,
-                    })
+                    .send((connection_id, opaque_message))
                     .await;
                 return;
             }
@@ -162,18 +127,18 @@ pub(super) async fn established_connection_task(
 
         // Now wait for something interesting to happen before looping again.
 
-        enum WhatHappened {
-            CoordinatorMessage(CoordinatorToConnection<Instant>),
+        enum WakeUpReason {
+            CoordinatorMessage(CoordinatorToConnection),
             CoordinatorDead,
             SocketEvent,
             MessageSent,
         }
 
-        let what_happened: WhatHappened = {
+        let wake_up_reason: WakeUpReason = {
             let coordinator_message = async {
                 match coordinator_to_connection.next().await {
-                    Some(msg) => WhatHappened::CoordinatorMessage(msg),
-                    None => WhatHappened::CoordinatorDead,
+                    Some(msg) => WakeUpReason::CoordinatorMessage(msg),
+                    None => WakeUpReason::CoordinatorDead,
                 }
             };
 
@@ -192,7 +157,7 @@ pub(super) async fn established_connection_task(
                 async {
                     if let Some(fut) = fut {
                         fut.await;
-                        WhatHappened::SocketEvent
+                        WakeUpReason::SocketEvent
                     } else {
                         future::pending().await
                     }
@@ -207,29 +172,29 @@ pub(super) async fn established_connection_task(
                 };
                 message_sending = None;
                 if result.is_ok() {
-                    WhatHappened::MessageSent
+                    WakeUpReason::MessageSent
                 } else {
-                    WhatHappened::CoordinatorDead
+                    WakeUpReason::CoordinatorDead
                 }
             };
 
             coordinator_message.or(socket_event).or(message_sent).await
         };
 
-        match what_happened {
-            WhatHappened::CoordinatorMessage(message) => {
-                connection_task.inject_coordinator_message(message);
+        match wake_up_reason {
+            WakeUpReason::CoordinatorMessage(message) => {
+                connection_task.inject_coordinator_message(&Instant::now(), message);
             }
-            WhatHappened::CoordinatorDead => return,
-            WhatHappened::SocketEvent => {}
-            WhatHappened::MessageSent => {}
+            WakeUpReason::CoordinatorDead => return,
+            WakeUpReason::SocketEvent => {}
+            WakeUpReason::MessageSent => {}
         }
     }
 }
 
 /// Builds a future that connects to the given multiaddress. Returns an error if the multiaddress
 /// protocols aren't supported.
-fn multiaddr_to_socket(
+pub(super) fn multiaddr_to_socket(
     addr: &Multiaddr,
 ) -> Result<impl Future<Output = Result<impl AsyncReadWrite, io::Error>>, ()> {
     let mut iter = addr.iter().fuse();
@@ -245,33 +210,33 @@ fn multiaddr_to_socket(
 
     // Ensure ahead of time that the multiaddress is supported.
     let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
+        (Protocol::Ip4(ip), Protocol::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
             None,
         ),
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
+        (Protocol::Ip6(ip), Protocol::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
             None,
         ),
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws)) => {
             let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
             (either::Left(addr), Some(addr.to_string()))
         }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws)) => {
             let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
             (either::Left(addr), Some(addr.to_string()))
         }
 
         // TODO: we don't care about the differences between Dns, Dns4, and Dns6
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
             None,
         ) => (either::Right((addr.to_string(), *port)), None),
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
-            Some(ProtocolRef::Ws),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
+            Some(Protocol::Ws),
         ) => (
             either::Right((addr.to_string(), *port)),
             Some(format!("{}:{}", addr, *port)),

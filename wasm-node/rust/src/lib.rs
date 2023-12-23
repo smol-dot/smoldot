@@ -17,20 +17,26 @@
 
 //! Contains a light client implementation usable from a browser environment.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use core::{future, mem, num::NonZeroU32, pin::Pin, str};
+extern crate alloc;
+
+use alloc::{
+    boxed::Box,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
+use async_lock::Mutex;
+use core::{num::NonZeroU32, pin::Pin, str, task};
 use futures_util::{stream, Stream as _, StreamExt as _};
 use smoldot_light::HandleRpcError;
-use std::{
-    sync::{Arc, Mutex},
-    task,
-};
 
 pub mod bindings;
 
-mod alloc;
+mod allocator;
 mod init;
 mod platform;
 mod timers;
@@ -51,13 +57,13 @@ fn add_chain(
     json_rpc_max_subscriptions: u32,
     potential_relay_chains: Vec<u8>,
 ) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.try_lock().unwrap();
 
     // Fail any new chain initialization if we're running low on memory space, which can
     // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
     // OOM errors. The threshold is completely empirical and should probably be updated
     // regularly to account for changes in the implementation.
-    if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+    if allocator::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
         let chain_id = client_lock.chains.insert(init::Chain::Erroneous {
             error:
                 "Wasm node is running low on memory and will prevent any new chain from being added"
@@ -154,7 +160,7 @@ fn add_chain(
 }
 
 fn remove_chain(chain_id: u32) {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.try_lock().unwrap();
 
     match client_lock
         .chains
@@ -183,7 +189,7 @@ fn remove_chain(chain_id: u32) {
 }
 
 fn chain_is_ok(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.lock().unwrap();
+    let client_lock = CLIENT.try_lock().unwrap();
     if matches!(
         client_lock
             .chains
@@ -198,7 +204,7 @@ fn chain_is_ok(chain_id: u32) -> u32 {
 }
 
 fn chain_error_len(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.lock().unwrap();
+    let client_lock = CLIENT.try_lock().unwrap();
     match client_lock
         .chains
         .get(usize::try_from(chain_id).unwrap())
@@ -210,7 +216,7 @@ fn chain_error_len(chain_id: u32) -> u32 {
 }
 
 fn chain_error_ptr(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.lock().unwrap();
+    let client_lock = CLIENT.try_lock().unwrap();
     match client_lock
         .chains
         .get(usize::try_from(chain_id).unwrap())
@@ -228,7 +234,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
     let json_rpc_request: String = String::from_utf8(json_rpc_request)
         .unwrap_or_else(|_| panic!("non-UTF-8 JSON-RPC request"));
 
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.try_lock().unwrap();
     let client_chain_id = match client_lock
         .chains
         .get(usize::try_from(chain_id).unwrap())
@@ -250,7 +256,7 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
 }
 
 fn json_rpc_responses_peek(chain_id: u32) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.try_lock().unwrap();
     match client_lock
         .chains
         .get_mut(usize::try_from(chain_id).unwrap())
@@ -316,7 +322,7 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
 }
 
 fn json_rpc_responses_pop(chain_id: u32) {
-    let mut client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.try_lock().unwrap();
     match client_lock
         .chains
         .get_mut(usize::try_from(chain_id).unwrap())
@@ -333,82 +339,29 @@ struct JsonRpcResponsesNonEmptyWaker {
     chain_id: u32,
 }
 
-impl task::Wake for JsonRpcResponsesNonEmptyWaker {
+impl alloc::task::Wake for JsonRpcResponsesNonEmptyWaker {
     fn wake(self: Arc<Self>) {
         unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
     }
 }
 
-/// Since "spawning a task" isn't really something that a browser or Node environment do
-/// efficiently, we instead combine all the asynchronous tasks into one executor.
-// TODO: we use an Executor instead of LocalExecutor because it is planned to allow multithreading; if this plan is abandoned, switch to SendWrapper<LocalExecutor>
-static EXECUTOR: async_executor::Executor = async_executor::Executor::new();
-
-/// While [`EXECUTOR`] is global to all threads, [`EXECUTOR_EXECUTE`] is thread specific. If
-/// smoldot eventually gets support for multiple threads, this value would be store in a
-/// thread-local storage. Since it only has one thread, it is instead a global variable.
-static EXECUTOR_EXECUTE: Mutex<ExecutionState> = Mutex::new(ExecutionState::NotStarted);
-enum ExecutionState {
-    /// Execution has not started. Everything remains to be initialized. Default state.
-    NotStarted,
-    /// Execution has been started in the past and is now waiting to be woken up.
-    NotReady,
-    /// Execution has been woken up. Ready to continue running.
-    Ready(async_task::Runnable),
-}
+/// List of light tasks waiting to be executed.
+static TASKS_QUEUE: crossbeam_queue::SegQueue<async_task::Runnable> =
+    crossbeam_queue::SegQueue::new();
 
 fn advance_execution() {
-    let runnable = {
-        let mut executor_execute_guard = EXECUTOR_EXECUTE.lock().unwrap();
-        match *executor_execute_guard {
-            ExecutionState::NotStarted => {
-                // Spawn a task that repeatedly executes one task then yields.
-                // This makes sure that we return to the JS engine after every task.
-                let (runnable, task) = {
-                    let run = async move {
-                        loop {
-                            EXECUTOR.tick().await;
-                            let mut has_yielded = false;
-                            future::poll_fn(|cx| {
-                                if has_yielded {
-                                    task::Poll::Ready(())
-                                } else {
-                                    cx.waker().wake_by_ref();
-                                    has_yielded = true;
-                                    task::Poll::Pending
-                                }
-                            })
-                            .await;
-                        }
-                    };
+    // This function executes one task then returns. This ensures that the Wasm doesn't use up
+    // all the available CPU of the host.
 
-                    async_task::spawn(run, |runnable| {
-                        let mut lock = EXECUTOR_EXECUTE.lock().unwrap();
-                        if !matches!(*lock, ExecutionState::NotReady) {
-                            return;
-                        }
-                        *lock = ExecutionState::Ready(runnable);
-                        unsafe {
-                            bindings::advance_execution_ready();
-                        }
-                    })
-                };
-
-                task.detach();
-                *executor_execute_guard = ExecutionState::NotReady;
-                runnable
-            }
-            ExecutionState::NotReady => return,
-            ExecutionState::Ready(_) => {
-                let ExecutionState::Ready(runnable) =
-                    mem::replace(&mut *executor_execute_guard, ExecutionState::NotReady)
-                else {
-                    unreachable!()
-                };
-                runnable
-            }
-        }
+    let Some(runnable) = TASKS_QUEUE.pop() else {
+        return;
     };
 
     runnable.run();
+
+    if !TASKS_QUEUE.is_empty() {
+        unsafe {
+            bindings::advance_execution_ready();
+        }
+    }
 }

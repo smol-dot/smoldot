@@ -27,7 +27,7 @@ use futures_channel::oneshot;
 use smoldot::{
     header,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -123,17 +123,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             rx.await.unwrap()
         };
 
-        // Block bodies and justifications aren't stored locally. Ask the network.
-        let result = if let Some(block_number) = block_number {
+        // Block bodies and headers aren't stored locally. Ask the network.
+        let mut result = if let Some(block_number) = block_number {
             self.sync_service
                 .clone()
                 .block_query(
                     block_number,
                     hash,
-                    protocol::BlocksRequestFields {
+                    codec::BlocksRequestFields {
                         header: true,
                         body: true,
-                        justifications: true,
+                        justifications: false,
                     },
                     3,
                     Duration::from_secs(8),
@@ -145,10 +145,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .clone()
                 .block_query_unknown_number(
                     hash,
-                    protocol::BlocksRequestFields {
+                    codec::BlocksRequestFields {
                         header: true,
                         body: true,
-                        justifications: true,
+                        justifications: false,
                     },
                     3,
                     Duration::from_secs(8),
@@ -157,9 +157,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .await
         };
 
-        // The `block_query` function guarantees that the header and body are present and
-        // are correct.
+        // Check whether the header and body are present and valid.
+        // TODO: try the request again with a different peerin case the response is invalid, instead of returning null
+        if let Ok(block) = &result {
+            if let (Some(header), Some(body)) = (&block.header, &block.body) {
+                if header::hash_from_scale_encoded_header(header) == hash {
+                    if let Ok(decoded) =
+                        header::decode(header, self.sync_service.block_number_bytes())
+                    {
+                        if header::extrinsics_root(body) != *decoded.extrinsics_root {
+                            result = Err(());
+                        }
+                    } else {
+                        // Note that if the header is undecodable it doesn't necessarily mean
+                        // that the header and/or body is bad, but given that we have no way to
+                        // check this we return an error.
+                        result = Err(());
+                    }
+                } else {
+                    result = Err(());
+                }
+            } else {
+                result = Err(());
+            }
+        }
 
+        // Return the response.
         if let Ok(block) = result {
             request.respond(methods::Response::chain_getBlock(methods::Block {
                 extrinsics: block
@@ -173,11 +196,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     self.sync_service.block_number_bytes(),
                 )
                 .unwrap(),
-                justifications: block.justifications.map(|list| {
-                    list.into_iter()
-                        .map(|j| (j.engine_id, j.justification))
-                        .collect()
-                }),
+                // There's no way to verify the correctness of the justifications, consequently
+                // we always return an empty list.
+                justifications: None,
             }))
         } else {
             request.respond_null()
@@ -288,7 +309,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .block_query(
                             block_number,
                             hash,
-                            protocol::BlocksRequestFields {
+                            codec::BlocksRequestFields {
                                 header: true,
                                 body: false,
                                 justifications: false,
@@ -303,7 +324,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .clone()
                         .block_query_unknown_number(
                             hash,
-                            protocol::BlocksRequestFields {
+                            codec::BlocksRequestFields {
                                 header: true,
                                 body: false,
                                 justifications: false,

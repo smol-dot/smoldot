@@ -105,7 +105,7 @@ function connect(config: ConnectionConfig): Connection {
         };
 
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: 1024 * 1024 });
+            config.onWritableBytes(1024 * 1024);
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -136,13 +136,15 @@ function connect(config: ConnectionConfig): Connection {
                 socket.onerror = () => { };
                 socket.close();
             },
-            send: (data: Uint8Array): void => {
-                socket.send(data);
+            send: (data: Array<Uint8Array>): void => {
                 if (bufferedAmountCheck.quenedUnreportedBytes == 0) {
                     bufferedAmountCheck.nextTimeout = 10;
                     setTimeout(checkBufferedAmount, 10);
                 }
-                bufferedAmountCheck.quenedUnreportedBytes += data.length;
+                for (const buffer of data) {
+                    socket.send(buffer);
+                    bufferedAmountCheck.quenedUnreportedBytes += buffer.length;
+                }
             },
             closeSend: (): void => { throw new Error('Wrong connection type') },
             openOutSubstream: () => { throw new Error('Wrong connection type') }
@@ -161,10 +163,7 @@ function connect(config: ConnectionConfig): Connection {
 
         socket.on('connect', () => {
             if (socket.destroyed) return;
-            config.onOpen({
-                type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-                initialWritableBytes: socket.writableHighWaterMark
-            });
+            config.onWritableBytes(socket.writableHighWaterMark);
         });
         socket.on('close', (hasError) => {
             if (socket.destroyed) return;
@@ -191,16 +190,18 @@ function connect(config: ConnectionConfig): Connection {
             reset: (): void => {
                 socket.destroy();
             },
-            send: (data: Uint8Array): void => {
-                const dataLen = data.length;
-                const allWritten = socket.write(data);
-                if (allWritten) {
-                    setImmediate(() => {
-                        if (!socket.writable) return;
-                        config.onWritableBytes(dataLen)
-                    });
-                } else {
-                    drainingBytes.num += dataLen;
+            send: (data: Array<Uint8Array>): void => {
+                for (const buffer of data) {
+                    const bufferLen = buffer.length;
+                    const allWritten = socket.write(buffer);
+                    if (allWritten) {
+                        setImmediate(() => {
+                            if (!socket.writable) return;
+                            config.onWritableBytes(bufferLen)
+                        });
+                    } else {
+                        drainingBytes.num += bufferLen;
+                    }
                 }
             },
             closeSend: (): void => {

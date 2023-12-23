@@ -33,6 +33,8 @@ This repository contains the following components:
     - 📚 <https://docs.rs/smoldot-full-node> (latest published version)
     - 📚 <https://smol-dot.github.io/smoldot/doc-rust/smoldot_full_node/index.html> (latest commit)
 
+[![dependency status](https://deps.rs/repo/github/smol-dot/smoldot/status.svg)](https://deps.rs/repo/github/smol-dot/smoldot)
+
 # Frequently asked questions
 
 ## Does smoldot support &lt;blockchain&gt;?
@@ -63,7 +65,7 @@ Smoldot has the following known vulnerabilities:
 
 - **Invalid best block** (light clients only). Light clients don't verify whether blocks are valid but only whether blocks are *authentic*. A block is authentic if it has been authored by a legitimate validator at a time when it was authorized to author a block. A validator could author a block that smoldot considers as authentic, but that contains completely arbitrary data. Invalid blocks aren't propagated by honest full nodes on the gossiping network, but it is possible for the validator to send the block to the smoldot instance(s) that are directly connected to it or its complicits. While this attack requires a validator to be malicious and that it doesn't offer any direct reward it is unlikely to happen, but it is still a realistic threat. For this reason, when using a light client, **do not assume any storage data coming from a best that hasn't been finalized yet to be accurate**. Once a block has been finalized, it means that at least 2/3rds of the validators consider the block valid. While it is still possible for a finalized block to be invalid, this would require the collaboration of 2/3rds of the validators. If that happens, then the chain has basically been taken over, and whether smoldot shows inaccurate data doesn't really matter anymore. When it comes to UIs built on top of a light client, it is suggested to always show the state of the finalized block, and show the state of the best block *in addition to* the one of the finalized block if it differs.
 
-- **Finality stalls** (mostly light clients). Because any block that hasn't been finalized yet can become part of the canonical chain in the future, a node, in order to function properly, needs to keep track of all the valid (for full nodes) or authentic (for light clients) non-finalized blocks that it has learned the existence of. Under normal circumstances, the number of such blocks is rather low (typically 3 blocks). If, however, blocks cease to be finalized but new blocks are still being authored, then the memory consumption of the node will slowly increase over time for each newly-authored block until there is no more memory available and the node is forced to stop. Substrate mitigates this problem by forcing blocks authors to gradually slow down the blocks production when the latest known finalized block is too far in the past. Since it is normally not possible for finality to stall unless there is a bug or the chain is misconfigured, this is not really an attack but rather the consequences of an attack. Full nodes are less affected by this problem because they typically have more memory available than a light client, and have the possibility to store blocks on the disk.
+- **Finality stalls** (mostly light clients). Because any block that hasn't been finalized yet can become part of the canonical chain in the future, a node, in order to function properly, needs to keep track of all the valid (for full nodes) or authentic (for light clients) non-finalized blocks that it has learned the existence of. Under normal circumstances, the number of such blocks is rather low (typically 3 blocks). If, however, blocks cease to be finalized but new blocks are still being authored, then the memory consumption of the node will slowly increase over time for each newly-authored block until there is no more memory available and the node is forced to stop. Since it is normally not possible for finality to stall unless there is a bug or the chain is misconfigured, this is not really an attack but rather the consequences of an attack. Full nodes are less affected by this problem because they typically have more memory available than a light client, and have the possibility to store blocks on the disk.
 
 Note that none of these attacks are specific to the smoldot implementation, but are rather known ways to attack a Substrate/Polkadot node in general. All implementations are affected by all these attacks.
 
@@ -93,7 +95,7 @@ Due to the history of this repository, the code written in 2022 and before belon
 
 ## Governance and contributions
 
-This project operates under the typical "benevolent dictator" model. The main maintener, @tomaka, is being remunerated to work on the source code through Polkadot treasury proposals.
+This project operates under the typical "benevolent dictator" model. The main maintainer, @tomaka, is being remunerated to work on the source code through Polkadot treasury proposals.
 
 Pull requests are welcome. However, if your changes are substantial, you are strongly encouraged to first discuss the nature of the changes through an issue or discussion. In general, unless the changes you are making are trivial, you are never wrong if you first open an issue instead of a pull request. Keep in mind that changes that might seem easy are often harder than they look. Changes that are *actually* easy have a high chance of having already been completed.
 
@@ -113,7 +115,7 @@ While the light client is fully maintained, please be aware that at the moment t
 
 - Smoldot crashes due to a certain exchange of messages on the libp2p networking level, including a high volume of data.
 - Smoldot crashes due to a certain exchange of messages on the JSON-RPC requests level, including a high volume of requests or responses.
-- A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly due to techincal reasons. A warning is printed when a legacy JSON-RPC request is called.
+- A response to a JSON-RPC request provides incorrect or incomplete information. In the context of the light client, this doesn't apply to the legacy JSON-RPC requests that can't be implemented properly due to technical reasons. A warning is printed when a legacy JSON-RPC request is called.
 
 Where "crash" includes: Rust panics, JavaScript exceptions (except for the ones documented), infinite loops, or allocating an ever increasing amount of memory (a.k.a. a "memory leak").
 

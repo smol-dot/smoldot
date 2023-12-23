@@ -153,15 +153,16 @@ impl Client {
         *self.network_known_best.lock().await
     }
 
-    /// Returns the current number of peers of the client.
+    /// Returns the current total number of peers of the client.
+    // TODO: weird API
     pub async fn num_peers(&self) -> u64 {
-        u64::try_from(self.network_service.num_peers(0).await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::max_value())
     }
 
-    /// Returns the current number of network connections of the client.
+    /// Returns the current total number of network connections of the client.
+    // TODO: weird API
     pub async fn num_network_connections(&self) -> u64 {
-        u64::try_from(self.network_service.num_established_connections().await)
-            .unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::max_value())
     }
 
     // TODO: not the best API
@@ -296,7 +297,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     if chain_spec.protocol_id().is_some() {
         config.log_callback.log(
             LogLevel::Warn,
-            format!("chain-spec-has-protocol-id; chain={}", chain_spec.name()),
+            format!("chain-spec-has-protocol-id; chain={}", chain_spec.id()),
         );
     }
     if let Some(relay_chain_spec) = &relay_chain_spec {
@@ -305,7 +306,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 LogLevel::Warn,
                 format!(
                     "chain-spec-has-protocol-id; chain={}",
-                    relay_chain_spec.name()
+                    relay_chain_spec.id()
                 ),
             );
         }
@@ -317,7 +318,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             LogLevel::Warn,
             format!(
                 "chain-spec-has-telemetry-endpoints; chain={}",
-                chain_spec.name()
+                chain_spec.id()
             ),
         );
     }
@@ -327,7 +328,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 LogLevel::Warn,
                 format!(
                     "chain-spec-has-telemetry-endpoints; chain={}",
-                    relay_chain_spec.name()
+                    relay_chain_spec.id()
                 ),
             );
         }
@@ -405,11 +406,12 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     .await
     .map_err(StartError::JaegerInit)?;
 
-    let (network_service, network_events_receivers) =
+    let (network_service, network_service_chain_ids, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
             listen_addresses: config.listen_addresses,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
+                log_name: chain_spec.id().to_owned(),
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
@@ -442,6 +444,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         })
                         .await
                 },
+                max_in_peers: 25,
+                max_slots: 15,
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
                         chain_spec.boot_nodes().len() + config.chain.additional_bootnodes.len(),
@@ -479,6 +483,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
             .chain(
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
+                        log_name: relay_chains_specs.id().to_owned(),
                         fork_id: relay_chains_specs.fork_id().map(|n| n.to_owned()),
                         block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
@@ -519,6 +524,8 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                                 }
                             })
                             .await,
+                        max_in_peers: 25,
+                        max_slots: 15,
                         bootstrap_nodes: {
                             let mut list =
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
@@ -588,7 +595,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         log_callback: config.log_callback.clone(),
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
-        network_service: (network_service.clone(), 0),
+        network_service: (network_service.clone(), network_service_chain_ids[0]),
         database: database.clone(),
         block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
@@ -615,7 +622,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                     )),
                 network_events_receiver: network_events_receivers.next().unwrap(),
-                network_service: (network_service.clone(), 1),
+                network_service: (network_service.clone(), network_service_chain_ids[1]),
                 database: relay_chain_database.clone(),
                 block_number_bytes: usize::from(
                     relay_chain_spec.as_ref().unwrap().block_number_bytes(),
@@ -657,7 +664,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
         log_callback: config.log_callback.clone(),
         database,
         consensus_service: consensus_service.clone(),
-        network_service: (network_service.clone(), 0),
+        network_service: (network_service.clone(), network_service_chain_ids[0]),
         bind_address: config.chain.json_rpc_listen.as_ref().map(|cfg| cfg.address),
         max_parallel_requests: 32,
         max_json_rpc_clients: config
@@ -686,7 +693,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                 log_callback: config.log_callback.clone(),
                 database: relay_chain_database.clone().unwrap(),
                 consensus_service: relay_chain_consensus_service.clone().unwrap(),
-                network_service: (network_service.clone(), 1),
+                network_service: (network_service.clone(), network_service_chain_ids[1]),
                 bind_address: relay_chain_cfg
                     .json_rpc_listen
                     .as_ref()
@@ -722,6 +729,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     let network_known_best = Arc::new(Mutex::new(None));
     (config.tasks_executor)(Box::pin({
         let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+        let network_service_chain_id = network_service_chain_ids[0];
         let network_known_best = network_known_best.clone();
 
         // TODO: shut down this task if the client stops?
@@ -732,10 +740,10 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
 
                 match network_event {
                     network_service::Event::BlockAnnounce {
-                        chain_index: 0,
+                        chain_id,
                         scale_encoded_header,
                         ..
-                    } => match (
+                    } if chain_id == network_service_chain_id => match (
                         *network_known_best,
                         header::decode(
                             &scale_encoded_header,
@@ -750,10 +758,10 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
                         }
                     },
                     network_service::Event::Connected {
-                        chain_index: 0,
+                        chain_id,
                         best_block_number,
                         ..
-                    } => match *network_known_best {
+                    } if chain_id == network_service_chain_id => match *network_known_best {
                         Some(n) if n >= best_block_number => {}
                         _ => *network_known_best = Some(best_block_number),
                     },
@@ -845,7 +853,7 @@ async fn open_database(
                     genesis_storage.value(b":heappages"),
                 )
                 .unwrap(),
-                exec_hint: executor::vm::ExecHint::Oneshot,
+                exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
                 allow_unresolved_imports: true,
             })
             .unwrap()
@@ -973,13 +981,9 @@ async fn open_database(
                         children_merkle_values: array::from_fn::<_, 16, _>(|n| {
                             let child_index =
                                 trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap();
-                            if let Some(mut child) = node_access.child(child_index) {
-                                Some(Cow::Owned(
-                                    child.user_data().1.as_ref().unwrap().as_ref().to_vec(),
-                                ))
-                            } else {
-                                None
-                            }
+                            node_access.child(child_index).map(|mut child| {
+                                Cow::Owned(child.user_data().1.as_ref().unwrap().as_ref().to_vec())
+                            })
                         }),
                         partial_key_nibbles: Cow::Owned(
                             node_access.partial_key().map(u8::from).collect::<Vec<_>>(),
@@ -990,13 +994,10 @@ async fn open_database(
             // The finalized block is the genesis block. As such, it has an empty body and
             // no justification.
             let database = empty
-                .initialize(
-                    genesis_chain_information,
-                    iter::empty(),
-                    None,
-                    genesis_storage_full_trie,
-                    state_version,
-                )
+                .initialize(genesis_chain_information, iter::empty(), None)
+                .unwrap();
+            database
+                .insert_trie_nodes(genesis_storage_full_trie, state_version)
                 .unwrap();
             (database, false)
         }

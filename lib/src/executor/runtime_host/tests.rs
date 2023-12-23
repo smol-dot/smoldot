@@ -74,7 +74,7 @@ fn execute_blocks() {
             host::HostVmPrototype::new(host::Config {
                 module: code,
                 heap_pages,
-                exec_hint: crate::executor::vm::ExecHint::Oneshot,
+                exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
                 allow_unresolved_imports: false,
             })
             .unwrap()
@@ -179,6 +179,7 @@ fn execute_blocks() {
 
                     execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
                 }
+                RuntimeHostVm::LogEmit(log) => execution = log.resume(),
                 RuntimeHostVm::OffchainStorageSet(_) | RuntimeHostVm::Offchain(_) => {
                     unimplemented!()
                 }

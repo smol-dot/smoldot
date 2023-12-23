@@ -73,7 +73,7 @@ sandbox".
 By default, calling `start()` will run smoldot entirely in the current thread. This can cause
 performance issues if other CPU-heavy operations are done in that thread.
 
-In order to help with this, it possible to use smoldot in conjunction with a worker.
+In order to help with this, it is possible to use smoldot in conjunction with a worker.
 To do so, you must first create a worker. Since creating a worker has some subtle differences
 depending on the platform, this is outside of the responsibility of smoldot.
 

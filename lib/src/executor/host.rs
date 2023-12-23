@@ -152,7 +152,7 @@
 //!     let prototype = HostVmPrototype::new(Config {
 //!         module: &wasm_binary_code,
 //!         heap_pages: HeapPages::from(2048),
-//!         exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+//!         exec_hint: smoldot::executor::vm::ExecHint::ValidateAndExecuteOnce,
 //!         allow_unresolved_imports: false
 //!     }).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
@@ -194,14 +194,7 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{
-    borrow::ToOwned as _,
-    boxed::Box,
-    string::{String, ToString as _},
-    sync::Arc,
-    vec,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use core::{fmt, hash::Hasher as _, iter, str};
 use functions::HostFunction;
 
@@ -438,7 +431,10 @@ impl HostVmPrototype {
 
     /// Returns the runtime version found in the module.
     pub fn runtime_version(&self) -> &CoreVersion {
-        self.common.runtime_version.as_ref().unwrap()
+        self.common
+            .runtime_version
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
     }
 
     /// Starts the VM, calling the function passed as parameter.
@@ -500,17 +496,19 @@ impl HostVmPrototype {
             .checked_sub(u32::from(vm.memory_size()))
         {
             // If the memory can't be grown, it indicates a bug in the allocator.
-            vm.grow_memory(HeapPages::from(to_grow)).unwrap();
+            vm.grow_memory(HeapPages::from(to_grow))
+                .unwrap_or_else(|_| unreachable!());
         }
 
         // Writing the input data into the VM.
         let mut data_ptr_iter = data_ptr;
         for data in data {
             let data = data.as_ref();
-            vm.write_memory(data_ptr_iter, data).unwrap();
+            vm.write_memory(data_ptr_iter, data)
+                .unwrap_or_else(|_| unreachable!());
             data_ptr_iter = data_ptr_iter
-                .checked_add(u32::try_from(data.len()).unwrap())
-                .unwrap();
+                .checked_add(u32::try_from(data.len()).unwrap_or_else(|_| unreachable!()))
+                .unwrap_or_else(|| unreachable!());
         }
 
         // Now start executing the function. We pass as parameter the location and size of the
@@ -709,8 +707,8 @@ impl ReadyToRun {
                 // According to the runtime environment specification, the return value is two
                 // consecutive I32s representing the length and size of the SCALE-encoded
                 // return value.
-                let value_size = u32::try_from(ret >> 32).unwrap();
-                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap();
+                let value_size = u32::try_from(ret >> 32).unwrap_or_else(|_| unreachable!());
+                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap_or_else(|_| unreachable!());
 
                 if value_size.saturating_add(value_ptr)
                     <= u32::from(self.inner.vm.memory_size()) * 64 * 1024
@@ -794,8 +792,8 @@ impl ReadyToRun {
                     _ => unreachable!(),
                 };
 
-                let len = u32::try_from(val >> 32).unwrap();
-                let ptr = u32::try_from(val & 0xffffffff).unwrap();
+                let len = u32::try_from(val >> 32).unwrap_or_else(|_| unreachable!());
+                let ptr = u32::try_from(val & 0xffffffff).unwrap_or_else(|_| unreachable!());
 
                 let result = self.inner.vm.read_memory(ptr, len);
                 match result {
@@ -825,8 +823,8 @@ impl ReadyToRun {
                     _ => unreachable!(),
                 };
 
-                let len = u32::try_from(val >> 32).unwrap();
-                let ptr = u32::try_from(val & 0xffffffff).unwrap();
+                let len = u32::try_from(val >> 32).unwrap_or_else(|_| unreachable!());
+                let ptr = u32::try_from(val & 0xffffffff).unwrap_or_else(|_| unreachable!());
 
                 if len.saturating_add(ptr) > u32::from(self.inner.vm.memory_size()) * 64 * 1024 {
                     return HostVm::Error {
@@ -855,7 +853,9 @@ impl ReadyToRun {
 
                 let result = self.inner.vm.read_memory(ptr, $size);
                 match result {
-                    Ok(v) => *<&[u8; $size]>::try_from(v.as_ref()).unwrap(),
+                    Ok(v) => {
+                        *<&[u8; $size]>::try_from(v.as_ref()).unwrap_or_else(|_| unreachable!())
+                    }
                     Err(vm::OutOfBoundsError) => {
                         drop(result);
                         return HostVm::Error {
@@ -1092,7 +1092,7 @@ impl ReadyToRun {
                     .common
                     .runtime_version
                     .as_ref()
-                    .unwrap()
+                    .unwrap_or_else(|| unreachable!())
                     .decode()
                     .state_version
                     .unwrap_or(TrieEntryVersion::V0);
@@ -1373,7 +1373,7 @@ impl ReadyToRun {
                     .common
                     .runtime_version
                     .as_ref()
-                    .unwrap()
+                    .unwrap_or_else(|| unreachable!())
                     .decode()
                     .state_version
                     .unwrap_or(TrieEntryVersion::V0);
@@ -1469,7 +1469,7 @@ impl ReadyToRun {
                     blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
                         .as_bytes(),
                 )
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
                 let message = libsecp256k1::Message::parse(&data);
 
                 if let Ok(sc) =
@@ -1574,7 +1574,8 @@ impl ReadyToRun {
 
                         if let Ok(v) = v {
                             let pubkey = libsecp256k1::recover(
-                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &libsecp256k1::Message::parse_slice(&msg)
+                                    .unwrap_or_else(|_| unreachable!()),
                                 &rs,
                                 &v,
                             );
@@ -1623,7 +1624,8 @@ impl ReadyToRun {
 
                         if let Ok(v) = v {
                             let pubkey = libsecp256k1::recover(
-                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &libsecp256k1::Message::parse_slice(&msg)
+                                    .unwrap_or_else(|_| unreachable!()),
                                 &rs,
                                 &v,
                             );
@@ -2044,7 +2046,7 @@ impl ReadyToRun {
                     self.inner
                         .vm
                         .read_memory(str_ptr, str_size)
-                        .unwrap()
+                        .unwrap_or_else(|_| unreachable!())
                         .as_ref(),
                 )
                 .map(|_| ());
@@ -2132,7 +2134,7 @@ impl ReadyToRun {
                     self.inner
                         .vm
                         .read_memory(target_str_ptr, target_str_size)
-                        .unwrap()
+                        .unwrap_or_else(|_| unreachable!())
                         .as_ref(),
                 )
                 .map(|_| ());
@@ -2152,7 +2154,7 @@ impl ReadyToRun {
                     self.inner
                         .vm
                         .read_memory(msg_str_ptr, msg_str_size)
-                        .unwrap()
+                        .unwrap_or_else(|_| unreachable!())
                         .as_ref(),
                 )
                 .map(|_| ());
@@ -2170,9 +2172,9 @@ impl ReadyToRun {
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry: LogEmitInner::Log {
-                        _log_level: log_level,
-                        _target_str_ptr: target_str_ptr,
-                        _target_str_size: target_str_size,
+                        log_level,
+                        target_str_ptr,
+                        target_str_size,
                         msg_str_ptr,
                         msg_str_size,
                     },
@@ -2211,7 +2213,7 @@ impl Finished {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Turns the virtual machine back into a prototype.
@@ -2256,7 +2258,7 @@ impl ExternalStorageGet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
@@ -2266,7 +2268,7 @@ impl ExternalStorageGet {
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2292,10 +2294,14 @@ impl ExternalStorageGet {
     /// use when the full storage value is already present in memory.
     pub fn resume_full_value(self, value: Option<&[u8]>) -> HostVm {
         if let Some(value) = value {
-            if usize::try_from(self.offset).unwrap() < value.len() {
-                let value_slice = &value[usize::try_from(self.offset).unwrap()..];
-                if usize::try_from(self.max_size).unwrap() < value_slice.len() {
-                    let value_slice = &value_slice[..usize::try_from(self.max_size).unwrap()];
+            if usize::try_from(self.offset).unwrap_or_else(|_| unreachable!()) < value.len() {
+                let value_slice =
+                    &value[usize::try_from(self.offset).unwrap_or_else(|_| unreachable!())..];
+                if usize::try_from(self.max_size).unwrap_or_else(|_| unreachable!())
+                    < value_slice.len()
+                {
+                    let value_slice = &value_slice
+                        [..usize::try_from(self.max_size).unwrap_or_else(|_| unreachable!())];
                     self.resume(Some((value_slice, value.len())))
                 } else {
                     self.resume(Some((value_slice, value.len())))
@@ -2380,19 +2386,26 @@ impl ExternalStorageGet {
             HostFunction::ext_storage_read_version_1
             | HostFunction::ext_default_child_storage_read_version_1 => {
                 let outcome = if let Some((value, value_total_len)) = value {
-                    let mut remaining_max_allowed = usize::try_from(self.max_size).unwrap();
-                    let mut offset = self.value_out_ptr.unwrap();
+                    let mut remaining_max_allowed =
+                        usize::try_from(self.max_size).unwrap_or_else(|_| unreachable!());
+                    let mut offset = self.value_out_ptr.unwrap_or_else(|| unreachable!());
                     for value in value {
                         let value = value.as_ref();
                         assert!(value.len() <= remaining_max_allowed);
                         remaining_max_allowed -= value.len();
-                        self.inner.vm.write_memory(offset, value).unwrap();
-                        offset += u32::try_from(value.len()).unwrap();
+                        self.inner
+                            .vm
+                            .write_memory(offset, value)
+                            .unwrap_or_else(|_| unreachable!());
+                        offset += u32::try_from(value.len()).unwrap_or_else(|_| unreachable!());
                     }
 
                     // Note: the https://github.com/paritytech/substrate/pull/7084 PR has changed
                     // the meaning of this return value.
-                    Some(u32::try_from(value_total_len).unwrap() - self.offset)
+                    Some(
+                        u32::try_from(value_total_len).unwrap_or_else(|_| unreachable!())
+                            - self.offset,
+                    )
                 } else {
                     None
                 };
@@ -2461,7 +2474,7 @@ impl ExternalStorageSet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
@@ -2473,7 +2486,11 @@ impl ExternalStorageSet {
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.child_trie_ptr_size {
             Some((ptr, size)) => {
-                let child_trie = self.inner.vm.read_memory(*ptr, *size).unwrap();
+                let child_trie = self
+                    .inner
+                    .vm
+                    .read_memory(*ptr, *size)
+                    .unwrap_or_else(|_| unreachable!());
                 Some(child_trie)
             }
             None => None,
@@ -2484,8 +2501,12 @@ impl ExternalStorageSet {
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
     pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.value
-            .map(|(ptr, size)| self.inner.vm.read_memory(ptr, size).unwrap())
+        self.value.map(|(ptr, size)| {
+            self.inner
+                .vm
+                .read_memory(ptr, size)
+                .unwrap_or_else(|_| unreachable!())
+        })
     }
 
     /// Returns the state trie version indicated by the runtime.
@@ -2497,7 +2518,7 @@ impl ExternalStorageSet {
             .common
             .runtime_version
             .as_ref()
-            .unwrap()
+            .unwrap_or_else(|| unreachable!())
             .decode()
             .state_version
             .unwrap_or(TrieEntryVersion::V0)
@@ -2563,7 +2584,7 @@ impl ExternalStorageAppend {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
@@ -2582,7 +2603,7 @@ impl ExternalStorageAppend {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Resumes execution after having set the value.
@@ -2629,7 +2650,12 @@ impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
         if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
-            either::Left(self.inner.vm.read_memory(prefix_ptr, prefix_size).unwrap())
+            either::Left(
+                self.inner
+                    .vm
+                    .read_memory(prefix_ptr, prefix_size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             either::Right(&[][..])
         }
@@ -2645,7 +2671,7 @@ impl ExternalStorageClearPrefix {
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2732,7 +2758,11 @@ impl ExternalStorageRoot {
     /// Returns the child trie whose root hash must be provided. `None` for the main trie.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.child_trie_ptr_size {
-            let child_trie = self.inner.vm.read_memory(ptr, size).unwrap();
+            let child_trie = self
+                .inner
+                .vm
+                .read_memory(ptr, size)
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2778,7 +2808,7 @@ impl ExternalStorageNextKey {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
@@ -2788,7 +2818,7 @@ impl ExternalStorageNextKey {
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2804,7 +2834,7 @@ impl ExternalStorageNextKey {
             .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!());
 
         match follow_up {
             Some(next) => {
@@ -2870,7 +2900,7 @@ impl SignatureVerification {
         self.inner
             .vm
             .read_memory(self.message_ptr, self.message_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the signature.
@@ -2889,7 +2919,7 @@ impl SignatureVerification {
         self.inner
             .vm
             .read_memory(self.signature_ptr, signature_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the public key the signature is against.
@@ -2908,7 +2938,7 @@ impl SignatureVerification {
         self.inner
             .vm
             .read_memory(self.public_key_ptr, public_key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Verify the signature. Returns `true` if it is valid.
@@ -2920,7 +2950,8 @@ impl SignatureVerification {
 
                 if let Ok(public_key) = public_key {
                     let signature = ed25519_zebra::Signature::from(
-                        <[u8; 64]>::try_from(self.signature().as_ref()).unwrap(),
+                        <[u8; 64]>::try_from(self.signature().as_ref())
+                            .unwrap_or_else(|_| unreachable!()),
                     );
                     public_key
                         .verify(&signature, self.message().as_ref())
@@ -2944,7 +2975,8 @@ impl SignatureVerification {
                     pk.verify_simple(
                         b"substrate",
                         self.message().as_ref(),
-                        &schnorrkel::Signature::from_bytes(self.signature().as_ref()).unwrap(),
+                        &schnorrkel::Signature::from_bytes(self.signature().as_ref())
+                            .unwrap_or_else(|_| unreachable!()),
                     )
                     .is_ok()
                 })
@@ -2954,7 +2986,7 @@ impl SignatureVerification {
                 let data = <[u8; 32]>::try_from(
                     blake2_rfc::blake2b::blake2b(32, &[], self.message().as_ref()).as_bytes(),
                 )
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
                 let message = libsecp256k1::Message::parse(&data);
 
                 // signature (64 bytes) + recovery ID (1 byte)
@@ -2972,7 +3004,8 @@ impl SignatureVerification {
                 // We can safely unwrap, as the size is checked when the `SignatureVerification`
                 // is constructed.
                 let message = libsecp256k1::Message::parse(
-                    &<[u8; 32]>::try_from(self.message().as_ref()).unwrap(),
+                    &<[u8; 32]>::try_from(self.message().as_ref())
+                        .unwrap_or_else(|_| unreachable!()),
                 );
 
                 // signature (64 bytes) + recovery ID (1 byte)
@@ -3063,7 +3096,7 @@ impl CallRuntimeVersion {
         self.inner
             .vm
             .read_memory(self.wasm_blob_ptr, self.wasm_blob_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Writes the SCALE-encoded runtime version to the memory and prepares for execution.
@@ -3116,7 +3149,7 @@ impl ExternalOffchainIndexSet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the value to set.
@@ -3124,7 +3157,12 @@ impl ExternalOffchainIndexSet {
     /// If `None` is returned, the key should be removed from the storage entirely.
     pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.value {
-            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+            Some(
+                self.inner
+                    .vm
+                    .read_memory(ptr, size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             None
         }
@@ -3167,7 +3205,7 @@ impl ExternalOffchainStorageSet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the value to set.
@@ -3175,7 +3213,12 @@ impl ExternalOffchainStorageSet {
     /// If `None` is returned, the key should be removed from the storage entirely.
     pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.value {
-            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+            Some(
+                self.inner
+                    .vm
+                    .read_memory(ptr, size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             None
         }
@@ -3184,7 +3227,12 @@ impl ExternalOffchainStorageSet {
     /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
     pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.old_value {
-            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+            Some(
+                self.inner
+                    .vm
+                    .read_memory(ptr, size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             None
         }
@@ -3232,7 +3280,7 @@ impl ExternalOffchainStorageGet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Resumes execution after having set the value.
@@ -3334,7 +3382,7 @@ impl OffchainSubmitTransaction {
         self.inner
             .vm
             .read_memory(self.tx_ptr, self.tx_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Resumes execution after having submitted the transaction.
@@ -3363,8 +3411,7 @@ impl fmt::Debug for OffchainSubmitTransaction {
 
 /// Report about a log entry being emitted.
 ///
-/// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
-/// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
+/// Use [`LogEmit::info`] to obtain what must be printed.
 pub struct LogEmit {
     inner: Box<Inner>,
     log_entry: LogEmitInner,
@@ -3386,11 +3433,11 @@ enum LogEmitInner {
     },
     Log {
         /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
-        _log_level: u32,
+        log_level: u32,
         /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
-        _target_str_ptr: u32,
+        target_str_ptr: u32,
         /// Size of the string of the log target. Guaranteed to be in range and to be UTF-8.
-        _target_str_size: u32,
+        target_str_size: u32,
         /// Pointer to the string of the log message. Guaranteed to be in range and to be UTF-8.
         msg_str_ptr: u32,
         /// Size of the string of the log message. Guaranteed to be in range and to be UTF-8.
@@ -3399,7 +3446,58 @@ enum LogEmitInner {
 }
 
 impl LogEmit {
-    /// Resumes execution after having set the value.
+    /// Returns the data that the runtime would like to print.
+    pub fn info(&self) -> LogEmitInfo {
+        match self.log_entry {
+            LogEmitInner::Num(n) => LogEmitInfo::Num(n),
+            LogEmitInner::Utf8 { str_ptr, str_size } => LogEmitInfo::Utf8(LogEmitInfoStr {
+                data: Box::new(
+                    self.inner
+                        .vm
+                        .read_memory(str_ptr, str_size)
+                        .unwrap_or_else(|_| unreachable!()),
+                ),
+            }),
+            LogEmitInner::Hex {
+                data_ptr,
+                data_size,
+            } => LogEmitInfo::Hex(LogEmitInfoHex {
+                data: Box::new(
+                    self.inner
+                        .vm
+                        .read_memory(data_ptr, data_size)
+                        .unwrap_or_else(|_| unreachable!()),
+                ),
+            }),
+            LogEmitInner::Log {
+                msg_str_ptr,
+                msg_str_size,
+                target_str_ptr,
+                target_str_size,
+                log_level,
+            } => LogEmitInfo::Log {
+                log_level,
+                target: LogEmitInfoStr {
+                    data: Box::new(
+                        self.inner
+                            .vm
+                            .read_memory(target_str_ptr, target_str_size)
+                            .unwrap_or_else(|_| unreachable!()),
+                    ),
+                },
+                message: LogEmitInfoStr {
+                    data: Box::new(
+                        self.inner
+                            .vm
+                            .read_memory(msg_str_ptr, msg_str_size)
+                            .unwrap_or_else(|_| unreachable!()),
+                    ),
+                },
+            },
+        }
+    }
+
+    /// Resumes execution.
     pub fn resume(self) -> HostVm {
         HostVm::ReadyToRun(ReadyToRun {
             inner: self.inner,
@@ -3408,45 +3506,83 @@ impl LogEmit {
     }
 }
 
-impl fmt::Display for LogEmit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.log_entry {
-            LogEmitInner::Num(num) => write!(f, "{num}"),
-            LogEmitInner::Utf8 { str_ptr, str_size } => {
-                let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
-                let str = str::from_utf8(str.as_ref()).unwrap();
-                write!(f, "{str}")
-            }
-            LogEmitInner::Hex {
-                data_ptr,
-                data_size,
-            } => {
-                let data = self.inner.vm.read_memory(data_ptr, data_size).unwrap();
-                write!(f, "{}", hex::encode(data.as_ref()))
-            }
-            LogEmitInner::Log {
-                msg_str_ptr,
-                msg_str_size,
-                ..
-            } => {
-                let str = self
-                    .inner
-                    .vm
-                    .read_memory(msg_str_ptr, msg_str_size)
-                    .unwrap();
-                let str = str::from_utf8(str.as_ref()).unwrap();
-                // TODO: don't just ignore the target and log level? better log representation? more control? also, it's unclear whether it should be an individual line
-                writeln!(f, "{str}")
-            }
-        }
-    }
-}
-
 impl fmt::Debug for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("LogEmit")
-            .field("message", &self.to_string())
+            .field("info", &self.info())
             .finish()
+    }
+}
+
+/// Detail about what a [`LogEmit`] should output. See [`LogEmit::info`].
+#[derive(Debug)]
+pub enum LogEmitInfo<'a> {
+    /// Must output a single number.
+    Num(u64),
+    /// Must output a UTF-8 string.
+    Utf8(LogEmitInfoStr<'a>),
+    /// Must output the hexadecimal encoding of the given buffer.
+    Hex(LogEmitInfoHex<'a>),
+    /// Must output a log line.
+    Log {
+        /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
+        log_level: u32,
+        /// "Target" of the log. Arbitrary string indicated by the runtime. Typically indicates
+        /// the subsystem which has emitted the log line.
+        target: LogEmitInfoStr<'a>,
+        /// Actual log message being emitted.
+        message: LogEmitInfoStr<'a>,
+    },
+}
+
+/// See [`LogEmitInfo`]. Use the `AsRef` trait implementation to retrieve the buffer.
+pub struct LogEmitInfoHex<'a> {
+    // TODO: don't use a Box once Rust supports type Foo = impl Trait;
+    data: Box<dyn AsRef<[u8]> + Send + Sync + 'a>,
+}
+
+impl<'a> AsRef<[u8]> for LogEmitInfoHex<'a> {
+    fn as_ref(&self) -> &[u8] {
+        (*self.data).as_ref()
+    }
+}
+
+impl<'a> fmt::Debug for LogEmitInfoHex<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl<'a> fmt::Display for LogEmitInfoHex<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&hex::encode(self.as_ref()), f)
+    }
+}
+
+/// See [`LogEmitInfo`]. Use the `AsRef` trait implementation to retrieve the string.
+pub struct LogEmitInfoStr<'a> {
+    // TODO: don't use a Box once Rust supports type Foo = impl Trait;
+    data: Box<dyn AsRef<[u8]> + Send + Sync + 'a>,
+}
+
+impl<'a> AsRef<str> for LogEmitInfoStr<'a> {
+    fn as_ref(&self) -> &str {
+        let data = (*self.data).as_ref();
+        // The creator of `LogEmitInfoStr` always makes sure that the string is indeed UTF-8
+        // before creating it.
+        str::from_utf8(data).unwrap_or_else(|_| unreachable!())
+    }
+}
+
+impl<'a> fmt::Debug for LogEmitInfoStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl<'a> fmt::Display for LogEmitInfoStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_ref(), f)
     }
 }
 
@@ -3583,7 +3719,9 @@ impl Inner {
         let mut ptr_iter = dest_ptr;
         for chunk in data {
             let chunk = chunk.as_ref();
-            self.vm.write_memory(ptr_iter, chunk).unwrap();
+            self.vm
+                .write_memory(ptr_iter, chunk)
+                .unwrap_or_else(|_| unreachable!());
             ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
         }
 
@@ -3632,7 +3770,9 @@ impl Inner {
         let mut ptr_iter = dest_ptr;
         for chunk in data {
             let chunk = chunk.as_ref();
-            self.vm.write_memory(ptr_iter, chunk).unwrap();
+            self.vm
+                .write_memory(ptr_iter, chunk)
+                .unwrap_or_else(|_| unreachable!());
             ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
         }
 
@@ -3692,8 +3832,10 @@ impl Inner {
             let to_grow = last_byte_memory_page - current_num_pages + HeapPages::new(1);
 
             // We check at initialization that the virtual machine is capable of growing up to
-            // `memory_total_pages`, meaning that this `unwrap` can't panic.
-            self.vm.grow_memory(to_grow).unwrap();
+            // `memory_total_pages`, meaning that this can't panic.
+            self.vm
+                .grow_memory(to_grow)
+                .unwrap_or_else(|_| unreachable!());
         }
 
         Ok(dest_ptr)
@@ -3916,15 +4058,15 @@ impl<'a> allocator::Memory for MemAccess<'a> {
             // This is the simple case: the memory access is in bounds.
             match self.vm {
                 MemAccessVm::Prepare(ref vm) => {
-                    let bytes = vm.read_memory(ptr, 8).unwrap();
+                    let bytes = vm.read_memory(ptr, 8).unwrap_or_else(|_| unreachable!());
                     Ok(u64::from_le_bytes(
-                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap_or_else(|_| unreachable!()),
                     ))
                 }
                 MemAccessVm::Running(ref vm) => {
-                    let bytes = vm.read_memory(ptr, 8).unwrap();
+                    let bytes = vm.read_memory(ptr, 8).unwrap_or_else(|_| unreachable!());
                     Ok(u64::from_le_bytes(
-                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap_or_else(|_| unreachable!()),
                     ))
                 }
             }
@@ -3934,7 +4076,7 @@ impl<'a> allocator::Memory for MemAccess<'a> {
                 MemAccessVm::Prepare(ref vm) => {
                     let partial_bytes = vm
                         .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
-                        .unwrap();
+                        .unwrap_or_else(|_| unreachable!());
                     let partial_bytes = partial_bytes.as_ref();
                     debug_assert!(partial_bytes.len() < 8);
 
@@ -3945,7 +4087,7 @@ impl<'a> allocator::Memory for MemAccess<'a> {
                 MemAccessVm::Running(ref vm) => {
                     let partial_bytes = vm
                         .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
-                        .unwrap();
+                        .unwrap_or_else(|_| unreachable!());
                     let partial_bytes = partial_bytes.as_ref();
                     debug_assert!(partial_bytes.len() < 8);
 
@@ -3986,16 +4128,24 @@ impl<'a> allocator::Memory for MemAccess<'a> {
             let to_grow = written_memory_page - current_num_pages + HeapPages::new(1);
 
             // We check at initialization that the virtual machine is capable of growing up to
-            // `memory_total_pages`, meaning that this `unwrap` can't panic.
+            // `memory_total_pages`, meaning that this can't panic.
             match self.vm {
-                MemAccessVm::Prepare(ref mut vm) => vm.grow_memory(to_grow).unwrap(),
-                MemAccessVm::Running(ref mut vm) => vm.grow_memory(to_grow).unwrap(),
+                MemAccessVm::Prepare(ref mut vm) => {
+                    vm.grow_memory(to_grow).unwrap_or_else(|_| unreachable!())
+                }
+                MemAccessVm::Running(ref mut vm) => {
+                    vm.grow_memory(to_grow).unwrap_or_else(|_| unreachable!())
+                }
             }
         }
 
         match self.vm {
-            MemAccessVm::Prepare(ref mut vm) => vm.write_memory(ptr, &bytes).unwrap(),
-            MemAccessVm::Running(ref mut vm) => vm.write_memory(ptr, &bytes).unwrap(),
+            MemAccessVm::Prepare(ref mut vm) => vm
+                .write_memory(ptr, &bytes)
+                .unwrap_or_else(|_| unreachable!()),
+            MemAccessVm::Running(ref mut vm) => vm
+                .write_memory(ptr, &bytes)
+                .unwrap_or_else(|_| unreachable!()),
         }
         Ok(())
     }

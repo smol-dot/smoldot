@@ -17,7 +17,10 @@
 
 #![cfg(test)]
 
-use super::{open, Config, ConfigTy, DatabaseOpen, InsertTrieNode, InsertTrieNodeStorageValue};
+use super::{
+    open, Config, ConfigTy, DatabaseOpen, InsertTrieNode, InsertTrieNodeStorageValue,
+    StorageAccessError,
+};
 use crate::{chain::chain_information, header, trie};
 
 use alloc::borrow::Cow;
@@ -159,25 +162,27 @@ fn empty_database_fill_then_query() {
                             ),
                         }
                     });
-            empty_db.initialize(
-                chain_information::ChainInformationRef {
-                    finalized_block_header: header::HeaderRef {
-                        number: 0,
-                        extrinsics_root: &[0; 32],
-                        parent_hash: &[0; 32],
-                        state_root,
-                        digest: header::DigestRef::empty(),
+
+            let db = empty_db
+                .initialize(
+                    chain_information::ChainInformationRef {
+                        finalized_block_header: header::HeaderRef {
+                            number: 0,
+                            extrinsics_root: &[0; 32],
+                            parent_hash: &[0; 32],
+                            state_root,
+                            digest: header::DigestRef::empty(),
+                        },
+                        consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                        finality: chain_information::ChainInformationFinalityRef::Outsourced,
                     },
-                    consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                    finality: chain_information::ChainInformationFinalityRef::Outsourced,
-                },
-                iter::empty(),
-                None,
-                trie_entries_linear,
-                0,
-            )
-        }
-        .unwrap();
+                    iter::empty(),
+                    None,
+                )
+                .unwrap();
+            db.insert_trie_nodes(trie_entries_linear, 0).unwrap();
+            db
+        };
 
         let block0_hash = open_db.finalized_block_hash().unwrap();
 
@@ -225,6 +230,7 @@ fn empty_database_fill_then_query() {
                 .unwrap();
             let expected = trie
                 .iter_ordered()
+                .filter(|n| branch_nodes || trie[*n].0.is_some())
                 .map(|n| trie.node_full_key_by_index(n).unwrap().collect::<Vec<_>>())
                 .find(|n| *n >= key)
                 .filter(|n| n.starts_with(&prefix))
@@ -271,4 +277,805 @@ fn empty_database_fill_then_query() {
             );
         }
     }
+}
+
+#[test]
+fn unknown_block() {
+    let DatabaseOpen::Empty(empty_db) = open(Config {
+        block_number_bytes: 4,
+        cache_size: 2 * 1024 * 1024,
+        ty: ConfigTy::Memory,
+    })
+    .unwrap() else {
+        panic!()
+    };
+
+    let db = empty_db
+        .initialize(
+            chain_information::ChainInformationRef {
+                finalized_block_header: header::HeaderRef {
+                    number: 0,
+                    extrinsics_root: &[0; 32],
+                    parent_hash: &[0; 32],
+                    state_root: &[1; 32],
+                    digest: header::DigestRef::empty(),
+                },
+                consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                finality: chain_information::ChainInformationFinalityRef::Outsourced,
+            },
+            iter::empty(),
+            None,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        db.block_storage_get(&[0xff; 32], iter::empty::<iter::Empty<_>>(), [].into_iter()),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &[0xff; 32],
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+            [].into_iter(),
+            true
+        ),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+    assert!(matches!(
+        db.block_storage_next_key(
+            &[0xff; 32],
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+            [].into_iter(),
+            false
+        ),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+
+    assert!(matches!(
+        db.block_storage_closest_descendant_merkle_value(
+            &[0xff; 32],
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter()
+        ),
+        Err(StorageAccessError::UnknownBlock)
+    ));
+}
+
+#[test]
+fn storage_get_partial() {
+    let DatabaseOpen::Empty(empty_db) = open(Config {
+        block_number_bytes: 4,
+        cache_size: 2 * 1024 * 1024,
+        ty: ConfigTy::Memory,
+    })
+    .unwrap() else {
+        panic!()
+    };
+
+    let db = empty_db
+        .initialize(
+            chain_information::ChainInformationRef {
+                finalized_block_header: header::HeaderRef {
+                    number: 0,
+                    extrinsics_root: &[0; 32],
+                    parent_hash: &[0; 32],
+                    state_root: &[1; 32],
+                    digest: header::DigestRef::empty(),
+                },
+                consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                finality: chain_information::ChainInformationFinalityRef::Outsourced,
+            },
+            iter::empty(),
+            None,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 2].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    // The empty key is specifically tested due to SQLite having some weird behaviors mixing
+    // null and empty bytes.
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[1; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+            children_merkle_values: [
+                None,
+                Some(Cow::Borrowed(&[2; 32])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::Value {
+                value: Cow::Borrowed(b"hello"),
+                references_merkle_value: false,
+            },
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap()
+        .0,
+        b"hello"
+    );
+
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(db
+        .block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+        )
+        .unwrap()
+        .is_none());
+
+    assert!(matches!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 2].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[2; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+            children_merkle_values: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::Value {
+                value: Cow::Borrowed(b"world"),
+                references_merkle_value: false,
+            },
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap()
+        .0,
+        b"hello"
+    );
+
+    assert_eq!(
+        db.block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap()
+        .0,
+        b"world"
+    );
+
+    assert!(db
+        .block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+        )
+        .unwrap()
+        .is_none());
+
+    assert!(db
+        .block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 2].into_iter(),
+        )
+        .unwrap()
+        .is_none());
+
+    // The empty key is specifically tested due to SQLite having some weird behaviors mixing
+    // null and empty bytes.
+    assert!(db
+        .block_storage_get(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn storage_next_key_partial() {
+    let DatabaseOpen::Empty(empty_db) = open(Config {
+        block_number_bytes: 4,
+        cache_size: 2 * 1024 * 1024,
+        ty: ConfigTy::Memory,
+    })
+    .unwrap() else {
+        panic!()
+    };
+
+    let db = empty_db
+        .initialize(
+            chain_information::ChainInformationRef {
+                finalized_block_header: header::HeaderRef {
+                    number: 0,
+                    extrinsics_root: &[0; 32],
+                    parent_hash: &[0; 32],
+                    state_root: &[1; 32],
+                    digest: header::DigestRef::empty(),
+                },
+                consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                finality: chain_information::ChainInformationFinalityRef::Outsourced,
+            },
+            iter::empty(),
+            None,
+        )
+        .unwrap();
+
+    // The empty key is specifically tested due to SQLite having some weird behaviors mixing
+    // null and empty bytes.
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+            iter::empty(),
+            true
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+            iter::empty(),
+            true
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[1; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+            children_merkle_values: [
+                None,
+                Some(Cow::Borrowed(&[2; 32])),
+                Some(Cow::Borrowed(&[3; 32])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::NoValue,
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 0].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1, 1]
+    );
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1, 1]
+    );
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+            iter::empty(),
+            false
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 0].into_iter(),
+            iter::empty(),
+            true
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 0].into_iter(),
+            [1, 1, 0].into_iter(),
+            true
+        ),
+        Ok(None)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+            iter::empty(),
+            true
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 3].into_iter(),
+            iter::empty(),
+            true
+        ),
+        Ok(None)
+    ));
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[3; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[2]),
+            children_merkle_values: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::Value {
+                value: Cow::Borrowed(b"hello"),
+                references_merkle_value: false,
+            },
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1, 1, 2, 2]
+    );
+
+    assert!(matches!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1, 1, 1, 1].into_iter(),
+            iter::empty(),
+            true
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[2; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+            children_merkle_values: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::Value {
+                value: Cow::Borrowed(b"hello"),
+                references_merkle_value: false,
+            },
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+            iter::empty(),
+            false
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1, 1, 1, 1, 1]
+    );
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1, 1, 1, 1].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1, 1, 2, 2]
+    );
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 3].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap(),
+        None
+    );
+
+    assert_eq!(
+        db.block_storage_next_key(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [3].into_iter(),
+            iter::empty(),
+            true
+        )
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn storage_closest_descendant_merkle_value_partial() {
+    let DatabaseOpen::Empty(empty_db) = open(Config {
+        block_number_bytes: 4,
+        cache_size: 2 * 1024 * 1024,
+        ty: ConfigTy::Memory,
+    })
+    .unwrap() else {
+        panic!()
+    };
+
+    let db = empty_db
+        .initialize(
+            chain_information::ChainInformationRef {
+                finalized_block_header: header::HeaderRef {
+                    number: 0,
+                    extrinsics_root: &[0; 32],
+                    parent_hash: &[0; 32],
+                    state_root: &[1; 32],
+                    digest: header::DigestRef::empty(),
+                },
+                consensus: chain_information::ChainInformationConsensusRef::Unknown,
+                finality: chain_information::ChainInformationFinalityRef::Outsourced,
+            },
+            iter::empty(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1; 32]
+    );
+
+    assert!(matches!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert!(matches!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 2, 3, 4, 5].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[1; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+            children_merkle_values: [
+                None,
+                Some(Cow::Borrowed(&[2; 32])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::Value {
+                value: Cow::Borrowed(b"hello"),
+                references_merkle_value: false,
+            },
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1; 32]
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1; 32]
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![2; 32]
+    );
+
+    assert!(matches!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1].into_iter(),
+        ),
+        Err(StorageAccessError::IncompleteStorage)
+    ));
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+        )
+        .unwrap(),
+        None
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [5].into_iter(),
+        )
+        .unwrap(),
+        None
+    );
+
+    db.insert_trie_nodes(
+        [InsertTrieNode {
+            merkle_value: Cow::Borrowed(&[2; 32]),
+            partial_key_nibbles: Cow::Borrowed(&[1, 1]),
+            children_merkle_values: [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None,
+            ],
+            storage_value: InsertTrieNodeStorageValue::Value {
+                value: Cow::Borrowed(b"world"),
+                references_merkle_value: false,
+            },
+        }]
+        .into_iter(),
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![1; 32]
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![2; 32]
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1].into_iter(),
+        )
+        .unwrap()
+        .unwrap(),
+        vec![2; 32]
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 2].into_iter(),
+        )
+        .unwrap(),
+        None
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 2].into_iter(),
+        )
+        .unwrap(),
+        None
+    );
+
+    assert_eq!(
+        db.block_storage_closest_descendant_merkle_value(
+            &db.block_hash_by_number(0).unwrap().next().unwrap(),
+            iter::empty::<iter::Empty<_>>(),
+            [1, 1, 1, 1, 1, 1, 1, 1].into_iter(),
+        )
+        .unwrap(),
+        None
+    );
 }

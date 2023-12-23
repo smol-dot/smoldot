@@ -15,14 +15,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use smoldot::libp2p::{multiaddr::ProtocolRef, multihash, Multiaddr};
+use smoldot::libp2p::multiaddr::{Multiaddr, Protocol};
 
-use super::{Address, IpAddr, MultiStreamAddress};
+use super::{Address, ConnectionType, IpAddr, MultiStreamAddress};
 use core::str;
 
 pub enum AddressOrMultiStreamAddress<'a> {
     Address(Address<'a>),
     MultiStreamAddress(MultiStreamAddress),
+}
+
+impl<'a> From<&'a AddressOrMultiStreamAddress<'a>> for ConnectionType {
+    fn from(address: &'a AddressOrMultiStreamAddress<'a>) -> ConnectionType {
+        match address {
+            AddressOrMultiStreamAddress::Address(a) => ConnectionType::from(a),
+            AddressOrMultiStreamAddress::MultiStreamAddress(a) => ConnectionType::from(a),
+        }
+    }
 }
 
 /// Parses a [`Multiaddr`] into an [`Address`] or [`MultiStreamAddress`].
@@ -39,43 +48,43 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
     }
 
     Ok(match (proto1, proto2, proto3, proto4) {
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None, None) => {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), None, None) => {
             AddressOrMultiStreamAddress::Address(Address::TcpIp {
                 ip: IpAddr::V4(ip),
                 port,
             })
         }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None, None) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), None, None) => {
             AddressOrMultiStreamAddress::Address(Address::TcpIp {
                 ip: IpAddr::V6(ip),
                 port,
             })
         }
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
             None,
             None,
         ) => AddressOrMultiStreamAddress::Address(Address::TcpDns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
             port,
         }),
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws), None) => {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws), None) => {
             AddressOrMultiStreamAddress::Address(Address::WebSocketIp {
                 ip: IpAddr::V4(ip),
                 port,
             })
         }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws), None) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws), None) => {
             AddressOrMultiStreamAddress::Address(Address::WebSocketIp {
                 ip: IpAddr::V6(ip),
                 port,
             })
         }
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
-            Some(ProtocolRef::Ws),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
+            Some(Protocol::Ws),
             None,
         ) => AddressOrMultiStreamAddress::Address(Address::WebSocketDns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
@@ -83,16 +92,16 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             secure: false,
         }),
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
-            Some(ProtocolRef::Wss),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
+            Some(Protocol::Wss),
             None,
         )
         | (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
-            Some(ProtocolRef::Tls),
-            Some(ProtocolRef::Ws),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
+            Some(Protocol::Tls),
+            Some(Protocol::Ws),
         ) => AddressOrMultiStreamAddress::Address(Address::WebSocketDns {
             hostname: str::from_utf8(addr.into_bytes()).map_err(Error::NonUtf8DomainName)?,
             port,
@@ -100,13 +109,11 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
         }),
 
         (
-            ProtocolRef::Ip4(ip),
-            ProtocolRef::Udp(port),
-            Some(ProtocolRef::WebRtcDirect),
-            Some(ProtocolRef::Certhash(hash)),
+            Protocol::Ip4(ip),
+            Protocol::Udp(port),
+            Some(Protocol::WebRtcDirect),
+            Some(Protocol::Certhash(multihash)),
         ) => {
-            // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
-            let multihash = multihash::MultihashRef::from_bytes(&hash).unwrap();
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
@@ -121,13 +128,11 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
         }
 
         (
-            ProtocolRef::Ip6(ip),
-            ProtocolRef::Udp(port),
-            Some(ProtocolRef::WebRtcDirect),
-            Some(ProtocolRef::Certhash(hash)),
+            Protocol::Ip6(ip),
+            Protocol::Udp(port),
+            Some(Protocol::WebRtcDirect),
+            Some(Protocol::Certhash(multihash)),
         ) => {
-            // TODO: unwrapping is hacky because Multiaddr is supposed to guarantee that this is a valid multihash but doesn't due to typing issues
-            let multihash = multihash::MultihashRef::from_bytes(&hash).unwrap();
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }

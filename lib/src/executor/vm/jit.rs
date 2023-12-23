@@ -77,11 +77,14 @@ impl JitPrototype {
         // by default, but we just disable them all to be sure.
         config.wasm_threads(false);
         config.wasm_reference_types(false);
+        config.wasm_function_references(false);
         config.wasm_simd(false);
+        config.wasm_relaxed_simd(false);
         config.wasm_bulk_memory(false);
         config.wasm_multi_value(false);
         config.wasm_multi_memory(false);
         config.wasm_memory64(false);
+        config.wasm_tail_call(false);
 
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;

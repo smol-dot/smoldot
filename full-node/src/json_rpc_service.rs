@@ -54,9 +54,12 @@ pub struct Config {
     /// Database to access blocks.
     pub database: Arc<database_thread::DatabaseThread>,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: (
+        Arc<network_service::NetworkService>,
+        network_service::ChainId,
+    ),
 
     /// Where to bind the WebSocket server. If `None`, no TCP server is started.
     pub bind_address: Option<SocketAddr>,
@@ -587,12 +590,12 @@ fn spawn_client_main_task(
                         }
                         methods::MethodCall::chainHead_unstable_unpin {
                             follow_subscription,
-                            hash,
+                            hash_or_hashes,
                         } => {
                             if let Some(follow_subscription) =
                                 chain_head_follow_subscriptions.get_mut(&*follow_subscription)
                             {
-                                let block_hashes = match hash {
+                                let block_hashes = match hash_or_hashes {
                                     methods::HashHexStringSingleOrArray::Array(list) => {
                                         list.into_iter().map(|h| h.0).collect::<Vec<_>>()
                                     }

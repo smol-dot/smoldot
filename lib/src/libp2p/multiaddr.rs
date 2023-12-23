@@ -24,21 +24,21 @@ use core::{
     str::{self, FromStr},
 };
 
-use super::multihash;
+pub use super::multihash::{FromBytesError as MultihashFromBytesError, Multihash};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Multiaddr {
-    bytes: Vec<u8>,
+pub struct Multiaddr<T = Vec<u8>> {
+    bytes: T,
 }
 
-impl Multiaddr {
+impl Multiaddr<Vec<u8>> {
     /// Creates a new empty `Multiaddr`.
     pub fn empty() -> Self {
         Multiaddr { bytes: Vec::new() }
     }
 
     /// Pushes a protocol at the end of this `Multiaddr`.
-    pub fn push(&mut self, protocol: ProtocolRef) {
+    pub fn push(&mut self, protocol: Protocol) {
         for slice in protocol.as_bytes() {
             self.bytes.extend(slice.as_ref());
         }
@@ -47,23 +47,6 @@ impl Multiaddr {
     /// Shrinks the memory used by the underlying container to its size.
     pub fn shrink_to_fit(&mut self) {
         self.bytes.shrink_to_fit();
-    }
-
-    /// Returns the serialized version of this `Multiaddr`.
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.bytes.clone()
-    }
-
-    /// Returns the serialized version of this `Multiaddr`.
-    pub fn into_vec(self) -> Vec<u8> {
-        self.bytes
-    }
-
-    /// Returns the list of components of the multiaddress.
-    pub fn iter(&'_ self) -> impl Iterator<Item = ProtocolRef<'_>> + '_ {
-        let mut iter =
-            nom::combinator::iterator(&self.bytes[..], protocol::<nom::error::Error<&'_ [u8]>>);
-        iter::from_fn(move || (&mut iter).next())
     }
 
     /// Pops the last protocol from the list.
@@ -76,7 +59,7 @@ impl Multiaddr {
         let remain = {
             let mut iter = nom::combinator::iterator(
                 &self.bytes[..],
-                nom::combinator::recognize(protocol::<nom::error::Error<&'_ [u8]>>),
+                nom::combinator::recognize(protocol::<&'_ [u8], nom::error::Error<&'_ [u8]>>),
             );
 
             let bytes_prefix = iter.last().unwrap().len();
@@ -87,14 +70,49 @@ impl Multiaddr {
     }
 }
 
-impl AsRef<[u8]> for Multiaddr {
-    fn as_ref(&self) -> &[u8] {
+impl<T> Multiaddr<T> {
+    /// Returns the serialized version of this `Multiaddr`.
+    pub fn into_bytes(self) -> T {
+        self.bytes
+    }
+}
+
+impl<T: AsRef<[u8]>> Multiaddr<T> {
+    /// Checks whether the given bytes have the proper format, and if so wraps them
+    /// around a [`Multiaddr`].
+    pub fn from_bytes(bytes: T) -> Result<Self, (FromBytesError, T)> {
+        // Check whether this is indeed a valid list of protocols.
+        if nom::combinator::all_consuming(nom::multi::fold_many0(
+            nom::combinator::complete(protocol::<&[u8], nom::error::Error<&[u8]>>),
+            || (),
+            |(), _| (),
+        ))(bytes.as_ref())
+        .is_err()
+        {
+            return Err((FromBytesError, bytes));
+        }
+
+        Ok(Multiaddr { bytes })
+    }
+
+    /// Returns the list of components of the multiaddress.
+    pub fn iter(&'_ self) -> impl Iterator<Item = Protocol<&'_ [u8]>> + '_ {
+        let mut iter = nom::combinator::iterator(
+            self.bytes.as_ref(),
+            protocol::<_, nom::error::Error<&'_ [u8]>>,
+        );
+        iter::from_fn(move || (&mut iter).next())
+    }
+}
+
+impl<T> AsRef<T> for Multiaddr<T> {
+    fn as_ref(&self) -> &T {
         &self.bytes
     }
 }
 
-impl<'a> From<ProtocolRef<'a>> for Multiaddr {
-    fn from(proto: ProtocolRef<'a>) -> Multiaddr {
+impl<T: AsRef<[u8]>> From<Protocol<T>> for Multiaddr<Vec<u8>> {
+    fn from(proto: Protocol<T>) -> Multiaddr<Vec<u8>> {
         let bytes = proto.as_bytes().fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
@@ -104,7 +122,7 @@ impl<'a> From<ProtocolRef<'a>> for Multiaddr {
     }
 }
 
-impl FromStr for Multiaddr {
+impl FromStr for Multiaddr<Vec<u8>> {
     type Err = ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
@@ -116,7 +134,7 @@ impl FromStr for Multiaddr {
         }
 
         while parts.peek().is_some() {
-            let protocol = ProtocolRef::from_str_parts(&mut parts)?;
+            let protocol = Protocol::from_str_parts(&mut parts)?;
             for slice in protocol.as_bytes() {
                 bytes.extend_from_slice(slice.as_ref());
             }
@@ -126,10 +144,10 @@ impl FromStr for Multiaddr {
     }
 }
 
-impl<'a> FromIterator<ProtocolRef<'a>> for Multiaddr {
-    fn from_iter<T>(iter: T) -> Self
+impl<T: AsRef<[u8]>> FromIterator<Protocol<T>> for Multiaddr<Vec<u8>> {
+    fn from_iter<I>(iter: I) -> Self
     where
-        T: IntoIterator<Item = ProtocolRef<'a>>,
+        I: IntoIterator<Item = Protocol<T>>,
     {
         let mut bytes = Vec::new();
         for protocol in iter {
@@ -141,32 +159,13 @@ impl<'a> FromIterator<ProtocolRef<'a>> for Multiaddr {
     }
 }
 
-impl TryFrom<Vec<u8>> for Multiaddr {
-    type Error = FromVecError;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        // Check whether this is indeed a valid list of protocols.
-        if nom::combinator::all_consuming(nom::multi::fold_many0(
-            nom::combinator::complete(protocol::<nom::error::Error<&[u8]>>),
-            || (),
-            |(), _| (),
-        ))(&bytes)
-        .is_err()
-        {
-            return Err(FromVecError { addr: bytes });
-        }
-
-        Ok(Multiaddr { bytes })
-    }
-}
-
-impl fmt::Debug for Multiaddr {
+impl<T: AsRef<[u8]>> fmt::Debug for Multiaddr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(&self, f)
     }
 }
 
-impl fmt::Display for Multiaddr {
+impl<T: AsRef<[u8]>> fmt::Display for Multiaddr<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for protocol in self.iter() {
             fmt::Display::fmt(&protocol, f)?;
@@ -176,12 +175,9 @@ impl fmt::Display for Multiaddr {
     }
 }
 
-// TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 #[display(fmt = "Unable to parse multiaddress")]
-pub struct FromVecError {
-    pub addr: Vec<u8>,
-}
+pub struct FromBytesError;
 
 // TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
@@ -194,21 +190,21 @@ pub enum ParseError {
     InvalidIp,
     NotBase58,
     InvalidDomainName,
-    InvalidMultihash(multihash::FromBytesError),
+    InvalidMultihash(MultihashFromBytesError),
     InvalidMemoryPayload,
     InvalidMultibase,
     InvalidBase64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProtocolRef<'a> {
-    Dns(DomainNameRef<'a>),
-    Dns4(DomainNameRef<'a>),
-    Dns6(DomainNameRef<'a>),
-    DnsAddr(DomainNameRef<'a>),
+#[derive(Clone, PartialEq, Eq)]
+pub enum Protocol<T = Vec<u8>> {
+    Dns(DomainName<T>),
+    Dns4(DomainName<T>),
+    Dns6(DomainName<T>),
+    DnsAddr(DomainName<T>),
     Ip4([u8; 4]),
     Ip6([u8; 16]),
-    P2p(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
+    P2p(Multihash<T>), // TODO: put directly a PeerId? unclear
     Quic,
     Tcp(u16),
     Tls,
@@ -220,75 +216,83 @@ pub enum ProtocolRef<'a> {
     Memory(u64),
     WebRtcDirect,
     /// Contains the multihash of the TLS certificate.
-    Certhash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
+    Certhash(Multihash<T>),
 }
 
-impl<'a> ProtocolRef<'a> {
+impl<'a> Protocol<Cow<'a, [u8]>> {
     /// Attempts to extract a protocol from an iterator of `/`-separated components.
     pub fn from_str_parts(mut iter: impl Iterator<Item = &'a str>) -> Result<Self, ParseError> {
         match iter.next().ok_or(ParseError::UnexpectedEof)? {
             "dns" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Dns(DomainNameRef::try_from(addr)?))
+                Ok(Protocol::Dns(DomainName::from_bytes(Cow::Borrowed(
+                    addr.as_bytes(),
+                ))?))
             }
             "dns4" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Dns4(DomainNameRef::try_from(addr)?))
+                Ok(Protocol::Dns4(DomainName::from_bytes(Cow::Borrowed(
+                    addr.as_bytes(),
+                ))?))
             }
             "dns6" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Dns6(DomainNameRef::try_from(addr)?))
+                Ok(Protocol::Dns6(DomainName::from_bytes(Cow::Borrowed(
+                    addr.as_bytes(),
+                ))?))
             }
             "dnsaddr" => {
                 let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::DnsAddr(DomainNameRef::try_from(addr)?))
+                Ok(Protocol::DnsAddr(DomainName::from_bytes(Cow::Borrowed(
+                    addr.as_bytes(),
+                ))?))
             }
             "ip4" => {
                 let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 let parsed =
                     no_std_net::Ipv4Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
-                Ok(ProtocolRef::Ip4(parsed.octets()))
+                Ok(Protocol::Ip4(parsed.octets()))
             }
             "ip6" => {
                 let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 let parsed =
                     no_std_net::Ipv6Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
-                Ok(ProtocolRef::Ip6(parsed.octets()))
+                Ok(Protocol::Ip6(parsed.octets()))
             }
             "p2p" => {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 let decoded = bs58::decode(s)
                     .into_vec()
                     .map_err(|_| ParseError::NotBase58)?;
-                if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
-                    return Err(ParseError::InvalidMultihash(err));
-                }
-                Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
+                Ok(Protocol::P2p(
+                    Multihash::from_bytes(Cow::Owned(decoded))
+                        .map_err(|(err, _)| ParseError::InvalidMultihash(err))?,
+                ))
             }
             "tcp" => {
                 let port = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Tcp(
+                Ok(Protocol::Tcp(
                     port.parse().map_err(|_| ParseError::InvalidPort)?,
                 ))
             }
-            "tls" => Ok(ProtocolRef::Tls),
+            "tls" => Ok(Protocol::Tls),
             "udp" => {
                 let port = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Udp(
+                Ok(Protocol::Udp(
                     port.parse().map_err(|_| ParseError::InvalidPort)?,
                 ))
             }
-            "ws" => Ok(ProtocolRef::Ws),
-            "wss" => Ok(ProtocolRef::Wss),
+            "ws" => Ok(Protocol::Ws),
+            "wss" => Ok(Protocol::Wss),
             "memory" => {
                 let payload = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                Ok(ProtocolRef::Memory(
+                Ok(Protocol::Memory(
                     payload
                         .parse()
                         .map_err(|_| ParseError::InvalidMemoryPayload)?,
                 ))
             }
-            "webrtc-direct" => Ok(ProtocolRef::WebRtcDirect),
+            "webrtc-direct" => Ok(Protocol::WebRtcDirect),
             "certhash" => {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 // See <https://github.com/multiformats/multibase#multibase-table>
@@ -302,60 +306,65 @@ impl<'a> ProtocolRef<'a> {
                 let decoded = base64_flavor
                     .decode(&s[1..])
                     .map_err(|_| ParseError::InvalidBase64)?;
-                if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
-                    return Err(ParseError::InvalidMultihash(err));
-                }
-                Ok(ProtocolRef::Certhash(Cow::Owned(decoded)))
+                Ok(Protocol::Certhash(
+                    Multihash::from_bytes(Cow::Owned(decoded))
+                        .map_err(|(err, _)| ParseError::InvalidMultihash(err))?,
+                ))
             }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
     }
+}
 
+impl<T: AsRef<[u8]>> Protocol<T> {
     /// Returns an iterator to a list of buffers that, when concatenated together, form the
     /// binary representation of this protocol.
     pub fn as_bytes(&self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         let code = match self {
-            ProtocolRef::Dns(_) => 53,
-            ProtocolRef::Dns4(_) => 54,
-            ProtocolRef::Dns6(_) => 55,
-            ProtocolRef::DnsAddr(_) => 56,
-            ProtocolRef::Ip4(_) => 4,
-            ProtocolRef::Ip6(_) => 41,
-            ProtocolRef::P2p(_) => 421,
-            ProtocolRef::Quic => 460,
-            ProtocolRef::Tcp(_) => 6,
-            ProtocolRef::Tls => 448,
-            ProtocolRef::Udp(_) => 273,
-            ProtocolRef::Ws => 477,
-            ProtocolRef::Wss => 478,
-            ProtocolRef::Memory(_) => 777,
-            ProtocolRef::WebRtcDirect => 280,
-            ProtocolRef::Certhash(_) => 466,
+            Protocol::Dns(_) => 53,
+            Protocol::Dns4(_) => 54,
+            Protocol::Dns6(_) => 55,
+            Protocol::DnsAddr(_) => 56,
+            Protocol::Ip4(_) => 4,
+            Protocol::Ip6(_) => 41,
+            Protocol::P2p(_) => 421,
+            Protocol::Quic => 460,
+            Protocol::Tcp(_) => 6,
+            Protocol::Tls => 448,
+            Protocol::Udp(_) => 273,
+            Protocol::Ws => 477,
+            Protocol::Wss => 478,
+            Protocol::Memory(_) => 777,
+            Protocol::WebRtcDirect => 280,
+            Protocol::Certhash(_) => 466,
         };
 
         // TODO: optimize by not allocating a Vec
         let extra = match self {
-            ProtocolRef::Dns(addr)
-            | ProtocolRef::Dns4(addr)
-            | ProtocolRef::Dns6(addr)
-            | ProtocolRef::DnsAddr(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
+            Protocol::Dns(addr)
+            | Protocol::Dns4(addr)
+            | Protocol::Dns6(addr)
+            | Protocol::DnsAddr(addr) => {
+                let addr = addr.as_ref().as_ref();
+                let mut out = Vec::with_capacity(addr.len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.len()));
+                out.extend_from_slice(addr);
                 out
             }
-            ProtocolRef::Ip4(ip) => ip.to_vec(),
-            ProtocolRef::Ip6(ip) => ip.to_vec(),
-            ProtocolRef::P2p(multihash) => {
+            Protocol::Ip4(ip) => ip.to_vec(),
+            Protocol::Ip6(ip) => ip.to_vec(),
+            Protocol::P2p(multihash) => {
+                let multihash = multihash.as_ref().as_ref();
                 // TODO: what if not a valid multihash? the enum variant can be constructed by the user
                 let mut out = Vec::with_capacity(multihash.len() + 4);
                 out.extend(crate::util::leb128::encode_usize(multihash.len()));
                 out.extend_from_slice(multihash);
                 out
             }
-            ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
-            ProtocolRef::Memory(payload) => payload.to_be_bytes().to_vec(),
-            ProtocolRef::Certhash(multihash) => {
+            Protocol::Tcp(port) | Protocol::Udp(port) => port.to_be_bytes().to_vec(),
+            Protocol::Memory(payload) => payload.to_be_bytes().to_vec(),
+            Protocol::Certhash(multihash) => {
+                let multihash = multihash.as_ref().as_ref();
                 // TODO: what if not a valid multihash? the enum variant can be constructed by the user
                 let mut out = Vec::with_capacity(multihash.len() + 4);
                 out.extend(crate::util::leb128::encode_usize(multihash.len()));
@@ -372,34 +381,40 @@ impl<'a> ProtocolRef<'a> {
     }
 }
 
-impl<'a> fmt::Display for ProtocolRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Debug for Protocol<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl<T: AsRef<[u8]>> fmt::Display for Protocol<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            // Note that since a `DomainNameRef` always contains a valid domain name, it is
+            // Note that since a `DomainName` always contains a valid domain name, it is
             // guaranteed that `addr` never contains a `/`.
-            ProtocolRef::Dns(addr) => write!(f, "/dns/{addr}"),
-            ProtocolRef::Dns4(addr) => write!(f, "/dns4/{addr}"),
-            ProtocolRef::Dns6(addr) => write!(f, "/dns6/{addr}"),
-            ProtocolRef::DnsAddr(addr) => write!(f, "/dnsaddr/{addr}"),
-            ProtocolRef::Ip4(ip) => write!(f, "/ip4/{}", no_std_net::Ipv4Addr::from(*ip)),
-            ProtocolRef::Ip6(ip) => write!(f, "/ip6/{}", no_std_net::Ipv6Addr::from(*ip)),
-            ProtocolRef::P2p(multihash) => {
+            Protocol::Dns(addr) => write!(f, "/dns/{addr}"),
+            Protocol::Dns4(addr) => write!(f, "/dns4/{addr}"),
+            Protocol::Dns6(addr) => write!(f, "/dns6/{addr}"),
+            Protocol::DnsAddr(addr) => write!(f, "/dnsaddr/{addr}"),
+            Protocol::Ip4(ip) => write!(f, "/ip4/{}", no_std_net::Ipv4Addr::from(*ip)),
+            Protocol::Ip6(ip) => write!(f, "/ip6/{}", no_std_net::Ipv6Addr::from(*ip)),
+            Protocol::P2p(multihash) => {
                 // Base58 encoding doesn't have `/` in its characters set.
-                write!(f, "/p2p/{}", bs58::encode(multihash).into_string())
+                write!(f, "/p2p/{}", bs58::encode(multihash.as_ref()).into_string())
             }
-            ProtocolRef::Quic => write!(f, "/quic"),
-            ProtocolRef::Tcp(port) => write!(f, "/tcp/{port}"),
-            ProtocolRef::Tls => write!(f, "/tls"),
-            ProtocolRef::Udp(port) => write!(f, "/udp/{port}"),
-            ProtocolRef::Ws => write!(f, "/ws"),
-            ProtocolRef::Wss => write!(f, "/wss"),
-            ProtocolRef::Memory(payload) => write!(f, "/memory/{payload}"),
-            ProtocolRef::WebRtcDirect => write!(f, "/webrtc-direct"),
-            ProtocolRef::Certhash(multihash) => {
+            Protocol::Quic => write!(f, "/quic"),
+            Protocol::Tcp(port) => write!(f, "/tcp/{port}"),
+            Protocol::Tls => write!(f, "/tls"),
+            Protocol::Udp(port) => write!(f, "/udp/{port}"),
+            Protocol::Ws => write!(f, "/ws"),
+            Protocol::Wss => write!(f, "/wss"),
+            Protocol::Memory(payload) => write!(f, "/memory/{payload}"),
+            Protocol::WebRtcDirect => write!(f, "/webrtc-direct"),
+            Protocol::Certhash(multihash) => {
                 write!(
                     f,
                     "/certhash/u{}",
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(multihash)
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(multihash.as_ref())
                 )
             }
         }
@@ -408,19 +423,19 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
 
 /// Domain name. Guarantees that the domain name has a valid syntax.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DomainNameRef<'a>(&'a str);
+pub struct DomainName<T = Vec<u8>>(T);
 
-impl<'a> DomainNameRef<'a> {
+impl<T> DomainName<T> {
     /// Returns the underlying bytes of the domain name.
-    pub fn into_bytes(self) -> &'a [u8] {
-        self.0.as_bytes()
+    pub fn into_bytes(self) -> T {
+        self.0
     }
-}
 
-impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
-    type Error = ParseError;
-
-    fn try_from(input: &'a str) -> Result<Self, Self::Error> {
+    /// Try to parse the given string as a domain name.
+    pub fn from_bytes(bytes: T) -> Result<DomainName<T>, ParseError>
+    where
+        T: AsRef<[u8]>,
+    {
         // Checks whether the input is valid domain name.
         // See https://datatracker.ietf.org/doc/html/rfc2181#section-11
 
@@ -428,14 +443,16 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
         // unnecessarily large binary size overhead (~1.1 MiB!), so the check is now implemented
         // manually instead.
 
-        if input.as_bytes().len() > 255 {
+        let as_str = str::from_utf8(bytes.as_ref()).map_err(|_| ParseError::InvalidDomainName)?;
+
+        if as_str.len() > 255 {
             return Err(ParseError::InvalidDomainName);
         }
 
-        if !input.is_empty() && input != "." {
+        if !as_str.is_empty() && as_str != "." {
             // The checks within this for loop would fail if `input` is empty or equal to ".",
             // even though "" and "." are valid domain names.
-            for label in input.split_terminator('.') {
+            for label in as_str.split_terminator('.') {
                 if label.is_empty() || label.as_bytes().len() > 63 {
                     return Err(ParseError::InvalidDomainName);
                 }
@@ -444,113 +461,99 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
 
         // In addition to the standard, we also forbid any domain name containing a `/` byte,
         // because it would mess up with the multiaddress format.
-        if input.chars().any(|c| c == '/') || input.as_bytes().iter().any(|b| *b == b'/') {
+        if as_str.chars().any(|c| c == '/') || as_str.as_bytes().iter().any(|b| *b == b'/') {
             return Err(ParseError::InvalidDomainName);
         }
 
         // Note that success here does in no way guarantee that this domain name is registrable,
         // only that its syntax is valid.
 
-        Ok(DomainNameRef(input))
+        Ok(DomainName(bytes))
     }
 }
 
-impl<'a> AsRef<[u8]> for DomainNameRef<'a> {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
+impl<T> AsRef<T> for DomainName<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
     }
 }
 
-impl<'a> fmt::Debug for DomainNameRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Debug for DomainName<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
+        let as_str = str::from_utf8(self.0.as_ref()).unwrap();
+        fmt::Debug::fmt(as_str, f)
     }
 }
 
-impl<'a> fmt::Display for DomainNameRef<'a> {
+impl<T: AsRef<[u8]>> fmt::Display for DomainName<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        let as_str = str::from_utf8(self.0.as_ref()).unwrap();
+        fmt::Display::fmt(as_str, f)
     }
 }
 
 /// Parses a single protocol from its bytes.
-fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
+fn protocol<'a, T: From<&'a [u8]> + AsRef<[u8]>, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], ProtocolRef<'a>, E> {
+) -> nom::IResult<&'a [u8], Protocol<T>, E> {
     nom::combinator::flat_map(crate::util::leb128::nom_leb128_usize, |protocol_code| {
         move |bytes: &'a [u8]| match protocol_code {
             4 => nom::combinator::map(nom::bytes::streaming::take(4_u32), |ip: &'a [u8]| {
-                ProtocolRef::Ip4(ip.try_into().unwrap())
+                Protocol::Ip4(ip.try_into().unwrap())
             })(bytes),
-            6 => nom::combinator::map(nom::number::streaming::be_u16, ProtocolRef::Tcp)(bytes),
+            6 => nom::combinator::map(nom::number::streaming::be_u16, Protocol::Tcp)(bytes),
             41 => nom::combinator::map(nom::bytes::streaming::take(16_u32), |ip: &'a [u8]| {
-                ProtocolRef::Ip6(ip.try_into().unwrap())
+                Protocol::Ip6(ip.try_into().unwrap())
             })(bytes),
             53 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(T::from(s)).ok(),
                 ),
-                ProtocolRef::Dns,
+                Protocol::Dns,
             )(bytes),
             54 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(T::from(s)).ok(),
                 ),
-                ProtocolRef::Dns4,
+                Protocol::Dns4,
             )(bytes),
             55 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(T::from(s)).ok(),
                 ),
-                ProtocolRef::Dns6,
+                Protocol::Dns6,
             )(bytes),
             56 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| {
-                        str::from_utf8(s)
-                            .ok()
-                            .and_then(|s| DomainNameRef::try_from(s).ok())
-                    },
+                    |s| DomainName::from_bytes(T::from(s)).ok(),
                 ),
-                ProtocolRef::DnsAddr,
+                Protocol::DnsAddr,
             )(bytes),
-            273 => nom::combinator::map(nom::number::streaming::be_u16, ProtocolRef::Udp)(bytes),
+            273 => nom::combinator::map(nom::number::streaming::be_u16, Protocol::Udp)(bytes),
             421 => nom::combinator::map(
-                nom::combinator::verify(
+                nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                    |s| Multihash::from_bytes(From::from(s)).ok(),
                 ),
-                |b| ProtocolRef::P2p(Cow::Borrowed(b)),
+                Protocol::P2p,
             )(bytes),
-            448 => Ok((bytes, ProtocolRef::Tls)),
-            460 => Ok((bytes, ProtocolRef::Quic)),
-            477 => Ok((bytes, ProtocolRef::Ws)),
-            478 => Ok((bytes, ProtocolRef::Wss)),
+            448 => Ok((bytes, Protocol::Tls)),
+            460 => Ok((bytes, Protocol::Quic)),
+            477 => Ok((bytes, Protocol::Ws)),
+            478 => Ok((bytes, Protocol::Wss)),
             // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
-            777 => nom::combinator::map(nom::number::streaming::be_u64, ProtocolRef::Memory)(bytes),
-            280 => Ok((bytes, ProtocolRef::WebRtcDirect)),
+            777 => nom::combinator::map(nom::number::streaming::be_u64, Protocol::Memory)(bytes),
+            280 => Ok((bytes, Protocol::WebRtcDirect)),
             466 => nom::combinator::map(
-                nom::combinator::verify(
+                nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                    |s| Multihash::from_bytes(From::from(s)).ok(),
                 ),
-                |b| ProtocolRef::Certhash(Cow::Borrowed(b)),
+                Protocol::Certhash,
             )(bytes),
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
@@ -570,7 +573,7 @@ mod tests {
             let parsed = addr.parse::<Multiaddr>().unwrap();
             assert_eq!(parsed.to_string(), addr, "{}", addr);
             assert_eq!(
-                Multiaddr::try_from(parsed.to_vec()).unwrap(),
+                Multiaddr::from_bytes(parsed.as_ref().to_vec()).unwrap(),
                 parsed,
                 "{}",
                 addr
