@@ -2058,12 +2058,15 @@ impl SyncBackground {
                                 .with_database_detached({
                                     let storage_changes = storage_changes.clone();
                                     let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
+                                    let body = header_verification_success
+                                        .scale_encoded_extrinsics().unwrap()
+                                        .map(|tx| tx.as_ref().to_owned())
+                                        .collect::<Vec<_>>();
                                     move |database| {
-                                        // TODO: overhead for building the SCALE encoding of the header
                                         let result = database.insert(
                                             &scale_encoded_header,
                                             is_new_best,
-                                            iter::empty::<Vec<u8>>(), // TODO:,no /!\
+                                            body.into_iter(),
                                         );
 
                                         match result {
