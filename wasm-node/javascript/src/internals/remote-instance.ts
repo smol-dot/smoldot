@@ -147,9 +147,10 @@ export async function connectToInstanceServer(config: ConnectConfig): Promise<in
             case "json-rpc-response": {
                 const queue = state.jsonRpcResponses.get(message.chainId);
                 // The chain might have been removed locally in the past.
-                if (queue)
+                if (queue) {
                     queue.push(message.response);
                     config.eventCallback({ ty: "json-rpc-responses-non-empty", chainId: message.chainId })
+                }
                 return;
             }
         }
