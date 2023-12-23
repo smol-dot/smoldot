@@ -344,6 +344,7 @@ impl ConsensusService {
             network_chain_id: config.network_service.1,
             to_background_rx,
             blocks_notifications: Vec::with_capacity(8),
+            pending_notification: None,
             from_network_service: config.network_events_receiver,
             database: config.database,
             peers_source_id_map: Default::default(),
@@ -629,6 +630,9 @@ struct SyncBackground {
     /// List of senders to report events to when they happen.
     blocks_notifications: Vec<async_channel::Sender<Notification>>,
 
+    /// Notification ready to be sent to [`SyncBackground::blocks_notifications`].
+    pending_notification: Option<Notification>,
+
     /// Service managing the connections to the networking peers.
     network_service: Arc<network_service::NetworkService>,
 
@@ -720,6 +724,7 @@ impl SyncBackground {
                 ReadyToAuthor,
                 FrontendEvent(ToBackground),
                 FrontendClosed,
+                SendPendingNotification(Notification),
                 NetworkEvent(network_service::Event),
                 SubtaskFinished(SubtaskFinished),
                 SyncProcess,
@@ -818,10 +823,17 @@ impl SyncBackground {
                     }
                 };
 
-                async move {
+                async {
+                    if let Some(notification) = self.pending_notification.take() {
+                        WakeUpReason::SendPendingNotification(notification)
+                    } else {
+                        future::pending().await
+                    }
+                }
+                .or(async move {
                     authoring_ready_future.await;
                     WakeUpReason::ReadyToAuthor
-                }
+                })
                 .or(async {
                     self.to_background_rx
                         .next()
@@ -944,6 +956,18 @@ impl SyncBackground {
                         new_blocks,
                     });
                 }
+                WakeUpReason::SendPendingNotification(notification) => {
+                    // Elements in `blocks_notifications` are removed one by one and inserted
+                    // back if the channel is still open.
+                    for index in (0..self.blocks_notifications.len()).rev() {
+                        let subscription = self.blocks_notifications.swap_remove(index);
+                        if subscription.try_send(notification.clone()).is_err() {
+                            continue;
+                        }
+                        self.blocks_notifications.push(subscription);
+                    }
+                }
+
                 WakeUpReason::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
                     let _ = result_tx.send(SyncState {
                         best_block_hash: self.sync.best_block_hash(),
@@ -2161,31 +2185,19 @@ impl SyncBackground {
                             );
 
                             // Notify the subscribers.
-                            // Elements in `blocks_notifications` are removed one by one and
-                            // inserted back if the channel is still open.
-                            let runtime_to_notify = new_runtime
-                                .as_ref()
-                                .map(|new_runtime| Arc::new(new_runtime.clone()));
-                            for index in (0..self.blocks_notifications.len()).rev() {
-                                let subscription = self.blocks_notifications.swap_remove(index);
-                                if subscription
-                                    .try_send(Notification::Block {
-                                        block: BlockNotification {
-                                            is_new_best,
-                                            scale_encoded_header: scale_encoded_header.clone(),
-                                            block_hash: header_verification_success.hash(),
-                                            runtime_update: runtime_to_notify.clone(),
-                                            parent_hash,
-                                        },
-                                        storage_changes: storage_changes.clone(),
-                                    })
-                                    .is_err()
-                                {
-                                    continue;
-                                }
-
-                                self.blocks_notifications.push(subscription);
-                            }
+                            debug_assert!(self.pending_notification.is_none());
+                            self.pending_notification = Some(Notification::Block {
+                                block: BlockNotification {
+                                    is_new_best,
+                                    scale_encoded_header: scale_encoded_header.clone(),
+                                    block_hash: header_verification_success.hash(),
+                                    runtime_update: new_runtime
+                                        .as_ref()
+                                        .map(|new_runtime| Arc::new(new_runtime.clone())),
+                                    parent_hash,
+                                },
+                                storage_changes: storage_changes.clone(),
+                            });
 
                             // Processing has made a step forward.
 
@@ -2449,27 +2461,18 @@ impl SyncBackground {
                                 database.set_finalized(&new_finalized_hash).unwrap();
                             })
                             .await;
-                        // Elements in `blocks_notifications` are removed one by one and inserted
-                        // back if the channel is still open.
-                        for index in (0..self.blocks_notifications.len()).rev() {
-                            let subscription = self.blocks_notifications.swap_remove(index);
-                            if subscription
-                                .try_send(Notification::Finalized {
-                                    finalized_blocks_newest_to_oldest:
-                                        finalized_blocks_newest_to_oldest
-                                            .iter()
-                                            .map(|b| b.header.hash(self.sync.block_number_bytes()))
-                                            .collect::<Vec<_>>(),
-                                    pruned_blocks_hashes: pruned_blocks.clone(),
-                                    best_block_hash: self.sync.best_block_hash(),
-                                })
-                                .is_err()
-                            {
-                                continue;
-                            }
 
-                            self.blocks_notifications.push(subscription);
-                        }
+                        // Notify the subscribers.
+                        debug_assert!(self.pending_notification.is_none());
+                        self.pending_notification = Some(Notification::Finalized {
+                            finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
+                                .iter()
+                                .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                .collect::<Vec<_>>(),
+                            pruned_blocks_hashes: pruned_blocks.clone(),
+                            best_block_hash: self.sync.best_block_hash(),
+                        });
+
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
