@@ -190,6 +190,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // TODO: make configurable?
                 // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
                 warp_sync_minimum_gap: 0,
+                download_block_body: config.download_bodies,
             }) {
                 Ok(inner) => AllSyncInner::WarpSync {
                     inner,
@@ -872,6 +873,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                     sync_start_block_hash: block_hash,
                                 }
                             }
+                            warp_sync::DesiredRequest::BlockBodyDownload {
+                                block_hash,
+                                block_number,
+                                ..
+                            } => DesiredRequest::BlocksRequest {
+                                first_block_height: block_number,
+                                first_block_hash: Some(block_hash),
+                                ascending: true,
+                                num_blocks: NonZeroU64::new(1).unwrap(),
+                                request_headers: false,
+                                request_bodies: true,
+                                request_justification: false,
+                            },
                             warp_sync::DesiredRequest::StorageGetMerkleProof {
                                 block_hash,
                                 state_trie_root,
@@ -1010,6 +1024,38 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     },
                     warp_sync::RequestDetail::WarpSyncRequest {
                         block_hash: *sync_start_block_hash,
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
+                return outer_request_id;
+            }
+            (
+                AllSyncInner::WarpSync { inner, .. },
+                RequestDetail::BlocksRequest {
+                    first_block_height,
+                    first_block_hash: Some(first_block_hash),
+                    request_bodies: true,
+                    ..
+                },
+            ) => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::WarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    WarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
+                    warp_sync::RequestDetail::BlockBodyDownload {
+                        block_hash: *first_block_hash,
+                        block_number: *first_block_height,
                     },
                 );
 
@@ -1198,6 +1244,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let (
                     new_inner,
                     finalized_block_runtime,
+                    finalized_body,
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
@@ -1209,7 +1256,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 ProcessOne::WarpSyncFinished {
                     sync: self,
                     finalized_block_runtime,
-                    finalized_block_scale_encoded_extrinsics: Vec::new(), // TODO: /!\ not implemented
+                    finalized_body,
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
@@ -1427,7 +1474,24 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
         match (&mut self.inner, request) {
             (_, RequestMapping::Inline(_, _, user_data)) => (user_data, ResponseOutcome::Outdated),
-            (AllSyncInner::WarpSync { .. }, _) => panic!(), // Grandpa warp sync never starts block requests.
+            (AllSyncInner::WarpSync { inner, .. }, RequestMapping::WarpSync(inner_request_id)) => {
+                match blocks
+                    .and_then(|mut b| b.next().ok_or(()))
+                    .map(|b| b.scale_encoded_extrinsics)
+                {
+                    Ok(body) => {
+                        let user_data = inner
+                            .body_download_success(inner_request_id, body)
+                            .user_data;
+                        (user_data, ResponseOutcome::Queued)
+                    }
+                    Err(_) => {
+                        // TODO: report source misbehaviour
+                        let user_data = inner.fail_request(inner_request_id).user_data;
+                        (user_data, ResponseOutcome::Outdated)
+                    }
+                }
+            }
             (
                 sync_container @ AllSyncInner::AllForks(_),
                 RequestMapping::AllForks(inner_request_id),
@@ -2066,8 +2130,8 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
 
         /// SCALE-encoded extrinsics of the finalized block. The ordering is important.
         ///
-        /// If [`Config::download_bodies`] was `false`, then this field is always empty.
-        finalized_block_scale_encoded_extrinsics: Vec<Vec<u8>>,
+        /// `Some` if and only if [`Config::download_bodies`] was `true`.
+        finalized_body: Option<Vec<Vec<u8>>>,
 
         /// Storage value at the `:code` key of the finalized block.
         finalized_storage_code: Option<Vec<u8>>,
@@ -2796,6 +2860,7 @@ impl<TRq> Shared<TRq> {
     ) -> (
         all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         host::HostVmPrototype,
+        Option<Vec<Vec<u8>>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
@@ -2836,6 +2901,18 @@ impl<TRq> Shared<TRq> {
                         sync_start_block_hash: block_hash,
                     }
                 }
+                warp_sync::RequestDetail::BlockBodyDownload {
+                    block_hash,
+                    block_number,
+                } => RequestDetail::BlocksRequest {
+                    first_block_height: block_number,
+                    first_block_hash: Some(block_hash),
+                    ascending: true,
+                    num_blocks: NonZeroU64::new(1).unwrap(),
+                    request_headers: false,
+                    request_bodies: true,
+                    request_justification: false,
+                },
                 warp_sync::RequestDetail::StorageGetMerkleProof { block_hash, keys } => {
                     RequestDetail::StorageGet { block_hash, keys }
                 }
@@ -2901,6 +2978,7 @@ impl<TRq> Shared<TRq> {
         (
             all_forks,
             ready_to_transition.finalized_runtime,
+            ready_to_transition.finalized_body,
             ready_to_transition.finalized_storage_code,
             ready_to_transition.finalized_storage_heap_pages,
             ready_to_transition.finalized_storage_code_merkle_value,

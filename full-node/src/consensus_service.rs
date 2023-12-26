@@ -1413,7 +1413,7 @@ impl SyncBackground {
                                 network::codec::BlocksRequestDirection::Descending
                             },
                             fields: network::codec::BlocksRequestFields {
-                                header: request_headers,
+                                header: true, // TODO: always set to true due to unwrapping the header when the response comes
                                 body: request_bodies,
                                 justifications: request_justification,
                             },
@@ -2394,7 +2394,7 @@ impl SyncBackground {
             }
             all::ProcessOne::WarpSyncFinished {
                 sync,
-                finalized_block_scale_encoded_extrinsics,
+                finalized_body: Some(finalized_body),
                 finalized_block_runtime,
                 ..
             } => {
@@ -2412,9 +2412,7 @@ impl SyncBackground {
                         database
                             .reset(
                                 chain_info.as_ref(),
-                                finalized_block_scale_encoded_extrinsics
-                                    .iter()
-                                    .map(|e| &e[..]),
+                                finalized_body.iter().map(|e| &e[..]),
                                 None,
                             )
                             .unwrap();
@@ -2430,6 +2428,12 @@ impl SyncBackground {
                 }
 
                 (self, true)
+            }
+            all::ProcessOne::WarpSyncFinished {
+                finalized_body: None,
+                ..
+            } => {
+                unreachable!()
             }
             all::ProcessOne::VerifyBlock(verify) => {
                 // TODO: ban peer in case of verification failure

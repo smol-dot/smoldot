@@ -158,6 +158,11 @@ pub struct Config {
     /// The ideal value of this field depends on the block production rate and the time it takes
     /// to answer requests.
     pub warp_sync_minimum_gap: usize,
+
+    /// If `true`, the body of the warp sync target will be downloaded before the warp sync
+    /// finishes.
+    /// Determines whether [`RuntimeInformation::finalized_body`] is `Some`.
+    pub download_block_body: bool,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -220,6 +225,11 @@ pub fn start_warp_sync<TSrc, TRq>(
             .as_ref()
             .finalized_block_header
             .state_root,
+        warped_header_extrinsics_root: *config
+            .start_chain_information
+            .as_ref()
+            .finalized_block_header
+            .extrinsics_root,
         warped_header_hash: header::hash_from_scale_encoded_header(&warped_header),
         warped_header,
         warped_finality: config.start_chain_information.as_ref().finality.into(),
@@ -240,6 +250,11 @@ pub fn start_warp_sync<TSrc, TRq>(
         verify_queue: VecDeque::new(),
         runtime_download: RuntimeDownload::NotStarted {
             hint_doesnt_match: false,
+        },
+        body_download: if config.download_block_body {
+            BodyDownload::NotStarted
+        } else {
+            BodyDownload::NotNeeded
         },
     })
 }
@@ -288,6 +303,10 @@ pub struct RuntimeInformation {
     /// finalized block of [`WarpSync::as_chain_information`].
     pub finalized_runtime: HostVmPrototype,
 
+    /// List of SCALE-encoded extrinsics of the body of the finalized block.
+    /// `Some` if and only if [`Config::download_block_body`] was `true`.
+    pub finalized_body: Option<Vec<Vec<u8>>>,
+
     /// Storage value at the `:code` key of the finalized block.
     pub finalized_storage_code: Option<Vec<u8>>,
 
@@ -320,6 +339,8 @@ pub struct WarpSync<TSrc, TRq> {
     warped_header_hash: [u8; 32],
     /// State trie root hash of the block in [`WarpSync::warped_header`].
     warped_header_state_root: [u8; 32],
+    /// Extrinsics trie root hash of the block in [`WarpSync::warped_header`].
+    warped_header_extrinsics_root: [u8; 32],
     /// Number of the block in [`WarpSync::warped_header`].
     warped_header_number: u64,
     /// Information about the finality of the chain at the point where we warp synced to.
@@ -354,6 +375,8 @@ pub struct WarpSync<TSrc, TRq> {
     verify_queue: VecDeque<PendingVerify>,
     /// State of the download of the runtime and chain information call proofs.
     runtime_download: RuntimeDownload,
+    /// State of the download of the body of the block.
+    body_download: BodyDownload,
     /// For each call required by the chain information builder, whether it has been downloaded yet.
     runtime_calls:
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
@@ -397,6 +420,20 @@ enum RuntimeDownload {
     Verified {
         downloaded_runtime: DownloadedRuntime,
         chain_info_builder: chain_information::build::ChainInformationBuild,
+    },
+}
+
+/// See [`WarpSync::body_download`].
+enum BodyDownload {
+    NotNeeded,
+    NotStarted,
+    Downloading {
+        request_id: RequestId,
+    },
+    Downloaded {
+        /// Source the body has been obtained from. `None` if the source has been removed.
+        downloaded_source: Option<SourceId>,
+        body: Vec<Vec<u8>>,
     },
 }
 
@@ -644,6 +681,14 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 *downloaded_source = None;
             }
         }
+        if let BodyDownload::Downloaded {
+            downloaded_source, ..
+        } = &mut self.body_download
+        {
+            if *downloaded_source == Some(to_remove) {
+                *downloaded_source = None;
+            }
+        }
         for (_, call_proof) in &mut self.runtime_calls {
             if let CallProof::Downloaded {
                 downloaded_source, ..
@@ -685,6 +730,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     self.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                }
+            }
+            if let BodyDownload::Downloading { request_id } = &mut self.body_download {
+                if *request_id == RequestId(index) {
+                    self.body_download = BodyDownload::NotStarted;
                 }
             }
             obsolete_requests.push((RequestId(index), user_data));
@@ -852,6 +902,38 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             either::Right(iter::empty())
         };
 
+        // If we are in the appropriate phase, and we are not currently downloading the body of
+        // the block, return a runtime download request.
+        let desired_body_download =
+            if let (WarpedBlockTy::Normal, BodyDownload::NotStarted, None, true, None) = (
+                &self.warped_block_ty,
+                &self.body_download,
+                self.warp_sync_fragments_download,
+                self.verify_queue.is_empty(),
+                desired_warp_sync_request.peek(),
+            ) {
+                // Sources are ordered by increasing finalized block height, in order to
+                // have the highest chance for the block to not be pruned.
+                let sources_with_block = self
+                    .sources_by_finalized_height
+                    .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                    .map(|(_, src_id)| src_id);
+
+                either::Left(sources_with_block.map(move |source_id| {
+                    (
+                        *source_id,
+                        &self.sources[source_id.0].user_data,
+                        DesiredRequest::BlockBodyDownload {
+                            block_hash: self.warped_header_hash,
+                            block_number: self.warped_header_number,
+                            extrinsics_root: self.warped_header_extrinsics_root,
+                        },
+                    )
+                }))
+            } else {
+                either::Right(iter::empty())
+            };
+
         // Return the list of runtime calls indicated by the chain information builder state
         // machine.
         let desired_call_proofs = if matches!(self.warped_block_ty, WarpedBlockTy::Normal)
@@ -892,6 +974,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // Chain all these demanded requests together.
         desired_warp_sync_request
             .chain(desired_runtime_parameters_get)
+            .chain(desired_body_download)
             .chain(desired_call_proofs)
     }
 
@@ -915,8 +998,8 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         let request_slot = self.in_progress_requests.vacant_entry();
         let request_id = RequestId(request_slot.key());
 
-        match (&detail, &mut self.runtime_download) {
-            (RequestDetail::WarpSyncRequest { block_hash }, _)
+        match (&detail, &mut self.runtime_download, &mut self.body_download) {
+            (RequestDetail::WarpSyncRequest { block_hash }, _, _)
                 if self.warp_sync_fragments_download.is_none()
                     && *block_hash
                         == self
@@ -933,8 +1016,24 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 self.warp_sync_fragments_download = Some(request_id);
             }
             (
+                RequestDetail::BlockBodyDownload {
+                    block_hash,
+                    block_number,
+                },
+                _,
+                BodyDownload::NotStarted,
+            ) => {
+                if self.sources[source_id.0].finalized_block_height >= self.warped_header_number
+                    && *block_number == self.warped_header_number
+                    && *block_hash == self.warped_header_hash
+                {
+                    self.body_download = BodyDownload::Downloading { request_id };
+                }
+            }
+            (
                 RequestDetail::StorageGetMerkleProof { block_hash, keys },
                 RuntimeDownload::NotStarted { hint_doesnt_match },
+                _,
             ) => {
                 let code_key_to_request = if let (false, Some(hint)) =
                     (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
@@ -966,6 +1065,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     function_name,
                     parameter_vectored,
                 },
+                _,
                 _,
             ) => {
                 for (info, status) in &mut self.runtime_calls {
@@ -1026,6 +1126,12 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             }
         }
 
+        if let BodyDownload::Downloading { request_id } = &mut self.body_download {
+            if *request_id == id {
+                self.body_download = BodyDownload::NotStarted;
+            }
+        }
+
         let (source_id, user_data, _) = self.in_progress_requests.remove(id.0);
         let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
         debug_assert!(_was_removed);
@@ -1040,6 +1146,53 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     ///
     pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
         self.in_progress_requests[request_id.0].0
+    }
+
+    /// Injects a successful body download and removes the given request from the state machine.
+    /// Returns the user data that was associated to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if the [`RequestId`] doesn't correspond to a body download request.
+    ///
+    pub fn body_download_success(&mut self, id: RequestId, body: Vec<Vec<u8>>) -> TRq {
+        // Remove the request from the list, obtaining its user data.
+        // If the request corresponds to the runtime parameters we're looking for, the function
+        // continues below, otherwise we return early.
+        let (source_id, user_data) =
+            match (self.in_progress_requests.remove(id.0), &self.body_download) {
+                ((source_id, user_data, _), BodyDownload::Downloading { request_id })
+                    if *request_id == id =>
+                {
+                    (source_id, user_data)
+                }
+                ((source_id, user_data, RequestDetail::BlockBodyDownload { .. }), _) => {
+                    let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+                    debug_assert!(_was_removed);
+                    return user_data;
+                }
+                (
+                    (
+                        _,
+                        _,
+                        RequestDetail::RuntimeCallMerkleProof { .. }
+                        | RequestDetail::WarpSyncRequest { .. }
+                        | RequestDetail::StorageGetMerkleProof { .. },
+                    ),
+                    _,
+                ) => panic!(),
+            };
+
+        self.body_download = BodyDownload::Downloaded {
+            downloaded_source: Some(source_id),
+            body,
+        };
+
+        let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+        debug_assert!(_was_removed);
+
+        user_data
     }
 
     /// Injects a successful Merkle proof and removes the given request from the state machine.
@@ -1075,7 +1228,8 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     _,
                     _,
                     RequestDetail::RuntimeCallMerkleProof { .. }
-                    | RequestDetail::WarpSyncRequest { .. },
+                    | RequestDetail::WarpSyncRequest { .. }
+                    | RequestDetail::BlockBodyDownload { .. },
                 ),
                 _,
             ) => panic!(),
@@ -1222,6 +1376,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // If we've downloaded everything that was needed, switch to "build chain information"
         // mode.
         if matches!(self.runtime_download, RuntimeDownload::Verified { .. })
+            && matches!(
+                self.body_download,
+                BodyDownload::NotNeeded | BodyDownload::Downloaded { .. }
+            )
             && self
                 .runtime_calls
                 .values()
@@ -1283,11 +1441,20 @@ impl<TSrc, TRq> ops::IndexMut<RequestId> for WarpSync<TSrc, TRq> {
 /// See [`WarpSync::desired_requests`].
 #[derive(Debug, Clone)]
 pub enum DesiredRequest {
-    /// A warp sync request should be start.
+    /// A warp sync request should be started.
     WarpSyncRequest {
         /// Starting point of the warp syncing. The first fragment of the response should be the
         /// of the epoch that the starting point is in.
         block_hash: [u8; 32],
+    },
+    /// A block body download should be started.
+    BlockBodyDownload {
+        /// Hash of the block whose body to download.
+        block_hash: [u8; 32],
+        /// Height of the block whose body to download.
+        block_number: u64,
+        /// Extrinsics trie root hash found in the header of the block.
+        extrinsics_root: [u8; 32],
     },
     /// A storage request of the runtime code and heap pages should be started.
     StorageGetMerkleProof {
@@ -1319,6 +1486,14 @@ pub enum RequestDetail {
     WarpSyncRequest {
         /// See [`DesiredRequest::WarpSyncRequest::block_hash`].
         block_hash: [u8; 32],
+    },
+    /// See [`DesiredRequest::BlockBodyDownload`].
+    BlockBodyDownload {
+        /// See [`DesiredRequest::BlockBodyDownload::block_hash`].
+        block_hash: [u8; 32],
+        /// See [`DesiredRequest::BlockBodyDownload::block_number`].
+        // TODO: remove this field as it's inappropriate, but this causes issues in all.rs
+        block_number: u64,
     },
     /// See [`DesiredRequest::StorageGetMerkleProof`].
     StorageGetMerkleProof {
@@ -1534,12 +1709,16 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         fragments_to_verify.next_fragment_to_verify_index += 1;
         self.inner.warped_header_number = fragment_decoded_header.number;
         self.inner.warped_header_state_root = *fragment_decoded_header.state_root;
+        self.inner.warped_header_extrinsics_root = *fragment_decoded_header.extrinsics_root;
         self.inner.warped_header_hash = fragment_header_hash;
         self.inner.warped_header = fragment_to_verify.scale_encoded_header.clone(); // TODO: figure out how to remove this clone()
         self.inner.warped_block_ty = WarpedBlockTy::Normal;
         self.inner.runtime_download = RuntimeDownload::NotStarted {
             hint_doesnt_match: false,
         };
+        if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+            self.inner.body_download = BodyDownload::NotStarted;
+        }
         self.inner.runtime_calls =
             runtime_calls_default_value(self.inner.verified_chain_information.as_ref().consensus);
         if let Some(new_authorities_list) = new_authorities_list {
@@ -1644,6 +1823,8 @@ pub enum SourceMisbehaviorTy {
     InvalidMerkleProof(proof_decode::Error),
     /// Merkle proof is missing the necessary entries.
     MerkleProofEntriesMissing,
+    /// Downloaded block body doesn't match the expected extrinsics root.
+    BlockBodyExtrinsicsRootMismatch,
 }
 
 /// Problem encountered during a call to [`BuildRuntime::build`].
@@ -1737,6 +1918,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
                                 hint_doesnt_match: *hint_doesnt_match,
                             };
+                            if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                                self.inner.body_download = BodyDownload::NotStarted;
+                            }
                             return (self.inner, Err(BuildRuntimeError::MissingCode));
                         }
                     }
@@ -1746,6 +1930,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (self.inner, Err(BuildRuntimeError::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
@@ -1753,6 +1940,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (
                         self.inner,
                         Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
@@ -1785,6 +1975,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (self.inner, Err(BuildRuntimeError::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
@@ -1824,6 +2017,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (self.inner, Err(BuildRuntimeError::InvalidHeapPages(err)));
                 }
             };
@@ -1840,6 +2036,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: *hint_doesnt_match,
                 };
+                if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                    self.inner.body_download = BodyDownload::NotStarted;
+                }
                 return (self.inner, Err(BuildRuntimeError::RuntimeBuild(err)));
             }
         };
@@ -1904,6 +2103,31 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         WarpSync<TSrc, TRq>,
         Result<RuntimeInformation, BuildChainInformationError>,
     ) {
+        let downloaded_body = match &mut self.inner.body_download {
+            BodyDownload::NotNeeded => None,
+            BodyDownload::Downloaded {
+                downloaded_source,
+                body,
+            } => {
+                if header::extrinsics_root(body) != self.inner.warped_header_extrinsics_root {
+                    let source_id = *downloaded_source;
+                    self.inner.body_download = BodyDownload::NotStarted;
+                    return (
+                        self.inner,
+                        Err(BuildChainInformationError::SourceMisbehavior(
+                            SourceMisbehavior {
+                                source_id,
+                                error: SourceMisbehaviorTy::BlockBodyExtrinsicsRootMismatch,
+                            },
+                        )),
+                    );
+                }
+
+                Some(body)
+            }
+            _ => unreachable!(),
+        };
+
         let RuntimeDownload::Verified {
             mut chain_info_builder,
             downloaded_runtime,
@@ -1978,6 +2202,12 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     {
                         self.inner.warped_block_ty = WarpedBlockTy::AlreadyVerified;
                     }
+
+                    let finalized_body = downloaded_body.map(mem::take);
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
+
                     self.inner.verified_chain_information = chain_information;
                     self.inner.runtime_calls = runtime_calls_default_value(
                         self.inner.verified_chain_information.as_ref().consensus,
@@ -1986,6 +2216,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         self.inner,
                         Ok(RuntimeInformation {
                             finalized_runtime: virtual_machine,
+                            finalized_body,
                             finalized_storage_code: downloaded_runtime.storage_code,
                             finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
                             finalized_storage_code_merkle_value: downloaded_runtime
