@@ -1598,6 +1598,8 @@ impl SyncBackground {
                         self.database_catch_up_download = DatabaseCatchUpDownload::None;
                     }
 
+                    // TODO: insert blocks in database if they are referenced through a parent_hash?
+
                     let _ = self.sync.blocks_request_response(
                         request_id,
                         Ok(blocks
@@ -1773,6 +1775,58 @@ impl SyncBackground {
                         self.database_catch_up_download = DatabaseCatchUpDownload::None;
                     }
 
+                    if let Ok(result) = &result {
+                        let result = result.clone();
+                        self.database
+                            .with_database(move |database| {
+                                if let Ok(decoded) = trie::proof_decode::decode_and_verify_proof(
+                                    trie::proof_decode::Config {
+                                        proof: result.decode(),
+                                    },
+                                ) {
+                                    for (_, entry) in decoded.iter_ordered() {
+                                        // TODO: check the state root hash; while this can't lead to a vulnerability, it can bloat the database
+                                        database.insert_trie_nodes(
+                                            iter::once(full_sqlite::InsertTrieNode {
+                                                merkle_value: Cow::Borrowed(entry.merkle_value),
+                                                partial_key_nibbles: Cow::Owned(entry.partial_key_nibbles.into_iter().map(|n| u8::from(n)).collect()),
+                                                children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
+                                                storage_value: match entry.trie_node_info.storage_value {
+                                                    trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                        _,
+                                                    ) => return,
+                                                    trie::proof_decode::StorageValue::None => {
+                                                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                                    }
+                                                    trie::proof_decode::StorageValue::Known {
+                                                        value, ..
+                                                    } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                        value: Cow::Borrowed(value),
+                                                        references_merkle_value: false, // TODO:
+                                                    },
+                                                },
+                                            }),
+                                            match entry.trie_node_info.storage_value {
+                                                trie::proof_decode::StorageValue::None => 0, // TODO: ?!
+                                                trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                    hash,
+                                                ) => return,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: true,
+                                                    ..
+                                                } => 0,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: false,
+                                                    ..
+                                                } => 1,
+                                            },
+                                        ).unwrap();
+                                    }
+                                }
+                            })
+                            .await;
+                    }
+
                     if result.is_err() {
                         // Note that we perform the ban even if the source is now disconnected.
                         let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
@@ -1816,6 +1870,59 @@ impl SyncBackground {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
                         self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
+                    // TODO: DRY with above
+                    if let Ok(result) = &result {
+                        let result = result.clone();
+                        self.database
+                            .with_database(move |database| {
+                                if let Ok(decoded) = trie::proof_decode::decode_and_verify_proof(
+                                    trie::proof_decode::Config {
+                                        proof: result.decode(),
+                                    },
+                                ) {
+                                    for (_, entry) in decoded.iter_ordered() {
+                                        // TODO: check the state root hash; while this can't lead to a vulnerability, it can bloat the database
+                                        database.insert_trie_nodes(
+                                            iter::once(full_sqlite::InsertTrieNode {
+                                                merkle_value: Cow::Borrowed(entry.merkle_value),
+                                                partial_key_nibbles: Cow::Owned(entry.partial_key_nibbles.into_iter().map(|n| u8::from(n)).collect()),
+                                                children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
+                                                storage_value: match entry.trie_node_info.storage_value {
+                                                    trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                        _,
+                                                    ) => return,
+                                                    trie::proof_decode::StorageValue::None => {
+                                                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                                    }
+                                                    trie::proof_decode::StorageValue::Known {
+                                                        value, ..
+                                                    } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                        value: Cow::Borrowed(value),
+                                                        references_merkle_value: false, // TODO:
+                                                    },
+                                                },
+                                            }),
+                                            match entry.trie_node_info.storage_value {
+                                                trie::proof_decode::StorageValue::None => 0, // TODO: ?!
+                                                trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                    hash,
+                                                ) => return,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: true,
+                                                    ..
+                                                } => 0,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: false,
+                                                    ..
+                                                } => 1,
+                                            },
+                                        ).unwrap();
+                                    }
+                                }
+                            })
+                            .await;
                     }
 
                     if result.is_err() {
