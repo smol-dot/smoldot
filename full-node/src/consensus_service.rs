@@ -1802,10 +1802,7 @@ impl SyncBackground {
                         break (success.scale_encoded_header, success.body, success.logs);
                     }
 
-                    author::build::BuilderAuthoring::Error {
-                        error,
-                        parent_runtime,
-                    } => {
+                    author::build::BuilderAuthoring::Error { error, .. } => {
                         // Block authoring process stopped because of an error.
 
                         // In order to prevent the block authoring from restarting immediately
@@ -2161,7 +2158,7 @@ impl SyncBackground {
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
                     match body_verification {
-                        body_only::Verify::Finished(Err((error, parent_runtime))) => {
+                        body_only::Verify::Finished(Err((error, _))) => {
                             // Print a separate warning because it is important for the user
                             // to be aware of the verification failure.
                             // `error` is last because it's quite big.
@@ -2182,7 +2179,6 @@ impl SyncBackground {
                         body_only::Verify::Finished(Ok(body_only::Success {
                             storage_changes,
                             state_trie_version,
-                            parent_runtime,
                             new_runtime,
                             ..
                         })) => {
