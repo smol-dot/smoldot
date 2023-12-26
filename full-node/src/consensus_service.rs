@@ -344,7 +344,7 @@ impl ConsensusService {
             authored_block: None,
             slot_duration_author_ratio: config.slot_duration_author_ratio,
             keystore: config.keystore,
-            finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
+            finalized_runtime: Arc::new(finalized_runtime),
             network_service: config.network_service.0,
             network_chain_id: config.network_service.1,
             network_local_chain_update_needed: true,
@@ -629,7 +629,7 @@ struct SyncBackground {
     /// The runtime is extracted when necessary then put back it place.
     ///
     /// The `Arc` is shared with [`NonFinalizedBlock::Verified::runtime`].
-    finalized_runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
+    finalized_runtime: Arc<executor::host::HostVmPrototype>,
 
     /// Used to receive messages from the frontend service, and to detect when it shuts down.
     to_background_rx: mpsc::Receiver<ToBackground>,
@@ -687,7 +687,7 @@ enum NonFinalizedBlock {
         /// different one.
         ///
         /// The `Arc` is shared with [`SyncBackground::finalized_runtime`].
-        runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
+        runtime: Arc<executor::host::HostVmPrototype>,
     },
 }
 
@@ -882,52 +882,53 @@ impl SyncBackground {
                     WakeUpReason::SubtaskFinished(subtask_finished)
                 })
                 .or({
-                    // TODO: handle obsolete requests
-                    // `desired_requests()` returns, in decreasing order of priority, the requests
-                    // that should be started in order for the syncing to proceed. We simply pick the
-                    // first request, but enforce one ongoing request per source.
-                    // TODO: desired_requests() is expensive and done at every iteration
-                    let request_to_start = self.sync.desired_requests().find(
-                        |(source_id, source_info, request_details)| {
-                            if source_info
-                                .as_ref()
-                                .map_or(false, |info| info.is_disconnected)
-                            {
-                                // Source is a networking source that has already been disconnected.
-                                false
-                            } else if *source_id != self.block_author_sync_source {
-                                // Remote source.
-                                self.sync.source_num_ongoing_requests(*source_id) == 0
-                            } else {
-                                // Locally-authored blocks source.
-                                match (request_details, &self.authored_block) {
-                                    (
-                                        all::DesiredRequest::BlocksRequest {
-                                            first_block_hash: None,
-                                            first_block_height,
-                                            ..
-                                        },
-                                        Some((authored_height, _, _, _)),
-                                    ) if first_block_height == authored_height => true,
-                                    (
-                                        all::DesiredRequest::BlocksRequest {
-                                            first_block_hash: Some(first_block_hash),
-                                            first_block_height,
-                                            ..
-                                        },
-                                        Some((authored_height, authored_hash, _, _)),
-                                    ) if first_block_hash == authored_hash
-                                        && first_block_height == authored_height =>
-                                    {
-                                        true
+                    async {
+                        // TODO: handle obsolete requests
+                        // `desired_requests()` returns, in decreasing order of priority, the
+                        // requests that should be started in order for the syncing to proceed. We
+                        // simply pick the first request, but enforce one ongoing request per
+                        // source.
+                        // TODO: desired_requests() is expensive and done at every iteration
+                        let request_to_start = self.sync.desired_requests().find(
+                            |(source_id, source_info, request_details)| {
+                                if source_info
+                                    .as_ref()
+                                    .map_or(false, |info| info.is_disconnected)
+                                {
+                                    // Source is a networking source that has already been disconnected.
+                                    false
+                                } else if *source_id != self.block_author_sync_source {
+                                    // Remote source.
+                                    self.sync.source_num_ongoing_requests(*source_id) == 0
+                                } else {
+                                    // Locally-authored blocks source.
+                                    match (request_details, &self.authored_block) {
+                                        (
+                                            all::DesiredRequest::BlocksRequest {
+                                                first_block_hash: None,
+                                                first_block_height,
+                                                ..
+                                            },
+                                            Some((authored_height, _, _, _)),
+                                        ) if first_block_height == authored_height => true,
+                                        (
+                                            all::DesiredRequest::BlocksRequest {
+                                                first_block_hash: Some(first_block_hash),
+                                                first_block_height,
+                                                ..
+                                            },
+                                            Some((authored_height, authored_hash, _, _)),
+                                        ) if first_block_hash == authored_hash
+                                            && first_block_height == authored_height =>
+                                        {
+                                            true
+                                        }
+                                        _ => false,
                                     }
-                                    _ => false,
                                 }
-                            }
-                        },
-                    );
+                            },
+                        );
 
-                    async move {
                         let Some((source_id, _, request_info)) = request_to_start else {
                             future::pending().await
                         };
@@ -1014,7 +1015,7 @@ impl SyncBackground {
                             let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
                                 None
                             } else {
-                                Some(Arc::new(runtime.lock().await.clone().unwrap()))
+                                Some(runtime.clone())
                             };
                             blocks_out.push(BlockNotification {
                                 is_new_best: header::hash_from_scale_encoded_header(
@@ -1034,9 +1035,7 @@ impl SyncBackground {
                         id: SubscriptionId(0), // TODO:
                         finalized_block_hash,
                         finalized_block_scale_encoded_header,
-                        finalized_block_runtime: Arc::new(
-                            self.finalized_runtime.lock().await.clone().unwrap(),
-                        ),
+                        finalized_block_runtime: self.finalized_runtime.clone(),
                         non_finalized_blocks_ancestry_order,
                         new_blocks,
                     });
@@ -1754,7 +1753,7 @@ impl SyncBackground {
                 } else {
                     self.finalized_runtime.clone()
                 };
-            let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
+            let parent_runtime = (*parent_runtime_arc).clone();
 
             // Start the block authoring process.
             let mut block_authoring = {
@@ -1806,20 +1805,11 @@ impl SyncBackground {
                             }
                         };
 
-                        // Put back the parent runtime that we extracted.
-                        *parent_runtime_arc.try_lock().unwrap() = Some(success.parent_runtime);
-
                         break (success.scale_encoded_header, success.body, success.logs);
                     }
 
-                    author::build::BuilderAuthoring::Error {
-                        error,
-                        parent_runtime,
-                    } => {
+                    author::build::BuilderAuthoring::Error { error, .. } => {
                         // Block authoring process stopped because of an error.
-
-                        // Put back the parent runtime that we extracted.
-                        *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
                         // In order to prevent the block authoring from restarting immediately
                         // after and failing again repeatedly, we switch the block authoring to
@@ -2298,7 +2288,7 @@ impl SyncBackground {
                     .as_ref()
                     .cloned()
                     .unwrap_or_else(|| self.finalized_runtime.clone());
-                let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
+                let parent_runtime = (*parent_runtime_arc).clone();
 
                 let parent_scale_encoded_header =
                     header_verification_success.parent_scale_encoded_header();
@@ -2327,7 +2317,7 @@ impl SyncBackground {
                 // TODO: check this block against the chain spec's badBlocks
                 loop {
                     match body_verification {
-                        body_only::Verify::Finished(Err((error, parent_runtime))) => {
+                        body_only::Verify::Finished(Err((error, _))) => {
                             // Print a separate warning because it is important for the user
                             // to be aware of the verification failure.
                             // `error` is last because it's quite big.
@@ -2342,14 +2332,12 @@ impl SyncBackground {
                                     error
                                 ),
                             );
-                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
                             self.sync = header_verification_success.reject_bad_block();
                             return (self, true);
                         }
                         body_only::Verify::Finished(Ok(body_only::Success {
                             storage_changes,
                             state_trie_version,
-                            parent_runtime,
                             new_runtime,
                             ..
                         })) => {
@@ -2480,15 +2468,13 @@ impl SyncBackground {
 
                             // Processing has made a step forward.
 
-                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-
                             self.sync =
                                 header_verification_success.finish(NonFinalizedBlock::NotVerified);
 
                             // Store the storage of the children.
                             self.sync[(height, &hash_to_verify)] = NonFinalizedBlock::Verified {
                                 runtime: if let Some(new_runtime) = new_runtime {
-                                    Arc::new(Mutex::new(Some(new_runtime)))
+                                    Arc::new(new_runtime)
                                 } else {
                                     parent_runtime_arc
                                 },
