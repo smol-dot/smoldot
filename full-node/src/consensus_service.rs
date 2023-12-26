@@ -1288,7 +1288,7 @@ impl SyncBackground {
                                 network::codec::BlocksRequestDirection::Descending
                             },
                             fields: network::codec::BlocksRequestFields {
-                                header: request_headers,
+                                header: true, // TODO: always set to true due to unwrapping the header when the response comes
                                 body: request_bodies,
                                 justifications: request_justification,
                             },
