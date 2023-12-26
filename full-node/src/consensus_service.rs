@@ -354,7 +354,7 @@ impl ConsensusService {
             pending_notification: None,
             from_network_service: config.network_events_receiver,
             database: config.database,
-            database_catch_up_download: DatabaseCatchUpDownload::None,
+            database_catch_up_download: DatabaseCatchUpDownload::NoDownloadInProgress,
             peers_source_id_map: Default::default(),
             sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
@@ -734,7 +734,9 @@ enum SubtaskFinished {
 
 enum DatabaseCatchUpDownload {
     /// No download currently in progress.
-    None,
+    NoDownloadInProgress,
+    /// No download currently in progress, and we know that nothing is missing from the database.
+    NothingToDownloadCache,
     InProgress(all::RequestId),
 }
 
@@ -957,7 +959,7 @@ impl SyncBackground {
                         // the database whether any storage item is missing.
                         if matches!(
                             self.database_catch_up_download,
-                            DatabaseCatchUpDownload::None
+                            DatabaseCatchUpDownload::NoDownloadInProgress
                         ) {
                             // TODO: this has a O(n^2) complexity; in case all sources are busy, we iterate a lot
                             let missing_items = self
@@ -968,6 +970,11 @@ impl SyncBackground {
                                 })
                                 .await
                                 .unwrap();
+                            if missing_items.is_empty() {
+                                self.database_catch_up_download =
+                                    DatabaseCatchUpDownload::NothingToDownloadCache;
+                            }
+
                             for missing_item in missing_items {
                                 // Since the database and sync state machine are supposed to have the
                                 // same finalized block, it is guaranteed that the missing item are
@@ -1431,7 +1438,7 @@ impl SyncBackground {
                     if is_database_catch_up {
                         debug_assert!(matches!(
                             self.database_catch_up_download,
-                            DatabaseCatchUpDownload::None
+                            DatabaseCatchUpDownload::NoDownloadInProgress
                         ));
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::InProgress(request_id);
@@ -1475,7 +1482,7 @@ impl SyncBackground {
                     if is_database_catch_up {
                         debug_assert!(matches!(
                             self.database_catch_up_download,
-                            DatabaseCatchUpDownload::None
+                            DatabaseCatchUpDownload::NoDownloadInProgress
                         ));
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::InProgress(request_id);
@@ -1520,7 +1527,7 @@ impl SyncBackground {
                     if is_database_catch_up {
                         debug_assert!(matches!(
                             self.database_catch_up_download,
-                            DatabaseCatchUpDownload::None
+                            DatabaseCatchUpDownload::NoDownloadInProgress
                         ));
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::InProgress(request_id);
@@ -1572,7 +1579,7 @@ impl SyncBackground {
                     if is_database_catch_up {
                         debug_assert!(matches!(
                             self.database_catch_up_download,
-                            DatabaseCatchUpDownload::None
+                            DatabaseCatchUpDownload::NoDownloadInProgress
                         ));
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::InProgress(request_id);
@@ -1595,7 +1602,8 @@ impl SyncBackground {
                 }) => {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
-                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
 
                     // TODO: insert blocks in database if they are referenced through a parent_hash?
@@ -1645,7 +1653,8 @@ impl SyncBackground {
                 }) => {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
-                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
 
                     // Note that we perform the ban even if the source is now disconnected.
@@ -1688,7 +1697,8 @@ impl SyncBackground {
                 }) => {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
-                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
 
                     let decoded = result.decode();
@@ -1731,7 +1741,8 @@ impl SyncBackground {
                 }) => {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
-                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
 
                     // Note that we perform the ban even if the source is now disconnected.
@@ -1772,7 +1783,8 @@ impl SyncBackground {
                 }) => {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
-                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
 
                     if let Ok(result) = &result {
@@ -1869,7 +1881,8 @@ impl SyncBackground {
                 }) => {
                     if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
                     {
-                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
 
                     // TODO: DRY with above
@@ -2408,6 +2421,14 @@ impl SyncBackground {
                     })
                     .await;
                 // TODO: insert what is known about the finalized storage into the database
+
+                if matches!(
+                    self.database_catch_up_download,
+                    DatabaseCatchUpDownload::NothingToDownloadCache
+                ) {
+                    self.database_catch_up_download = DatabaseCatchUpDownload::NoDownloadInProgress;
+                }
+
                 (self, true)
             }
             all::ProcessOne::VerifyBlock(verify) => {
