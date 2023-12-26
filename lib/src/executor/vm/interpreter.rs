@@ -613,6 +613,10 @@ impl Interpreter {
     }
 }
 
+// TODO: `wasmi::ResumableInvocation` doesn't implement `Sync`, see <https://github.com/paritytech/wasmi/issues/869>
+// while it's not 100% clear whether or not it should implement `Sync`, none of the `&self`-taking functions of `Interpreter` access this field, and it is thus safe to Sync-ify Interpreter
+unsafe impl Sync for Interpreter {}
+
 impl fmt::Debug for Interpreter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Interpreter").finish()
