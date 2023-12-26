@@ -558,8 +558,10 @@ impl SqliteFullDatabase {
                         WHERE trie_nodes.is_present
                 )
 
-            SELECT trie_nodes.block_hash, trie_nodes.node_hash, trie_nodes.node_key
-            FROM trie_nodes WHERE is_present = false
+            SELECT trie_nodes.block_hash, blocks.number, trie_nodes.node_hash, trie_nodes.node_key
+            FROM trie_nodes
+            JOIN blocks ON blocks.hash = trie_nodes.block_hash
+            WHERE is_present = false
             LIMIT ?
             "#)
             .map_err(|err| {
@@ -571,13 +573,14 @@ impl SqliteFullDatabase {
         let results = statement
             .query_map((limit,), |row| {
                 let block_hash = row.get::<_, Vec<u8>>(0)?;
-                let node_hash = row.get::<_, Vec<u8>>(1)?;
-                let node_key = row.get::<_, Vec<u8>>(2)?;
-                Ok((block_hash, node_hash, node_key))
+                let block_number = row.get::<_, u64>(1)?;
+                let node_hash = row.get::<_, Vec<u8>>(2)?;
+                let node_key = row.get::<_, Vec<u8>>(3)?;
+                Ok((block_hash, block_number, node_hash, node_key))
             })
             .map_err(|err| CorruptedError::Internal(InternalError(err)))?
             .map(|row| {
-                let (block_hash, trie_node_hash, node_key) = match row {
+                let (block_hash, block_number, trie_node_hash, node_key) = match row {
                     Ok(r) => r,
                     Err(err) => return Err(CorruptedError::Internal(InternalError(err))),
                 };
@@ -600,6 +603,7 @@ impl SqliteFullDatabase {
 
                 Ok(MissingTrieNode {
                     block_hash,
+                    block_number,
                     trie_node_hash,
                     parent_tries_paths_nibbles,
                     trie_node_key_nibbles,
@@ -1662,6 +1666,7 @@ pub struct MissingTrieNode {
     /// Hash of one of the blocks the trie node belongs to.
     // TODO: consider merging all trie nodes by hash, and turn block_hash into a Vec?
     pub block_hash: [u8; 32],
+    pub block_number: u64,
     pub trie_node_hash: [u8; 32],
     pub parent_tries_paths_nibbles: Vec<Vec<u8>>,
     /// Nibbles that compose the key of the trie node.

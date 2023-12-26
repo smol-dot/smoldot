@@ -62,7 +62,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Configuration for a [`ConsensusService`].
@@ -884,6 +884,8 @@ impl SyncBackground {
                 .or({
                     async {
                         // TODO: handle obsolete requests
+                        // Ask the sync state machine whether any new network request should
+                        // be started.
                         // `desired_requests()` returns, in decreasing order of priority, the
                         // requests that should be started in order for the syncing to proceed. We
                         // simply pick the first request, but enforce one ongoing request per
@@ -928,11 +930,88 @@ impl SyncBackground {
                                 }
                             },
                         );
+                        if let Some((source_id, _, request_info)) = request_to_start {
+                            return WakeUpReason::StartNetworkRequest(source_id, request_info);
+                        }
 
-                        let Some((source_id, _, request_info)) = request_to_start else {
-                            future::pending().await
-                        };
-                        WakeUpReason::StartNetworkRequest(source_id, request_info)
+                        // If the sync state machine doesn't require any additional request, ask
+                        // the database whether any storage item is missing.
+                        // TODO: this has a O(n^2) complexity; in case all sources are busy, we iterate a lot
+                        let missing_items = self
+                            .database
+                            .with_database(|db| {
+                                db.finalized_and_above_missing_trie_nodes_unordered(64)
+                            })
+                            .await
+                            .unwrap();
+                        for missing_item in missing_items {
+                            // Since the database and sync state machine are supposed to have the
+                            // same finalized block, it is guaranteed that the missing item are
+                            // in the finalized block or above.
+                            debug_assert!(
+                                missing_item.block_number
+                                    >= self.sync.finalized_block_header().number
+                            );
+
+                            // Choose which source to query. We have to use an `if` because
+                            // `knows_non_finalized_block` panics if the parameter is inferior
+                            // or equal to the finalized block number.
+                            let source_id = if missing_item.block_number
+                                <= self.sync.finalized_block_header().number
+                            {
+                                let Some(source_id) = self
+                                    .sync
+                                    .sources()
+                                    .filter(|s| *s != self.block_author_sync_source)
+                                    .choose(&mut rand::thread_rng())
+                                else {
+                                    break;
+                                };
+                                source_id
+                            } else {
+                                let Some(source_id) = self
+                                    .sync
+                                    .knows_non_finalized_block(
+                                        missing_item.block_number,
+                                        &missing_item.block_hash,
+                                    )
+                                    .filter(|source_id| {
+                                        *source_id != self.block_author_sync_source
+                                            && self.sync.source_num_ongoing_requests(*source_id)
+                                                == 0
+                                    })
+                                    .choose(&mut rand::thread_rng())
+                                else {
+                                    continue;
+                                };
+                                source_id
+                            };
+
+                            return WakeUpReason::StartNetworkRequest(
+                                source_id,
+                                all::DesiredRequest::StorageGetMerkleProof {
+                                    block_hash: missing_item.block_hash,
+                                    state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
+                                    keys: vec![trie::nibbles_to_bytes_suffix_extend(
+                                        missing_item
+                                            .trie_node_key_nibbles
+                                            .into_iter()
+                                            // In order to download more than one item at a time,
+                                            // we add some randomly-generated nibbles to the
+                                            // requested key. The request will target the missing
+                                            // key plus a few other random keys.
+                                            .chain((0..32).map(|_| {
+                                                rand::Rng::gen_range(&mut rand::thread_rng(), 0..16)
+                                            }))
+                                            .map(|n| trie::Nibble::try_from(n).unwrap()),
+                                    )
+                                    .collect::<Vec<_>>()],
+                                },
+                            );
+                        }
+
+                        // No network request to start.
+                        future::pending().await
                     }
                 })
                 .or(async {
@@ -2100,7 +2179,7 @@ impl SyncBackground {
                 self.pending_notification = None;
                 self.blocks_notifications.clear();
 
-                self.finalized_runtime = Arc::new(Mutex::new(Some(finalized_block_runtime)));
+                self.finalized_runtime = Arc::new(finalized_block_runtime);
                 let chain_info: chain_information::ValidChainInformation =
                     self.sync.as_chain_information().into();
                 self.database
