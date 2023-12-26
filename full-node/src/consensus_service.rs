@@ -52,6 +52,7 @@ use smoldot::{
 use std::{
     array,
     borrow::Cow,
+    cmp,
     future::Future,
     iter,
     num::{NonZeroU64, NonZeroUsize},
@@ -727,13 +728,12 @@ impl SyncBackground {
         let mut process_sync = true;
 
         loop {
-            self.start_network_requests().await;
-
             enum WakeUpReason {
                 ReadyToAuthor,
                 FrontendEvent(ToBackground),
                 FrontendClosed,
                 SendPendingNotification(Notification),
+                StartNetworkRequest(all::SourceId, all::DesiredRequest),
                 NetworkEvent(network_service::Event),
                 NetworkLocalChainUpdate,
                 AnnounceBlock(Vec<u8>, [u8; 32], u64),
@@ -874,6 +874,59 @@ impl SyncBackground {
                         future::pending().await
                     };
                     WakeUpReason::SubtaskFinished(subtask_finished)
+                })
+                .or({
+                    // TODO: handle obsolete requests
+                    // `desired_requests()` returns, in decreasing order of priority, the requests
+                    // that should be started in order for the syncing to proceed. We simply pick the
+                    // first request, but enforce one ongoing request per source.
+                    // TODO: desired_requests() is expensive and done at every iteration
+                    let request_to_start = self.sync.desired_requests().find(
+                        |(source_id, source_info, request_details)| {
+                            if source_info
+                                .as_ref()
+                                .map_or(false, |info| info.is_disconnected)
+                            {
+                                // Source is a networking source that has already been disconnected.
+                                false
+                            } else if *source_id != self.block_author_sync_source {
+                                // Remote source.
+                                self.sync.source_num_ongoing_requests(*source_id) == 0
+                            } else {
+                                // Locally-authored blocks source.
+                                match (request_details, &self.authored_block) {
+                                    (
+                                        all::DesiredRequest::BlocksRequest {
+                                            first_block_hash: None,
+                                            first_block_height,
+                                            ..
+                                        },
+                                        Some((authored_height, _, _, _)),
+                                    ) if first_block_height == authored_height => true,
+                                    (
+                                        all::DesiredRequest::BlocksRequest {
+                                            first_block_hash: Some(first_block_hash),
+                                            first_block_height,
+                                            ..
+                                        },
+                                        Some((authored_height, authored_hash, _, _)),
+                                    ) if first_block_hash == authored_hash
+                                        && first_block_height == authored_height =>
+                                    {
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            }
+                        },
+                    );
+
+                    async move {
+                        let Some((source_id, _, request_info)) = request_to_start else {
+                            future::pending().await
+                        };
+                        WakeUpReason::StartNetworkRequest(source_id, request_info)
+                    }
                 })
                 .or(async {
                     if !process_sync {
@@ -1161,6 +1214,219 @@ impl SyncBackground {
                 }
                 WakeUpReason::NetworkEvent(_) => {
                     // Different chain index.
+                }
+
+                WakeUpReason::StartNetworkRequest(
+                    source_id,
+                    request_info @ all::DesiredRequest::BlocksRequest { .. },
+                ) if source_id == self.block_author_sync_source => {
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        "queue-locally-authored-block-for-import".to_string(),
+                    );
+
+                    let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
+                        self.authored_block.take().unwrap();
+
+                    let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
+
+                    // Create a request that is immediately answered right below.
+                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
+
+                    // TODO: announce the block on the network, but only after it's been imported
+                    self.sync.blocks_request_response(
+                        request_id,
+                        Ok(iter::once(all::BlockRequestSuccessBlock {
+                            scale_encoded_header,
+                            scale_encoded_extrinsics,
+                            scale_encoded_justifications: Vec::new(),
+                            user_data: NonFinalizedBlock::NotVerified,
+                        })),
+                    );
+                }
+
+                WakeUpReason::StartNetworkRequest(
+                    source_id,
+                    all::DesiredRequest::BlocksRequest {
+                        first_block_hash,
+                        first_block_height,
+                        ascending,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification,
+                    },
+                ) => {
+                    // Before notifying the syncing of the request, clamp the number of blocks to
+                    // the number of blocks we expect to receive.
+                    let num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), 64)).unwrap();
+
+                    let peer_id = {
+                        let info = self.sync[source_id].clone().unwrap();
+                        // Disconnected sources are filtered out above.
+                        debug_assert!(!info.is_disconnected);
+                        info.peer_id
+                    };
+
+                    // TODO: add jaeger span
+
+                    let request = self.network_service.clone().blocks_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::BlocksRequestConfig {
+                            start: if let Some(first_block_hash) = first_block_hash {
+                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
+                            } else {
+                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
+                            },
+                            desired_count: NonZeroU32::new(
+                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                            )
+                            .unwrap(),
+                            direction: if ascending {
+                                network::codec::BlocksRequestDirection::Ascending
+                            } else {
+                                network::codec::BlocksRequestDirection::Descending
+                            },
+                            fields: network::codec::BlocksRequestFields {
+                                header: request_headers,
+                                body: request_bodies,
+                                justifications: request_justification,
+                            },
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::DesiredRequest::BlocksRequest {
+                            first_block_hash,
+                            first_block_height,
+                            ascending,
+                            num_blocks,
+                            request_headers,
+                            request_bodies,
+                            request_justification,
+                        }
+                        .into(),
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::BlocksRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
+                WakeUpReason::StartNetworkRequest(
+                    source_id,
+                    all::DesiredRequest::WarpSync {
+                        sync_start_block_hash,
+                    },
+                ) => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().warp_sync_request(
+                        peer_id,
+                        self.network_chain_id,
+                        sync_start_block_hash,
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::WarpSync {
+                            sync_start_block_hash,
+                        },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::WarpSyncRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
+                WakeUpReason::StartNetworkRequest(
+                    source_id,
+                    all::DesiredRequest::StorageGetMerkleProof {
+                        block_hash, keys, ..
+                    },
+                ) => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().storage_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::StorageProofRequestConfig {
+                            block_hash,
+                            keys: keys.clone().into_iter(),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::StorageGet { block_hash, keys },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::StorageRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
+                WakeUpReason::StartNetworkRequest(
+                    source_id,
+                    all::DesiredRequest::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                ) => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().call_proof_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::CallProofRequestConfig {
+                            block_hash,
+                            method: function_name.clone(),
+                            parameter_vectored: iter::once(parameter_vectored.clone()),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::RuntimeCallMerkleProof {
+                            block_hash,
+                            function_name,
+                            parameter_vectored,
+                        },
+                        (),
+                    );
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::CallProofRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
                 }
 
                 WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
@@ -1740,244 +2006,6 @@ impl SyncBackground {
             new_block_header,
             new_block_body,
         ));
-    }
-
-    /// Starts all the new network requests that should be started.
-    // TODO: handle obsolete requests
-    async fn start_network_requests(&mut self) {
-        loop {
-            // `desired_requests()` returns, in decreasing order of priority, the requests
-            // that should be started in order for the syncing to proceed. We simply pick the
-            // first request, but enforce one ongoing request per source.
-            let (source_id, _, mut request_info) = match self.sync.desired_requests().find(
-                |(source_id, source_info, request_details)| {
-                    if source_info
-                        .as_ref()
-                        .map_or(false, |info| info.is_disconnected)
-                    {
-                        // Source is a networking source that has already been disconnected.
-                        false
-                    } else if *source_id != self.block_author_sync_source {
-                        // Remote source.
-                        self.sync.source_num_ongoing_requests(*source_id) == 0
-                    } else {
-                        // Locally-authored blocks source.
-                        match (request_details, &self.authored_block) {
-                            (
-                                all::DesiredRequest::BlocksRequest {
-                                    first_block_hash: None,
-                                    first_block_height,
-                                    ..
-                                },
-                                Some((authored_height, _, _, _)),
-                            ) if first_block_height == authored_height => true,
-                            (
-                                all::DesiredRequest::BlocksRequest {
-                                    first_block_hash: Some(first_block_hash),
-                                    first_block_height,
-                                    ..
-                                },
-                                Some((authored_height, authored_hash, _, _)),
-                            ) if first_block_hash == authored_hash
-                                && first_block_height == authored_height =>
-                            {
-                                true
-                            }
-                            _ => false,
-                        }
-                    }
-                },
-            ) {
-                Some(v) => v,
-                None => break,
-            };
-
-            // Before notifying the syncing of the request, clamp the number of blocks to the
-            // number of blocks we expect to receive.
-            request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
-
-            match request_info {
-                all::DesiredRequest::BlocksRequest { .. }
-                    if source_id == self.block_author_sync_source =>
-                {
-                    self.log_callback.log(
-                        LogLevel::Debug,
-                        "queue-locally-authored-block-for-import".to_string(),
-                    );
-
-                    let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
-                        self.authored_block.take().unwrap();
-
-                    let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
-
-                    // Create a request that is immediately answered right below.
-                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
-
-                    // TODO: announce the block on the network, but only after it's been imported
-                    self.sync.blocks_request_response(
-                        request_id,
-                        Ok(iter::once(all::BlockRequestSuccessBlock {
-                            scale_encoded_header,
-                            scale_encoded_extrinsics,
-                            scale_encoded_justifications: Vec::new(),
-                            user_data: NonFinalizedBlock::NotVerified,
-                        })),
-                    );
-                }
-
-                all::DesiredRequest::BlocksRequest {
-                    first_block_hash,
-                    first_block_height,
-                    ascending,
-                    num_blocks,
-                    request_headers,
-                    request_bodies,
-                    request_justification,
-                } => {
-                    let peer_id = {
-                        let info = self.sync[source_id].clone().unwrap();
-                        // Disconnected sources are filtered out above.
-                        debug_assert!(!info.is_disconnected);
-                        info.peer_id
-                    };
-
-                    // TODO: add jaeger span
-
-                    let request = self.network_service.clone().blocks_request(
-                        peer_id,
-                        self.network_chain_id,
-                        network::codec::BlocksRequestConfig {
-                            start: if let Some(first_block_hash) = first_block_hash {
-                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
-                            } else {
-                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
-                            },
-                            desired_count: NonZeroU32::new(
-                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                            )
-                            .unwrap(),
-                            direction: if ascending {
-                                network::codec::BlocksRequestDirection::Ascending
-                            } else {
-                                network::codec::BlocksRequestDirection::Descending
-                            },
-                            fields: network::codec::BlocksRequestFields {
-                                header: request_headers,
-                                body: request_bodies,
-                                justifications: request_justification,
-                            },
-                        },
-                    );
-
-                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::BlocksRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-                all::DesiredRequest::WarpSync {
-                    sync_start_block_hash,
-                } => {
-                    // TODO: don't unwrap? could this target the virtual sync source?
-                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                    let request = self.network_service.clone().warp_sync_request(
-                        peer_id,
-                        self.network_chain_id,
-                        sync_start_block_hash,
-                    );
-
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        all::RequestDetail::WarpSync {
-                            sync_start_block_hash,
-                        },
-                        (),
-                    );
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::WarpSyncRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-                all::DesiredRequest::StorageGetMerkleProof {
-                    block_hash, keys, ..
-                } => {
-                    // TODO: don't unwrap? could this target the virtual sync source?
-                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                    let request = self.network_service.clone().storage_request(
-                        peer_id,
-                        self.network_chain_id,
-                        network::codec::StorageProofRequestConfig {
-                            block_hash,
-                            keys: keys.clone().into_iter(),
-                        },
-                    );
-
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        all::RequestDetail::StorageGet { block_hash, keys },
-                        (),
-                    );
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::StorageRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-                all::DesiredRequest::RuntimeCallMerkleProof {
-                    block_hash,
-                    function_name,
-                    parameter_vectored,
-                } => {
-                    // TODO: don't unwrap? could this target the virtual sync source?
-                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                    let request = self.network_service.clone().call_proof_request(
-                        peer_id,
-                        self.network_chain_id,
-                        network::codec::CallProofRequestConfig {
-                            block_hash,
-                            method: function_name.clone(),
-                            parameter_vectored: iter::once(parameter_vectored.clone()),
-                        },
-                    );
-
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        all::RequestDetail::RuntimeCallMerkleProof {
-                            block_hash,
-                            function_name,
-                            parameter_vectored,
-                        },
-                        (),
-                    );
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::CallProofRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-            }
-        }
     }
 
     async fn process_blocks(mut self) -> (Self, bool) {
