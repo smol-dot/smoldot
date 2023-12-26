@@ -354,6 +354,7 @@ impl ConsensusService {
             pending_notification: None,
             from_network_service: config.network_events_receiver,
             database: config.database,
+            database_catch_up_download: DatabaseCatchUpDownload::None,
             peers_source_id_map: Default::default(),
             sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
@@ -675,6 +676,10 @@ struct SyncBackground {
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
 
+    /// Whether an old block or storage item from an old block is currently being downloaded or
+    /// must be downloaded.
+    database_catch_up_download: DatabaseCatchUpDownload,
+
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
 }
@@ -727,6 +732,12 @@ enum SubtaskFinished {
     },
 }
 
+enum DatabaseCatchUpDownload {
+    /// No download currently in progress.
+    None,
+    InProgress(all::RequestId),
+}
+
 impl SyncBackground {
     async fn run(mut self) {
         let mut process_sync = true;
@@ -737,7 +748,11 @@ impl SyncBackground {
                 FrontendEvent(ToBackground),
                 FrontendClosed,
                 SendPendingNotification(Notification),
-                StartNetworkRequest(all::SourceId, all::DesiredRequest),
+                StartNetworkRequest {
+                    source_id: all::SourceId,
+                    request: all::DesiredRequest,
+                    is_database_catch_up: bool,
+                },
                 NetworkEvent(network_service::Event),
                 NetworkLocalChainUpdate,
                 AnnounceBlock(Vec<u8>, [u8; 32], u64),
@@ -930,84 +945,98 @@ impl SyncBackground {
                                 }
                             },
                         );
-                        if let Some((source_id, _, request_info)) = request_to_start {
-                            return WakeUpReason::StartNetworkRequest(source_id, request_info);
+                        if let Some((source_id, _, request)) = request_to_start {
+                            return WakeUpReason::StartNetworkRequest {
+                                source_id,
+                                request,
+                                is_database_catch_up: false,
+                            };
                         }
 
                         // If the sync state machine doesn't require any additional request, ask
                         // the database whether any storage item is missing.
-                        // TODO: this has a O(n^2) complexity; in case all sources are busy, we iterate a lot
-                        let missing_items = self
-                            .database
-                            .with_database(|db| {
-                                db.finalized_and_above_missing_trie_nodes_unordered(64)
-                            })
-                            .await
-                            .unwrap();
-                        for missing_item in missing_items {
-                            // Since the database and sync state machine are supposed to have the
-                            // same finalized block, it is guaranteed that the missing item are
-                            // in the finalized block or above.
-                            debug_assert!(
-                                missing_item.block_number
-                                    >= self.sync.finalized_block_header().number
-                            );
+                        if matches!(
+                            self.database_catch_up_download,
+                            DatabaseCatchUpDownload::None
+                        ) {
+                            // TODO: this has a O(n^2) complexity; in case all sources are busy, we iterate a lot
+                            let missing_items = self
+                                .database
+                                .with_database(|db| {
+                                    db.finalized_and_above_missing_trie_nodes_unordered(64)
+                                    // TODO: limit?!
+                                })
+                                .await
+                                .unwrap();
+                            for missing_item in missing_items {
+                                // Since the database and sync state machine are supposed to have the
+                                // same finalized block, it is guaranteed that the missing item are
+                                // in the finalized block or above.
+                                debug_assert!(
+                                    missing_item.block_number
+                                        >= self.sync.finalized_block_header().number
+                                );
 
-                            // Choose which source to query. We have to use an `if` because
-                            // `knows_non_finalized_block` panics if the parameter is inferior
-                            // or equal to the finalized block number.
-                            let source_id = if missing_item.block_number
-                                <= self.sync.finalized_block_header().number
-                            {
-                                let Some(source_id) = self
-                                    .sync
-                                    .sources()
-                                    .filter(|s| *s != self.block_author_sync_source)
-                                    .choose(&mut rand::thread_rng())
-                                else {
-                                    break;
+                                // Choose which source to query. We have to use an `if` because
+                                // `knows_non_finalized_block` panics if the parameter is inferior
+                                // or equal to the finalized block number.
+                                let source_id = if missing_item.block_number
+                                    <= self.sync.finalized_block_header().number
+                                {
+                                    let Some(source_id) = self
+                                        .sync
+                                        .sources()
+                                        .filter(|s| *s != self.block_author_sync_source)
+                                        .choose(&mut rand::thread_rng())
+                                    else {
+                                        break;
+                                    };
+                                    source_id
+                                } else {
+                                    let Some(source_id) = self
+                                        .sync
+                                        .knows_non_finalized_block(
+                                            missing_item.block_number,
+                                            &missing_item.block_hash,
+                                        )
+                                        .filter(|source_id| {
+                                            *source_id != self.block_author_sync_source
+                                                && self.sync.source_num_ongoing_requests(*source_id)
+                                                    == 0
+                                        })
+                                        .choose(&mut rand::thread_rng())
+                                    else {
+                                        continue;
+                                    };
+                                    source_id
                                 };
-                                source_id
-                            } else {
-                                let Some(source_id) = self
-                                    .sync
-                                    .knows_non_finalized_block(
-                                        missing_item.block_number,
-                                        &missing_item.block_hash,
-                                    )
-                                    .filter(|source_id| {
-                                        *source_id != self.block_author_sync_source
-                                            && self.sync.source_num_ongoing_requests(*source_id)
-                                                == 0
-                                    })
-                                    .choose(&mut rand::thread_rng())
-                                else {
-                                    continue;
-                                };
-                                source_id
-                            };
 
-                            return WakeUpReason::StartNetworkRequest(
-                                source_id,
-                                all::DesiredRequest::StorageGetMerkleProof {
-                                    block_hash: missing_item.block_hash,
-                                    state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
-                                    keys: vec![trie::nibbles_to_bytes_suffix_extend(
-                                        missing_item
-                                            .trie_node_key_nibbles
-                                            .into_iter()
-                                            // In order to download more than one item at a time,
-                                            // we add some randomly-generated nibbles to the
-                                            // requested key. The request will target the missing
-                                            // key plus a few other random keys.
-                                            .chain((0..32).map(|_| {
-                                                rand::Rng::gen_range(&mut rand::thread_rng(), 0..16)
-                                            }))
-                                            .map(|n| trie::Nibble::try_from(n).unwrap()),
-                                    )
-                                    .collect::<Vec<_>>()],
-                                },
-                            );
+                                return WakeUpReason::StartNetworkRequest {
+                                    source_id,
+                                    request: all::DesiredRequest::StorageGetMerkleProof {
+                                        block_hash: missing_item.block_hash,
+                                        state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
+                                        keys: vec![trie::nibbles_to_bytes_suffix_extend(
+                                            missing_item
+                                                .trie_node_key_nibbles
+                                                .into_iter()
+                                                // In order to download more than one item at a time,
+                                                // we add some randomly-generated nibbles to the
+                                                // requested key. The request will target the missing
+                                                // key plus a few other random keys.
+                                                .chain((0..32).map(|_| {
+                                                    rand::Rng::gen_range(
+                                                        &mut rand::thread_rng(),
+                                                        0..16,
+                                                    )
+                                                }))
+                                                .map(|n| trie::Nibble::try_from(n).unwrap()),
+                                        )
+                                        .collect::<Vec<_>>()],
+                                    },
+                                    is_database_catch_up: true,
+                                };
+                            }
                         }
 
                         // No network request to start.
@@ -1300,10 +1329,13 @@ impl SyncBackground {
                     // Different chain index.
                 }
 
-                WakeUpReason::StartNetworkRequest(
+                WakeUpReason::StartNetworkRequest {
                     source_id,
-                    request_info @ all::DesiredRequest::BlocksRequest { .. },
-                ) if source_id == self.block_author_sync_source => {
+                    request: request_info @ all::DesiredRequest::BlocksRequest { .. },
+                    is_database_catch_up,
+                } if source_id == self.block_author_sync_source => {
+                    debug_assert!(!is_database_catch_up);
+
                     self.log_callback.log(
                         LogLevel::Debug,
                         "queue-locally-authored-block-for-import".to_string(),
@@ -1316,7 +1348,6 @@ impl SyncBackground {
 
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(source_id, request_info.into(), ());
-
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(
                         request_id,
@@ -1329,18 +1360,20 @@ impl SyncBackground {
                     );
                 }
 
-                WakeUpReason::StartNetworkRequest(
+                WakeUpReason::StartNetworkRequest {
                     source_id,
-                    all::DesiredRequest::BlocksRequest {
-                        first_block_hash,
-                        first_block_height,
-                        ascending,
-                        num_blocks,
-                        request_headers,
-                        request_bodies,
-                        request_justification,
-                    },
-                ) => {
+                    request:
+                        all::DesiredRequest::BlocksRequest {
+                            first_block_hash,
+                            first_block_height,
+                            ascending,
+                            num_blocks,
+                            request_headers,
+                            request_bodies,
+                            request_justification,
+                        },
+                    is_database_catch_up,
+                } => {
                     // Before notifying the syncing of the request, clamp the number of blocks to
                     // the number of blocks we expect to receive.
                     let num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), 64)).unwrap();
@@ -1395,6 +1428,15 @@ impl SyncBackground {
                         (),
                     );
 
+                    if is_database_catch_up {
+                        debug_assert!(matches!(
+                            self.database_catch_up_download,
+                            DatabaseCatchUpDownload::None
+                        ));
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::InProgress(request_id);
+                    }
+
                     self.sub_tasks.push(Box::pin(async move {
                         let result = request.await;
                         SubtaskFinished::BlocksRequestFinished {
@@ -1405,12 +1447,14 @@ impl SyncBackground {
                     }));
                 }
 
-                WakeUpReason::StartNetworkRequest(
+                WakeUpReason::StartNetworkRequest {
                     source_id,
-                    all::DesiredRequest::WarpSync {
-                        sync_start_block_hash,
-                    },
-                ) => {
+                    request:
+                        all::DesiredRequest::WarpSync {
+                            sync_start_block_hash,
+                        },
+                    is_database_catch_up,
+                } => {
                     // TODO: don't unwrap? could this target the virtual sync source?
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
@@ -1428,6 +1472,15 @@ impl SyncBackground {
                         (),
                     );
 
+                    if is_database_catch_up {
+                        debug_assert!(matches!(
+                            self.database_catch_up_download,
+                            DatabaseCatchUpDownload::None
+                        ));
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::InProgress(request_id);
+                    }
+
                     self.sub_tasks.push(Box::pin(async move {
                         let result = request.await;
                         SubtaskFinished::WarpSyncRequestFinished {
@@ -1438,12 +1491,14 @@ impl SyncBackground {
                     }));
                 }
 
-                WakeUpReason::StartNetworkRequest(
+                WakeUpReason::StartNetworkRequest {
                     source_id,
-                    all::DesiredRequest::StorageGetMerkleProof {
-                        block_hash, keys, ..
-                    },
-                ) => {
+                    request:
+                        all::DesiredRequest::StorageGetMerkleProof {
+                            block_hash, keys, ..
+                        },
+                    is_database_catch_up,
+                } => {
                     // TODO: don't unwrap? could this target the virtual sync source?
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
@@ -1462,6 +1517,15 @@ impl SyncBackground {
                         (),
                     );
 
+                    if is_database_catch_up {
+                        debug_assert!(matches!(
+                            self.database_catch_up_download,
+                            DatabaseCatchUpDownload::None
+                        ));
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::InProgress(request_id);
+                    }
+
                     self.sub_tasks.push(Box::pin(async move {
                         let result = request.await;
                         SubtaskFinished::StorageRequestFinished {
@@ -1472,14 +1536,16 @@ impl SyncBackground {
                     }));
                 }
 
-                WakeUpReason::StartNetworkRequest(
+                WakeUpReason::StartNetworkRequest {
                     source_id,
-                    all::DesiredRequest::RuntimeCallMerkleProof {
-                        block_hash,
-                        function_name,
-                        parameter_vectored,
-                    },
-                ) => {
+                    request:
+                        all::DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash,
+                            function_name,
+                            parameter_vectored,
+                        },
+                    is_database_catch_up,
+                } => {
                     // TODO: don't unwrap? could this target the virtual sync source?
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
@@ -1503,6 +1569,15 @@ impl SyncBackground {
                         (),
                     );
 
+                    if is_database_catch_up {
+                        debug_assert!(matches!(
+                            self.database_catch_up_download,
+                            DatabaseCatchUpDownload::None
+                        ));
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::InProgress(request_id);
+                    }
+
                     self.sub_tasks.push(Box::pin(async move {
                         let result = request.await;
                         SubtaskFinished::CallProofRequestFinished {
@@ -1518,6 +1593,11 @@ impl SyncBackground {
                     source_id,
                     result: Ok(blocks),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
                     let _ = self.sync.blocks_request_response(
                         request_id,
                         Ok(blocks
@@ -1561,6 +1641,11 @@ impl SyncBackground {
                     source_id,
                     result: Err(_),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
                     // Note that we perform the ban even if the source is now disconnected.
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
                     self.network_service
@@ -1599,6 +1684,11 @@ impl SyncBackground {
                     source_id,
                     result: Ok(result),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
                     let decoded = result.decode();
                     let fragments = decoded
                         .fragments
@@ -1637,6 +1727,11 @@ impl SyncBackground {
                     source_id,
                     result: Err(_),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
                     // Note that we perform the ban even if the source is now disconnected.
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
                     self.network_service
@@ -1673,6 +1768,11 @@ impl SyncBackground {
                     source_id,
                     result,
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
                     if result.is_err() {
                         // Note that we perform the ban even if the source is now disconnected.
                         let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
@@ -1713,6 +1813,11 @@ impl SyncBackground {
                     source_id,
                     result,
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download = DatabaseCatchUpDownload::None;
+                    }
+
                     if result.is_err() {
                         // Note that we perform the ban even if the source is now disconnected.
                         let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
