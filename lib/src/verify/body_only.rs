@@ -16,14 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    chain::chain_information,
     executor::{self, host, runtime_host, vm},
     header, util,
-    verify::{aura, babe, inherents},
+    verify::inherents,
 };
 
 use alloc::{string::String, vec::Vec};
-use core::{iter, num::NonZeroU64, time::Duration};
+use core::{iter, time::Duration};
 
 pub use runtime_host::{
     LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr, Nibble, StorageChanges, TrieChange,
@@ -65,35 +64,6 @@ pub struct Config<'a, TBody> {
     pub calculate_trie_changes: bool,
 }
 
-/// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
-pub enum ConfigConsensus<'a> {
-    /// Chain is using the Aura consensus engine.
-    Aura {
-        /// Aura authorities that must validate the block.
-        ///
-        /// This list is either equal to the parent's list, or, if the parent changes the list of
-        /// authorities, equal to that new modified list.
-        current_authorities: header::AuraAuthoritiesIter<'a>,
-
-        /// Duration of a slot in milliseconds.
-        /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-        slot_duration: NonZeroU64,
-    },
-
-    /// Chain is using the Babe consensus engine.
-    Babe {
-        /// Number of slots per epoch in the Babe configuration.
-        slots_per_epoch: NonZeroU64,
-
-        /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's
-        /// number is 0, as block #0 doesn't belong to any epoch.
-        parent_block_epoch: Option<chain_information::BabeEpochInformationRef<'a>>,
-
-        /// Epoch that follows the epoch the parent block belongs to.
-        parent_block_next_epoch: chain_information::BabeEpochInformationRef<'a>,
-    },
-}
-
 /// Block successfully verified.
 pub struct Success {
     /// Runtime that was passed by [`Config`].
@@ -115,31 +85,6 @@ pub struct Success {
     pub logs: String,
 }
 
-/// Extra items in [`Success`] relevant to the consensus engine.
-pub enum SuccessConsensus {
-    /// Chain is using the Aura consensus engine.
-    Aura {
-        /// True if the list of authorities is modified by this block.
-        authorities_change: bool,
-    },
-
-    /// Chain is using the Babe consensus engine.
-    Babe {
-        /// Slot number the block belongs to.
-        ///
-        /// > **Note**: This is a simple reminder. The value can also be found in the header of the
-        /// >           block.
-        slot_number: u64,
-
-        /// If `Some`, the verified block contains an epoch transition describing the new
-        /// "next epoch". When verifying blocks that are children of this one, the value in this
-        /// field must be provided as [`ConfigConsensus::Babe::parent_block_next_epoch`], and the
-        /// value previously in [`ConfigConsensus::Babe::parent_block_next_epoch`] must instead be
-        /// passed as [`ConfigConsensus::Babe::parent_block_epoch`].
-        epoch_transition_target: Option<chain_information::BabeEpochInformation>,
-    },
-}
-
 /// Error that can happen during the verification.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
@@ -154,17 +99,6 @@ pub enum Error {
     InherentsOutputError(InherentsOutputError),
     /// Output of `Core_execute_block` wasn't empty.
     NonEmptyOutput,
-    /// Block header contains items relevant to multiple consensus engines at the same time.
-    MultipleConsensusEngines,
-    /// Block header contains an unrecognized consensus engine.
-    #[display(fmt = "Block header contains an unrecognized consensus engine: {engine:?}")]
-    UnknownConsensusEngine { engine: [u8; 4] },
-    /// Failed to verify the authenticity of the block with the AURA algorithm.
-    #[display(fmt = "{_0}")]
-    AuraVerification(aura::VerifyError),
-    /// Failed to verify the authenticity of the block with the BABE algorithm.
-    #[display(fmt = "{_0}")]
-    BabeVerification(babe::VerifyError),
     /// Error while compiling new runtime.
     NewRuntimeCompilationError(host::NewErr),
     /// Block being verified has erased the `:code` key from the storage.
