@@ -1380,6 +1380,20 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .map_err(InvalidOrError::ValidateError)
         .map_err(ValidationError::InvalidOrError)?;
 
+    if runtime
+        .runtime_version()
+        .decode()
+        .apis
+        .find_version("TaggedTransactionQueue")
+        != Some(3)
+    {
+        return Err(ValidationError::InvalidOrError(
+            InvalidOrError::ValidateError(ValidateTransactionError::Validation(
+                validate::Error::UnknownApiVersion,
+            )),
+        ));
+    }
+
     let mut validation_in_progress = match runtime_host::run(runtime_host::Config {
         virtual_machine: runtime,
         function_to_call: validate::VALIDATION_FUNCTION_NAME,
