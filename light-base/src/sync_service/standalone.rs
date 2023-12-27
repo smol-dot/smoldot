@@ -1058,6 +1058,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 finalized_storage_code_closest_ancestor_excluding,
                 finalized_storage_heap_pages,
                 finalized_storage_code_merkle_value,
+                finalized_body: _,
             } => {
                 self.sync = sync;
 
