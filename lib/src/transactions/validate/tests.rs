@@ -17,7 +17,11 @@
 
 #![cfg(test)]
 
-use crate::{executor, header, trie::proof_decode};
+use crate::{
+    executor::{self, runtime_host},
+    header,
+    trie::proof_decode,
+};
 use core::iter;
 
 #[test]
@@ -43,27 +47,32 @@ fn validate_from_proof() {
 
     let main_trie_root = header::decode(&scale_encoded_header, 4).unwrap().state_root;
 
-    let mut validation_in_progress = super::validate_transaction(super::Config {
-        runtime,
-        scale_encoded_header: &scale_encoded_header,
-        block_number_bytes: 4,
-        scale_encoded_transaction: iter::once(&hex::decode(test.transaction_bytes).unwrap()),
-        source: super::TransactionSource::External,
+    let mut validation_in_progress = runtime_host::run(runtime_host::Config {
+        virtual_machine: runtime,
+        function_to_call: super::VALIDATION_FUNCTION_NAME,
+        parameter: super::validate_transaction_runtime_parameters_v3(
+            iter::once(&hex::decode(test.transaction_bytes).unwrap()),
+            super::TransactionSource::External,
+            &header::hash_from_scale_encoded_header(&scale_encoded_header),
+        ),
+        storage_main_trie_changes: Default::default(),
         max_log_level: 0,
-    });
+        calculate_trie_changes: false,
+    })
+    .unwrap();
 
     loop {
         match validation_in_progress {
-            super::Query::Finished { result: Ok(_), .. } => return, // Success,
-            super::Query::Finished { result: Err(_), .. } => panic!(),
-            super::Query::StorageGet(get) => {
+            runtime_host::RuntimeHostVm::Finished(Ok(_)) => return, // Success,
+            runtime_host::RuntimeHostVm::Finished(Err(_)) => panic!(),
+            runtime_host::RuntimeHostVm::StorageGet(get) => {
                 let value = call_proof
                     .storage_value(main_trie_root, get.key().as_ref())
                     .unwrap();
                 validation_in_progress =
                     get.inject_value(value.map(|(val, ver)| (iter::once(val), ver)));
             }
-            super::Query::NextKey(nk) => {
+            runtime_host::RuntimeHostVm::NextKey(nk) => {
                 let next_key = call_proof
                     .next_key(
                         main_trie_root,
@@ -75,12 +84,20 @@ fn validate_from_proof() {
                     .unwrap();
                 validation_in_progress = nk.inject_key(next_key);
             }
-            super::Query::ClosestDescendantMerkleValue(mv) => {
+            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
                 let value = call_proof
                     .closest_descendant_merkle_value(main_trie_root, mv.key())
                     .unwrap();
                 validation_in_progress = mv.inject_merkle_value(value);
             }
+            runtime_host::RuntimeHostVm::SignatureVerification(r) => {
+                validation_in_progress = r.verify_and_resume()
+            }
+            runtime_host::RuntimeHostVm::LogEmit(r) => validation_in_progress = r.resume(),
+            runtime_host::RuntimeHostVm::OffchainStorageSet(r) => {
+                validation_in_progress = r.resume()
+            }
+            runtime_host::RuntimeHostVm::Offchain(_) => panic!(),
         }
     }
 }
