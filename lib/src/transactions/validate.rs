@@ -17,10 +17,7 @@
 
 //! Runtime call to obtain the transactions validity status.
 
-use crate::{
-    executor::{host, runtime_host},
-    header, util,
-};
+use crate::util;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
@@ -157,33 +154,6 @@ pub enum UnknownTransaction {
     /// Any other custom unknown validity that is not covered by this enum.
     #[display(fmt = "Other reason (code: {_0})")]
     Custom(u8),
-}
-
-/// Problem encountered during a call to [`validate_transaction`].
-#[derive(Debug, derive_more::Display, Clone)]
-pub enum Error {
-    /// Error while decoding the block header against which to make the call.
-    #[display(fmt = "Failed to decode block header: {_0}")]
-    InvalidHeader(header::Error),
-    /// Transaction validation API version unrecognized.
-    UnknownApiVersion,
-    /// Error while starting the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
-    WasmStart(host::StartErr),
-    /// Error while running the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
-    WasmVmReadWrite(runtime_host::ErrorDetail),
-    /// Error while running the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
-    WasmVmReadOnly(runtime_host::ErrorDetail),
-    /// Error while decoding the output of the runtime.
-    OutputDecodeError(DecodeError),
-    /// The list of provided tags ([`ValidTransaction::provides`]) is empty. It is mandatory for
-    /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
-    /// in the runtime.
-    EmptyProvidedTags,
-    /// Runtime called a forbidden host function.
-    ForbiddenHostCall,
 }
 
 /// Error that can happen during the decoding.

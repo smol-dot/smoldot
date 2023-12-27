@@ -89,7 +89,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
-    executor::runtime_host,
+    executor::{host, runtime_host},
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
@@ -354,9 +354,22 @@ pub enum ValidateTransactionError {
     /// Error during the network request.
     #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
-    /// Error during the validation runtime call.
+    /// Transaction validation API version unrecognized.
+    UnknownApiVersion,
+    /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    Validation(validate::Error),
+    WasmStart(host::StartErr),
+    /// Error while running the Wasm virtual machine.
+    #[display(fmt = "{_0}")]
+    WasmExecution(runtime_host::ErrorDetail),
+    /// Error while decoding the output of the runtime.
+    OutputDecodeError(validate::DecodeError),
+    /// The list of provided tags ([`ValidTransaction::provides`]) is empty. It is mandatory for
+    /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
+    /// in the runtime.
+    EmptyProvidedTags,
+    /// Runtime called a forbidden host function.
+    ForbiddenHostCall,
 }
 
 #[derive(Debug, Clone)]
@@ -1388,9 +1401,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         != Some(3)
     {
         return Err(ValidationError::InvalidOrError(
-            InvalidOrError::ValidateError(ValidateTransactionError::Validation(
-                validate::Error::UnknownApiVersion,
-            )),
+            InvalidOrError::ValidateError(ValidateTransactionError::UnknownApiVersion),
         ));
     }
 
@@ -1410,9 +1421,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err((err, virtual_machine)) => {
             runtime_call_lock.unlock(virtual_machine);
             return Err(ValidationError::InvalidOrError(
-                InvalidOrError::ValidateError(ValidateTransactionError::Validation(
-                    validate::Error::WasmStart(err),
-                )),
+                InvalidOrError::ValidateError(ValidateTransactionError::WasmStart(err)),
             ));
         }
     };
@@ -1430,9 +1439,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                             // TODO: this check should be performed by the validate module
                             return Err(ValidationError::InvalidOrError(
                                 InvalidOrError::ValidateError(
-                                    ValidateTransactionError::Validation(
-                                        validate::Error::EmptyProvidedTags,
-                                    ),
+                                    ValidateTransactionError::EmptyProvidedTags,
                                 ),
                             ));
                         }
@@ -1443,16 +1450,16 @@ async fn validate_transaction<TPlat: PlatformRef>(
                         err,
                     ))),
                     Err(err) => Err(ValidationError::InvalidOrError(
-                        InvalidOrError::ValidateError(ValidateTransactionError::Validation(
-                            validate::Error::OutputDecodeError(err),
+                        InvalidOrError::ValidateError(ValidateTransactionError::OutputDecodeError(
+                            err,
                         )),
                     )),
                 };
             }
             runtime_host::RuntimeHostVm::Finished(Err(err)) => {
                 return Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::Validation(
-                        validate::Error::WasmVmReadOnly(err.detail),
+                    InvalidOrError::ValidateError(ValidateTransactionError::WasmExecution(
+                        err.detail,
                     )),
                 ));
             }
@@ -1529,9 +1536,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
             }
             runtime_host::RuntimeHostVm::Offchain(_) => {
                 return Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::Validation(
-                        validate::Error::ForbiddenHostCall,
-                    )),
+                    InvalidOrError::ValidateError(ValidateTransactionError::ForbiddenHostCall),
                 ));
             }
             runtime_host::RuntimeHostVm::OffchainStorageSet(r) => {
