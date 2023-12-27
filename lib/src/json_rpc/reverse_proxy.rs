@@ -175,8 +175,8 @@ pub struct ReverseProxy<TClient, TServer> {
 
     /// List of all subscriptions that are currently active according to clients.
     ///
-    /// Entries are inserted when we send to the client a JSON-RPC response containing a
-    /// subscription confirmation, and removed when we send to the client a JSON-RPC response
+    /// Entries are inserted when we queue for the client a JSON-RPC response containing a
+    /// subscription confirmation, and removed when we queue for the client a JSON-RPC response
     /// containing an unsubscription confirmation.
     ///
     /// Contains `Some` only if the subscription is active on a server.
@@ -1307,6 +1307,18 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                     // TODO: ^
                 };
 
+                match request_info.ty {
+                    QueuedRequestTy::Subscription { ty, assigned_subscription_id } => {
+                        
+                    }
+                    QueuedRequestTy::Unsubscribe(_) => {
+
+                    }
+                    QueuedRequestTy::Regular { is_legacy_api_server_specific } => {
+
+                    }
+                }
+
                 // TODO: add subscription if this was a subscribe request
                 // TODO: remove subscription if this was an unsubscribe request
 
@@ -1338,6 +1350,8 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 error_message,
                 error_data_json,
             }) => {
+                // TODO: if this was a "fake subscription" request, re-queue it
+
                 // JSON-RPC server has returned an error for this JSON-RPC call.
                 // TODO: translate ID
                 parse::build_error_response(
