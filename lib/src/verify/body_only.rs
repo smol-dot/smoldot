@@ -154,20 +154,9 @@ pub enum Error {
     /// Error while running the Wasm virtual machine to execute the block.
     #[display(fmt = "{_0}")]
     WasmVm(runtime_host::ErrorDetail),
-    /// Runtime has returned some errors when verifying inherents.
-    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
-    CheckInherentsError {
-        /// List of errors produced by the runtime.
-        ///
-        /// The first element of each tuple is an identifier of the module that produced the
-        /// error, while the second element is a SCALE-encoded piece of data.
-        ///
-        /// Due to the fact that errors are not supposed to happen, and that the format of errors
-        /// has changed depending on runtime versions, no utility is provided to decode them.
-        errors: Vec<([u8; 8], Vec<u8>)>,
-    },
-    /// Failed to parse the output of `BlockBuilder_check_inherents`.
-    CheckInherentsOutputParseFailure,
+    /// Error while checking the return value of `BlockBuilder_check_inherents`.
+    #[display(fmt = "{_0}")]
+    InherentsOutputError(InherentsOutputError),
     /// Output of `Core_execute_block` wasn't empty.
     NonEmptyOutput,
     /// Block header contains items relevant to multiple consensus engines at the same time.
@@ -351,7 +340,7 @@ impl VerifyInner {
                         check_check_inherents_output(success.virtual_machine.value().as_ref());
                     if let Err(err) = check_inherents_result {
                         return Verify::Finished(Err((
-                            err,
+                            Error::InherentsOutputError(err),
                             success.virtual_machine.into_prototype(),
                         )));
                     }
@@ -799,7 +788,7 @@ impl RuntimeCompilation {
 }
 
 /// Checks the output of the `BlockBuilder_check_inherents` runtime call.
-fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
+pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutputError> {
     // The format of the output of `check_inherents` consists of two booleans and a list of
     // errors.
     // We don't care about the value of the two booleans, and they are ignored during the parsing.
@@ -830,13 +819,32 @@ fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
     );
 
     match nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(parser)(output) {
-        Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
+        Err(_err) => Err(InherentsOutputError::ParseFailure),
         Ok((_, errors)) => {
             if errors.is_empty() {
                 Ok(())
             } else {
-                Err(Error::CheckInherentsError { errors })
+                Err(InherentsOutputError::Error { errors })
             }
         }
     }
+}
+
+/// Error potentially returned by [`check_check_inherents_output`].
+#[derive(Debug, derive_more::Display)]
+pub enum InherentsOutputError {
+    /// Runtime has returned some errors.
+    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
+    Error {
+        /// List of errors produced by the runtime.
+        ///
+        /// The first element of each tuple is an identifier of the module that produced the
+        /// error, while the second element is a SCALE-encoded piece of data.
+        ///
+        /// Due to the fact that errors are not supposed to happen, and that the format of errors
+        /// has changed depending on runtime versions, no utility is provided to decode them.
+        errors: Vec<([u8; 8], Vec<u8>)>,
+    },
+    /// Failed to parse the output.
+    ParseFailure,
 }
