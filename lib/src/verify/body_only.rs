@@ -30,7 +30,7 @@ pub use runtime_host::{
 };
 
 /// Configuration for a block verification.
-pub struct Config<'a, TBody> {
+pub struct Config<THeader, TBody> {
     /// Runtime used to check the new block. Must be built using the `:code` of the parent
     /// block.
     pub parent_runtime: host::HostVmPrototype,
@@ -43,7 +43,7 @@ pub struct Config<'a, TBody> {
     ///
     /// The `parent_hash` field is the hash of the parent whose storage can be accessed through
     /// the other fields.
-    pub block_header: header::HeaderRef<'a>,
+    pub block_header: THeader,
 
     /// Number of bytes used to encode the block number in the header.
     pub block_number_bytes: usize,
@@ -97,6 +97,9 @@ pub enum Error {
     /// Error while checking the return value of `BlockBuilder_check_inherents`.
     #[display(fmt = "{_0}")]
     InherentsOutputError(InherentsOutputError),
+    /// Header of the block couldn't be decoded.
+    #[display(fmt = "Invalid block header: {_0}")]
+    InvalidHeader(header::Error),
     /// Output of `Core_execute_block` wasn't empty.
     NonEmptyOutput,
     /// Error while compiling new runtime.
@@ -119,7 +122,10 @@ pub enum Error {
 
 /// Verifies whether a block body is valid.
 pub fn verify(
-    config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
+    config: Config<
+        impl AsRef<[u8]>,
+        impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+    >,
 ) -> Verify {
     // We need to call two runtime functions:
     //
@@ -134,7 +140,16 @@ pub fn verify(
     let execute_block_parameters = {
         // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
         // be the last item. We need to remove it before we can verify the unsealed header.
-        let mut unsealed_header = config.block_header.clone();
+        let mut unsealed_header =
+            match header::decode(config.block_header.as_ref(), config.block_number_bytes) {
+                Ok(h) => h,
+                Err(err) => {
+                    return Verify::Finished(Err((
+                        Error::InvalidHeader(err),
+                        config.parent_runtime,
+                    )))
+                }
+            };
         let _seal_log = unsealed_header.digest.pop_seal();
 
         let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
