@@ -364,10 +364,6 @@ pub enum ValidateTransactionError {
     WasmExecution(runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError(validate::DecodeError),
-    /// The list of provided tags ([`ValidTransaction::provides`]) is empty. It is mandatory for
-    /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
-    /// in the runtime.
-    EmptyProvidedTags,
     /// Runtime called a forbidden host function.
     ForbiddenHostCall,
 }
@@ -1360,6 +1356,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         }
     };
 
+    // TODO: move somewhere else?
     log::debug!(
         target: log_target,
         "TxValidations <= Start(tx={}, block={}, block_height={})",
@@ -1378,7 +1375,6 @@ async fn validate_transaction<TPlat: PlatformRef>(
     let (runtime_call_lock, runtime) = runtime_lock
         .start(
             validate::VALIDATION_FUNCTION_NAME,
-            // TODO: don't hardcode v3 but determine parameters dynamically from the runtime
             validate::validate_transaction_runtime_parameters_v3(
                 iter::once(scale_encoded_transaction.as_ref()),
                 source,
@@ -1434,18 +1430,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 );
                 runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                 return match decode_result {
-                    Ok(Ok(decoded)) => {
-                        if decoded.provides.is_empty() {
-                            // TODO: this check should be performed by the validate module
-                            return Err(ValidationError::InvalidOrError(
-                                InvalidOrError::ValidateError(
-                                    ValidateTransactionError::EmptyProvidedTags,
-                                ),
-                            ));
-                        }
-
-                        Ok(decoded)
-                    }
+                    Ok(Ok(decoded)) => Ok(decoded),
                     Ok(Err(err)) => Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
                         err,
                     ))),

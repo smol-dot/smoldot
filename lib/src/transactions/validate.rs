@@ -256,7 +256,8 @@ fn valid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], ValidTransaction> {
             nom::sequence::tuple((
                 nom::number::streaming::le_u64,
                 tags,
-                tags,
+                // TODO: maybe show by strong typing the fact that the provide tags are never empty
+                nom::combinator::verify(tags, |provides: &Vec<Vec<u8>>| !provides.is_empty()),
                 nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
                 util::nom_bool_decode,
             )),
