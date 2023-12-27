@@ -36,11 +36,6 @@ pub struct Config<'a, TBody> {
     /// block.
     pub parent_runtime: host::HostVmPrototype,
 
-    /// Header of the parent of the block to verify.
-    ///
-    /// The hash of this header must be the one referenced in [`Config::block_header`].
-    pub parent_block_header: header::HeaderRef<'a>,
-
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
     pub now_from_unix_epoch: Duration,
