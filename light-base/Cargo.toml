@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light"
-version = "0.12.0"
+version = "0.13.0"
 description = "Browser bindings to a light client for Substrate-based blockchains"
 authors.workspace = true
 license.workspace = true
@@ -37,7 +37,7 @@ serde = { version = "1.0.183", default-features = false, features = ["alloc", "d
 serde_json = { version = "1.0.104", default-features = false, features = ["alloc"] }
 siphasher = { version = "1.0.0", default-features = false }
 slab = { version = "0.4.8", default-features = false }
-smoldot = { version = "0.14.0", path = "../lib", default-features = false }
+smoldot = { version = "0.15.0", path = "../lib", default-features = false }
 zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 
 # `std` feature

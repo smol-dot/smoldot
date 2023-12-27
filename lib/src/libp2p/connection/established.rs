@@ -209,7 +209,10 @@ pub enum Event<TSubUd> {
     },
 
     /// An outgoing ping has succeeded. This event is generated automatically over time.
-    PingOutSuccess,
+    PingOutSuccess {
+        /// Duration between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
     /// An outgoing ping has failed. This event is generated automatically over time.
     PingOutFailed,
 }

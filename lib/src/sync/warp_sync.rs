@@ -91,8 +91,6 @@
 //! previously been downloaded.
 //!
 
-// TODO: this module is "vulnerable" to situations where new malicious sources are continuously added with a high finalized block, as the state machine will repeatedly try to download from that source and fail
-
 use crate::{
     chain::chain_information::{
         self, ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
@@ -160,6 +158,11 @@ pub struct Config {
     /// The ideal value of this field depends on the block production rate and the time it takes
     /// to answer requests.
     pub warp_sync_minimum_gap: usize,
+
+    /// If `true`, the body of the warp sync target will be downloaded before the warp sync
+    /// finishes.
+    /// Determines whether [`RuntimeInformation::finalized_body`] is `Some`.
+    pub download_block_body: bool,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -222,6 +225,11 @@ pub fn start_warp_sync<TSrc, TRq>(
             .as_ref()
             .finalized_block_header
             .state_root,
+        warped_header_extrinsics_root: *config
+            .start_chain_information
+            .as_ref()
+            .finalized_block_header
+            .extrinsics_root,
         warped_header_hash: header::hash_from_scale_encoded_header(&warped_header),
         warped_header,
         warped_finality: config.start_chain_information.as_ref().finality.into(),
@@ -242,6 +250,11 @@ pub fn start_warp_sync<TSrc, TRq>(
         verify_queue: VecDeque::new(),
         runtime_download: RuntimeDownload::NotStarted {
             hint_doesnt_match: false,
+        },
+        body_download: if config.download_block_body {
+            BodyDownload::NotStarted
+        } else {
+            BodyDownload::NotNeeded
         },
     })
 }
@@ -278,8 +291,7 @@ pub struct Deconstructed<TSrc, TRq> {
     /// height and user data.
     /// The list is ordered by [`SourceId`].
     // TODO: use a struct?
-    // TODO: this `Option` is weird
-    pub sources_ordered: Vec<(SourceId, Option<u64>, TSrc)>,
+    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
 
     /// The list of requests that were added to the state machine.
     pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
@@ -290,6 +302,10 @@ pub struct RuntimeInformation {
     /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
     /// finalized block of [`WarpSync::as_chain_information`].
     pub finalized_runtime: HostVmPrototype,
+
+    /// List of SCALE-encoded extrinsics of the body of the finalized block.
+    /// `Some` if and only if [`Config::download_block_body`] was `true`.
+    pub finalized_body: Option<Vec<Vec<u8>>>,
 
     /// Storage value at the `:code` key of the finalized block.
     pub finalized_storage_code: Option<Vec<u8>>,
@@ -323,6 +339,8 @@ pub struct WarpSync<TSrc, TRq> {
     warped_header_hash: [u8; 32],
     /// State trie root hash of the block in [`WarpSync::warped_header`].
     warped_header_state_root: [u8; 32],
+    /// Extrinsics trie root hash of the block in [`WarpSync::warped_header`].
+    warped_header_extrinsics_root: [u8; 32],
     /// Number of the block in [`WarpSync::warped_header`].
     warped_header_number: u64,
     /// Information about the finality of the chain at the point where we warp synced to.
@@ -357,6 +375,8 @@ pub struct WarpSync<TSrc, TRq> {
     verify_queue: VecDeque<PendingVerify>,
     /// State of the download of the runtime and chain information call proofs.
     runtime_download: RuntimeDownload,
+    /// State of the download of the body of the block.
+    body_download: BodyDownload,
     /// For each call required by the chain information builder, whether it has been downloaded yet.
     runtime_calls:
         hashbrown::HashMap<chain_information::build::RuntimeCall, CallProof, fnv::FnvBuildHasher>,
@@ -367,9 +387,8 @@ pub struct WarpSync<TSrc, TRq> {
 struct Source<TSrc> {
     /// User data chosen by the API user.
     user_data: TSrc,
-    /// Height of the finalized block of the source, as reported by the source. Contains `Err`
-    /// if the source has sent invalid fragments or proofs in the past.
-    finalized_block_height: Result<u64, ()>,
+    /// Height of the finalized block of the source, as reported by the source.
+    finalized_block_height: u64,
 }
 
 /// See [`WarpSync::warped_block_ty`].
@@ -401,6 +420,20 @@ enum RuntimeDownload {
     Verified {
         downloaded_runtime: DownloadedRuntime,
         chain_info_builder: chain_information::build::ChainInformationBuild,
+    },
+}
+
+/// See [`WarpSync::body_download`].
+enum BodyDownload {
+    NotNeeded,
+    NotStarted,
+    Downloading {
+        request_id: RequestId,
+    },
+    Downloaded {
+        /// Source the body has been obtained from. `None` if the source has been removed.
+        downloaded_source: Option<SourceId>,
+        body: Vec<Vec<u8>>,
     },
 }
 
@@ -566,7 +599,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 .map(|(id, source)| {
                     (
                         SourceId(id),
-                        source.finalized_block_height.ok(),
+                        source.finalized_block_height,
                         source.user_data,
                     )
                 })
@@ -583,6 +616,19 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         self.sources.iter().map(|(id, _)| SourceId(id))
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        assert!(self.sources.contains(source_id.0));
+        self.in_progress_requests_by_source
+            .range((source_id, RequestId(usize::MIN))..=(source_id, RequestId(usize::MAX)))
+            .count()
+    }
+
     /// Add a source to the list of sources.
     ///
     /// The source has a finalized block height of 0, which should later be updated using
@@ -590,7 +636,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
-            finalized_block_height: Ok(0),
+            finalized_block_height: 0,
         }));
 
         let _inserted = self.sources_by_finalized_height.insert((0, source_id));
@@ -614,13 +660,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         debug_assert!(self.sources.contains(to_remove.0));
         let removed = self.sources.remove(to_remove.0);
-
-        if let Ok(finalized_block_height) = removed.finalized_block_height {
-            let _was_in = self
-                .sources_by_finalized_height
-                .remove(&(finalized_block_height, to_remove));
-            debug_assert!(_was_in);
-        }
+        let _was_in = self
+            .sources_by_finalized_height
+            .remove(&(removed.finalized_block_height, to_remove));
+        debug_assert!(_was_in);
         debug_assert!(self.sources.len() >= self.sources_by_finalized_height.len());
 
         // We make sure to not leave invalid source IDs in the state of `self`.
@@ -633,6 +676,14 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         if let RuntimeDownload::NotVerified {
             downloaded_source, ..
         } = &mut self.runtime_download
+        {
+            if *downloaded_source == Some(to_remove) {
+                *downloaded_source = None;
+            }
+        }
+        if let BodyDownload::Downloaded {
+            downloaded_source, ..
+        } = &mut self.body_download
         {
             if *downloaded_source == Some(to_remove) {
                 *downloaded_source = None;
@@ -681,6 +732,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     };
                 }
             }
+            if let BodyDownload::Downloading { request_id } = &mut self.body_download {
+                if *request_id == RequestId(index) {
+                    self.body_download = BodyDownload::NotStarted;
+                }
+            }
             obsolete_requests.push((RequestId(index), user_data));
         }
 
@@ -694,29 +750,29 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if `source_id` is invalid.
     ///
     pub fn set_source_finality_state(&mut self, source_id: SourceId, finalized_block_height: u64) {
-        if let Ok(stored_height) = self.sources[source_id.0].finalized_block_height.as_mut() {
-            // Small optimization. No need to do anything more if the block doesn't actuall change.
-            if *stored_height == finalized_block_height {
-                return;
-            }
+        let stored_height = &mut self.sources[source_id.0].finalized_block_height;
 
-            // Note that if the new finalized block is below the former one (which is not something
-            // that is ever supposed to happen), we should in principle cancel the requests
-            // targeting that source that require a specific block height. In practice, however,
-            // we don't care as again this isn't supposed to ever happen. While ongoing requests
-            // might fail as a result, this is handled the same way as a regular request failure.
-
-            let _was_in = self
-                .sources_by_finalized_height
-                .remove(&(*stored_height, source_id));
-            debug_assert!(_was_in);
-            let _inserted = self
-                .sources_by_finalized_height
-                .insert((finalized_block_height, source_id));
-            debug_assert!(_inserted);
-
-            *stored_height = finalized_block_height;
+        // Small optimization. No need to do anything more if the block doesn't actuall change.
+        if *stored_height == finalized_block_height {
+            return;
         }
+
+        // Note that if the new finalized block is below the former one (which is not something
+        // that is ever supposed to happen), we should in principle cancel the requests
+        // targeting that source that require a specific block height. In practice, however,
+        // we don't care as again this isn't supposed to ever happen. While ongoing requests
+        // might fail as a result, this is handled the same way as a regular request failure.
+
+        let _was_in = self
+            .sources_by_finalized_height
+            .remove(&(*stored_height, source_id));
+        debug_assert!(_was_in);
+        let _inserted = self
+            .sources_by_finalized_height
+            .insert((finalized_block_height, source_id));
+        debug_assert!(_inserted);
+
+        *stored_height = finalized_block_height;
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
@@ -769,11 +825,11 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 if let Some(verify_queue_tail_block_number) = verify_queue_tail_block_number {
                     // Combine the request with every single available source.
                     either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
-                        if src.finalized_block_height.map_or(true, |h| {
-                            h <= verify_queue_tail_block_number.saturating_add(
+                        if src.finalized_block_height
+                            <= verify_queue_tail_block_number.saturating_add(
                                 u64::try_from(warp_sync_minimum_gap).unwrap_or(u64::max_value()),
                             )
-                        }) {
+                        {
                             return None;
                         }
 
@@ -846,6 +902,38 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             either::Right(iter::empty())
         };
 
+        // If we are in the appropriate phase, and we are not currently downloading the body of
+        // the block, return a runtime download request.
+        let desired_body_download =
+            if let (WarpedBlockTy::Normal, BodyDownload::NotStarted, None, true, None) = (
+                &self.warped_block_ty,
+                &self.body_download,
+                self.warp_sync_fragments_download,
+                self.verify_queue.is_empty(),
+                desired_warp_sync_request.peek(),
+            ) {
+                // Sources are ordered by increasing finalized block height, in order to
+                // have the highest chance for the block to not be pruned.
+                let sources_with_block = self
+                    .sources_by_finalized_height
+                    .range((self.warped_header_number, SourceId(usize::min_value()))..)
+                    .map(|(_, src_id)| src_id);
+
+                either::Left(sources_with_block.map(move |source_id| {
+                    (
+                        *source_id,
+                        &self.sources[source_id.0].user_data,
+                        DesiredRequest::BlockBodyDownload {
+                            block_hash: self.warped_header_hash,
+                            block_number: self.warped_header_number,
+                            extrinsics_root: self.warped_header_extrinsics_root,
+                        },
+                    )
+                }))
+            } else {
+                either::Right(iter::empty())
+            };
+
         // Return the list of runtime calls indicated by the chain information builder state
         // machine.
         let desired_call_proofs = if matches!(self.warped_block_ty, WarpedBlockTy::Normal)
@@ -886,6 +974,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // Chain all these demanded requests together.
         desired_warp_sync_request
             .chain(desired_runtime_parameters_get)
+            .chain(desired_body_download)
             .chain(desired_call_proofs)
     }
 
@@ -909,8 +998,8 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         let request_slot = self.in_progress_requests.vacant_entry();
         let request_id = RequestId(request_slot.key());
 
-        match (&detail, &mut self.runtime_download) {
-            (RequestDetail::WarpSyncRequest { block_hash }, _)
+        match (&detail, &mut self.runtime_download, &mut self.body_download) {
+            (RequestDetail::WarpSyncRequest { block_hash }, _, _)
                 if self.warp_sync_fragments_download.is_none()
                     && *block_hash
                         == self
@@ -927,8 +1016,24 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 self.warp_sync_fragments_download = Some(request_id);
             }
             (
+                RequestDetail::BlockBodyDownload {
+                    block_hash,
+                    block_number,
+                },
+                _,
+                BodyDownload::NotStarted,
+            ) => {
+                if self.sources[source_id.0].finalized_block_height >= self.warped_header_number
+                    && *block_number == self.warped_header_number
+                    && *block_hash == self.warped_header_hash
+                {
+                    self.body_download = BodyDownload::Downloading { request_id };
+                }
+            }
+            (
                 RequestDetail::StorageGetMerkleProof { block_hash, keys },
                 RuntimeDownload::NotStarted { hint_doesnt_match },
+                _,
             ) => {
                 let code_key_to_request = if let (false, Some(hint)) =
                     (*hint_doesnt_match, self.code_trie_node_hint.as_ref())
@@ -943,9 +1048,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     Cow::Borrowed(&b":code"[..])
                 };
 
-                if self.sources[source_id.0]
-                    .finalized_block_height
-                    .map_or(false, |h| h >= self.warped_header_number)
+                if self.sources[source_id.0].finalized_block_height >= self.warped_header_number
                     && *block_hash == self.warped_header_hash
                     && keys.iter().any(|k| *k == *code_key_to_request)
                     && keys.iter().any(|k| k == b":heappages")
@@ -963,12 +1066,12 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     parameter_vectored,
                 },
                 _,
+                _,
             ) => {
                 for (info, status) in &mut self.runtime_calls {
                     if matches!(status, CallProof::NotStarted)
-                        && self.sources[source_id.0]
-                            .finalized_block_height
-                            .map_or(false, |h| h >= self.warped_header_number)
+                        && self.sources[source_id.0].finalized_block_height
+                            >= self.warped_header_number
                         && *block_hash == self.warped_header_hash
                         && function_name == info.function_name()
                         && parameters_equal(parameter_vectored, info.parameter_vectored())
@@ -1023,9 +1126,72 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             }
         }
 
+        if let BodyDownload::Downloading { request_id } = &mut self.body_download {
+            if *request_id == id {
+                self.body_download = BodyDownload::NotStarted;
+            }
+        }
+
         let (source_id, user_data, _) = self.in_progress_requests.remove(id.0);
         let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
         debug_assert!(_was_removed);
+        user_data
+    }
+
+    /// Returns the [`SourceId`] that is expected to fulfill the given request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
+        self.in_progress_requests[request_id.0].0
+    }
+
+    /// Injects a successful body download and removes the given request from the state machine.
+    /// Returns the user data that was associated to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if the [`RequestId`] doesn't correspond to a body download request.
+    ///
+    pub fn body_download_success(&mut self, id: RequestId, body: Vec<Vec<u8>>) -> TRq {
+        // Remove the request from the list, obtaining its user data.
+        // If the request corresponds to the runtime parameters we're looking for, the function
+        // continues below, otherwise we return early.
+        let (source_id, user_data) =
+            match (self.in_progress_requests.remove(id.0), &self.body_download) {
+                ((source_id, user_data, _), BodyDownload::Downloading { request_id })
+                    if *request_id == id =>
+                {
+                    (source_id, user_data)
+                }
+                ((source_id, user_data, RequestDetail::BlockBodyDownload { .. }), _) => {
+                    let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+                    debug_assert!(_was_removed);
+                    return user_data;
+                }
+                (
+                    (
+                        _,
+                        _,
+                        RequestDetail::RuntimeCallMerkleProof { .. }
+                        | RequestDetail::WarpSyncRequest { .. }
+                        | RequestDetail::StorageGetMerkleProof { .. },
+                    ),
+                    _,
+                ) => panic!(),
+            };
+
+        self.body_download = BodyDownload::Downloaded {
+            downloaded_source: Some(source_id),
+            body,
+        };
+
+        let _was_removed = self.in_progress_requests_by_source.remove(&(source_id, id));
+        debug_assert!(_was_removed);
+
         user_data
     }
 
@@ -1062,7 +1228,8 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                     _,
                     _,
                     RequestDetail::RuntimeCallMerkleProof { .. }
-                    | RequestDetail::WarpSyncRequest { .. },
+                    | RequestDetail::WarpSyncRequest { .. }
+                    | RequestDetail::BlockBodyDownload { .. },
                 ),
                 _,
             ) => panic!(),
@@ -1154,33 +1321,31 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
             .last()
             .and_then(|h| header::decode(&h.scale_encoded_header, self.block_number_bytes).ok())
         {
-            if let Ok(src_finalized_height) =
-                self.sources[rq_source_id.0].finalized_block_height.as_mut()
-            {
-                let new_height = if final_set_of_fragments {
-                    // If the source indicated that this is the last fragment, then we know that
-                    // it's also equal to their finalized block.
-                    last_header.number
-                } else {
-                    // If this is not the last fragment, we know that the finalized block of the
-                    // source is *at least* the one provided.
-                    // TODO: could maybe do + gap or something?
-                    cmp::max(*src_finalized_height, last_header.number.saturating_add(1))
-                };
+            let src_finalized_height = &mut self.sources[rq_source_id.0].finalized_block_height;
 
-                if *src_finalized_height != new_height {
-                    let _was_in = self
-                        .sources_by_finalized_height
-                        .remove(&(*src_finalized_height, rq_source_id));
-                    debug_assert!(_was_in);
+            let new_height = if final_set_of_fragments {
+                // If the source indicated that this is the last fragment, then we know that
+                // it's also equal to their finalized block.
+                last_header.number
+            } else {
+                // If this is not the last fragment, we know that the finalized block of the
+                // source is *at least* the one provided.
+                // TODO: could maybe do + gap or something?
+                cmp::max(*src_finalized_height, last_header.number.saturating_add(1))
+            };
 
-                    *src_finalized_height = new_height;
+            if *src_finalized_height != new_height {
+                let _was_in = self
+                    .sources_by_finalized_height
+                    .remove(&(*src_finalized_height, rq_source_id));
+                debug_assert!(_was_in);
 
-                    let _inserted = self
-                        .sources_by_finalized_height
-                        .insert((*src_finalized_height, rq_source_id));
-                    debug_assert!(_inserted);
-                }
+                *src_finalized_height = new_height;
+
+                let _inserted = self
+                    .sources_by_finalized_height
+                    .insert((*src_finalized_height, rq_source_id));
+                debug_assert!(_inserted);
             }
         }
 
@@ -1211,6 +1376,10 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         // If we've downloaded everything that was needed, switch to "build chain information"
         // mode.
         if matches!(self.runtime_download, RuntimeDownload::Verified { .. })
+            && matches!(
+                self.body_download,
+                BodyDownload::NotNeeded | BodyDownload::Downloaded { .. }
+            )
             && self
                 .runtime_calls
                 .values()
@@ -1272,11 +1441,20 @@ impl<TSrc, TRq> ops::IndexMut<RequestId> for WarpSync<TSrc, TRq> {
 /// See [`WarpSync::desired_requests`].
 #[derive(Debug, Clone)]
 pub enum DesiredRequest {
-    /// A warp sync request should be start.
+    /// A warp sync request should be started.
     WarpSyncRequest {
         /// Starting point of the warp syncing. The first fragment of the response should be the
         /// of the epoch that the starting point is in.
         block_hash: [u8; 32],
+    },
+    /// A block body download should be started.
+    BlockBodyDownload {
+        /// Hash of the block whose body to download.
+        block_hash: [u8; 32],
+        /// Height of the block whose body to download.
+        block_number: u64,
+        /// Extrinsics trie root hash found in the header of the block.
+        extrinsics_root: [u8; 32],
     },
     /// A storage request of the runtime code and heap pages should be started.
     StorageGetMerkleProof {
@@ -1308,6 +1486,14 @@ pub enum RequestDetail {
     WarpSyncRequest {
         /// See [`DesiredRequest::WarpSyncRequest::block_hash`].
         block_hash: [u8; 32],
+    },
+    /// See [`DesiredRequest::BlockBodyDownload`].
+    BlockBodyDownload {
+        /// See [`DesiredRequest::BlockBodyDownload::block_hash`].
+        block_hash: [u8; 32],
+        /// See [`DesiredRequest::BlockBodyDownload::block_number`].
+        // TODO: remove this field as it's inappropriate, but this causes issues in all.rs
+        block_number: u64,
     },
     /// See [`DesiredRequest::StorageGetMerkleProof`].
     StorageGetMerkleProof {
@@ -1391,9 +1577,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
         // The source has sent an empty list of fragments. This is invalid.
         if fragments_to_verify.fragments.is_empty() {
-            if let Some(SourceId(downloaded_source)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[downloaded_source].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.pop_front().unwrap();
             return (self.inner, Err(VerifyFragmentError::EmptyProof));
         }
@@ -1426,9 +1609,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         ) {
             Ok(j) => j,
             Err(err) => {
-                if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                    self.inner.sources[source_id].finalized_block_height = Err(());
-                }
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
                 return (self.inner, Err(VerifyFragmentError::InvalidHeader(err)));
@@ -1440,9 +1620,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         ) {
             Ok(j) => j,
             Err(err) => {
-                if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                    self.inner.sources[source_id].finalized_block_height = Err(());
-                }
                 self.inner.verify_queue.clear();
                 self.inner.warp_sync_fragments_download = None;
                 return (
@@ -1454,9 +1631,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
 
         // Make sure that the header would actually advance the warp sync process forward.
         if fragment_decoded_header.number <= self.inner.warped_header_number {
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (
@@ -1475,9 +1649,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 header_hash: fragment_header_hash,
                 header_height: fragment_decoded_header.number,
             };
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (self.inner, Err(error));
@@ -1493,9 +1664,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             authorities_set_id: *after_finalized_block_authorities_set_id,
             randomness_seed,
         }) {
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (
@@ -1532,9 +1700,6 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                 || fragments_to_verify.next_fragment_to_verify_index
                     != fragments_to_verify.fragments.len() - 1)
         {
-            if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-                self.inner.sources[source_id].finalized_block_height = Err(());
-            }
             self.inner.verify_queue.clear();
             self.inner.warp_sync_fragments_download = None;
             return (self.inner, Err(VerifyFragmentError::NonMinimalProof));
@@ -1544,24 +1709,21 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         fragments_to_verify.next_fragment_to_verify_index += 1;
         self.inner.warped_header_number = fragment_decoded_header.number;
         self.inner.warped_header_state_root = *fragment_decoded_header.state_root;
+        self.inner.warped_header_extrinsics_root = *fragment_decoded_header.extrinsics_root;
         self.inner.warped_header_hash = fragment_header_hash;
         self.inner.warped_header = fragment_to_verify.scale_encoded_header.clone(); // TODO: figure out how to remove this clone()
         self.inner.warped_block_ty = WarpedBlockTy::Normal;
         self.inner.runtime_download = RuntimeDownload::NotStarted {
             hint_doesnt_match: false,
         };
+        if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+            self.inner.body_download = BodyDownload::NotStarted;
+        }
         self.inner.runtime_calls =
             runtime_calls_default_value(self.inner.verified_chain_information.as_ref().consensus);
         if let Some(new_authorities_list) = new_authorities_list {
             *finalized_triggered_authorities = new_authorities_list;
             *after_finalized_block_authorities_set_id += 1;
-        }
-        if let Some(SourceId(source_id)) = fragments_to_verify.downloaded_source {
-            let src_finalized = &mut self.inner.sources[source_id].finalized_block_height;
-            if src_finalized.is_err() {
-                self.inner.sources[source_id].finalized_block_height =
-                    Ok(self.inner.warped_header_number);
-            }
         }
         if fragments_to_verify.next_fragment_to_verify_index == fragments_to_verify.fragments.len()
         {
@@ -1661,6 +1823,8 @@ pub enum SourceMisbehaviorTy {
     InvalidMerkleProof(proof_decode::Error),
     /// Merkle proof is missing the necessary entries.
     MerkleProofEntriesMissing,
+    /// Downloaded block body doesn't match the expected extrinsics root.
+    BlockBodyExtrinsicsRootMismatch,
 }
 
 /// Problem encountered during a call to [`BuildRuntime::build`].
@@ -1712,9 +1876,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 Ok(p) => p,
                 Err(err) => {
                     let downloaded_source = *downloaded_source;
-                    if let Some(SourceId(downloaded_source)) = downloaded_source {
-                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                    }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
@@ -1735,24 +1896,31 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             let code_nibbles = trie::bytes_to_nibbles(b":code".iter().copied()).collect::<Vec<_>>();
             match decoded_downloaded_runtime.closest_ancestor_in_proof(
                 &self.inner.warped_header_state_root,
-                &code_nibbles[..code_nibbles.len() - 1],
+                code_nibbles.iter().take(code_nibbles.len() - 1).copied(),
             ) {
                 Ok(Some(closest_ancestor_key)) => {
+                    let closest_ancestor_key = closest_ancestor_key.collect::<Vec<_>>();
                     let next_nibble = code_nibbles[closest_ancestor_key.len()];
                     let merkle_value = decoded_downloaded_runtime
-                        .trie_node_info(&self.inner.warped_header_state_root, closest_ancestor_key)
+                        .trie_node_info(
+                            &self.inner.warped_header_state_root,
+                            closest_ancestor_key.iter().copied(),
+                        )
                         .unwrap()
                         .children
                         .child(next_nibble)
                         .merkle_value();
 
                     match merkle_value {
-                        Some(mv) => (mv.to_owned(), closest_ancestor_key.to_vec()),
+                        Some(mv) => (mv.to_owned(), closest_ancestor_key),
                         None => {
                             self.inner.warped_block_ty = WarpedBlockTy::KnownBad;
                             self.inner.runtime_download = RuntimeDownload::NotStarted {
                                 hint_doesnt_match: *hint_doesnt_match,
                             };
+                            if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                                self.inner.body_download = BodyDownload::NotStarted;
+                            }
                             return (self.inner, Err(BuildRuntimeError::MissingCode));
                         }
                     }
@@ -1762,16 +1930,19 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (self.inner, Err(BuildRuntimeError::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
                     let downloaded_source = *downloaded_source;
-                    if let Some(SourceId(downloaded_source)) = downloaded_source {
-                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                    }
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (
                         self.inner,
                         Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
@@ -1804,13 +1975,13 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (self.inner, Err(BuildRuntimeError::MissingCode));
                 }
                 Err(proof_decode::IncompleteProofError { .. }) => {
                     let downloaded_source = *downloaded_source;
-                    if let Some(SourceId(downloaded_source)) = downloaded_source {
-                        self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                    }
                     return (
                         self.inner,
                         Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
@@ -1828,9 +1999,6 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             Ok(val) => val.map(|(v, _)| v),
             Err(proof_decode::IncompleteProofError { .. }) => {
                 let downloaded_source = *downloaded_source;
-                if let Some(SourceId(downloaded_source)) = downloaded_source {
-                    self.inner.sources[downloaded_source].finalized_block_height = Err(());
-                }
                 return (
                     self.inner,
                     Err(BuildRuntimeError::SourceMisbehavior(SourceMisbehavior {
@@ -1849,6 +2017,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                     self.inner.runtime_download = RuntimeDownload::NotStarted {
                         hint_doesnt_match: *hint_doesnt_match,
                     };
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
                     return (self.inner, Err(BuildRuntimeError::InvalidHeapPages(err)));
                 }
             };
@@ -1865,6 +2036,9 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
                 self.inner.runtime_download = RuntimeDownload::NotStarted {
                     hint_doesnt_match: *hint_doesnt_match,
                 };
+                if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                    self.inner.body_download = BodyDownload::NotStarted;
+                }
                 return (self.inner, Err(BuildRuntimeError::RuntimeBuild(err)));
             }
         };
@@ -1929,6 +2103,31 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         WarpSync<TSrc, TRq>,
         Result<RuntimeInformation, BuildChainInformationError>,
     ) {
+        let downloaded_body = match &mut self.inner.body_download {
+            BodyDownload::NotNeeded => None,
+            BodyDownload::Downloaded {
+                downloaded_source,
+                body,
+            } => {
+                if header::extrinsics_root(body) != self.inner.warped_header_extrinsics_root {
+                    let source_id = *downloaded_source;
+                    self.inner.body_download = BodyDownload::NotStarted;
+                    return (
+                        self.inner,
+                        Err(BuildChainInformationError::SourceMisbehavior(
+                            SourceMisbehavior {
+                                source_id,
+                                error: SourceMisbehaviorTy::BlockBodyExtrinsicsRootMismatch,
+                            },
+                        )),
+                    );
+                }
+
+                Some(body)
+            }
+            _ => unreachable!(),
+        };
+
         let RuntimeDownload::Verified {
             mut chain_info_builder,
             downloaded_runtime,
@@ -1971,10 +2170,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     }) {
                         Ok(d) => d,
                         Err(err) => {
-                            if let Some(SourceId(downloaded_source)) = downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(
@@ -2007,6 +2202,12 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     {
                         self.inner.warped_block_ty = WarpedBlockTy::AlreadyVerified;
                     }
+
+                    let finalized_body = downloaded_body.map(mem::take);
+                    if !matches!(self.inner.body_download, BodyDownload::NotNeeded) {
+                        self.inner.body_download = BodyDownload::NotStarted;
+                    }
+
                     self.inner.verified_chain_information = chain_information;
                     self.inner.runtime_calls = runtime_calls_default_value(
                         self.inner.verified_chain_information.as_ref().consensus,
@@ -2015,6 +2216,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         self.inner,
                         Ok(RuntimeInformation {
                             finalized_runtime: virtual_machine,
+                            finalized_body,
                             finalized_storage_code: downloaded_runtime.storage_code,
                             finalized_storage_heap_pages: downloaded_runtime.storage_heap_pages,
                             finalized_storage_code_merkle_value: downloaded_runtime
@@ -2048,10 +2250,6 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(
@@ -2071,17 +2269,13 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     let (proof, downloaded_source) = calls.get(&nk.call_in_progress()).unwrap();
                     let value = match proof.next_key(
                         &self.inner.warped_header_state_root,
-                        &nk.key().collect::<Vec<_>>(), // TODO: overhead
+                        nk.key(),
                         nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(), // TODO: overhead
+                        nk.prefix(),
                         nk.branch_nodes(),
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(
@@ -2093,21 +2287,17 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                             );
                         }
                     };
-                    nk.inject_key(value.map(|v| v.iter().copied()))
+                    nk.inject_key(value)
                 }
                 chain_information::build::InProgress::ClosestDescendantMerkleValue(mv) => {
                     // TODO: child tries not supported
                     let (proof, downloaded_source) = calls.get(&mv.call_in_progress()).unwrap();
                     let value = match proof.closest_descendant_merkle_value(
                         &self.inner.warped_header_state_root,
-                        &mv.key().collect::<Vec<_>>(), // TODO: overhead
+                        mv.key(),
                     ) {
                         Ok(v) => v,
                         Err(proof_decode::IncompleteProofError { .. }) => {
-                            if let Some(SourceId(downloaded_source)) = *downloaded_source {
-                                self.inner.sources[downloaded_source].finalized_block_height =
-                                    Err(());
-                            }
                             return (
                                 self.inner,
                                 Err(BuildChainInformationError::SourceMisbehavior(

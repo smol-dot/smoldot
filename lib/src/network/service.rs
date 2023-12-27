@@ -1523,40 +1523,50 @@ where
                         .substreams
                         .remove(&substream_id)
                         .unwrap_or_else(|| unreachable!());
+                    let peer_index = *self.inner[substream_info.connection_id]
+                        .peer_index
+                        .as_ref()
+                        .unwrap_or_else(|| unreachable!());
 
                     // Decode/verify the response.
-                    let response = match substream_info.protocol {
+                    let (response, chain_index) = match substream_info.protocol {
                         None => continue,
                         Some(Protocol::Identify) => todo!(), // TODO: we don't send identify requests yet, so it's fine to leave this unimplemented
-                        Some(Protocol::Sync { .. }) => RequestResult::Blocks(
-                            response
-                                .map_err(BlocksRequestError::Request)
-                                .and_then(|response| {
-                                    codec::decode_block_response(&response)
-                                        .map_err(BlocksRequestError::Decode)
-                                }),
+                        Some(Protocol::Sync { chain_index, .. }) => (
+                            RequestResult::Blocks(
+                                response.map_err(BlocksRequestError::Request).and_then(
+                                    |response| {
+                                        codec::decode_block_response(&response)
+                                            .map_err(BlocksRequestError::Decode)
+                                    },
+                                ),
+                            ),
+                            chain_index,
                         ),
                         Some(Protocol::LightUnknown { .. }) => unreachable!(),
-                        Some(Protocol::LightStorage { .. }) => RequestResult::StorageProof(
-                            response
-                                .map_err(StorageProofRequestError::Request)
-                                .and_then(|payload| {
-                                    match codec::decode_storage_or_call_proof_response(
-                                        codec::StorageOrCallProof::StorageProof,
-                                        &payload,
-                                    ) {
-                                        Err(err) => Err(StorageProofRequestError::Decode(err)),
-                                        Ok(None) => {
-                                            Err(StorageProofRequestError::RemoteCouldntAnswer)
-                                        }
-                                        Ok(Some(_)) => Ok(EncodedMerkleProof(
-                                            payload,
+                        Some(Protocol::LightStorage { chain_index, .. }) => (
+                            RequestResult::StorageProof(
+                                response
+                                    .map_err(StorageProofRequestError::Request)
+                                    .and_then(|payload| {
+                                        match codec::decode_storage_or_call_proof_response(
                                             codec::StorageOrCallProof::StorageProof,
-                                        )),
-                                    }
-                                }),
+                                            &payload,
+                                        ) {
+                                            Err(err) => Err(StorageProofRequestError::Decode(err)),
+                                            Ok(None) => {
+                                                Err(StorageProofRequestError::RemoteCouldntAnswer)
+                                            }
+                                            Ok(Some(_)) => Ok(EncodedMerkleProof(
+                                                payload,
+                                                codec::StorageOrCallProof::StorageProof,
+                                            )),
+                                        }
+                                    }),
+                            ),
+                            chain_index,
                         ),
-                        Some(Protocol::LightCall { .. }) => {
+                        Some(Protocol::LightCall { chain_index, .. }) => (
                             RequestResult::CallProof(
                                 response.map_err(CallProofRequestError::Request).and_then(
                                     |payload| match codec::decode_storage_or_call_proof_response(
@@ -1571,46 +1581,58 @@ where
                                         )),
                                     },
                                 ),
-                            )
-                        }
-                        Some(Protocol::Kad { .. }) => RequestResult::KademliaFindNode(
-                            response
-                                .map_err(KademliaFindNodeError::RequestFailed)
-                                .and_then(|payload| {
-                                    match codec::decode_find_node_response(&payload) {
-                                        Err(err) => Err(KademliaFindNodeError::DecodeError(err)),
-                                        Ok(nodes) => Ok(nodes),
-                                    }
-                                }),
+                            ),
+                            chain_index,
                         ),
-                        Some(Protocol::SyncWarp { chain_index }) => RequestResult::GrandpaWarpSync(
-                            response
-                                .map_err(GrandpaWarpSyncRequestError::Request)
-                                .and_then(|message| {
-                                    if let Err(err) = codec::decode_grandpa_warp_sync_response(
-                                        &message,
-                                        self.chains[chain_index].block_number_bytes,
-                                    ) {
-                                        Err(GrandpaWarpSyncRequestError::Decode(err))
-                                    } else {
-                                        Ok(EncodedGrandpaWarpSyncResponse {
-                                            message,
-                                            block_number_bytes: self.chains[chain_index]
-                                                .block_number_bytes,
-                                        })
-                                    }
-                                }),
+                        Some(Protocol::Kad { chain_index, .. }) => (
+                            RequestResult::KademliaFindNode(
+                                response
+                                    .map_err(KademliaFindNodeError::RequestFailed)
+                                    .and_then(|payload| {
+                                        match codec::decode_find_node_response(&payload) {
+                                            Err(err) => {
+                                                Err(KademliaFindNodeError::DecodeError(err))
+                                            }
+                                            Ok(nodes) => Ok(nodes),
+                                        }
+                                    }),
+                            ),
+                            chain_index,
                         ),
-                        Some(Protocol::State { .. }) => RequestResult::State(
-                            response
-                                .map_err(StateRequestError::Request)
-                                .and_then(|payload| {
-                                    if let Err(err) = codec::decode_state_response(&payload) {
-                                        Err(StateRequestError::Decode(err))
-                                    } else {
-                                        Ok(EncodedStateResponse(payload))
-                                    }
-                                }),
+                        Some(Protocol::SyncWarp { chain_index }) => (
+                            RequestResult::GrandpaWarpSync(
+                                response
+                                    .map_err(GrandpaWarpSyncRequestError::Request)
+                                    .and_then(|message| {
+                                        if let Err(err) = codec::decode_grandpa_warp_sync_response(
+                                            &message,
+                                            self.chains[chain_index].block_number_bytes,
+                                        ) {
+                                            Err(GrandpaWarpSyncRequestError::Decode(err))
+                                        } else {
+                                            Ok(EncodedGrandpaWarpSyncResponse {
+                                                message,
+                                                block_number_bytes: self.chains[chain_index]
+                                                    .block_number_bytes,
+                                            })
+                                        }
+                                    }),
+                            ),
+                            chain_index,
+                        ),
+                        Some(Protocol::State { chain_index, .. }) => (
+                            RequestResult::State(
+                                response
+                                    .map_err(StateRequestError::Request)
+                                    .and_then(|payload| {
+                                        if let Err(err) = codec::decode_state_response(&payload) {
+                                            Err(StateRequestError::Decode(err))
+                                        } else {
+                                            Ok(EncodedStateResponse(payload))
+                                        }
+                                    }),
+                            ),
+                            chain_index,
                         ),
 
                         // The protocols below aren't request-response protocols.
@@ -1618,6 +1640,8 @@ where
                     };
 
                     return Some(Event::RequestResult {
+                        peer_id: self.peers[peer_index.0].clone(),
+                        chain_id: ChainId(chain_index),
                         substream_id,
                         response,
                     });
@@ -2803,9 +2827,17 @@ where
                     debug_assert!(_was_in1 || _was_in2);
                 }
 
-                collection::Event::PingOutSuccess { .. } => {
-                    // We ignore ping events.
-                    // TODO: report to end user or something
+                collection::Event::PingOutSuccess { id, ping_time } => {
+                    // The connection is necessarily past its handshake phase, and thus
+                    // the `peer_index` is necessarily known and valid.
+                    let Some(peer_index) = self.inner[id].peer_index else {
+                        unreachable!()
+                    };
+                    return Some(Event::PingOutSuccess {
+                        id,
+                        peer_id: self.peers[peer_index.0].clone(),
+                        ping_time,
+                    });
                 }
             }
         }
@@ -3323,6 +3355,53 @@ where
                     && matches!(*s, NotificationsSubstreamState::Open { .. })
             })
             .map(|(_, peer_index, _, _, _)| &self.peers[peer_index.0])
+    }
+
+    /// Returns the list of all peers for a [`Event::GossipConnected`] event of the given kind has
+    /// been emitted.
+    /// It is possible to send gossip notifications to these peers.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn gossip_is_connected(
+        &'_ self,
+        chain_id: ChainId,
+        target: &PeerId,
+        kind: GossipKind,
+    ) -> bool {
+        assert!(self.chains.contains(chain_id.0));
+        let GossipKind::ConsensusTransactions = kind;
+
+        let Some(&peer_index) = self.peers_by_peer_id.get(target) else {
+            // If the `PeerId` is unknown, then we also don't have any gossip link to it.
+            return false;
+        };
+
+        self.notification_substreams_by_peer_id
+            .range(
+                (
+                    NotificationsProtocol::BlockAnnounces {
+                        chain_index: chain_id.0,
+                    },
+                    peer_index,
+                    SubstreamDirection::Out,
+                    NotificationsSubstreamState::open_min_value(),
+                    SubstreamId::min_value(),
+                )
+                    ..=(
+                        NotificationsProtocol::BlockAnnounces {
+                            chain_index: chain_id.0,
+                        },
+                        peer_index,
+                        SubstreamDirection::Out,
+                        NotificationsSubstreamState::open_max_value(),
+                        SubstreamId::max_value(),
+                    ),
+            )
+            .next()
+            .is_some()
     }
 
     /// Open a gossiping substream with the given peer on the given chain.
@@ -4178,6 +4257,16 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
+    /// The ping of a connection has been measured.
+    PingOutSuccess {
+        /// Identifier of the connection.
+        id: ConnectionId,
+        /// [`PeerId`] of the connection.
+        peer_id: PeerId,
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
+
     /// Now connected to the given peer for gossiping purposes.
     ///
     /// This event can only happen as a result of a call to [`ChainNetwork::gossip_open`].
@@ -4245,6 +4334,10 @@ pub enum Event<TConn> {
 
     /// An outgoing request has finished, either successfully or not.
     RequestResult {
+        /// Peer that has answered the request.
+        peer_id: PeerId,
+        /// Index of the chain the request relates to.
+        chain_id: ChainId,
         /// Identifier of the request that was returned by the function that started the request.
         substream_id: SubstreamId,
         /// Outcome of the request.

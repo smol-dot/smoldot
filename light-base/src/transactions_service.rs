@@ -89,6 +89,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
+    executor::{host, runtime_host},
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
@@ -353,9 +354,18 @@ pub enum ValidateTransactionError {
     /// Error during the network request.
     #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
-    /// Error during the validation runtime call.
+    /// Transaction validation API version unrecognized.
+    UnknownApiVersion,
+    /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    Validation(validate::Error),
+    WasmStart(host::StartErr),
+    /// Error while running the Wasm virtual machine.
+    #[display(fmt = "{_0}")]
+    WasmExecution(runtime_host::ErrorDetail),
+    /// Error while decoding the output of the runtime.
+    OutputDecodeError(validate::DecodeError),
+    /// Runtime called a forbidden host function.
+    ForbiddenHostCall,
 }
 
 #[derive(Debug, Clone)]
@@ -1346,6 +1356,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         }
     };
 
+    // TODO: move somewhere else?
     log::debug!(
         target: log_target,
         "TxValidations <= Start(tx={}, block={}, block_height={})",
@@ -1364,7 +1375,6 @@ async fn validate_transaction<TPlat: PlatformRef>(
     let (runtime_call_lock, runtime) = runtime_lock
         .start(
             validate::VALIDATION_FUNCTION_NAME,
-            // TODO: don't hardcode v3 but determine parameters dynamically from the runtime
             validate::validate_transaction_runtime_parameters_v3(
                 iter::once(scale_encoded_transaction.as_ref()),
                 source,
@@ -1379,43 +1389,66 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .map_err(InvalidOrError::ValidateError)
         .map_err(ValidationError::InvalidOrError)?;
 
-    let mut validation_in_progress = validate::validate_transaction(validate::Config {
-        runtime,
-        scale_encoded_header: block_scale_encoded_header,
-        block_number_bytes: relay_chain_sync.block_number_bytes(),
-        scale_encoded_transaction: iter::once(scale_encoded_transaction),
-        source,
+    if runtime
+        .runtime_version()
+        .decode()
+        .apis
+        .find_version("TaggedTransactionQueue")
+        != Some(3)
+    {
+        return Err(ValidationError::InvalidOrError(
+            InvalidOrError::ValidateError(ValidateTransactionError::UnknownApiVersion),
+        ));
+    }
+
+    let mut validation_in_progress = match runtime_host::run(runtime_host::Config {
+        virtual_machine: runtime,
+        function_to_call: validate::VALIDATION_FUNCTION_NAME,
+        parameter: validate::validate_transaction_runtime_parameters_v3(
+            iter::once(scale_encoded_transaction.as_ref()),
+            source,
+            &block_hash,
+        ),
+        storage_main_trie_changes: Default::default(),
         max_log_level: 0,
-    });
+        calculate_trie_changes: false,
+    }) {
+        Ok(r) => r,
+        Err((err, virtual_machine)) => {
+            runtime_call_lock.unlock(virtual_machine);
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::WasmStart(err)),
+            ));
+        }
+    };
 
     loop {
         match validation_in_progress {
-            validate::Query::Finished {
-                result: Ok(Ok(success)),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Ok(success);
+            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                let decode_result = validate::decode_validate_transaction_return_value(
+                    success.virtual_machine.value().as_ref(),
+                );
+                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                return match decode_result {
+                    Ok(Ok(decoded)) => Ok(decoded),
+                    Ok(Err(err)) => Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
+                        err,
+                    ))),
+                    Err(err) => Err(ValidationError::InvalidOrError(
+                        InvalidOrError::ValidateError(ValidateTransactionError::OutputDecodeError(
+                            err,
+                        )),
+                    )),
+                };
             }
-            validate::Query::Finished {
-                result: Ok(Err(invalid)),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
-                    invalid,
-                )));
-            }
-            validate::Query::Finished {
-                result: Err(error),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::Validation(error)),
+            runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                return Err(ValidationError::InvalidOrError(
+                    InvalidOrError::ValidateError(ValidateTransactionError::WasmExecution(
+                        err.detail,
+                    )),
                 ));
             }
-            validate::Query::StorageGet(get) => {
+            runtime_host::RuntimeHostVm::StorageGet(get) => {
                 let storage_value = {
                     let child_trie = get.child_trie();
                     runtime_call_lock
@@ -1424,7 +1457,8 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 let storage_value = match storage_value {
                     Ok(v) => v,
                     Err(err) => {
-                        runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
+                        runtime_call_lock
+                            .unlock(runtime_host::RuntimeHostVm::StorageGet(get).into_prototype());
                         return Err(ValidationError::InvalidOrError(
                             InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
@@ -1433,19 +1467,20 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 validation_in_progress =
                     get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
-            validate::Query::ClosestDescendantMerkleValue(mv) => {
+            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
                 let merkle_value = {
                     let child_trie = mv.child_trie();
                     runtime_call_lock.closest_descendant_merkle_value(
                         child_trie.as_ref().map(|c| c.as_ref()),
-                        &mv.key().collect::<Vec<_>>(),
+                        mv.key(),
                     )
                 };
                 let merkle_value = match merkle_value {
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(
-                            validate::Query::ClosestDescendantMerkleValue(mv).into_prototype(),
+                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                .into_prototype(),
                         );
                         return Err(ValidationError::InvalidOrError(
                             InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
@@ -1454,27 +1489,44 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 };
                 validation_in_progress = mv.inject_merkle_value(merkle_value);
             }
-            validate::Query::NextKey(nk) => {
+            runtime_host::RuntimeHostVm::NextKey(nk) => {
                 let next_key = {
                     let child_trie = nk.child_trie();
                     runtime_call_lock.next_key(
                         child_trie.as_ref().map(|c| c.as_ref()),
-                        &nk.key().collect::<Vec<_>>(),
+                        nk.key(),
                         nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(),
+                        nk.prefix(),
                         nk.branch_nodes(),
                     )
                 };
                 let next_key = match next_key {
                     Ok(v) => v,
                     Err(err) => {
-                        runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
+                        runtime_call_lock
+                            .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
                         return Err(ValidationError::InvalidOrError(
                             InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
                     }
                 };
-                validation_in_progress = nk.inject_key(next_key.map(|k| k.iter().copied()));
+                validation_in_progress = nk.inject_key(next_key);
+            }
+            runtime_host::RuntimeHostVm::SignatureVerification(r) => {
+                validation_in_progress = r.verify_and_resume();
+            }
+            runtime_host::RuntimeHostVm::LogEmit(r) => {
+                // Logs are ignored.
+                validation_in_progress = r.resume()
+            }
+            runtime_host::RuntimeHostVm::Offchain(_) => {
+                return Err(ValidationError::InvalidOrError(
+                    InvalidOrError::ValidateError(ValidateTransactionError::ForbiddenHostCall),
+                ));
+            }
+            runtime_host::RuntimeHostVm::OffchainStorageSet(r) => {
+                // Ignore offset storage writes.
+                validation_in_progress = r.resume();
             }
         }
     }

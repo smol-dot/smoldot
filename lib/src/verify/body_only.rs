@@ -16,14 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    chain::chain_information,
     executor::{self, host, runtime_host, vm},
     header, util,
-    verify::{aura, babe, inherents},
+    verify::inherents,
 };
 
 use alloc::{string::String, vec::Vec};
-use core::{iter, num::NonZeroU64, time::Duration};
+use core::{iter, time::Duration};
 
 pub use runtime_host::{
     LogEmitInfo, LogEmitInfoHex, LogEmitInfoStr, Nibble, StorageChanges, TrieChange,
@@ -31,15 +30,10 @@ pub use runtime_host::{
 };
 
 /// Configuration for a block verification.
-pub struct Config<'a, TBody> {
+pub struct Config<THeader, TBody> {
     /// Runtime used to check the new block. Must be built using the `:code` of the parent
     /// block.
     pub parent_runtime: host::HostVmPrototype,
-
-    /// Header of the parent of the block to verify.
-    ///
-    /// The hash of this header must be the one referenced in [`Config::block_header`].
-    pub parent_block_header: header::HeaderRef<'a>,
 
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -49,7 +43,7 @@ pub struct Config<'a, TBody> {
     ///
     /// The `parent_hash` field is the hash of the parent whose storage can be accessed through
     /// the other fields.
-    pub block_header: header::HeaderRef<'a>,
+    pub block_header: THeader,
 
     /// Number of bytes used to encode the block number in the header.
     pub block_number_bytes: usize,
@@ -68,35 +62,6 @@ pub struct Config<'a, TBody> {
     /// If `true`, then [`StorageChanges::trie_changes_iter_ordered`] will return `Some`.
     /// Passing `None` requires fewer calculation and fewer storage accesses.
     pub calculate_trie_changes: bool,
-}
-
-/// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
-pub enum ConfigConsensus<'a> {
-    /// Chain is using the Aura consensus engine.
-    Aura {
-        /// Aura authorities that must validate the block.
-        ///
-        /// This list is either equal to the parent's list, or, if the parent changes the list of
-        /// authorities, equal to that new modified list.
-        current_authorities: header::AuraAuthoritiesIter<'a>,
-
-        /// Duration of a slot in milliseconds.
-        /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-        slot_duration: NonZeroU64,
-    },
-
-    /// Chain is using the Babe consensus engine.
-    Babe {
-        /// Number of slots per epoch in the Babe configuration.
-        slots_per_epoch: NonZeroU64,
-
-        /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's
-        /// number is 0, as block #0 doesn't belong to any epoch.
-        parent_block_epoch: Option<chain_information::BabeEpochInformationRef<'a>>,
-
-        /// Epoch that follows the epoch the parent block belongs to.
-        parent_block_next_epoch: chain_information::BabeEpochInformationRef<'a>,
-    },
 }
 
 /// Block successfully verified.
@@ -120,31 +85,6 @@ pub struct Success {
     pub logs: String,
 }
 
-/// Extra items in [`Success`] relevant to the consensus engine.
-pub enum SuccessConsensus {
-    /// Chain is using the Aura consensus engine.
-    Aura {
-        /// True if the list of authorities is modified by this block.
-        authorities_change: bool,
-    },
-
-    /// Chain is using the Babe consensus engine.
-    Babe {
-        /// Slot number the block belongs to.
-        ///
-        /// > **Note**: This is a simple reminder. The value can also be found in the header of the
-        /// >           block.
-        slot_number: u64,
-
-        /// If `Some`, the verified block contains an epoch transition describing the new
-        /// "next epoch". When verifying blocks that are children of this one, the value in this
-        /// field must be provided as [`ConfigConsensus::Babe::parent_block_next_epoch`], and the
-        /// value previously in [`ConfigConsensus::Babe::parent_block_next_epoch`] must instead be
-        /// passed as [`ConfigConsensus::Babe::parent_block_epoch`].
-        epoch_transition_target: Option<chain_information::BabeEpochInformation>,
-    },
-}
-
 /// Error that can happen during the verification.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
@@ -154,33 +94,14 @@ pub enum Error {
     /// Error while running the Wasm virtual machine to execute the block.
     #[display(fmt = "{_0}")]
     WasmVm(runtime_host::ErrorDetail),
-    /// Runtime has returned some errors when verifying inherents.
-    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
-    CheckInherentsError {
-        /// List of errors produced by the runtime.
-        ///
-        /// The first element of each tuple is an identifier of the module that produced the
-        /// error, while the second element is a SCALE-encoded piece of data.
-        ///
-        /// Due to the fact that errors are not supposed to happen, and that the format of errors
-        /// has changed depending on runtime versions, no utility is provided to decode them.
-        errors: Vec<([u8; 8], Vec<u8>)>,
-    },
-    /// Failed to parse the output of `BlockBuilder_check_inherents`.
-    CheckInherentsOutputParseFailure,
+    /// Error while checking the return value of `BlockBuilder_check_inherents`.
+    #[display(fmt = "{_0}")]
+    InherentsOutputError(InherentsOutputError),
+    /// Header of the block couldn't be decoded.
+    #[display(fmt = "Invalid block header: {_0}")]
+    InvalidHeader(header::Error),
     /// Output of `Core_execute_block` wasn't empty.
     NonEmptyOutput,
-    /// Block header contains items relevant to multiple consensus engines at the same time.
-    MultipleConsensusEngines,
-    /// Block header contains an unrecognized consensus engine.
-    #[display(fmt = "Block header contains an unrecognized consensus engine: {engine:?}")]
-    UnknownConsensusEngine { engine: [u8; 4] },
-    /// Failed to verify the authenticity of the block with the AURA algorithm.
-    #[display(fmt = "{_0}")]
-    AuraVerification(aura::VerifyError),
-    /// Failed to verify the authenticity of the block with the BABE algorithm.
-    #[display(fmt = "{_0}")]
-    BabeVerification(babe::VerifyError),
     /// Error while compiling new runtime.
     NewRuntimeCompilationError(host::NewErr),
     /// Block being verified has erased the `:code` key from the storage.
@@ -201,7 +122,10 @@ pub enum Error {
 
 /// Verifies whether a block body is valid.
 pub fn verify(
-    config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
+    config: Config<
+        impl AsRef<[u8]>,
+        impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+    >,
 ) -> Verify {
     // We need to call two runtime functions:
     //
@@ -216,7 +140,16 @@ pub fn verify(
     let execute_block_parameters = {
         // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
         // be the last item. We need to remove it before we can verify the unsealed header.
-        let mut unsealed_header = config.block_header.clone();
+        let mut unsealed_header =
+            match header::decode(config.block_header.as_ref(), config.block_number_bytes) {
+                Ok(h) => h,
+                Err(err) => {
+                    return Verify::Finished(Err((
+                        Error::InvalidHeader(err),
+                        config.parent_runtime,
+                    )))
+                }
+            };
         let _seal_log = unsealed_header.digest.pop_seal();
 
         let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
@@ -351,7 +284,7 @@ impl VerifyInner {
                         check_check_inherents_output(success.virtual_machine.value().as_ref());
                     if let Err(err) = check_inherents_result {
                         return Verify::Finished(Err((
-                            err,
+                            Error::InherentsOutputError(err),
                             success.virtual_machine.into_prototype(),
                         )));
                     }
@@ -776,7 +709,7 @@ impl RuntimeCompilation {
         let new_runtime = match host::HostVmPrototype::new(host::Config {
             module: code,
             heap_pages: self.heap_pages,
-            exec_hint: vm::ExecHint::CompileAheadOfTime,
+            exec_hint: vm::ExecHint::ValidateAndCompile, // TODO: let API user choose this
             allow_unresolved_imports: false,
         }) {
             Ok(vm) => vm,
@@ -799,7 +732,7 @@ impl RuntimeCompilation {
 }
 
 /// Checks the output of the `BlockBuilder_check_inherents` runtime call.
-fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
+pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutputError> {
     // The format of the output of `check_inherents` consists of two booleans and a list of
     // errors.
     // We don't care about the value of the two booleans, and they are ignored during the parsing.
@@ -830,13 +763,32 @@ fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
     );
 
     match nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(parser)(output) {
-        Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
+        Err(_err) => Err(InherentsOutputError::ParseFailure),
         Ok((_, errors)) => {
             if errors.is_empty() {
                 Ok(())
             } else {
-                Err(Error::CheckInherentsError { errors })
+                Err(InherentsOutputError::Error { errors })
             }
         }
     }
+}
+
+/// Error potentially returned by [`check_check_inherents_output`].
+#[derive(Debug, derive_more::Display)]
+pub enum InherentsOutputError {
+    /// Runtime has returned some errors.
+    #[display(fmt = "Runtime has returned some errors when verifying inherents: {errors:?}")]
+    Error {
+        /// List of errors produced by the runtime.
+        ///
+        /// The first element of each tuple is an identifier of the module that produced the
+        /// error, while the second element is a SCALE-encoded piece of data.
+        ///
+        /// Due to the fact that errors are not supposed to happen, and that the format of errors
+        /// has changed depending on runtime versions, no utility is provided to decode them.
+        errors: Vec<([u8; 8], Vec<u8>)>,
+    },
+    /// Failed to parse the output.
+    ParseFailure,
 }

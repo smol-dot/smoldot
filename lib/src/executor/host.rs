@@ -152,7 +152,7 @@
 //!     let prototype = HostVmPrototype::new(Config {
 //!         module: &wasm_binary_code,
 //!         heap_pages: HeapPages::from(2048),
-//!         exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+//!         exec_hint: smoldot::executor::vm::ExecHint::ValidateAndExecuteOnce,
 //!         allow_unresolved_imports: false
 //!     }).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()

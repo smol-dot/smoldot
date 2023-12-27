@@ -730,9 +730,10 @@ where
                                 },
                             );
                         }
-                        Some(established::Event::PingOutSuccess) => {
-                            self.pending_messages
-                                .push_back(ConnectionToCoordinatorInner::PingOutSuccess);
+                        Some(established::Event::PingOutSuccess { ping_time }) => {
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::PingOutSuccess { ping_time },
+                            );
                         }
                         Some(established::Event::PingOutFailed) => {
                             self.pending_messages

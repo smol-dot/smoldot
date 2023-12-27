@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Changed
+
+- The WebAssembly runtime is now compiled lazily, meaning that only the code that is executed is validated and translated. Thanks to this, compiling a runtime is now four times faster and the time to head of the chain is around 200ms faster. ([#1488](https://github.com/smol-dot/smoldot/pull/1488))
+- Decoding and analyzing a Merkle proof is now around 10% to 50% faster. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+
+### Fixed
+
+- Fix state mismatch during warp syncing if a peer sends a bad header, justification, or proof. ([#1498](https://github.com/smol-dot/smoldot/pull/1498))
+- Fix bugs in various corner cases when decoding and analyzing a Merkle proof. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
+- Fix Merkle proofs being considered as invalid if they contain a storage value that happens to successfully decode as a trie node with an inline child. ([#1504](https://github.com/smol-dot/smoldot/pull/1504))
+- Fix crash when using a worker due to race condition when a chain is removed while a JSON-RPC response is generated for it. ([#1512](https://github.com/smol-dot/smoldot/pull/1512))
+
+## 2.0.15 - 2023-12-20
+
+### Changed
+
+- When a network request fails, or when a block or justification fails to verify, smoldot now closes the gossip link with the peer it tried to send the request to or obtained the block or justification from, and will not re-open a new gossip link for a little while. ([#1482](https://github.com/smol-dot/smoldot/pull/1482))
+
+## 2.0.14 - 2023-12-11
+
+### Fixed
+
+- Fix pings never being sent to peers, which means that smoldot would fail to detect when a connection is no longer responsive. ([#1461](https://github.com/smol-dot/smoldot/pull/1461))
+- Fix connection being properly killed when the ping substream fails to be negotiated. ([#1459](https://github.com/smol-dot/smoldot/pull/1459))
+- Fix Merkle proofs with nodes that have one child and no storage value being considered as valid.
+- Fix Merkle proofs with nodes that have no children or storage value and aren't the root being considered as valid.
+
 ## 2.0.13 - 2023-11-28
 
 ### Changed

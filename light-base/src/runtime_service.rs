@@ -712,11 +712,11 @@ impl<'a> RuntimeCall<'a> {
     pub fn next_key(
         &'_ self,
         child_trie: Option<&[u8]>,
-        key_before: &[trie::Nibble],
+        key_before: impl Iterator<Item = trie::Nibble>,
         or_equal: bool,
-        prefix: &[trie::Nibble],
+        prefix: impl Iterator<Item = trie::Nibble>,
         branch_nodes: bool,
-    ) -> Result<Option<&'_ [trie::Nibble]>, RuntimeCallError> {
+    ) -> Result<Option<proof_decode::EntryKeyIter<'_, Vec<u8>>>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
             Err(err) => return Err(err.clone()),
@@ -734,7 +734,7 @@ impl<'a> RuntimeCall<'a> {
 
         match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
             Ok(v) => Ok(v),
-            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
+            Err(err) => return Err(RuntimeCallError::MissingProofEntry(err)),
         }
     }
 
@@ -752,7 +752,7 @@ impl<'a> RuntimeCall<'a> {
     pub fn closest_descendant_merkle_value(
         &'_ self,
         child_trie: Option<&[u8]>,
-        key: &[trie::Nibble],
+        key: impl Iterator<Item = trie::Nibble>,
     ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
             Ok(p) => p,
@@ -2533,13 +2533,16 @@ impl SuccessfulRuntime {
         let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
         let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
             .map_err(RuntimeError::InvalidHeapPages)?;
-        let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
+        // Because the runtime has been validated by at least the author of the block, we assume
+        // that it is valid. This significantly speeds up the compilation.
+        let exec_hint = executor::vm::ExecHint::CompileWithNonDeterministicValidation;
 
         // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
         // import, we try again but with `allowed_unresolved_imports: true`.
         // Having unresolved imports might cause errors later on, for example when validating
         // transactions or getting the parachain heads, but for now we continue the execution
         // and print a warning.
+        // TODO: should log the fact that we're compiling a runtime and the time it takes, as this is a heavy operation
         match executor::host::HostVmPrototype::new(executor::host::Config {
             module,
             heap_pages,

@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "0.14.0"
+version = "0.15.0"
 description = "Primitives to build a client for Substrate-based blockchains"
 documentation = "https://docs.rs/smoldot"
 keywords = ["blockchain", "peer-to-peer"]
@@ -77,7 +77,7 @@ siphasher = { version = "1.0.0", default-features = false }
 slab = { version = "0.4.8", default-features = false }
 smallvec = { version = "1.11.0", default-features = false }
 twox-hash = { version = "1.6.3", default-features = false }
-wasmi = { version = "0.31.0", default-features = false }
+wasmi = { version = "0.32.0-beta.2", default-features = false }
 x25519-dalek = { version = "2.0.0-rc.3", default-features = false, features = ["alloc", "precomputed-tables", "static_secrets", "zeroize"] }
 zeroize = { version = "1.6.0", default-features = false, features = ["alloc"] }
 
@@ -95,7 +95,7 @@ soketto = { version = "0.7.1", optional = true }
 # The arch and OS of a specific target can be found with the command `rustc +nightly -Z unstable-options --print target-spec-json --target ...`
 [target.'cfg(any(all(target_arch = "x86_64", any(target_os = "windows", target_os = "linux", target_os = "macos")), all(target_arch = "aarch64", target_os = "linux"), all(target_arch = "s390x", target_os = "linux")))'.dependencies]
 # `wasmtime` feature
-wasmtime = { version = "15.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "16.0.0", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5.1"
@@ -109,4 +109,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [[bench]]
 name = "header"
+harness = false
+[[bench]]
+name = "proof-decode"
 harness = false

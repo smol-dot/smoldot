@@ -334,11 +334,20 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(target, request_config.clone(), timeout_per_request)
+                .blocks_request(target.clone(), request_config.clone(), timeout_per_request)
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
-                Ok(_) | Err(_) => continue,
+                Ok(_) | Err(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "blocks-request-failed",
+                        )
+                        .await;
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -379,7 +388,12 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .await
             {
                 Ok(b) if !b.is_empty() => b,
-                Ok(_) | Err(_) => continue,
+                Ok(_) | Err(_) => {
+                    // Because we have no idea whether the block is canonical, it might be
+                    // totally legitimate for the peer to refuse the request. For this reason,
+                    // we don't ban it.
+                    continue;
+                }
             };
 
             return Ok(result.remove(0));
@@ -553,7 +567,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 .network_service
                 .clone()
                 .storage_proof_request(
-                    target,
+                    target.clone(),
                     codec::StorageProofRequestConfig {
                         block_hash: *block_hash,
                         keys: keys_to_request.into_iter(),
@@ -580,6 +594,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         network_service::StorageProofRequestError::RequestTooLarge
                     ) || response_nodes_cap == 1
                     {
+                        self.network_service
+                            .ban_and_disconnect(
+                                target,
+                                network_service::BanSeverity::Low,
+                                "storage-request-failed",
+                            )
+                            .await;
                         outcome_errors.push(StorageQueryErrorDetail::Network(err));
                     }
 
@@ -596,6 +617,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }) {
                 Ok(d) => d,
                 Err(err) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::High,
+                            "bad-merkle-proof",
+                        )
+                        .await;
                     outcome_errors.push(StorageQueryErrorDetail::ProofVerification(err));
                     continue;
                 }
@@ -675,10 +703,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         }
                     }
                     RequestImpl::ValueOrHash { key, hash } => {
-                        // TODO: overhead
                         match decoded_proof.trie_node_info(
                             main_trie_root_hash,
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>(),
+                            trie::bytes_to_nibbles(key.iter().copied()),
                         ) {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
@@ -727,13 +754,14 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         }
                     }
                     RequestImpl::ClosestDescendantMerkleValue { key } => {
-                        let key_nibbles =
-                            &trie::bytes_to_nibbles(key.iter().copied()).collect::<Vec<_>>();
+                        let key_nibbles = trie::bytes_to_nibbles(key.iter().copied());
 
                         let closest_descendant_merkle_value = match decoded_proof
-                            .closest_descendant_merkle_value(main_trie_root_hash, key_nibbles)
-                        {
-                            Ok(Some(merkle_value)) => Some(merkle_value.as_ref().to_vec()),
+                            .closest_descendant_merkle_value(
+                                main_trie_root_hash,
+                                key_nibbles.clone(),
+                            ) {
+                            Ok(Some(merkle_value)) => Some(merkle_value.to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 requests_remaining
@@ -745,7 +773,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                         let found_closest_ancestor_excluding = match decoded_proof
                             .closest_ancestor_in_proof(main_trie_root_hash, key_nibbles)
                         {
-                            Ok(Some(ancestor)) => Some(ancestor.to_vec()),
+                            Ok(Some(ancestor)) => Some(ancestor.collect::<Vec<_>>()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 requests_remaining
@@ -796,20 +824,36 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             let result = self
                 .network_service
                 .clone()
-                .call_proof_request(target, config.clone(), timeout_per_request)
+                .call_proof_request(target.clone(), config.clone(), timeout_per_request)
                 .await;
 
             match result {
                 Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
-                Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
+                Ok(_) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "call-proof-request-failed",
+                        )
+                        .await;
+                    outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
                         smoldot::network::service::RequestError::Substream(
                             smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                         ),
                     ),
-                )),
+                ))
+                }
                 Err(err) => {
+                    self.network_service
+                        .ban_and_disconnect(
+                            target,
+                            network_service::BanSeverity::Low,
+                            "call-proof-request-failed",
+                        )
+                        .await;
                     outcome_errors.push(err);
                 }
             }

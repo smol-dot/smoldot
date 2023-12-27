@@ -853,7 +853,7 @@ async fn open_database(
                     genesis_storage.value(b":heappages"),
                 )
                 .unwrap(),
-                exec_hint: executor::vm::ExecHint::Oneshot,
+                exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
                 allow_unresolved_imports: true,
             })
             .unwrap()
@@ -994,13 +994,10 @@ async fn open_database(
             // The finalized block is the genesis block. As such, it has an empty body and
             // no justification.
             let database = empty
-                .initialize(
-                    genesis_chain_information,
-                    iter::empty(),
-                    None,
-                    genesis_storage_full_trie,
-                    state_version,
-                )
+                .initialize(genesis_chain_information, iter::empty(), None)
+                .unwrap();
+            database
+                .insert_trie_nodes(genesis_storage_full_trie, state_version)
                 .unwrap();
             (database, false)
         }
