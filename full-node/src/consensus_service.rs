@@ -965,8 +965,7 @@ impl SyncBackground {
                             let missing_items = self
                                 .database
                                 .with_database(|db| {
-                                    db.finalized_and_above_missing_trie_nodes_unordered(64)
-                                    // TODO: limit?!
+                                    db.finalized_and_above_missing_trie_nodes_unordered()
                                 })
                                 .await
                                 .unwrap();
