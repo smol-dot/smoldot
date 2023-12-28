@@ -74,7 +74,7 @@ fn execute_blocks() {
             host::HostVmPrototype::new(host::Config {
                 module: code,
                 heap_pages,
-                exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
+                exec_hint: crate::executor::vm::ExecHint::Oneshot,
                 allow_unresolved_imports: false,
             })
             .unwrap()
