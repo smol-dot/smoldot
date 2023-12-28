@@ -2606,22 +2606,10 @@ impl SyncBackground {
                     .unwrap_or_else(|| self.finalized_runtime.clone());
                 let parent_runtime = (*parent_runtime_arc).clone();
 
-                let parent_scale_encoded_header =
-                    header_verification_success.parent_scale_encoded_header();
                 let mut body_verification = body_only::verify(body_only::Config {
                     parent_runtime,
-                    parent_block_header: header::decode(
-                        &parent_scale_encoded_header,
-                        block_number_bytes,
-                    )
-                    .unwrap(),
                     now_from_unix_epoch: unix_time,
-                    // TODO: shouldn't have to decode here
-                    block_header: header::decode(
-                        header_verification_success.scale_encoded_header(),
-                        block_number_bytes,
-                    )
-                    .unwrap(),
+                    block_header: header_verification_success.scale_encoded_header(),
                     block_number_bytes,
                     block_body: header_verification_success
                         .scale_encoded_extrinsics()
