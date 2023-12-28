@@ -555,10 +555,11 @@ impl SqliteFullDatabase {
                         WHERE trie_nodes.is_present
                 )
 
-            SELECT trie_nodes.block_hash, blocks.number, trie_nodes.node_hash, trie_nodes.node_key
+            SELECT group_concat(HEX(trie_nodes.block_hash)), group_concat(CAST(blocks.number as TEXT)), trie_nodes.node_hash, group_concat(HEX(trie_nodes.node_key))
             FROM trie_nodes
             JOIN blocks ON blocks.hash = trie_nodes.block_hash
             WHERE is_present = false
+            GROUP BY trie_nodes.node_hash
             "#)
             .map_err(|err| {
                 CorruptedError::Internal(
@@ -568,41 +569,74 @@ impl SqliteFullDatabase {
 
         let results = statement
             .query_map((), |row| {
-                let block_hash = row.get::<_, Vec<u8>>(0)?;
-                let block_number = row.get::<_, u64>(1)?;
+                let block_hashes = row.get::<_, String>(0)?;
+                let block_numbers = row.get::<_, String>(1)?;
                 let node_hash = row.get::<_, Vec<u8>>(2)?;
-                let node_key = row.get::<_, Vec<u8>>(3)?;
-                Ok((block_hash, block_number, node_hash, node_key))
+                let node_keys = row.get::<_, String>(3)?;
+                Ok((block_hashes, block_numbers, node_hash, node_keys))
             })
             .map_err(|err| CorruptedError::Internal(InternalError(err)))?
             .map(|row| {
-                let (block_hash, block_number, trie_node_hash, node_key) = match row {
+                let (block_hashes, block_numbers, trie_node_hash, node_keys) = match row {
                     Ok(r) => r,
                     Err(err) => return Err(CorruptedError::Internal(InternalError(err))),
                 };
-                let block_hash = <[u8; 32]>::try_from(block_hash)
-                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
-                let trie_node_hash = <[u8; 32]>::try_from(trie_node_hash)
-                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?; // TODO: wrong error
 
-                let mut trie_node_key_nibbles = Vec::with_capacity(node_key.len());
-                let mut parent_tries_paths_nibbles = Vec::with_capacity(node_key.len());
-                for nibble in node_key {
-                    debug_assert!(nibble <= 16);
-                    if nibble == 16 {
-                        parent_tries_paths_nibbles.push(trie_node_key_nibbles.clone());
-                        trie_node_key_nibbles.clear();
-                    } else {
-                        trie_node_key_nibbles.push(nibble);
+                let mut block_hashes_iter = block_hashes
+                    .split(',')
+                    .map(|hash| hex::decode(hash).unwrap());
+                let mut block_numbers_iter = block_numbers
+                    .split(',')
+                    .map(|n| <u64 as core::str::FromStr>::from_str(n).unwrap());
+                let mut node_keys_iter =
+                    node_keys.split(',').map(|hash| hex::decode(hash).unwrap());
+
+                let mut blocks = Vec::with_capacity(32);
+                loop {
+                    match (
+                        block_hashes_iter.next(),
+                        block_numbers_iter.next(),
+                        node_keys_iter.next(),
+                    ) {
+                        (Some(hash), Some(number), Some(node_key)) => {
+                            let hash = <[u8; 32]>::try_from(hash)
+                                .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
+                            let mut trie_node_key_nibbles = Vec::with_capacity(node_key.len());
+                            let mut parent_tries_paths_nibbles = Vec::with_capacity(node_key.len());
+                            for nibble in node_key {
+                                debug_assert!(nibble <= 16);
+                                if nibble == 16 {
+                                    parent_tries_paths_nibbles.push(trie_node_key_nibbles.clone());
+                                    trie_node_key_nibbles.clear();
+                                } else {
+                                    trie_node_key_nibbles.push(nibble);
+                                }
+                            }
+
+                            blocks.push(MissingTrieNodeBlock {
+                                hash,
+                                number,
+                                parent_tries_paths_nibbles,
+                                trie_node_key_nibbles,
+                            })
+                        }
+                        (None, None, None) => break,
+                        _ => {
+                            // The iterators are supposed to have the same number of elements.
+                            debug_assert!(false);
+                            break;
+                        }
                     }
                 }
 
+                let trie_node_hash = <[u8; 32]>::try_from(trie_node_hash)
+                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?; // TODO: wrong error
+
+                debug_assert!(!blocks.is_empty());
+
                 Ok(MissingTrieNode {
-                    block_hash,
-                    block_number,
+                    blocks,
                     trie_node_hash,
-                    parent_tries_paths_nibbles,
-                    trie_node_key_nibbles,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1659,11 +1693,25 @@ impl Drop for SqliteFullDatabase {
 /// See [`SqliteFullDatabase::finalized_and_above_missing_trie_nodes_unordered`].
 #[derive(Debug)]
 pub struct MissingTrieNode {
-    /// Hash of one of the blocks the trie node belongs to.
-    // TODO: consider merging all trie nodes by hash, and turn block_hash into a Vec?
-    pub block_hash: [u8; 32],
-    pub block_number: u64,
+    /// Blocks the trie node is known to belong to.
+    ///
+    /// Guaranteed to never be empty.
+    ///
+    /// Only contains blocks whose number is superior or equal to the latest finalized block
+    /// number.
+    pub blocks: Vec<MissingTrieNodeBlock>,
+    /// Hash of the missing trie node.
     pub trie_node_hash: [u8; 32],
+}
+
+/// See [`MissingTrieNode::blocks`].
+#[derive(Debug)]
+pub struct MissingTrieNodeBlock {
+    /// Hash of the block.
+    pub hash: [u8; 32],
+    /// Height of the block.
+    pub number: u64,
+    /// Path of the parent tries leading to the trie node.
     pub parent_tries_paths_nibbles: Vec<Vec<u8>>,
     /// Nibbles that compose the key of the trie node.
     pub trie_node_key_nibbles: Vec<u8>,

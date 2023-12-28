@@ -974,19 +974,22 @@ impl SyncBackground {
                                     DatabaseCatchUpDownload::NothingToDownloadCache;
                             }
 
-                            for missing_item in missing_items {
+                            for missing_item in missing_items
+                                .into_iter()
+                                .flat_map(|item| item.blocks.into_iter())
+                            {
                                 // Since the database and sync state machine are supposed to have the
                                 // same finalized block, it is guaranteed that the missing item are
                                 // in the finalized block or above.
                                 debug_assert!(
-                                    missing_item.block_number
+                                    missing_item.number
                                         >= self.sync.finalized_block_header().number
                                 );
 
                                 // Choose which source to query. We have to use an `if` because
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
-                                let source_id = if missing_item.block_number
+                                let source_id = if missing_item.number
                                     <= self.sync.finalized_block_header().number
                                 {
                                     let Some(source_id) = self
@@ -1002,8 +1005,8 @@ impl SyncBackground {
                                     let Some(source_id) = self
                                         .sync
                                         .knows_non_finalized_block(
-                                            missing_item.block_number,
-                                            &missing_item.block_hash,
+                                            missing_item.number,
+                                            &missing_item.hash,
                                         )
                                         .filter(|source_id| {
                                             *source_id != self.block_author_sync_source
@@ -1020,7 +1023,7 @@ impl SyncBackground {
                                 return WakeUpReason::StartNetworkRequest {
                                     source_id,
                                     request: all::DesiredRequest::StorageGetMerkleProof {
-                                        block_hash: missing_item.block_hash,
+                                        block_hash: missing_item.hash,
                                         state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
                                         keys: vec![trie::nibbles_to_bytes_suffix_extend(
                                             missing_item
