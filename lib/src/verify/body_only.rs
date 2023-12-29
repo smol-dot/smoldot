@@ -731,13 +731,18 @@ impl RuntimeCompilation {
     }
 }
 
+pub const EXECUTE_BLOCK_FUNCTION_NAME: &'static str = "Core_execute_block";
+
 /// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
 /// the `Core_execute_block` function in order to verify the inherents of a block.
 pub fn execute_block_parameter<'a>(
     block_header: &'a [u8],
     block_number_bytes: usize,
-    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + 'a> + 'a,
-) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a, ExecuteBlockParameterError> {
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
+) -> Result<
+    impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
+    ExecuteBlockParameterError,
+> {
     // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
     // be the last item. We need to remove it before we can verify the unsealed header.
     let mut unsealed_header = match header::decode(block_header, block_number_bytes) {
@@ -777,14 +782,19 @@ pub enum ExecuteBlockOutputError {
     NotEmpty,
 }
 
+pub const CHECK_INHERENTS_FUNCTION_NAME: &'static str = "BlockBuilder_check_inherents";
+
 /// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
 /// the `BlockBuilder_check_inherents` function in order to verify the inherents of a block.
 pub fn check_inherents_parameter<'a>(
     block_header: &'a [u8],
     block_number_bytes: usize,
-    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + 'a> + 'a,
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
     now_from_unix_epoch: Duration,
-) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a, ExecuteBlockParameterError> {
+) -> Result<
+    impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a,
+    ExecuteBlockParameterError,
+> {
     // The first parameter of `BlockBuilder_check_inherents` is identical to the one of
     // `Core_execute_block`.
     let execute_block_parameter =
