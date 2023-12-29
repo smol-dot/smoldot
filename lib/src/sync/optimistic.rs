@@ -984,6 +984,11 @@ impl<TRq, TSrc, TBl> BlockVerifySuccess<TRq, TSrc, TBl> {
             .scale_encoding_vec(self.parent.chain.block_number_bytes())
     }
 
+    /// Cancel the block verification.
+    pub fn cancel(self) -> OptimisticSync<TRq, TSrc, TBl> {
+        self.parent
+    }
+
     /// Reject the block and mark it as bad.
     pub fn reject_bad_block(mut self) -> OptimisticSync<TRq, TSrc, TBl> {
         self.parent.inner.make_requests_obsolete(&self.parent.chain);

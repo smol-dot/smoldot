@@ -2502,6 +2502,29 @@ impl SyncBackground {
                 {
                     Ok(success) => success,
                     Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess(
+                            full_sqlite::StorageAccessError::IncompleteStorage,
+                        ),
+                    )) => {
+                        // The block verification failed because the storage of the parent
+                        // is still being downloaded from the network.
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "block-verification-incomplete-storage; hash={}; height={}; \
+                                time_before_interrupt={:?}",
+                                HashDisplay(&hash_to_verify),
+                                header_verification_success.height(),
+                                when_verification_started.elapsed()
+                            ),
+                        );
+
+                        // TODO: download call proof
+
+                        self.sync = header_verification_success.cancel();
+                        return (self, false);
+                    }
+                    Err(ExecuteBlockError::VerificationFailure(
                         ExecuteBlockVerificationFailureError::DatabaseParentAccess(error),
                     )) => {
                         panic!("corrupted database: {error}")

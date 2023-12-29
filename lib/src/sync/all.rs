@@ -2454,6 +2454,26 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
         }
     }
 
+    /// Cancel the block verification.
+    pub fn cancel(self) -> AllSync<TRq, TSrc, TBl> {
+        match self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => {
+                let sync = inner.cancel();
+                AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
+            HeaderVerifySuccessInner::Optimistic(inner) => {
+                let sync = inner.cancel();
+                AllSync {
+                    inner: AllSyncInner::Optimistic { inner: sync },
+                    shared: self.shared,
+                }
+            }
+        }
+    }
+
     /// Reject the block and mark it as bad.
     pub fn reject_bad_block(self) -> AllSync<TRq, TSrc, TBl> {
         match self.inner {
