@@ -2508,7 +2508,8 @@ impl SyncBackground {
                     }
                     Err(ExecuteBlockError::VerificationFailure(
                         ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase
-                        | ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase(_),
+                        | ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase(_)
+                        | ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion,
                     )) => panic!("corrupted database"),
                     Err(error) => {
                         // Print a separate warning because it is important for the user
@@ -2839,13 +2840,14 @@ pub async fn execute_block_and_insert(
                         })
                         .await
                         .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
-                    let value = value.as_ref().map(|(val, vers)| {
-                        (
+                    let value = match value.as_ref() {
+                        Some((val, vers)) => Some((
                             iter::once(&val[..]),
                             runtime_host::TrieEntryVersion::try_from(*vers)
-                                .expect("corrupted database"), // TODO: proper error
-                        )
-                    });
+                                .map_err(|_| ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion)?
+                        )),
+                        None => None,
+                    };
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_value(value);
@@ -3133,6 +3135,8 @@ pub enum ExecuteBlockVerificationFailureError {
     RuntimeStartError(executor::host::StartErr),
     /// Error while accessing the parent block in the database.
     DatabaseParentAccess(full_sqlite::StorageAccessError),
+    /// State trie version stored in database is invalid.
+    DatabaseInvalidStateTrieVersion,
     /// Runtime has tried to call a forbidden host function.
     ForbiddenHostFunction,
     /// The `:code` of the parent block in database is empty.
