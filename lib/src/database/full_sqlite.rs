@@ -630,7 +630,7 @@ impl SqliteFullDatabase {
                 }
 
                 let trie_node_hash = <[u8; 32]>::try_from(trie_node_hash)
-                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?; // TODO: wrong error
+                    .map_err(|_| CorruptedError::InvalidTrieHashLen)?;
 
                 debug_assert!(!blocks.is_empty());
 
@@ -1783,6 +1783,8 @@ pub enum CorruptedError {
     InvalidFinalizedNum,
     /// A block hash is expected to be 32 bytes. This isn't the case.
     InvalidBlockHashLen,
+    /// A trie hash is expected to be 32 bytes. This isn't the case.
+    InvalidTrieHashLen,
     /// Values in the database are all well-formatted, but are incoherent.
     #[display(fmt = "Invalid chain information: {_0}")]
     InvalidChainInformation(chain_information::ValidityError),
