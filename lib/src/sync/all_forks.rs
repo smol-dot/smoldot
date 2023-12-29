@@ -2138,6 +2138,11 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
         }
     }
 
+    /// Cancel the block verification.
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.parent
+    }
+
     /// Reject the block and mark it as bad.
     pub fn reject_bad_block(mut self) -> AllForksSync<TBl, TRq, TSrc> {
         // Remove the block from `pending_blocks`.
