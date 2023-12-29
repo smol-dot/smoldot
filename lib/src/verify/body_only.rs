@@ -24,6 +24,7 @@
 //! [`check_inherents_parameter`] and [`execute_block_parameter`]. When execution succeeds,
 //! the output of the runtime call must be checked using [`check_check_inherents_output`]
 //! and [`check_execute_block_output`].
+//! The storage changes must be preserved between the two calls.
 //!
 //! Any error during the execution or the output verification means that the block is invalid.
 
