@@ -15,6 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Verifying a block body. This operation is also called executing a block.
+//!
+//! In order to execute a block, one must perform two runtime calls, to
+//! [`CHECK_INHERENTS_FUNCTION_NAME`] and to [`EXECUTE_BLOCK_FUNCTION_NAME`] (in that order).
+//!
+//! The parameter to pass for these runtime calls can be determined using
+//! [`check_inherents_parameter`] and [`execute_block_parameter`]. When execution succeeds,
+//! the output of the runtime call must be checked using [`check_check_inherents_output`]
+//! and [`check_execute_block_output`].
+//!
+//! Any error during the execution or the output verification means that the block is invalid.
+
 use crate::{header, util, verify::inherents};
 
 use alloc::vec::Vec;
