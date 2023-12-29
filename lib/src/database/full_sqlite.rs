@@ -495,6 +495,155 @@ impl SqliteFullDatabase {
         Ok(())
     }
 
+    /// Returns a list of trie nodes that are missing from the database and that belong to the
+    /// state of a block whose number is superior or equal to the finalized block.
+    ///
+    /// The ordering of the returned trie nodes is unspecified.
+    ///
+    /// > **Note**: This function call is relatively expensive, and the API user is expected to
+    /// >           cache the return value.
+    pub fn finalized_and_above_missing_trie_nodes_unordered(
+        &self,
+    ) -> Result<Vec<MissingTrieNode>, CorruptedError> {
+        let database = self.database.lock();
+
+        let mut statement = database
+            .prepare_cached(
+                r#"
+            WITH RECURSIVE
+                -- List of all block hashes that are equal to the finalized block or above.
+                finalized_and_above_blocks(block_hash) AS (
+                    SELECT blocks.hash
+                    FROM blocks
+                    JOIN meta ON meta.key = "finalized"
+                    WHERE blocks.number >= meta.value_number
+                ),
+
+                -- List of all trie nodes for these blocks.
+                trie_nodes(block_hash, node_hash, node_key, is_present) AS (
+                    SELECT  blocks.hash, blocks.state_trie_root_hash,
+                            CASE WHEN trie_node.partial_key IS NULL THEN X'' ELSE trie_node.partial_key END,
+                            trie_node.hash IS NOT NULL
+                        FROM blocks
+                        JOIN finalized_and_above_blocks
+                            ON blocks.hash = finalized_and_above_blocks.block_hash
+                        LEFT JOIN trie_node
+                            ON trie_node.hash = blocks.state_trie_root_hash
+
+                    UNION ALL
+                    SELECT  trie_nodes.block_hash, trie_node_child.child_hash,
+                            CASE WHEN trie_node.hash IS NULL THEN CAST(trie_nodes.node_key || trie_node_child.child_num AS BLOB)
+                            ELSE CAST(trie_nodes.node_key || trie_node_child.child_num || trie_node.partial_key AS BLOB) END,
+                            trie_node.hash IS NOT NULL
+                        FROM trie_nodes
+                        JOIN trie_node_child
+                            ON trie_nodes.node_hash = trie_node_child.hash
+                        LEFT JOIN trie_node
+                            ON trie_node.hash = trie_node_child.child_hash
+                        WHERE trie_nodes.is_present
+
+                    UNION ALL
+                    SELECT  trie_nodes.block_hash, trie_node_storage.trie_root_ref,
+                            CASE WHEN trie_node.hash IS NULL THEN CAST(trie_nodes.node_key || X'10' AS BLOB)
+                            ELSE CAST(trie_nodes.node_key || X'10' || trie_node.partial_key AS BLOB) END,
+                            trie_node.hash IS NOT NULL
+                        FROM trie_nodes
+                        JOIN trie_node_storage
+                            ON trie_nodes.node_hash = trie_node_storage.node_hash AND trie_node_storage.trie_root_ref IS NOT NULL
+                        LEFT JOIN trie_node
+                            ON trie_node.hash = trie_node_storage.trie_root_ref
+                        WHERE trie_nodes.is_present
+                )
+
+            SELECT group_concat(HEX(trie_nodes.block_hash)), group_concat(CAST(blocks.number as TEXT)), trie_nodes.node_hash, group_concat(HEX(trie_nodes.node_key))
+            FROM trie_nodes
+            JOIN blocks ON blocks.hash = trie_nodes.block_hash
+            WHERE is_present = false
+            GROUP BY trie_nodes.node_hash
+            "#)
+            .map_err(|err| {
+                CorruptedError::Internal(
+                    InternalError(err),
+                )
+            })?;
+
+        let results = statement
+            .query_map((), |row| {
+                let block_hashes = row.get::<_, String>(0)?;
+                let block_numbers = row.get::<_, String>(1)?;
+                let node_hash = row.get::<_, Vec<u8>>(2)?;
+                let node_keys = row.get::<_, String>(3)?;
+                Ok((block_hashes, block_numbers, node_hash, node_keys))
+            })
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
+            .map(|row| {
+                let (block_hashes, block_numbers, trie_node_hash, node_keys) = match row {
+                    Ok(r) => r,
+                    Err(err) => return Err(CorruptedError::Internal(InternalError(err))),
+                };
+
+                let mut block_hashes_iter = block_hashes
+                    .split(',')
+                    .map(|hash| hex::decode(hash).unwrap());
+                let mut block_numbers_iter = block_numbers
+                    .split(',')
+                    .map(|n| <u64 as core::str::FromStr>::from_str(n).unwrap());
+                let mut node_keys_iter =
+                    node_keys.split(',').map(|hash| hex::decode(hash).unwrap());
+
+                let mut blocks = Vec::with_capacity(32);
+                loop {
+                    match (
+                        block_hashes_iter.next(),
+                        block_numbers_iter.next(),
+                        node_keys_iter.next(),
+                    ) {
+                        (Some(hash), Some(number), Some(node_key)) => {
+                            let hash = <[u8; 32]>::try_from(hash)
+                                .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
+                            let mut trie_node_key_nibbles = Vec::with_capacity(node_key.len());
+                            let mut parent_tries_paths_nibbles = Vec::with_capacity(node_key.len());
+                            for nibble in node_key {
+                                debug_assert!(nibble <= 16);
+                                if nibble == 16 {
+                                    parent_tries_paths_nibbles.push(trie_node_key_nibbles.clone());
+                                    trie_node_key_nibbles.clear();
+                                } else {
+                                    trie_node_key_nibbles.push(nibble);
+                                }
+                            }
+
+                            blocks.push(MissingTrieNodeBlock {
+                                hash,
+                                number,
+                                parent_tries_paths_nibbles,
+                                trie_node_key_nibbles,
+                            })
+                        }
+                        (None, None, None) => break,
+                        _ => {
+                            // The iterators are supposed to have the same number of elements.
+                            debug_assert!(false);
+                            break;
+                        }
+                    }
+                }
+
+                let trie_node_hash = <[u8; 32]>::try_from(trie_node_hash)
+                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?; // TODO: wrong error
+
+                debug_assert!(!blocks.is_empty());
+
+                Ok(MissingTrieNode {
+                    blocks,
+                    trie_node_hash,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(results)
+    }
+
     /// Changes the finalized block to the given one.
     ///
     /// The block must have been previously inserted using [`SqliteFullDatabase::insert`],
@@ -1539,6 +1688,33 @@ impl Drop for SqliteFullDatabase {
             let _ = self.database.get_mut().execute("PRAGMA optimize", ());
         }
     }
+}
+
+/// See [`SqliteFullDatabase::finalized_and_above_missing_trie_nodes_unordered`].
+#[derive(Debug)]
+pub struct MissingTrieNode {
+    /// Blocks the trie node is known to belong to.
+    ///
+    /// Guaranteed to never be empty.
+    ///
+    /// Only contains blocks whose number is superior or equal to the latest finalized block
+    /// number.
+    pub blocks: Vec<MissingTrieNodeBlock>,
+    /// Hash of the missing trie node.
+    pub trie_node_hash: [u8; 32],
+}
+
+/// See [`MissingTrieNode::blocks`].
+#[derive(Debug)]
+pub struct MissingTrieNodeBlock {
+    /// Hash of the block.
+    pub hash: [u8; 32],
+    /// Height of the block.
+    pub number: u64,
+    /// Path of the parent tries leading to the trie node.
+    pub parent_tries_paths_nibbles: Vec<Vec<u8>>,
+    /// Nibbles that compose the key of the trie node.
+    pub trie_node_key_nibbles: Vec<u8>,
 }
 
 pub struct InsertTrieNode<'a> {
