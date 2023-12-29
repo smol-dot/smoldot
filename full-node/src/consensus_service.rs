@@ -2502,9 +2502,10 @@ impl SyncBackground {
                 {
                     Ok(success) => success,
                     Err(ExecuteBlockError::VerificationFailure(
-                        ExecuteBlockVerificationFailureError::DatabaseParentAccess(
-                            full_sqlite::StorageAccessError::IncompleteStorage,
-                        ),
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                            error: full_sqlite::StorageAccessError::IncompleteStorage,
+                            ..
+                        },
                     )) => {
                         // The block verification failed because the storage of the parent
                         // is still being downloaded from the network.
@@ -2525,7 +2526,9 @@ impl SyncBackground {
                         return (self, false);
                     }
                     Err(ExecuteBlockError::VerificationFailure(
-                        ExecuteBlockVerificationFailureError::DatabaseParentAccess(error),
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                            error, ..
+                        },
                     )) => {
                         panic!("corrupted database: {error}")
                     }
@@ -2798,7 +2801,7 @@ pub async fn execute_block_and_insert(
         let mut call = runtime_host::run(runtime_host::Config {
             virtual_machine: parent_runtime,
             function_to_call: call_function,
-            parameter: iter::once(call_parameter),
+            parameter: iter::once(&call_parameter),
             storage_main_trie_changes: storage_changes.into_main_trie_diff(),
             max_log_level: 0,
             calculate_trie_changes: true,
@@ -2861,15 +2864,26 @@ pub async fn execute_block_and_insert(
                                 key.iter().copied(),
                             )
                         })
-                        .await
-                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
-                    let value = match value.as_ref() {
-                        Some((val, vers)) => Some((
+                        .await;
+                    let value = match value {
+                        Ok(Some((ref val, vers))) => Some((
                             iter::once(&val[..]),
-                            runtime_host::TrieEntryVersion::try_from(*vers)
+                            runtime_host::TrieEntryVersion::try_from(vers)
                                 .map_err(|_| ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion)?
                         )),
-                        None => None,
+                        Ok(None) => None,
+                        Err(error) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                            function_name: call_function,
+                                            parameter: call_parameter,
+                                        },
+                                },
+                            ))
+                        }
                     };
 
                     database_accesses_duration += when_database_access_started.elapsed();
@@ -2895,8 +2909,22 @@ pub async fn execute_block_and_insert(
                                 key_nibbles.iter().copied(),
                             )
                         })
-                        .await
-                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
+                        .await;
+                    let merkle_value = match merkle_value {
+                        Ok(mv) => mv,
+                        Err(error) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                            function_name: call_function,
+                                            parameter: call_parameter,
+                                        },
+                                },
+                            ))
+                        }
+                    };
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
@@ -2929,8 +2957,22 @@ pub async fn execute_block_and_insert(
                                 branch_nodes,
                             )
                         })
-                        .await
-                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
+                        .await;
+                    let next_key = match next_key {
+                        Ok(k) => k,
+                        Err(error) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                            function_name: call_function,
+                                            parameter: call_parameter,
+                                        },
+                                },
+                            ))
+                        }
+                    };
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_key(
@@ -2975,7 +3017,7 @@ pub async fn execute_block_and_insert(
                 }
                 None => {
                     let parent_block_hash = *parent_block_hash;
-                    database
+                    let access = database
                         .with_database(move |db| {
                             db.block_storage_get(
                                 &parent_block_hash,
@@ -2983,32 +3025,55 @@ pub async fn execute_block_and_insert(
                                 trie::bytes_to_nibbles(b":code".into_iter().copied()).map(u8::from),
                             )
                         })
-                        .await
-                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?
-                        .map(|(v, _)| Cow::Owned(v))
-                        .ok_or(ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase)?
+                        .await;
+                    match access {
+                        Ok(Some((v, _))) => Cow::Owned(v),
+                        Ok(None) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase,
+                            ))
+                        }
+                        Err(error) => return Err(ExecuteBlockError::VerificationFailure(
+                            ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                error,
+                                context:
+                                    ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess,
+                            },
+                        )),
+                    }
                 }
             };
 
             let new_heap_pages = match new_heap_pages {
                 Some(c) => executor::storage_heap_pages_to_value(c)
                     .map_err(ExecuteBlockInvalidBlockError::InvalidNewHeapPages)?,
-                None => executor::storage_heap_pages_to_value({
-                    let parent_block_hash = *parent_block_hash;
-                    database
-                        .with_database(move |db| {
-                            db.block_storage_get(
-                                &parent_block_hash,
-                                iter::empty::<iter::Empty<_>>(),
-                                trie::bytes_to_nibbles(b":heappages".into_iter().copied())
-                                    .map(u8::from),
-                            )
-                        })
-                        .await
-                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?
-                        .as_ref()
-                        .map(|(v, _)| &v[..])
-                })
+                None => executor::storage_heap_pages_to_value(
+                    {
+                        let parent_block_hash = *parent_block_hash;
+                        let access = database
+                            .with_database(move |db| {
+                                db.block_storage_get(
+                                    &parent_block_hash,
+                                    iter::empty::<iter::Empty<_>>(),
+                                    trie::bytes_to_nibbles(b":heappages".into_iter().copied())
+                                        .map(u8::from),
+                                )
+                            })
+                            .await;
+                        match access {
+                            Ok(Some((v, _))) => Some(v),
+                            Ok(None) => None,
+                            Err(error) => return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess,
+                                },
+                            )),
+                        }
+                    }
+                    .as_deref(),
+                )
                 .map_err(ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase)?,
             };
 
@@ -3157,7 +3222,13 @@ pub enum ExecuteBlockVerificationFailureError {
     /// Error starting the runtime execution.
     RuntimeStartError(executor::host::StartErr),
     /// Error while accessing the parent block in the database.
-    DatabaseParentAccess(full_sqlite::StorageAccessError),
+    #[display(fmt = "Error while accessing the parent block in the database: {error}")]
+    DatabaseParentAccess {
+        /// Error that happened.
+        error: full_sqlite::StorageAccessError,
+        /// In which context the error hapened.
+        context: ExecuteBlockDatabaseAccessFailureContext,
+    },
     /// State trie version stored in database is invalid.
     DatabaseInvalidStateTrieVersion,
     /// Runtime has tried to call a forbidden host function.
@@ -3166,6 +3237,20 @@ pub enum ExecuteBlockVerificationFailureError {
     ParentCodeEmptyInDatabase,
     /// The `:heappages` after the execution is invalid.
     InvaliParentHeapPagesInDatabase(executor::InvalidHeapPagesError),
+}
+
+/// See [`ExecuteBlockVerificationFailureError::DatabaseParentAccess`].
+#[derive(Debug)]
+pub enum ExecuteBlockDatabaseAccessFailureContext {
+    /// Error while accessing the `:code` or `:heappages` key of the parent.
+    ParentRuntimeAccess,
+    /// Error while performing a runtime call.
+    FunctionCall {
+        /// Name of the function that was being called during the access error.
+        function_name: &'static str,
+        /// Parameter to the function that was being called during the access error.
+        parameter: Vec<u8>,
+    },
 }
 
 /// See [`ExecuteBlockError::InvalidBlock`].
