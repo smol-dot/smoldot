@@ -2442,8 +2442,6 @@ impl SyncBackground {
             all::ProcessOne::VerifyBlock(verify) => {
                 // TODO: ban peer in case of verification failure
                 let when_verification_started = Instant::now();
-                let mut database_accesses_duration = Duration::new(0, 0);
-                let mut runtime_build_duration = Duration::new(0, 0);
                 let hash_to_verify = verify.hash();
 
                 let _jaeger_span = self.jaeger_service.block_verify_span(&hash_to_verify);
@@ -2471,133 +2469,6 @@ impl SyncBackground {
                         }
                     };
 
-                let parent_hash = *header_verification_success.parent_hash();
-
-                let core_execute_block_param = {
-                    let header = header_verification_success.scale_encoded_header();
-                    let mut unsealed_header = header::decode(&header, block_number_bytes).unwrap();
-                    let _seal_log = unsealed_header.digest.pop_seal();
-
-                    let encoded_body_len = smoldot::util::encode_scale_compact_usize(
-                        header_verification_success
-                            .scale_encoded_extrinsics()
-                            .unwrap()
-                            .len(),
-                    );
-                    unsealed_header
-                        .scale_encoding(block_number_bytes)
-                        .map(|b| either::Right(either::Left(b)))
-                        .chain(iter::once(either::Right(either::Right(encoded_body_len))))
-                        .chain(
-                            header_verification_success
-                                .scale_encoded_extrinsics()
-                                .unwrap()
-                                .map(either::Left),
-                        )
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
-                            a
-                        })
-                };
-
-                let calls = [
-                    ("BlockBuilder_check_inherents", {
-                        let inherent_data = smoldot::verify::inherents::InherentData {
-                            timestamp: u64::try_from(unix_time.as_millis())
-                                .unwrap_or(u64::max_value()),
-                        };
-                        let inherent_data = inherent_data.as_raw_list();
-
-                        let mut v = core_execute_block_param.clone();
-                        v.extend_from_slice(
-                            smoldot::util::encode_scale_compact_usize(inherent_data.len()).as_ref(),
-                        );
-                        for (id, item) in inherent_data {
-                            v.extend_from_slice(&id);
-                            v.extend_from_slice(
-                                smoldot::util::encode_scale_compact_usize(item.as_ref().len())
-                                    .as_ref(),
-                            );
-                            v.extend_from_slice(item.as_ref());
-                        }
-                        v
-                    }),
-                    ("Core_execute_block", core_execute_block_param),
-                ];
-
-                for (method, parameter) in calls {
-                    let proof = {
-                        let target = self
-                            .peers_source_id_map
-                            .keys()
-                            .choose(&mut rand::thread_rng())
-                            .unwrap();
-                        self.network_service
-                            .clone()
-                            .call_proof_request(
-                                target.clone(),
-                                self.network_chain_id,
-                                CallProofRequestConfig {
-                                    block_hash: parent_hash,
-                                    method: Cow::Borrowed(method),
-                                    parameter_vectored: iter::once(parameter),
-                                },
-                            )
-                            .await
-                            .unwrap()
-                    };
-
-                    self.database
-                    .with_database(move |database| {
-                        let decoded_proof = trie::proof_decode::decode_and_verify_proof(
-                            trie::proof_decode::Config {
-                                proof: proof.decode(),
-                            },
-                        )
-                        .unwrap();
-
-                        for (_, entry) in decoded_proof.iter_ordered() {
-                            // TODO: check the state root hash
-                            database.insert_trie_nodes(
-                                iter::once(full_sqlite::InsertTrieNode {
-                                    merkle_value: Cow::Borrowed(entry.merkle_value),
-                                    partial_key_nibbles: Cow::Owned(entry.partial_key_nibbles.into_iter().map(|n| u8::from(n)).collect()),
-                                    children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
-                                    storage_value: match entry.trie_node_info.storage_value {
-                                        trie::proof_decode::StorageValue::HashKnownValueMissing(
-                                            _,
-                                        ) => return,
-                                        trie::proof_decode::StorageValue::None => {
-                                            full_sqlite::InsertTrieNodeStorageValue::NoValue
-                                        }
-                                        trie::proof_decode::StorageValue::Known {
-                                            value, ..
-                                        } => full_sqlite::InsertTrieNodeStorageValue::Value {
-                                            value: Cow::Borrowed(value),
-                                            references_merkle_value: false, // TODO:
-                                        },
-                                    },
-                                }),
-                                match entry.trie_node_info.storage_value {
-                                    trie::proof_decode::StorageValue::None => 0, // TODO: ?!
-                                    trie::proof_decode::StorageValue::HashKnownValueMissing(
-                                        hash,
-                                    ) => return,
-                                    trie::proof_decode::StorageValue::Known {
-                                        inline: true,
-                                        ..
-                                    } => 0,
-                                    trie::proof_decode::StorageValue::Known {
-                                        inline: false,
-                                        ..
-                                    } => 1,
-                                },
-                            ).unwrap();
-                        }
-                    })
-                    .await;
-                }
-
                 let parent_info = header_verification_success.parent_user_data().map(|b| {
                     let NonFinalizedBlock::Verified { runtime } = b else {
                         unreachable!()
@@ -2608,460 +2479,59 @@ impl SyncBackground {
                     .as_ref()
                     .cloned()
                     .unwrap_or_else(|| self.finalized_runtime.clone());
-                let mut parent_runtime = (*parent_runtime_arc).clone();
 
                 // TODO: check this block against the chain spec's badBlocks
-                let mut storage_changes = runtime_host::StorageChanges::empty();
-                let mut state_trie_version = runtime_host::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
-                for (call_function, call_parameter) in [
-                    (
-                        body_only::CHECK_INHERENTS_FUNCTION_NAME,
-                        body_only::check_inherents_parameter(
-                            header_verification_success.scale_encoded_header(),
-                            block_number_bytes,
-                            header_verification_success
-                                .scale_encoded_extrinsics()
-                                .unwrap(),
-                            unix_time,
-                        )
-                        .unwrap()
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        }),
-                    ),
-                    (
-                        body_only::EXECUTE_BLOCK_FUNCTION_NAME,
-                        body_only::execute_block_parameter(
-                            header_verification_success.scale_encoded_header(),
-                            block_number_bytes,
-                            header_verification_success
-                                .scale_encoded_extrinsics()
-                                .unwrap(),
-                        )
-                        .unwrap()
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        }),
-                    ),
-                ] {
-                    let mut call = match runtime_host::run(runtime_host::Config {
-                        virtual_machine: parent_runtime,
-                        function_to_call: call_function,
-                        parameter: iter::once(call_parameter),
-                        storage_main_trie_changes: storage_changes.into_main_trie_diff(),
-                        max_log_level: 0,
-                        calculate_trie_changes: true,
-                    }) {
-                        Ok(c) => c,
-                        Err((error, _)) => {
-                            // Print a separate warning because it is important for the user
-                            // to be aware of the verification failure.
-                            // `error` is last because it's quite big.
-                            // TODO: DRY, maybe convert the error into a runtime_host::RuntimeHostVm::Finished(Err())
-                            self.log_callback.log(
-                                LogLevel::Warn,
-                                format!(
-                                    "failed-block-verification; hash={}; height={}; \
-                                    total_duration={:?}; error={}",
-                                    HashDisplay(&hash_to_verify),
-                                    header_verification_success.height(),
-                                    when_verification_started.elapsed(),
-                                    error
-                                ),
-                            );
-                            self.sync = header_verification_success.reject_bad_block();
-                            return (self, true);
-                        }
-                    };
-
-                    loop {
-                        match call {
-                            runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                                // Print a separate warning because it is important for the user
-                                // to be aware of the verification failure.
-                                // `error` is last because it's quite big.
-                                self.log_callback.log(
-                                    LogLevel::Warn,
-                                    format!(
-                                        "failed-block-verification; hash={}; height={}; \
-                                        total_duration={:?}; error={}",
-                                        HashDisplay(&hash_to_verify),
-                                        header_verification_success.height(),
-                                        when_verification_started.elapsed(),
-                                        error
-                                    ),
-                                );
-                                self.sync = header_verification_success.reject_bad_block();
-                                return (self, true);
-                            }
-                            runtime_host::RuntimeHostVm::Finished(Ok(runtime_host::Success {
-                                virtual_machine,
-                                storage_changes: storage_changes_update,
-                                state_trie_version: state_trie_version_update,
-                                ..
-                            })) => {
-                                let output_is_erroneous = {
-                                    let output = virtual_machine.value();
-                                    // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
-                                    if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
-                                        body_only::check_check_inherents_output(output.as_ref())
-                                            .is_err()
-                                    } else {
-                                        body_only::check_execute_block_output(output.as_ref())
-                                            .is_err()
-                                    }
-                                };
-                                if output_is_erroneous {
-                                    // TODO: logs
-                                    self.sync = header_verification_success.reject_bad_block();
-                                    return (self, true);
-                                }
-
-                                storage_changes = storage_changes_update;
-                                state_trie_version = state_trie_version_update;
-                                parent_runtime = virtual_machine.into_prototype();
-                                break;
-                            }
-
-                            runtime_host::RuntimeHostVm::StorageGet(req) => {
-                                let when_database_access_started = Instant::now();
-                                let parent_paths = req.child_trie().map(|child_trie| {
-                                    trie::bytes_to_nibbles(
-                                        b":child_storage:default:".iter().copied(),
-                                    )
-                                    .chain(trie::bytes_to_nibbles(
-                                        child_trie.as_ref().iter().copied(),
-                                    ))
-                                    .map(u8::from)
-                                    .collect::<Vec<_>>()
-                                });
-                                let key =
-                                    trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
-                                        .map(u8::from)
-                                        .collect::<Vec<_>>();
-                                let value = self
-                                    .database
-                                    .with_database(move |db| {
-                                        db.block_storage_get(
-                                            &parent_hash,
-                                            parent_paths.into_iter().map(|p| p.into_iter()),
-                                            key.iter().copied(),
-                                        )
-                                    })
-                                    .await
-                                    .expect("database access error");
-                                let value = value.as_ref().map(|(val, vers)| {
-                                    (
-                                        iter::once(&val[..]),
-                                        runtime_host::TrieEntryVersion::try_from(*vers)
-                                            .expect("corrupted database"),
-                                    )
-                                });
-
-                                database_accesses_duration +=
-                                    when_database_access_started.elapsed();
-                                call = req.inject_value(value);
-                            }
-                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
-                                let when_database_access_started = Instant::now();
-
-                                let parent_paths = req.child_trie().map(|child_trie| {
-                                    trie::bytes_to_nibbles(
-                                        b":child_storage:default:".iter().copied(),
-                                    )
-                                    .chain(trie::bytes_to_nibbles(
-                                        child_trie.as_ref().iter().copied(),
-                                    ))
-                                    .map(u8::from)
-                                    .collect::<Vec<_>>()
-                                });
-                                let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
-
-                                let merkle_value = self
-                                    .database
-                                    .with_database(move |db| {
-                                        db.block_storage_closest_descendant_merkle_value(
-                                            &parent_hash,
-                                            parent_paths.into_iter().map(|p| p.into_iter()),
-                                            key_nibbles.iter().copied(),
-                                        )
-                                    })
-                                    .await
-                                    .expect("database access error");
-
-                                database_accesses_duration +=
-                                    when_database_access_started.elapsed();
-                                call =
-                                    req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
-                            }
-                            runtime_host::RuntimeHostVm::NextKey(req) => {
-                                let when_database_access_started = Instant::now();
-
-                                let parent_paths = req.child_trie().map(|child_trie| {
-                                    trie::bytes_to_nibbles(
-                                        b":child_storage:default:".iter().copied(),
-                                    )
-                                    .chain(trie::bytes_to_nibbles(
-                                        child_trie.as_ref().iter().copied(),
-                                    ))
-                                    .map(u8::from)
-                                    .collect::<Vec<_>>()
-                                });
-                                let key_nibbles = req
-                                    .key()
-                                    .map(u8::from)
-                                    .chain(if req.or_equal() { None } else { Some(0u8) })
-                                    .collect::<Vec<_>>();
-                                let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
-
-                                let branch_nodes = req.branch_nodes();
-                                let next_key = self
-                                    .database
-                                    .with_database(move |db| {
-                                        db.block_storage_next_key(
-                                            &parent_hash,
-                                            parent_paths.into_iter().map(|p| p.into_iter()),
-                                            key_nibbles.iter().copied(),
-                                            prefix_nibbles.iter().copied(),
-                                            branch_nodes,
-                                        )
-                                    })
-                                    .await
-                                    .expect("database access error");
-
-                                database_accesses_duration +=
-                                    when_database_access_started.elapsed();
-                                call = req.inject_key(next_key.map(|k| {
-                                    k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
-                                }));
-                            }
-                            runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
-                                // Ignore offchain storage writes at the moment.
-                                call = req.resume();
-                            }
-                            runtime_host::RuntimeHostVm::LogEmit(req) => {
-                                // Logs are ignored.
-                                call = req.resume();
-                            }
-                            runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
-                                call = sig.verify_and_resume();
-                            }
-                            runtime_host::RuntimeHostVm::Offchain(_) => {
-                                // Offchain storage calls are forbidden.
-                                // TODO: DRY, maybe convert the error into a runtime_host::RuntimeHostVm::Finished(Err())
-                                self.log_callback.log(
-                                    LogLevel::Warn,
-                                    format!(
-                                        "failed-block-verification; hash={}; height={}; \
-                                        total_duration={:?}; error=forbidden-offchain-call",
-                                        HashDisplay(&hash_to_verify),
-                                        header_verification_success.height(),
-                                        when_verification_started.elapsed()
-                                    ),
-                                );
-                                self.sync = header_verification_success.reject_bad_block();
-                                return (self, true);
-                            }
-                        }
-                    }
-                }
-
-                // If the block performs a runtime upgrade, compile the new runtime.
-                // The block is rejected if the new runtime doesn't successfully compile.
-                let new_runtime: Option<executor::host::HostVmPrototype> = match (
-                    storage_changes.main_trie_diff_get(b":code"),
-                    storage_changes.main_trie_diff_get(b":heappages"),
-                ) {
-                    (None, None) => None,
-                    (new_code, new_heap_pages) => {
-                        let new_code = match new_code {
-                            Some(c) => c.map(Cow::Borrowed),
-                            None => self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_get(
-                                        &parent_hash,
-                                        iter::empty::<iter::Empty<_>>(),
-                                        trie::bytes_to_nibbles(b":code".into_iter().copied())
-                                            .map(u8::from),
-                                    )
-                                })
-                                .await
-                                .expect("database access error")
-                                .map(|(v, _)| Cow::Owned(v)),
-                        };
-
-                        let new_code = match new_code {
-                            Some(c) => c,
-                            None => {
-                                // TODO: logs
-                                self.sync = header_verification_success.reject_bad_block();
-                                return (self, true);
-                            }
-                        };
-
-                        let new_heap_pages = match new_heap_pages {
-                            Some(c) => c.map(Cow::Borrowed),
-                            None => self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_get(
-                                        &parent_hash,
-                                        iter::empty::<iter::Empty<_>>(),
-                                        trie::bytes_to_nibbles(b":heappages".into_iter().copied())
-                                            .map(u8::from),
-                                    )
-                                })
-                                .await
-                                .expect("database access error")
-                                .map(|(v, _)| Cow::Owned(v)),
-                        };
-
-                        let new_heap_pages = match executor::storage_heap_pages_to_value(
-                            new_heap_pages.as_deref(),
-                        ) {
-                            Ok(c) => c,
-                            Err(_) => {
-                                // TODO: logs
-                                self.sync = header_verification_success.reject_bad_block();
-                                return (self, true);
-                            }
-                        };
-
-                        let before_runtime_build = Instant::now();
-                        match host::HostVmPrototype::new(host::Config {
-                            module: &new_code,
-                            heap_pages: new_heap_pages,
-                            exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
-                            allow_unresolved_imports: false,
-                        }) {
-                            Ok(vm) => {
-                                runtime_build_duration += before_runtime_build.elapsed();
-                                Some(vm)
-                            }
-                            Err(_) => {
-                                // TODO: logs
-                                self.sync = header_verification_success.reject_bad_block();
-                                return (self, true);
-                            }
-                        }
-                    }
-                };
-
-                let storage_changes = Arc::new(storage_changes);
-
-                // Insert the block in the database.
-                let when_database_access_started = Instant::now();
-                self.database
-                    .with_database_detached({
-                        let storage_changes = storage_changes.clone();
-                        let scale_encoded_header =
-                            header_verification_success.scale_encoded_header().to_vec();
-                        let body = header_verification_success
-                            .scale_encoded_extrinsics()
-                            .unwrap()
-                            .map(|tx| tx.as_ref().to_owned())
-                            .collect::<Vec<_>>();
-                        move |database| {
-                            let result = database.insert(
-                                &scale_encoded_header,
-                                is_new_best,
-                                body.into_iter(),
-                            );
-
-                            match result {
-                                Ok(()) => {}
-                                Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                Err(err) => panic!("{}", err),
-                            }
-
-                            let trie_nodes = storage_changes
-                                .trie_changes_iter_ordered()
-                                .unwrap()
-                                .filter_map(|(_child_trie, key, change)| {
-                                    let runtime_host::TrieChange::InsertUpdate {
-                                        new_merkle_value,
-                                        partial_key,
-                                        children_merkle_values,
-                                        new_storage_value,
-                                    } = &change
-                                    else {
-                                        return None;
-                                    };
-
-                                    // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
-                                    let references_merkle_value = key
-                                        .iter()
-                                        .copied()
-                                        .zip(trie::bytes_to_nibbles(
-                                            b":child_storage:".iter().copied(),
-                                        ))
-                                        .all(|(a, b)| a == b);
-
-                                    Some(full_sqlite::InsertTrieNode {
-                                        merkle_value: (&new_merkle_value[..]).into(),
-                                        children_merkle_values: array::from_fn(|n| {
-                                            children_merkle_values[n]
-                                                .as_ref()
-                                                .map(|v| From::from(&v[..]))
-                                        }),
-                                        storage_value: match new_storage_value {
-                                            runtime_host::TrieChangeStorageValue::Modified {
-                                                new_value: Some(value),
-                                            } => full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                value: Cow::Borrowed(value),
-                                                references_merkle_value,
-                                            },
-                                            runtime_host::TrieChangeStorageValue::Modified {
-                                                new_value: None,
-                                            } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                            runtime_host::TrieChangeStorageValue::Unmodified => {
-                                                // TODO: overhead, and no child trie support
-                                                if let Some((value_in_parent, _)) = database
-                                                    .block_storage_get(
-                                                        &parent_hash,
-                                                        iter::empty::<iter::Empty<_>>(),
-                                                        key.iter().map(|n| u8::from(*n)),
-                                                    )
-                                                    .unwrap()
-                                                {
-                                                    full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                        value: Cow::Owned(value_in_parent),
-                                                        references_merkle_value,
-                                                    }
-                                                } else {
-                                                    full_sqlite::InsertTrieNodeStorageValue::NoValue
-                                                }
-                                            }
-                                        },
-                                        partial_key_nibbles: partial_key
-                                            .iter()
-                                            .map(|n| u8::from(*n))
-                                            .collect::<Vec<_>>()
-                                            .into(),
-                                    })
-                                })
-                                .collect::<Vec<_>>();
-
-                            let result = database.insert_trie_nodes(
-                                trie_nodes.into_iter(),
-                                u8::from(state_trie_version),
-                            );
-
-                            match result {
-                                Ok(()) => {}
-                                Err(err) => panic!("{}", err),
-                            }
-                        }
-                    })
-                    .await;
-                database_accesses_duration += when_database_access_started.elapsed();
 
                 let height = header_verification_success.height();
                 let scale_encoded_header =
                     header_verification_success.scale_encoded_header().to_vec();
+
+                let execute_block_success = match execute_block_and_insert(
+                    &self.database,
+                    (*parent_runtime_arc).clone(),
+                    &header_verification_success.parent_hash(),
+                    header_verification_success.scale_encoded_header(),
+                    block_number_bytes,
+                    header_verification_success
+                        .scale_encoded_extrinsics()
+                        .unwrap(),
+                    unix_time,
+                    is_new_best,
+                )
+                .await
+                {
+                    Ok(success) => success,
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess(error),
+                    )) => {
+                        panic!("corrupted database: {error}")
+                    }
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase
+                        | ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase(_),
+                    )) => panic!("corrupted database"),
+                    Err(error) => {
+                        // Print a separate warning because it is important for the user
+                        // to be aware of the verification failure.
+                        // `error` is last because it's quite big.
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!(
+                                "failed-block-verification; hash={}; height={}; \
+                                total_duration={:?}; error={error}",
+                                HashDisplay(&hash_to_verify),
+                                header_verification_success.height(),
+                                when_verification_started.elapsed()
+                            ),
+                        );
+                        // Note that some errors are verification failures errors that shouldn't
+                        // lead to the block being marked as bad. However, there's not much else
+                        // we can do here as trying to verify the block again would likely lead to
+                        // the same error again. Marking the block as bad is a reasonable solution.
+                        self.sync = header_verification_success.reject_bad_block();
+                        return (self, true);
+                    }
+                };
 
                 self.log_callback.log(
                     LogLevel::Debug,
@@ -3072,11 +2542,17 @@ impl SyncBackground {
                         HashDisplay(&hash_to_verify),
                         height,
                         when_verification_started.elapsed(),
-                        database_accesses_duration,
-                        runtime_build_duration,
+                        execute_block_success.database_accesses_duration,
+                        execute_block_success.runtime_build_duration,
                         is_new_best
                     ),
                 );
+
+                match execute_block_success.block_insertion {
+                    Ok(()) => {}
+                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                    Err(error) => panic!("failed to insert block in database: {error}"),
+                }
 
                 // Notify the subscribers.
                 debug_assert!(self.pending_notification.is_none());
@@ -3085,12 +2561,13 @@ impl SyncBackground {
                         is_new_best,
                         scale_encoded_header: scale_encoded_header.clone(),
                         block_hash: header_verification_success.hash(),
-                        runtime_update: new_runtime
+                        runtime_update: execute_block_success
+                            .new_runtime
                             .as_ref()
                             .map(|new_runtime| Arc::new(new_runtime.clone())),
-                        parent_hash,
+                        parent_hash: *header_verification_success.parent_hash(),
                     },
-                    storage_changes: storage_changes.clone(),
+                    storage_changes: execute_block_success.storage_changes.clone(),
                 });
 
                 // Processing has made a step forward.
@@ -3099,7 +2576,7 @@ impl SyncBackground {
 
                 // Store the storage of the children.
                 self.sync[(height, &hash_to_verify)] = NonFinalizedBlock::Verified {
-                    runtime: if let Some(new_runtime) = new_runtime {
+                    runtime: if let Some(new_runtime) = execute_block_success.new_runtime {
                         Arc::new(new_runtime)
                     } else {
                         parent_runtime_arc
@@ -3246,4 +2723,439 @@ impl SyncBackground {
             }
         }
     }
+}
+
+/// Executes the given block. On success, inserts it and its storage into the database.
+// TODO: use a config struct for the parameters?
+pub async fn execute_block_and_insert(
+    database: &database_thread::DatabaseThread,
+    mut parent_runtime: host::HostVmPrototype,
+    parent_block_hash: &[u8; 32],
+    block_header: &[u8],
+    block_number_bytes: usize,
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+    now_from_unix_epoch: Duration,
+    is_new_best: bool,
+) -> Result<ExecuteBlockSuccess, ExecuteBlockError> {
+    let mut database_accesses_duration = Duration::new(0, 0);
+    let mut runtime_build_duration = Duration::new(0, 0);
+
+    let mut storage_changes = runtime_host::StorageChanges::empty();
+    let mut state_trie_version = runtime_host::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
+    for (call_function, call_parameter) in [
+        (
+            body_only::CHECK_INHERENTS_FUNCTION_NAME,
+            body_only::check_inherents_parameter(
+                block_header,
+                block_number_bytes,
+                block_body.clone(),
+                now_from_unix_epoch,
+            )
+            .unwrap()
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
+        ),
+        (
+            body_only::EXECUTE_BLOCK_FUNCTION_NAME,
+            body_only::execute_block_parameter(
+                block_header,
+                block_number_bytes,
+                block_body.clone(),
+            )
+            .unwrap()
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
+        ),
+    ] {
+        let mut call = runtime_host::run(runtime_host::Config {
+            virtual_machine: parent_runtime,
+            function_to_call: call_function,
+            parameter: iter::once(call_parameter),
+            storage_main_trie_changes: storage_changes.into_main_trie_diff(),
+            max_log_level: 0,
+            calculate_trie_changes: true,
+        })
+        .map_err(|(err, _)| ExecuteBlockVerificationFailureError::RuntimeStartError(err))?;
+
+        loop {
+            match call {
+                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                    return Err(ExecuteBlockError::InvalidBlock(
+                        ExecuteBlockInvalidBlockError::RuntimeExecutionError(error.detail),
+                    ));
+                }
+                runtime_host::RuntimeHostVm::Finished(Ok(runtime_host::Success {
+                    virtual_machine,
+                    storage_changes: storage_changes_update,
+                    state_trie_version: state_trie_version_update,
+                    ..
+                })) => {
+                    // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
+                    let error = {
+                        let output = virtual_machine.value();
+                        if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
+                            body_only::check_check_inherents_output(output.as_ref())
+                                .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
+                                .err()
+                        } else {
+                            body_only::check_execute_block_output(output.as_ref())
+                                .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
+                                .err()
+                        }
+                    };
+                    if let Some(error) = error {
+                        return Err(ExecuteBlockError::InvalidBlock(error));
+                    }
+
+                    storage_changes = storage_changes_update;
+                    state_trie_version = state_trie_version_update;
+                    parent_runtime = virtual_machine.into_prototype();
+                    break;
+                }
+
+                runtime_host::RuntimeHostVm::StorageGet(req) => {
+                    let when_database_access_started = Instant::now();
+                    let parent_paths = req.child_trie().map(|child_trie| {
+                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                            .map(u8::from)
+                            .collect::<Vec<_>>()
+                    });
+                    let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                        .map(u8::from)
+                        .collect::<Vec<_>>();
+                    let parent_block_hash = *parent_block_hash;
+                    let value = database
+                        .with_database(move |db| {
+                            db.block_storage_get(
+                                &parent_block_hash,
+                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                key.iter().copied(),
+                            )
+                        })
+                        .await
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
+                    let value = value.as_ref().map(|(val, vers)| {
+                        (
+                            iter::once(&val[..]),
+                            runtime_host::TrieEntryVersion::try_from(*vers)
+                                .expect("corrupted database"), // TODO: proper error
+                        )
+                    });
+
+                    database_accesses_duration += when_database_access_started.elapsed();
+                    call = req.inject_value(value);
+                }
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
+                    let when_database_access_started = Instant::now();
+
+                    let parent_paths = req.child_trie().map(|child_trie| {
+                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                            .map(u8::from)
+                            .collect::<Vec<_>>()
+                    });
+                    let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                    let parent_block_hash = *parent_block_hash;
+                    let merkle_value = database
+                        .with_database(move |db| {
+                            db.block_storage_closest_descendant_merkle_value(
+                                &parent_block_hash,
+                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                key_nibbles.iter().copied(),
+                            )
+                        })
+                        .await
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
+
+                    database_accesses_duration += when_database_access_started.elapsed();
+                    call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+                }
+                runtime_host::RuntimeHostVm::NextKey(req) => {
+                    let when_database_access_started = Instant::now();
+
+                    let parent_paths = req.child_trie().map(|child_trie| {
+                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                            .map(u8::from)
+                            .collect::<Vec<_>>()
+                    });
+                    let key_nibbles = req
+                        .key()
+                        .map(u8::from)
+                        .chain(if req.or_equal() { None } else { Some(0u8) })
+                        .collect::<Vec<_>>();
+                    let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                    let branch_nodes = req.branch_nodes();
+                    let parent_block_hash = *parent_block_hash;
+                    let next_key = database
+                        .with_database(move |db| {
+                            db.block_storage_next_key(
+                                &parent_block_hash,
+                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                key_nibbles.iter().copied(),
+                                prefix_nibbles.iter().copied(),
+                                branch_nodes,
+                            )
+                        })
+                        .await
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
+
+                    database_accesses_duration += when_database_access_started.elapsed();
+                    call = req.inject_key(
+                        next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
+                    );
+                }
+                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                    // Ignore offchain storage writes at the moment.
+                    call = req.resume();
+                }
+                runtime_host::RuntimeHostVm::LogEmit(req) => {
+                    // Logs are ignored.
+                    call = req.resume();
+                }
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    call = sig.verify_and_resume();
+                }
+                runtime_host::RuntimeHostVm::Offchain(_) => {
+                    // Offchain storage calls are forbidden.
+                    return Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
+                    ));
+                }
+            }
+        }
+    }
+
+    // If the block performs a runtime upgrade, compile the new runtime.
+    // The block is rejected if the new runtime doesn't successfully compile.
+    let new_runtime: Option<executor::host::HostVmPrototype> = match (
+        storage_changes.main_trie_diff_get(b":code"),
+        storage_changes.main_trie_diff_get(b":heappages"),
+    ) {
+        (None, None) => None,
+        (new_code, new_heap_pages) => {
+            let new_code = match new_code {
+                Some(Some(c)) => Cow::Borrowed(c),
+                Some(None) => {
+                    return Err(ExecuteBlockError::InvalidBlock(
+                        ExecuteBlockInvalidBlockError::EmptyCode,
+                    ))
+                }
+                None => {
+                    let parent_block_hash = *parent_block_hash;
+                    database
+                        .with_database(move |db| {
+                            db.block_storage_get(
+                                &parent_block_hash,
+                                iter::empty::<iter::Empty<_>>(),
+                                trie::bytes_to_nibbles(b":code".into_iter().copied()).map(u8::from),
+                            )
+                        })
+                        .await
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?
+                        .map(|(v, _)| Cow::Owned(v))
+                        .ok_or(ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase)?
+                }
+            };
+
+            let new_heap_pages = match new_heap_pages {
+                Some(c) => executor::storage_heap_pages_to_value(c)
+                    .map_err(ExecuteBlockInvalidBlockError::InvalidNewHeapPages)?,
+                None => executor::storage_heap_pages_to_value({
+                    let parent_block_hash = *parent_block_hash;
+                    database
+                        .with_database(move |db| {
+                            db.block_storage_get(
+                                &parent_block_hash,
+                                iter::empty::<iter::Empty<_>>(),
+                                trie::bytes_to_nibbles(b":heappages".into_iter().copied())
+                                    .map(u8::from),
+                            )
+                        })
+                        .await
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?
+                        .as_ref()
+                        .map(|(v, _)| &v[..])
+                })
+                .map_err(ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase)?,
+            };
+
+            let before_runtime_build = Instant::now();
+            let vm = host::HostVmPrototype::new(host::Config {
+                module: &new_code,
+                heap_pages: new_heap_pages,
+                exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
+                allow_unresolved_imports: false,
+            })
+            .map_err(ExecuteBlockInvalidBlockError::InvalidNewRuntime)?;
+            runtime_build_duration += before_runtime_build.elapsed();
+            Some(vm)
+        }
+    };
+
+    let storage_changes = Arc::new(storage_changes);
+
+    // Insert the block in the database.
+    let when_database_access_started = Instant::now();
+    let block_insertion = database
+        .with_database({
+            let parent_block_hash = *parent_block_hash;
+            let storage_changes = storage_changes.clone();
+            let block_header = block_header.to_owned();
+            let block_body = block_body
+                .map(|tx| tx.as_ref().to_owned())
+                .collect::<Vec<_>>();
+            move |database| {
+                database.insert(&block_header, is_new_best, block_body.into_iter())?;
+
+                let trie_nodes = storage_changes
+                    .trie_changes_iter_ordered()
+                    .unwrap()
+                    .filter_map(|(_child_trie, key, change)| {
+                        let runtime_host::TrieChange::InsertUpdate {
+                            new_merkle_value,
+                            partial_key,
+                            children_merkle_values,
+                            new_storage_value,
+                        } = &change
+                        else {
+                            return None;
+                        };
+
+                        // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                        let references_merkle_value = key
+                            .iter()
+                            .copied()
+                            .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                            .all(|(a, b)| a == b);
+
+                        Some(full_sqlite::InsertTrieNode {
+                            merkle_value: (&new_merkle_value[..]).into(),
+                            children_merkle_values: array::from_fn(|n| {
+                                children_merkle_values[n]
+                                    .as_ref()
+                                    .map(|v| From::from(&v[..]))
+                            }),
+                            storage_value: match new_storage_value {
+                                runtime_host::TrieChangeStorageValue::Modified {
+                                    new_value: Some(value),
+                                } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                    value: Cow::Borrowed(value),
+                                    references_merkle_value,
+                                },
+                                runtime_host::TrieChangeStorageValue::Modified {
+                                    new_value: None,
+                                } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                runtime_host::TrieChangeStorageValue::Unmodified => {
+                                    // TODO: overhead, and no child trie support
+                                    if let Some((value_in_parent, _)) = database
+                                        .block_storage_get(
+                                            &parent_block_hash,
+                                            iter::empty::<iter::Empty<_>>(),
+                                            key.iter().map(|n| u8::from(*n)),
+                                        )
+                                        .unwrap()
+                                    {
+                                        full_sqlite::InsertTrieNodeStorageValue::Value {
+                                            value: Cow::Owned(value_in_parent),
+                                            references_merkle_value,
+                                        }
+                                    } else {
+                                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                    }
+                                }
+                            },
+                            partial_key_nibbles: partial_key
+                                .iter()
+                                .map(|n| u8::from(*n))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                database
+                    .insert_trie_nodes(trie_nodes.into_iter(), u8::from(state_trie_version))
+                    .map_err(full_sqlite::InsertError::Corrupted)
+            }
+        })
+        .await;
+    database_accesses_duration += when_database_access_started.elapsed();
+
+    Ok(ExecuteBlockSuccess {
+        block_insertion,
+        new_runtime,
+        storage_changes,
+        database_accesses_duration,
+        runtime_build_duration,
+    })
+}
+
+/// Returned by [`execute_block_and_insert`] in case of success.
+#[derive(Debug)]
+pub struct ExecuteBlockSuccess {
+    /// Whether the block was successfully inserted in the database.
+    pub block_insertion: Result<(), full_sqlite::InsertError>,
+
+    /// If the block modifies the runtime, this contains the new runtime.
+    pub new_runtime: Option<host::HostVmPrototype>,
+
+    /// Changes to the storage performed during the execution.
+    pub storage_changes: Arc<runtime_host::StorageChanges>,
+
+    /// Total time the database accesses combined took.
+    pub database_accesses_duration: Duration,
+
+    /// Total time compiling the new runtime took. Equal to 0 if no runtime upgrade happened.
+    pub runtime_build_duration: Duration,
+}
+
+/// Error returned by [`execute_block_and_insert`].
+#[derive(Debug, derive_more::Display, derive_more::From)]
+pub enum ExecuteBlockError {
+    /// Failed to verify block.
+    VerificationFailure(ExecuteBlockVerificationFailureError),
+    /// Block has been verified as being invalid.
+    InvalidBlock(ExecuteBlockInvalidBlockError),
+}
+
+/// See [`ExecuteBlockError::VerificationFailure`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockVerificationFailureError {
+    /// Error starting the runtime execution.
+    RuntimeStartError(executor::host::StartErr),
+    /// Error while accessing the parent block in the database.
+    DatabaseParentAccess(full_sqlite::StorageAccessError),
+    /// Runtime has tried to call a forbidden host function.
+    ForbiddenHostFunction,
+    /// The `:code` of the parent block in database is empty.
+    ParentCodeEmptyInDatabase,
+    /// The `:heappages` after the execution is invalid.
+    InvaliParentHeapPagesInDatabase(executor::InvalidHeapPagesError),
+}
+
+/// See [`ExecuteBlockError::InvalidBlock`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockInvalidBlockError {
+    /// Error while executing the runtime.
+    RuntimeExecutionError(runtime_host::ErrorDetail),
+    /// Error in the output of `BlockBuilder_check_inherents`.
+    #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
+    CheckInherentsOutputError(body_only::InherentsOutputError),
+    /// Error in the output of `Core_execute_block`.
+    #[display(fmt = "Error in the output of Core_execute_block: {_0}")]
+    ExecuteBlockOutputError(body_only::ExecuteBlockOutputError),
+    /// The new `:code` after the execution is empty.
+    EmptyCode,
+    /// The `:heappages` after the execution is invalid.
+    InvalidNewHeapPages(executor::InvalidHeapPagesError),
+    /// Failed to compile the new runtime that the block upgrades to.
+    InvalidNewRuntime(host::NewErr),
 }
