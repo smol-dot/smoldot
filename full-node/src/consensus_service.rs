@@ -2151,7 +2151,7 @@ impl SyncBackground {
                 {
                     Ok(success) => success,
                     Err(ExecuteBlockError::VerificationFailure(
-                        ExecuteBlockVerificationFailureError::Database(error),
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess(error),
                     )) => {
                         panic!("corrupted database: {error}")
                     }
@@ -2196,6 +2196,12 @@ impl SyncBackground {
                         is_new_best
                     ),
                 );
+
+                match execute_block_success.block_insertion {
+                    Ok(()) => {}
+                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                    Err(error) => panic!("failed to insert block in database: {error}"),
+                }
 
                 // Notify the subscribers.
                 debug_assert!(self.pending_notification.is_none());
@@ -2481,7 +2487,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockVerificationFailureError::Database)?;
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
                     let value = value.as_ref().map(|(val, vers)| {
                         (
                             iter::once(&val[..]),
@@ -2514,7 +2520,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockVerificationFailureError::Database)?;
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
@@ -2548,7 +2554,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockVerificationFailureError::Database)?;
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?;
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_key(
@@ -2602,7 +2608,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockVerificationFailureError::Database)?
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?
                         .map(|(v, _)| Cow::Owned(v))
                         .ok_or(ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase)?
                 }
@@ -2623,7 +2629,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockVerificationFailureError::Database)?
+                        .map_err(ExecuteBlockVerificationFailureError::DatabaseParentAccess)?
                         .as_ref()
                         .map(|(v, _)| &v[..])
                 })
@@ -2647,7 +2653,7 @@ pub async fn execute_block_and_insert(
 
     // Insert the block in the database.
     let when_database_access_started = Instant::now();
-    database
+    let block_insertion = database
         .with_database({
             let parent_block_hash = *parent_block_hash;
             let storage_changes = storage_changes.clone();
@@ -2656,13 +2662,7 @@ pub async fn execute_block_and_insert(
                 .map(|tx| tx.as_ref().to_owned())
                 .collect::<Vec<_>>();
             move |database| {
-                let result = database.insert(&block_header, is_new_best, block_body.into_iter());
-
-                match result {
-                    Ok(()) => {}
-                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                    Err(err) => panic!("{}", err),
-                }
+                database.insert(&block_header, is_new_best, block_body.into_iter())?;
 
                 let trie_nodes = storage_changes
                     .trie_changes_iter_ordered()
@@ -2732,14 +2732,14 @@ pub async fn execute_block_and_insert(
 
                 database
                     .insert_trie_nodes(trie_nodes.into_iter(), u8::from(state_trie_version))
-                    .map_err(full_sqlite::StorageAccessError::Corrupted)
-                    .map_err(ExecuteBlockVerificationFailureError::Database)
+                    .map_err(full_sqlite::InsertError::Corrupted)
             }
         })
-        .await?;
+        .await;
     database_accesses_duration += when_database_access_started.elapsed();
 
     Ok(ExecuteBlockSuccess {
+        block_insertion,
         new_runtime,
         storage_changes,
         database_accesses_duration,
@@ -2750,6 +2750,9 @@ pub async fn execute_block_and_insert(
 /// Returned by [`execute_block_and_insert`] in case of success.
 #[derive(Debug)]
 pub struct ExecuteBlockSuccess {
+    /// Whether the block was successfully inserted in the database.
+    pub block_insertion: Result<(), full_sqlite::InsertError>,
+
     /// If the block modifies the runtime, this contains the new runtime.
     pub new_runtime: Option<host::HostVmPrototype>,
 
@@ -2777,8 +2780,8 @@ pub enum ExecuteBlockError {
 pub enum ExecuteBlockVerificationFailureError {
     /// Error starting the runtime execution.
     RuntimeStartError(executor::host::StartErr),
-    /// Error while accessing the database.
-    Database(full_sqlite::StorageAccessError),
+    /// Error while accessing the parent block in the database.
+    DatabaseParentAccess(full_sqlite::StorageAccessError),
     /// Runtime has tried to call a forbidden host function.
     ForbiddenHostFunction,
     /// The `:code` of the parent block in database is empty.
