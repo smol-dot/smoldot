@@ -154,6 +154,22 @@ pub struct StorageChanges {
 }
 
 impl StorageChanges {
+    /// Returns an empty [`StorageChanges`], as if the execution didn't modify anything.
+    pub fn empty() -> StorageChanges {
+        StorageChanges {
+            inner: PendingStorageChanges {
+                trie_diffs: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
+                stale_child_tries_root_hashes: hashbrown::HashSet::with_capacity_and_hasher(
+                    4,
+                    Default::default(),
+                ),
+                tries_changes: BTreeMap::new(),
+                offchain_storage_changes: BTreeMap::new(),
+            },
+            calculate_trie_changes: true,
+        }
+    }
+
     /// Returns the change, if any, at the given key of the main trie.
     ///
     /// Returns `None` if the runtime hasn't modified this entry in the main trie, and `Some(None)`
@@ -225,7 +241,8 @@ impl StorageChanges {
     /// Returns an iterator over the list of all changes performed to the tries (main trie and
     /// child tries included).
     ///
-    /// Returns `Some` if and only if [`Config::calculate_trie_changes`] was `true`.
+    /// Returns `Some` if and only if [`Config::calculate_trie_changes`] was `true` or if the
+    /// [`StorageChanges`] was created using [`StorageChanges::empty`].
     pub fn trie_changes_iter_ordered(
         &'_ self,
     ) -> Option<impl Iterator<Item = (Option<&'_ [u8]>, &'_ [Nibble], TrieChange<'_>)>> {
