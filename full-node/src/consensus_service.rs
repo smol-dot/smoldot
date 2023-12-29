@@ -2150,13 +2150,15 @@ impl SyncBackground {
                 .await
                 {
                     Ok(success) => success,
-                    Err(ExecuteBlockError::Database(error)) => {
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::Database(error),
+                    )) => {
                         panic!("corrupted database: {error}")
                     }
-                    Err(
-                        ExecuteBlockError::ParentCodeEmptyInDatabase
-                        | ExecuteBlockError::InvaliParentHeapPagesInDatabase(_),
-                    ) => panic!("corrupted database"),
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase
+                        | ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase(_),
+                    )) => panic!("corrupted database"),
                     Err(error) => {
                         // Print a separate warning because it is important for the user
                         // to be aware of the verification failure.
@@ -2171,6 +2173,10 @@ impl SyncBackground {
                                 when_verification_started.elapsed()
                             ),
                         );
+                        // Note that some errors are verification failures errors that shouldn't
+                        // lead to the block being marked as bad. However, there's not much else
+                        // we can do here as trying to verify the block again would likely lead to
+                        // the same error again. Marking the block as bad is a reasonable solution.
                         self.sync = header_verification_success.reject_bad_block();
                         return (self, true);
                     }
@@ -2416,12 +2422,14 @@ pub async fn execute_block_and_insert(
             max_log_level: 0,
             calculate_trie_changes: true,
         })
-        .map_err(|(err, _)| ExecuteBlockError::RuntimeStartError(err))?;
+        .map_err(|(err, _)| ExecuteBlockVerificationFailureError::RuntimeStartError(err))?;
 
         loop {
             match call {
                 runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                    return Err(ExecuteBlockError::RuntimeExecutionError(error.detail));
+                    return Err(ExecuteBlockError::InvalidBlock(
+                        ExecuteBlockInvalidBlockError::RuntimeExecutionError(error.detail),
+                    ));
                 }
                 runtime_host::RuntimeHostVm::Finished(Ok(runtime_host::Success {
                     virtual_machine,
@@ -2434,16 +2442,16 @@ pub async fn execute_block_and_insert(
                         let output = virtual_machine.value();
                         if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
                             body_only::check_check_inherents_output(output.as_ref())
-                                .map_err(ExecuteBlockError::CheckInherentsOutputError)
+                                .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
                                 .err()
                         } else {
                             body_only::check_execute_block_output(output.as_ref())
-                                .map_err(ExecuteBlockError::ExecuteBlockOutputError)
+                                .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
                                 .err()
                         }
                     };
                     if let Some(error) = error {
-                        return Err(error);
+                        return Err(ExecuteBlockError::InvalidBlock(error));
                     }
 
                     storage_changes = storage_changes_update;
@@ -2473,7 +2481,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockError::Database)?;
+                        .map_err(ExecuteBlockVerificationFailureError::Database)?;
                     let value = value.as_ref().map(|(val, vers)| {
                         (
                             iter::once(&val[..]),
@@ -2506,7 +2514,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockError::Database)?;
+                        .map_err(ExecuteBlockVerificationFailureError::Database)?;
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
@@ -2540,7 +2548,7 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockError::Database)?;
+                        .map_err(ExecuteBlockVerificationFailureError::Database)?;
 
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_key(
@@ -2560,7 +2568,9 @@ pub async fn execute_block_and_insert(
                 }
                 runtime_host::RuntimeHostVm::Offchain(_) => {
                     // Offchain storage calls are forbidden.
-                    return Err(ExecuteBlockError::ForbiddenHostFunction);
+                    return Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
+                    ));
                 }
             }
         }
@@ -2576,7 +2586,11 @@ pub async fn execute_block_and_insert(
         (new_code, new_heap_pages) => {
             let new_code = match new_code {
                 Some(Some(c)) => Cow::Borrowed(c),
-                Some(None) => return Err(ExecuteBlockError::EmptyCode),
+                Some(None) => {
+                    return Err(ExecuteBlockError::InvalidBlock(
+                        ExecuteBlockInvalidBlockError::EmptyCode,
+                    ))
+                }
                 None => {
                     let parent_block_hash = *parent_block_hash;
                     database
@@ -2588,15 +2602,15 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockError::Database)?
+                        .map_err(ExecuteBlockVerificationFailureError::Database)?
                         .map(|(v, _)| Cow::Owned(v))
-                        .ok_or(ExecuteBlockError::ParentCodeEmptyInDatabase)?
+                        .ok_or(ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase)?
                 }
             };
 
             let new_heap_pages = match new_heap_pages {
                 Some(c) => executor::storage_heap_pages_to_value(c)
-                    .map_err(ExecuteBlockError::InvalidNewHeapPages)?,
+                    .map_err(ExecuteBlockInvalidBlockError::InvalidNewHeapPages)?,
                 None => executor::storage_heap_pages_to_value({
                     let parent_block_hash = *parent_block_hash;
                     database
@@ -2609,11 +2623,11 @@ pub async fn execute_block_and_insert(
                             )
                         })
                         .await
-                        .map_err(ExecuteBlockError::Database)?
+                        .map_err(ExecuteBlockVerificationFailureError::Database)?
                         .as_ref()
                         .map(|(v, _)| &v[..])
                 })
-                .map_err(ExecuteBlockError::InvaliParentHeapPagesInDatabase)?,
+                .map_err(ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase)?,
             };
 
             let before_runtime_build = Instant::now();
@@ -2623,7 +2637,7 @@ pub async fn execute_block_and_insert(
                 exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
                 allow_unresolved_imports: false,
             })
-            .map_err(ExecuteBlockError::InvalidNewRuntime)?;
+            .map_err(ExecuteBlockInvalidBlockError::InvalidNewRuntime)?;
             runtime_build_duration += before_runtime_build.elapsed();
             Some(vm)
         }
@@ -2634,7 +2648,7 @@ pub async fn execute_block_and_insert(
     // Insert the block in the database.
     let when_database_access_started = Instant::now();
     database
-        .with_database_detached({
+        .with_database({
             let parent_block_hash = *parent_block_hash;
             let storage_changes = storage_changes.clone();
             let block_header = block_header.to_owned();
@@ -2716,16 +2730,13 @@ pub async fn execute_block_and_insert(
                     })
                     .collect::<Vec<_>>();
 
-                let result = database
-                    .insert_trie_nodes(trie_nodes.into_iter(), u8::from(state_trie_version));
-
-                match result {
-                    Ok(()) => {}
-                    Err(err) => panic!("{}", err),
-                }
+                database
+                    .insert_trie_nodes(trie_nodes.into_iter(), u8::from(state_trie_version))
+                    .map_err(full_sqlite::StorageAccessError::Corrupted)
+                    .map_err(ExecuteBlockVerificationFailureError::Database)
             }
         })
-        .await;
+        .await?;
     database_accesses_duration += when_database_access_started.elapsed();
 
     Ok(ExecuteBlockSuccess {
@@ -2753,30 +2764,44 @@ pub struct ExecuteBlockSuccess {
 }
 
 /// Error returned by [`execute_block_and_insert`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum ExecuteBlockError {
+    /// Failed to verify block.
+    VerificationFailure(ExecuteBlockVerificationFailureError),
+    /// Block has been verified as being invalid.
+    InvalidBlock(ExecuteBlockInvalidBlockError),
+}
+
+/// See [`ExecuteBlockError::VerificationFailure`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockVerificationFailureError {
     /// Error starting the runtime execution.
     RuntimeStartError(executor::host::StartErr),
-    /// Error while executing the runtime.
-    RuntimeExecutionError(runtime_host::ErrorDetail),
     /// Error while accessing the database.
     Database(full_sqlite::StorageAccessError),
+    /// Runtime has tried to call a forbidden host function.
+    ForbiddenHostFunction,
+    /// The `:code` of the parent block in database is empty.
+    ParentCodeEmptyInDatabase,
+    /// The `:heappages` after the execution is invalid.
+    InvaliParentHeapPagesInDatabase(executor::InvalidHeapPagesError),
+}
+
+/// See [`ExecuteBlockError::InvalidBlock`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockInvalidBlockError {
+    /// Error while executing the runtime.
+    RuntimeExecutionError(runtime_host::ErrorDetail),
     /// Error in the output of `BlockBuilder_check_inherents`.
     #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
     CheckInherentsOutputError(body_only::InherentsOutputError),
     /// Error in the output of `Core_execute_block`.
     #[display(fmt = "Error in the output of Core_execute_block: {_0}")]
     ExecuteBlockOutputError(body_only::ExecuteBlockOutputError),
-    /// Runtime has tried to call a forbidden host function.
-    ForbiddenHostFunction,
     /// The new `:code` after the execution is empty.
     EmptyCode,
-    /// The `:code` of the parent block in database is empty.
-    ParentCodeEmptyInDatabase,
     /// The `:heappages` after the execution is invalid.
     InvalidNewHeapPages(executor::InvalidHeapPagesError),
-    /// The `:heappages` after the execution is invalid.
-    InvaliParentHeapPagesInDatabase(executor::InvalidHeapPagesError),
     /// Failed to compile the new runtime that the block upgrades to.
     InvalidNewRuntime(host::NewErr),
 }
