@@ -2150,6 +2150,13 @@ impl SyncBackground {
                 .await
                 {
                     Ok(success) => success,
+                    Err(ExecuteBlockError::Database(error)) => {
+                        panic!("corrupted database: {error}")
+                    }
+                    Err(
+                        ExecuteBlockError::ParentCodeEmptyInDatabase
+                        | ExecuteBlockError::InvaliParentHeapPagesInDatabase(_),
+                    ) => panic!("corrupted database"),
                     Err(error) => {
                         // Print a separate warning because it is important for the user
                         // to be aware of the verification failure.
