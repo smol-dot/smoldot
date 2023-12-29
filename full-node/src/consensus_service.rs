@@ -48,7 +48,7 @@ use smoldot::{
     network::{self, codec::BlockData},
     sync::all,
     trie,
-    verify::body_only::{self, StorageChanges, TrieEntryVersion},
+    verify::body_only,
 };
 use std::{
     array,
@@ -535,7 +535,7 @@ pub enum Notification {
         /// Changes to the storage that the block has performed.
         ///
         /// Note that this field is only available when a new block is available.
-        storage_changes: Arc<StorageChanges>,
+        storage_changes: Arc<runtime_host::StorageChanges>,
     },
 }
 
@@ -1866,7 +1866,8 @@ impl SyncBackground {
                         block_authoring = req.inject_value(value.as_ref().map(|(val, vers)| {
                             (
                                 iter::once(&val[..]),
-                                TrieEntryVersion::try_from(*vers).expect("corrupted database"),
+                                runtime_host::TrieEntryVersion::try_from(*vers)
+                                    .expect("corrupted database"),
                             )
                         }));
                     }
@@ -2277,7 +2278,7 @@ impl SyncBackground {
                                 let value = value.as_ref().map(|(val, vers)| {
                                     (
                                         iter::once(&val[..]),
-                                        TrieEntryVersion::try_from(*vers)
+                                        runtime_host::TrieEntryVersion::try_from(*vers)
                                             .expect("corrupted database"),
                                     )
                                 });
@@ -2503,7 +2504,7 @@ impl SyncBackground {
                                 .trie_changes_iter_ordered()
                                 .unwrap()
                                 .filter_map(|(_child_trie, key, change)| {
-                                    let body_only::TrieChange::InsertUpdate {
+                                    let runtime_host::TrieChange::InsertUpdate {
                                         new_merkle_value,
                                         partial_key,
                                         children_merkle_values,
@@ -2530,16 +2531,16 @@ impl SyncBackground {
                                                 .map(|v| From::from(&v[..]))
                                         }),
                                         storage_value: match new_storage_value {
-                                            body_only::TrieChangeStorageValue::Modified {
+                                            runtime_host::TrieChangeStorageValue::Modified {
                                                 new_value: Some(value),
                                             } => full_sqlite::InsertTrieNodeStorageValue::Value {
                                                 value: Cow::Borrowed(value),
                                                 references_merkle_value,
                                             },
-                                            body_only::TrieChangeStorageValue::Modified {
+                                            runtime_host::TrieChangeStorageValue::Modified {
                                                 new_value: None,
                                             } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                            body_only::TrieChangeStorageValue::Unmodified => {
+                                            runtime_host::TrieChangeStorageValue::Unmodified => {
                                                 // TODO: overhead, and no child trie support
                                                 if let Some((value_in_parent, _)) = database
                                                     .block_storage_get(
