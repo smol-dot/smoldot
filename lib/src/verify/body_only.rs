@@ -731,6 +731,93 @@ impl RuntimeCompilation {
     }
 }
 
+/// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
+/// the `Core_execute_block` function in order to verify the inherents of a block.
+pub fn execute_block_parameter<'a>(
+    block_header: &'a [u8],
+    block_number_bytes: usize,
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + 'a> + 'a,
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a, ExecuteBlockParameterError> {
+    // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
+    // be the last item. We need to remove it before we can verify the unsealed header.
+    let mut unsealed_header = match header::decode(block_header, block_number_bytes) {
+        Ok(h) => h,
+        Err(err) => return Err(ExecuteBlockParameterError::InvalidHeader(err)),
+    };
+    let _seal_log = unsealed_header.digest.pop_seal();
+
+    let encoded_body_len = util::encode_scale_compact_usize(block_body.len());
+    Ok(unsealed_header
+        .scale_encoding(block_number_bytes)
+        .map(|b| either::Right(either::Left(b)))
+        .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+        .chain(block_body.map(either::Left)))
+}
+
+/// Error potentially returned by [`execute_block_parameter`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockParameterError {
+    /// Header provided as parameter is invalid.
+    InvalidHeader(header::Error),
+}
+
+/// Checks the output of the `Core_execute_block` runtime call.
+pub fn check_execute_block_output(output: &[u8]) -> Result<(), ExecuteBlockOutputError> {
+    if !output.is_empty() {
+        return Err(ExecuteBlockOutputError::NotEmpty);
+    }
+
+    Ok(())
+}
+
+/// Error potentially returned by [`check_execute_block_output`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockOutputError {
+    /// The output is not empty.
+    NotEmpty,
+}
+
+/// Returns a list of buffers that, when concatenated together, forms the parameter to pass to
+/// the `BlockBuilder_check_inherents` function in order to verify the inherents of a block.
+pub fn check_inherents_parameter<'a>(
+    block_header: &'a [u8],
+    block_number_bytes: usize,
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + 'a> + 'a,
+    now_from_unix_epoch: Duration,
+) -> Result<impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a, ExecuteBlockParameterError> {
+    // The first parameter of `BlockBuilder_check_inherents` is identical to the one of
+    // `Core_execute_block`.
+    let execute_block_parameter =
+        execute_block_parameter(block_header, block_number_bytes, block_body)?;
+
+    // The second parameter of `BlockBuilder_check_inherents` is a SCALE-encoded list of
+    // tuples containing an "inherent identifier" (`[u8; 8]`) and a value (`Vec<u8>`).
+    let inherent_data = inherents::InherentData {
+        timestamp: u64::try_from(now_from_unix_epoch.as_millis()).unwrap_or(u64::max_value()),
+    };
+    let list = inherent_data.into_raw_list();
+    let len = util::encode_scale_compact_usize(list.len());
+    let encoded_list = list.flat_map(|(id, value)| {
+        let value_len = util::encode_scale_compact_usize(value.as_ref().len());
+        let value_and_len = iter::once(value_len)
+            .map(either::Left)
+            .chain(iter::once(value).map(either::Right));
+        iter::once(id)
+            .map(either::Left)
+            .chain(value_and_len.map(either::Right))
+    });
+
+    Ok([
+        either::Left(execute_block_parameter.map(either::Left)),
+        either::Right(either::Left(iter::once(either::Right(either::Left(len))))),
+        either::Right(either::Right(
+            encoded_list.map(either::Right).map(either::Right),
+        )),
+    ]
+    .into_iter()
+    .flat_map(|i| i))
+}
+
 /// Checks the output of the `BlockBuilder_check_inherents` runtime call.
 pub fn check_check_inherents_output(output: &[u8]) -> Result<(), InherentsOutputError> {
     // The format of the output of `check_inherents` consists of two booleans and a list of
