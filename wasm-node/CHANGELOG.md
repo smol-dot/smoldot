@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.16 - 2023-12-29
+
 ### Changed
 
 - Decoding and analyzing a Merkle proof is now around 10% to 50% faster. ([#1462](https://github.com/smol-dot/smoldot/pull/1462))
