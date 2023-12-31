@@ -2716,8 +2716,8 @@ impl SyncBackground {
                         match context {
                             ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess => {
                                 self.database_catch_up_download_block_verification = DatabaseCatchUpDownloadBlockVerification::CodeStorageProofDesired {
-                                    block_hash: header_verification_success.hash(),
-                                    block_number: header_verification_success.height(),
+                                    block_hash: *header_verification_success.parent_hash(),
+                                    block_number: header_verification_success.height() - 1,
                                 };
                             }
                             ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
@@ -2726,8 +2726,8 @@ impl SyncBackground {
                             } => {
                                 self.database_catch_up_download_block_verification =
                                     DatabaseCatchUpDownloadBlockVerification::CallProofDesired {
-                                        block_hash: header_verification_success.hash(),
-                                        block_number: header_verification_success.height(),
+                                        block_hash: *header_verification_success.parent_hash(),
+                                        block_number: header_verification_success.height() - 1,
                                         function_name: function_name.to_owned(),
                                         parameter,
                                     };
