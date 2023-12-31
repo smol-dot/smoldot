@@ -2422,7 +2422,7 @@ impl SyncBackground {
                             .unwrap();
                     })
                     .await;
-                // TODO: insert what is known about the finalized storage into the database
+                // TODO: what is known about the finalized storage into the database is currently done when a proof is downloaded; however if the proof download finished code no longer inserts entries related to unknown blocks, then we should do it here instead
 
                 if matches!(
                     self.database_catch_up_download,
