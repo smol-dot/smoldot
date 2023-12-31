@@ -356,6 +356,8 @@ impl ConsensusService {
             from_network_service: config.network_events_receiver,
             database: config.database,
             database_catch_up_download: DatabaseCatchUpDownload::NoDownloadInProgress,
+            database_catch_up_download_block_verification:
+                DatabaseCatchUpDownloadBlockVerification::None,
             peers_source_id_map: Default::default(),
             sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
@@ -681,6 +683,10 @@ struct SyncBackground {
     /// must be downloaded.
     database_catch_up_download: DatabaseCatchUpDownload,
 
+    /// Whether an old block or storage item from an old block is currently being downloaded or
+    /// must be downloaded.
+    database_catch_up_download_block_verification: DatabaseCatchUpDownloadBlockVerification,
+
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
 }
@@ -733,11 +739,30 @@ enum SubtaskFinished {
     },
 }
 
+#[derive(Debug, Clone)]
 enum DatabaseCatchUpDownload {
     /// No download currently in progress.
     NoDownloadInProgress,
     /// No download currently in progress, and we know that nothing is missing from the database.
     NothingToDownloadCache,
+    InProgress(all::RequestId),
+}
+
+#[derive(Debug, Clone)]
+enum DatabaseCatchUpDownloadBlockVerification {
+    /// No download is required.
+    None,
+    CallProofDesired {
+        block_hash: [u8; 32],
+        block_number: u64,
+        function_name: String,
+        parameter: Vec<u8>,
+    },
+    CodeStorageProofDesired {
+        block_hash: [u8; 32],
+        block_number: u64,
+    },
+    /// Currently downloading.
     InProgress(all::RequestId),
 }
 
@@ -754,13 +779,19 @@ impl SyncBackground {
                 StartNetworkRequest {
                     source_id: all::SourceId,
                     request: all::DesiredRequest,
-                    is_database_catch_up: bool,
+                    database_catch_up_type: DbCatchUpType,
                 },
                 NetworkEvent(network_service::Event),
                 NetworkLocalChainUpdate,
                 AnnounceBlock(Vec<u8>, [u8; 32], u64),
                 SubtaskFinished(SubtaskFinished),
                 SyncProcess,
+            }
+
+            enum DbCatchUpType {
+                No,
+                BlockVerification,
+                Database,
             }
 
             let wake_up_reason: WakeUpReason = {
@@ -952,8 +983,94 @@ impl SyncBackground {
                             return WakeUpReason::StartNetworkRequest {
                                 source_id,
                                 request,
-                                is_database_catch_up: false,
+                                database_catch_up_type: DbCatchUpType::No,
                             };
+                        }
+
+                        match self.database_catch_up_download_block_verification.clone() {
+                            _ if !matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                                    | DatabaseCatchUpDownload::NothingToDownloadCache
+                            ) => {}
+                            DatabaseCatchUpDownloadBlockVerification::None => {}
+                            DatabaseCatchUpDownloadBlockVerification::InProgress(_) => {}
+                            DatabaseCatchUpDownloadBlockVerification::CallProofDesired {
+                                block_hash,
+                                block_number,
+                                function_name,
+                                parameter,
+                            } => {
+                                // Choose which source to query. We have to use an `if` because
+                                // `knows_non_finalized_block` panics if the parameter is inferior
+                                // or equal to the finalized block number.
+                                let source_id = if block_number
+                                    <= self.sync.finalized_block_header().number
+                                {
+                                    self.sync
+                                        .sources()
+                                        .filter(|s| *s != self.block_author_sync_source)
+                                        .choose(&mut rand::thread_rng())
+                                } else {
+                                    self.sync
+                                        .knows_non_finalized_block(block_number, &block_hash)
+                                        .filter(|source_id| {
+                                            *source_id != self.block_author_sync_source
+                                                && self.sync.source_num_ongoing_requests(*source_id)
+                                                    == 0
+                                        })
+                                        .choose(&mut rand::thread_rng())
+                                };
+
+                                if let Some(source_id) = source_id {
+                                    return WakeUpReason::StartNetworkRequest {
+                                        source_id,
+                                        request: all::DesiredRequest::RuntimeCallMerkleProof {
+                                            block_hash,
+                                            function_name: function_name.into(),
+                                            parameter_vectored: parameter.into(),
+                                        },
+                                        database_catch_up_type: DbCatchUpType::BlockVerification,
+                                    };
+                                }
+                            }
+                            DatabaseCatchUpDownloadBlockVerification::CodeStorageProofDesired {
+                                block_hash,
+                                block_number,
+                            } => {
+                                // Choose which source to query. We have to use an `if` because
+                                // `knows_non_finalized_block` panics if the parameter is inferior
+                                // or equal to the finalized block number.
+                                let source_id = if block_number
+                                    <= self.sync.finalized_block_header().number
+                                {
+                                    self.sync
+                                        .sources()
+                                        .filter(|s| *s != self.block_author_sync_source)
+                                        .choose(&mut rand::thread_rng())
+                                } else {
+                                    self.sync
+                                        .knows_non_finalized_block(block_number, &block_hash)
+                                        .filter(|source_id| {
+                                            *source_id != self.block_author_sync_source
+                                                && self.sync.source_num_ongoing_requests(*source_id)
+                                                    == 0
+                                        })
+                                        .choose(&mut rand::thread_rng())
+                                };
+
+                                if let Some(source_id) = source_id {
+                                    return WakeUpReason::StartNetworkRequest {
+                                        source_id,
+                                        request: all::DesiredRequest::StorageGetMerkleProof {
+                                            block_hash,
+                                            state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
+                                            keys: vec![":code".into(), ":heappages".into()],
+                                        },
+                                        database_catch_up_type: DbCatchUpType::BlockVerification,
+                                    };
+                                }
+                            }
                         }
 
                         // If the sync state machine doesn't require any additional request, ask
@@ -1044,7 +1161,7 @@ impl SyncBackground {
                                         )
                                         .collect::<Vec<_>>()],
                                     },
-                                    is_database_catch_up: true,
+                                    database_catch_up_type: DbCatchUpType::Database,
                                 };
                             }
                         }
@@ -1053,11 +1170,17 @@ impl SyncBackground {
                         future::pending().await
                     }
                 })
-                .or(async {
-                    if !process_sync {
-                        future::pending().await
+                .or({
+                    let is_downloading = matches!(
+                        self.database_catch_up_download_block_verification,
+                        DatabaseCatchUpDownloadBlockVerification::None
+                    );
+                    async move {
+                        if !process_sync || !is_downloading {
+                            future::pending().await
+                        }
+                        WakeUpReason::SyncProcess
                     }
-                    WakeUpReason::SyncProcess
                 })
                 .await
             };
@@ -1342,9 +1465,9 @@ impl SyncBackground {
                 WakeUpReason::StartNetworkRequest {
                     source_id,
                     request: request_info @ all::DesiredRequest::BlocksRequest { .. },
-                    is_database_catch_up,
+                    database_catch_up_type,
                 } if source_id == self.block_author_sync_source => {
-                    debug_assert!(!is_database_catch_up);
+                    debug_assert!(matches!(database_catch_up_type, DbCatchUpType::No));
 
                     self.log_callback.log(
                         LogLevel::Debug,
@@ -1382,7 +1505,7 @@ impl SyncBackground {
                             request_bodies,
                             request_justification,
                         },
-                    is_database_catch_up,
+                    database_catch_up_type,
                 } => {
                     // Before notifying the syncing of the request, clamp the number of blocks to
                     // the number of blocks we expect to receive.
@@ -1438,13 +1561,20 @@ impl SyncBackground {
                         (),
                     );
 
-                    if is_database_catch_up {
-                        debug_assert!(matches!(
-                            self.database_catch_up_download,
-                            DatabaseCatchUpDownload::NoDownloadInProgress
-                        ));
-                        self.database_catch_up_download =
-                            DatabaseCatchUpDownload::InProgress(request_id);
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
                     }
 
                     self.sub_tasks.push(Box::pin(async move {
@@ -1463,7 +1593,7 @@ impl SyncBackground {
                         all::DesiredRequest::WarpSync {
                             sync_start_block_hash,
                         },
-                    is_database_catch_up,
+                    database_catch_up_type,
                 } => {
                     // TODO: don't unwrap? could this target the virtual sync source?
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
@@ -1482,13 +1612,20 @@ impl SyncBackground {
                         (),
                     );
 
-                    if is_database_catch_up {
-                        debug_assert!(matches!(
-                            self.database_catch_up_download,
-                            DatabaseCatchUpDownload::NoDownloadInProgress
-                        ));
-                        self.database_catch_up_download =
-                            DatabaseCatchUpDownload::InProgress(request_id);
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
                     }
 
                     self.sub_tasks.push(Box::pin(async move {
@@ -1507,7 +1644,7 @@ impl SyncBackground {
                         all::DesiredRequest::StorageGetMerkleProof {
                             block_hash, keys, ..
                         },
-                    is_database_catch_up,
+                    database_catch_up_type,
                 } => {
                     // TODO: don't unwrap? could this target the virtual sync source?
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
@@ -1527,13 +1664,20 @@ impl SyncBackground {
                         (),
                     );
 
-                    if is_database_catch_up {
-                        debug_assert!(matches!(
-                            self.database_catch_up_download,
-                            DatabaseCatchUpDownload::NoDownloadInProgress
-                        ));
-                        self.database_catch_up_download =
-                            DatabaseCatchUpDownload::InProgress(request_id);
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
                     }
 
                     self.sub_tasks.push(Box::pin(async move {
@@ -1554,7 +1698,7 @@ impl SyncBackground {
                             function_name,
                             parameter_vectored,
                         },
-                    is_database_catch_up,
+                    database_catch_up_type,
                 } => {
                     // TODO: don't unwrap? could this target the virtual sync source?
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
@@ -1579,13 +1723,20 @@ impl SyncBackground {
                         (),
                     );
 
-                    if is_database_catch_up {
-                        debug_assert!(matches!(
-                            self.database_catch_up_download,
-                            DatabaseCatchUpDownload::NoDownloadInProgress
-                        ));
-                        self.database_catch_up_download =
-                            DatabaseCatchUpDownload::InProgress(request_id);
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
                     }
 
                     self.sub_tasks.push(Box::pin(async move {
@@ -1607,6 +1758,11 @@ impl SyncBackground {
                     {
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
                     }
 
                     // TODO: insert blocks in database if they are referenced through a parent_hash?
@@ -1659,6 +1815,11 @@ impl SyncBackground {
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
 
                     // Note that we perform the ban even if the source is now disconnected.
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
@@ -1702,6 +1863,11 @@ impl SyncBackground {
                     {
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
                     }
 
                     let decoded = result.decode();
@@ -1747,6 +1913,11 @@ impl SyncBackground {
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
 
                     // Note that we perform the ban even if the source is now disconnected.
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
@@ -1788,6 +1959,11 @@ impl SyncBackground {
                     {
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
                     }
 
                     if let Ok(result) = &result {
@@ -1887,6 +2063,11 @@ impl SyncBackground {
                         self.database_catch_up_download =
                             DatabaseCatchUpDownload::NoDownloadInProgress;
                     }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
 
                     // TODO: DRY with above
                     if let Ok(result) = &result {
@@ -1983,6 +2164,14 @@ impl SyncBackground {
                     debug_assert!(self.pending_notification.is_none());
                     // Similarly, verifying a block might generate a block announce.
                     debug_assert!(self.pending_block_announce.is_none());
+
+                    // Given that a block verification might require downloading some storage
+                    // items due to missing storage items, and that we only want one download at
+                    // a time, we don't verify blocks if a download is in progress.
+                    debug_assert!(matches!(
+                        self.database_catch_up_download_block_verification,
+                        DatabaseCatchUpDownloadBlockVerification::None
+                    ));
 
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
@@ -2504,7 +2693,7 @@ impl SyncBackground {
                     Err(ExecuteBlockError::VerificationFailure(
                         ExecuteBlockVerificationFailureError::DatabaseParentAccess {
                             error: full_sqlite::StorageAccessError::IncompleteStorage,
-                            ..
+                            context,
                         },
                     )) => {
                         // The block verification failed because the storage of the parent
@@ -2520,10 +2709,33 @@ impl SyncBackground {
                             ),
                         );
 
-                        // TODO: download call proof
+                        debug_assert!(matches!(
+                            self.database_catch_up_download_block_verification,
+                            DatabaseCatchUpDownloadBlockVerification::None
+                        ));
+                        match context {
+                            ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess => {
+                                self.database_catch_up_download_block_verification = DatabaseCatchUpDownloadBlockVerification::CodeStorageProofDesired {
+                                    block_hash: header_verification_success.hash(),
+                                    block_number: header_verification_success.height(),
+                                };
+                            }
+                            ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                function_name,
+                                parameter,
+                            } => {
+                                self.database_catch_up_download_block_verification =
+                                    DatabaseCatchUpDownloadBlockVerification::CallProofDesired {
+                                        block_hash: header_verification_success.hash(),
+                                        block_number: header_verification_success.height(),
+                                        function_name: function_name.to_owned(),
+                                        parameter,
+                                    };
+                            }
+                        }
 
                         self.sync = header_verification_success.cancel();
-                        return (self, false);
+                        return (self, true);
                     }
                     Err(ExecuteBlockError::VerificationFailure(
                         ExecuteBlockVerificationFailureError::DatabaseParentAccess {
