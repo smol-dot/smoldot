@@ -60,7 +60,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Configuration for a [`ConsensusService`].
@@ -798,8 +798,10 @@ impl SyncBackground {
                 // Creating the block authoring state and prepare a future that is ready when something
                 // related to the block authoring is ready.
                 // TODO: refactor as a separate task?
+                // TODO: restore block authoring after https://github.com/smol-dot/smoldot/issues/1109
                 let authoring_ready_future = {
-                    // TODO: overhead to call best_block_consensus() multiple times
+                    future::pending::<WakeUpReason>()
+                    /*// TODO: overhead to call best_block_consensus() multiple times
                     let local_authorities = {
                         let namespace_filter = match self.sync.best_block_consensus() {
                             chain_information::ChainInformationConsensusRef::Aura { .. } => {
@@ -884,7 +886,7 @@ impl SyncBackground {
                                 delay,
                             )))
                         }
-                    }
+                    }*/
                 };
 
                 async {
