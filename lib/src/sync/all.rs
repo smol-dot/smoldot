@@ -111,10 +111,9 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
-    /// verified.
-    // TODO: change this now that we don't verify block bodies here
-    pub full_mode: bool,
+    /// If true, the body of a block is downloaded (if necessary) before a
+    /// [`ProcessOne::VerifyBlock`] is generated.
+    pub download_bodies: bool,
 
     /// Known valid Merkle value and storage value combination for the `:code` key.
     ///
@@ -181,58 +180,45 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
         AllSync {
-            inner: if config.full_mode {
-                AllSyncInner::Optimistic {
-                    inner: optimistic::OptimisticSync::new(optimistic::Config {
-                        chain_information: config.chain_information,
-                        block_number_bytes: config.block_number_bytes,
-                        sources_capacity: config.sources_capacity,
-                        blocks_capacity: config.blocks_capacity,
-                        download_ahead_blocks: config.download_ahead_blocks,
-                        download_bodies: config.full_mode,
-                    }),
-                }
-            } else {
-                match warp_sync::start_warp_sync(warp_sync::Config {
-                    start_chain_information: config.chain_information,
-                    block_number_bytes: config.block_number_bytes,
-                    sources_capacity: config.sources_capacity,
-                    requests_capacity: config.sources_capacity, // TODO: ?! add as config?
-                    code_trie_node_hint: config.code_trie_node_hint,
-                    num_download_ahead_fragments: 128, // TODO: make configurable?
-                    // TODO: make configurable?
-                    // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
-                    warp_sync_minimum_gap: 0,
-                    download_block_body: config.full_mode,
-                }) {
-                    Ok(inner) => AllSyncInner::WarpSync {
-                        inner,
-                        ready_to_transition: None,
-                    },
-                    Err((
-                        chain_information,
-                        warp_sync::WarpSyncInitError::NotGrandpa
-                        | warp_sync::WarpSyncInitError::UnknownConsensus,
-                    )) => {
-                        // On error, `warp_sync` returns back the chain information that was
-                        // provided in its configuration.
-                        AllSyncInner::Optimistic {
-                            inner: optimistic::OptimisticSync::new(optimistic::Config {
-                                chain_information,
-                                block_number_bytes: config.block_number_bytes,
-                                sources_capacity: config.sources_capacity,
-                                blocks_capacity: config.blocks_capacity,
-                                download_ahead_blocks: config.download_ahead_blocks,
-                                download_bodies: false,
-                            }),
-                        }
+            inner: match warp_sync::start_warp_sync(warp_sync::Config {
+                start_chain_information: config.chain_information,
+                block_number_bytes: config.block_number_bytes,
+                sources_capacity: config.sources_capacity,
+                requests_capacity: config.sources_capacity, // TODO: ?! add as config?
+                code_trie_node_hint: config.code_trie_node_hint,
+                num_download_ahead_fragments: 128, // TODO: make configurable?
+                // TODO: make configurable?
+                // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
+                warp_sync_minimum_gap: 0,
+                download_block_body: config.download_bodies,
+            }) {
+                Ok(inner) => AllSyncInner::WarpSync {
+                    inner,
+                    ready_to_transition: None,
+                },
+                Err((
+                    chain_information,
+                    warp_sync::WarpSyncInitError::NotGrandpa
+                    | warp_sync::WarpSyncInitError::UnknownConsensus,
+                )) => {
+                    // On error, `warp_sync` returns back the chain information that was
+                    // provided in its configuration.
+                    AllSyncInner::Optimistic {
+                        inner: optimistic::OptimisticSync::new(optimistic::Config {
+                            chain_information,
+                            block_number_bytes: config.block_number_bytes,
+                            sources_capacity: config.sources_capacity,
+                            blocks_capacity: config.blocks_capacity,
+                            download_ahead_blocks: config.download_ahead_blocks,
+                            download_bodies: false,
+                        }),
                     }
                 }
             },
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
-                full_mode: config.full_mode,
+                download_bodies: config.download_bodies,
                 sources_capacity: config.sources_capacity,
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
@@ -859,7 +845,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         (
                             sync[inner_source_id].outer_source_id,
                             &src_user_data.user_data,
-                            all_forks_request_convert(rq_params, self.shared.full_mode),
+                            all_forks_request_convert(rq_params, self.shared.download_bodies),
                         )
                     },
                 );
@@ -871,7 +857,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     (
                         inner[rq_detail.source_id].outer_source_id,
                         &inner[rq_detail.source_id].user_data,
-                        optimistic_request_convert(rq_detail, self.shared.full_mode),
+                        optimistic_request_convert(rq_detail, self.shared.download_bodies),
                     )
                 });
 
@@ -2144,7 +2130,7 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
 
         /// SCALE-encoded extrinsics of the finalized block. The ordering is important.
         ///
-        /// `Some` if and only if [`Config::full_mode`] was `true`.
+        /// `Some` if and only if [`Config::download_bodies`] was `true`.
         finalized_body: Option<Vec<Vec<u8>>>,
 
         /// Storage value at the `:code` key of the finalized block.
@@ -2254,7 +2240,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full_mode`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
@@ -2419,7 +2405,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full_mode`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
@@ -2867,8 +2853,8 @@ struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
 
-    /// See [`Config::full_mode`].
-    full_mode: bool,
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 
     /// Value passed through [`Config::sources_capacity`].
     sources_capacity: usize,
@@ -2910,7 +2896,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-            download_bodies: false,
+            download_bodies: self.download_bodies,
         });
 
         debug_assert!(self
@@ -3038,14 +3024,14 @@ enum SourceMapping {
 
 fn all_forks_request_convert(
     rq_params: all_forks::RequestParams,
-    full_node: bool,
+    download_body: bool,
 ) -> DesiredRequest {
     DesiredRequest::BlocksRequest {
         ascending: false, // Hardcoded based on the logic of the all-forks syncing.
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
         num_blocks: rq_params.num_blocks,
-        request_bodies: full_node,
+        request_bodies: download_body,
         request_headers: true,
         request_justification: true,
     }
@@ -3053,14 +3039,14 @@ fn all_forks_request_convert(
 
 fn optimistic_request_convert(
     rq_params: optimistic::RequestDetail,
-    full_node: bool,
+    download_body: bool,
 ) -> DesiredRequest {
     DesiredRequest::BlocksRequest {
         ascending: true, // Hardcoded based on the logic of the optimistic syncing.
         first_block_hash: None,
         first_block_height: rq_params.block_height.get(),
         num_blocks: rq_params.num_blocks.into(),
-        request_bodies: full_node,
+        request_bodies: download_body,
         request_headers: true,
         request_justification: true,
     }
