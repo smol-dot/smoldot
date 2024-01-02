@@ -2193,7 +2193,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     }
 }
 
-// TODO: should be used by the optimistic syncing as well
 pub struct FinalityProofVerify<TRq, TSrc, TBl> {
     inner: FinalityProofVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
