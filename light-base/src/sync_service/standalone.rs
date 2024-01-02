@@ -90,7 +90,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // is 5k.
                 NonZeroU32::new(5000).unwrap()
             },
-            full_mode: false,
+            download_bodies: false,
             code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
                 merkle_value: hint.merkle_value,
                 storage_value: hint.storage_value,

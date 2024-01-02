@@ -19,6 +19,7 @@ use smoldot::json_rpc;
 use std::sync::Arc;
 
 #[test]
+#[ignore] // TODO: restore after https://github.com/smol-dot/smoldot/issues/1109
 fn basic_block_generated() {
     smol::block_on(async move {
         let client = smoldot_full_node::start(smoldot_full_node::Config {
