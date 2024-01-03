@@ -32,7 +32,7 @@ jobs:
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
-    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'macos-latest' }}
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'macos-latest' }} # TODO: use an arm64 platform for arm64 ; right now we use macos-latest, but it's not actually arm64
     permissions:
       contents: read
     steps:
