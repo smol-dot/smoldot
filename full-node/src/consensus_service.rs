@@ -3512,13 +3512,13 @@ pub async fn runtime_call(
     }
 }
 
-/// Returned by [`runtime_call`] in case of success.
+/// Returned by [`runtime_call()`] in case of success.
 #[derive(Debug)]
 pub struct RuntimeCallSuccess {
     /// Output of the runtime call.
     pub output: Vec<u8>,
 
-    /// Runtime that was provided as input to [`runtime_call`].
+    /// Runtime that was provided as input to [`runtime_call()`].
     pub runtime: host::HostVmPrototype,
 
     /// Changes to the storage performed during the execution.
@@ -3531,7 +3531,7 @@ pub struct RuntimeCallSuccess {
     pub database_accesses_duration: Duration,
 }
 
-/// Error returned by [`runtime_call`].
+/// Error returned by [`runtime_call()`].
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum RuntimeCallError {
     /// Error starting the runtime execution.
