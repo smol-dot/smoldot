@@ -662,7 +662,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// The block does not need to be known by the data structure.
     ///
     /// This is automatically done for the blocks added through [`AllForksSync::block_announce`],
-    /// [`AllForksSync::prepare_add_source`] or [`FinishAncestrySearch::add_block`].
+    /// [`AllForksSync::prepare_add_source`] or [`FinishRequest::add_block`].
     ///
     /// # Panic
     ///
@@ -775,7 +775,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }
 
     /// Returns a list of requests that are considered obsolete and can be removed using
-    /// [`AllForksSync::finish_ancestry_search`] or similar.
+    /// [`AllForksSync::finish_request`].
     ///
     /// A request becomes obsolete if the state of the request blocks changes in such a way that
     /// they don't need to be requested anymore. The response to the request will be useless.
@@ -797,7 +797,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.request_source_id(request_id)
     }
 
-    /// Call in response to a blocks request being successful.
+    /// Call in response to a request being successful or failing.
+    ///
+    /// This state machine doesn't differentiate between successful or failed requests. If a
+    /// request has failed, call this function and immediately call [`FinishRequest::finish`].
     ///
     /// This method takes ownership of the [`AllForksSync`] and puts it in a mode where the blocks
     /// of the response can be added one by one.
@@ -810,10 +813,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_ancestry_search(
-        mut self,
-        request_id: RequestId,
-    ) -> (TRq, FinishAncestrySearch<TBl, TRq, TSrc>) {
+    pub fn finish_request(mut self, request_id: RequestId) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
@@ -823,11 +823,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             },
             source_id,
             request_user_data,
-        ) = self.inner.blocks.finish_request(request_id);
+        ) = self.inner.blocks.remove_request(request_id);
 
         (
             request_user_data,
-            FinishAncestrySearch {
+            FinishRequest {
                 inner: self,
                 source_id,
                 any_progress: false,
@@ -838,23 +838,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 expected_next_height: requested_block_height,
             },
         )
-    }
-
-    /// Call in response to a blocks request having failed.
-    ///
-    /// This removes the request from the state machine and returns its user data.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`RequestId`] is invalid.
-    ///
-    // TODO: taking a `&mut self` instead of a `self` would be more correct, however this doesn't give any benefit and complicates the implementation at the moment, so it might not be worth doing
-    pub fn ancestry_search_failed(
-        self,
-        request_id: RequestId,
-    ) -> (TRq, AllForksSync<TBl, TRq, TSrc>) {
-        let (user_data, inner) = self.finish_ancestry_search(request_id);
-        (user_data, inner.finish())
     }
 
     /// Update the source with a newly-announced block.
@@ -1089,8 +1072,8 @@ impl<'a, TBl, TRq, TSrc> ops::IndexMut<(u64, &'a [u8; 32])> for AllForksSync<TBl
     }
 }
 
-/// See [`AllForksSync::finish_ancestry_search`].
-pub struct FinishAncestrySearch<TBl, TRq, TSrc> {
+/// See [`AllForksSync::finish_request`].
+pub struct FinishRequest<TBl, TRq, TSrc> {
     inner: AllForksSync<TBl, TRq, TSrc>,
 
     /// Source that has sent the request that is being answered.
@@ -1113,13 +1096,13 @@ pub struct FinishAncestrySearch<TBl, TRq, TSrc> {
     expected_next_height: u64,
 }
 
-impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
+impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
     /// Adds a block coming from the response that the source has provided.
     ///
-    /// On success, the [`FinishAncestrySearch`] is turned into an [`AddBlock`]. The block is
+    /// On success, the [`FinishRequest`] is turned into an [`AddBlock`]. The block is
     /// inserted in the state machine only after one of the methods in [`AddBlock`] is added.
     ///
-    /// If an error is returned, the [`FinishAncestrySearch`] is turned back again into a
+    /// If an error is returned, the [`FinishRequest`] is turned back again into a
     /// [`AllForksSync`], but all the blocks that have already been added are retained.
     ///
     /// If [`Config::download_bodies`] was `false`, the content of `scale_encoded_extrinsics`
@@ -1306,7 +1289,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
     }
 }
 
-/// Result of calling [`FinishAncestrySearch::add_block`].
+/// Result of calling [`FinishRequest::add_block`].
 pub enum AddBlock<TBl, TRq, TSrc> {
     /// The block is already in the list of unverified blocks.
     AlreadyPending(AddBlockOccupied<TBl, TRq, TSrc>),
@@ -1321,9 +1304,9 @@ pub enum AddBlock<TBl, TRq, TSrc> {
     AlreadyInChain(AddBlockOccupied<TBl, TRq, TSrc>),
 }
 
-/// See [`FinishAncestrySearch::add_block`] and [`AddBlock`].
+/// See [`FinishRequest::add_block`] and [`AddBlock`].
 pub struct AddBlockOccupied<TBl, TRq, TSrc> {
-    inner: FinishAncestrySearch<TBl, TRq, TSrc>,
+    inner: FinishRequest<TBl, TRq, TSrc>,
     decoded_header: header::Header,
     is_verified: bool,
 }
@@ -1356,7 +1339,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     ///
     /// Returns an object that allows continuing inserting blocks, plus the former user data that
     /// was overwritten by the new one.
-    pub fn replace(mut self, user_data: TBl) -> (FinishAncestrySearch<TBl, TRq, TSrc>, TBl) {
+    pub fn replace(mut self, user_data: TBl) -> (FinishRequest<TBl, TRq, TSrc>, TBl) {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1420,15 +1403,15 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     }
 
     /// Do not update the state machine with this block. Equivalent to calling
-    /// [`FinishAncestrySearch::finish`].
+    /// [`FinishRequest::finish`].
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.inner.inner
     }
 }
 
-/// See [`FinishAncestrySearch::add_block`] and [`AddBlock`].
+/// See [`FinishRequest::add_block`] and [`AddBlock`].
 pub struct AddBlockVacant<TBl, TRq, TSrc> {
-    inner: FinishAncestrySearch<TBl, TRq, TSrc>,
+    inner: FinishRequest<TBl, TRq, TSrc>,
     decoded_header: header::Header,
     justifications: Vec<([u8; 4], Vec<u8>)>,
     scale_encoded_extrinsics: Vec<Vec<u8>>,
@@ -1436,7 +1419,7 @@ pub struct AddBlockVacant<TBl, TRq, TSrc> {
 
 impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
     /// Insert the block in the state machine, with the given user data.
-    pub fn insert(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+    pub fn insert(mut self, user_data: TBl) -> FinishRequest<TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1520,7 +1503,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
     }
 
     /// Do not update the state machine with this block. Equivalent to calling
-    /// [`FinishAncestrySearch::finish`].
+    /// [`FinishRequest::finish`].
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.inner.inner
     }
@@ -1741,7 +1724,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     }
 }
 
-/// Error when adding a block using [`FinishAncestrySearch::add_block`].
+/// Error when adding a block using [`FinishRequest::add_block`].
 pub enum AncestrySearchResponseError {
     /// Failed to decode block header.
     InvalidHeader(header::Error),
@@ -2136,6 +2119,11 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
                 .unwrap()
                 .to_owned()
         }
+    }
+
+    /// Cancel the block verification.
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.parent
     }
 
     /// Reject the block and mark it as bad.

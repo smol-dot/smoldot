@@ -954,6 +954,13 @@ impl fmt::Debug for Jit {
     }
 }
 
+// Because `BoxFuture` doesn't implement `Sync`, `Jit` also doesn't implement `Sync`. In
+// reality, however, none of the `&self`-accepting functions of `Jit` ever access the
+// `BoxFuture` and even if they did, there's no `&self`-accepting function on `BoxFuture` itself
+// anyway.
+// TODO: maybe find a way to remove this unsafe implementation
+unsafe impl Sync for Jit {}
+
 fn noop_waker() -> task::Waker {
     // Safety: all the requirements in the documentation of wakers (e.g. thread safety) is
     // irrelevant here due to the implementation being trivial.

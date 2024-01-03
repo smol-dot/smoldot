@@ -15,10 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! All syncing strategies (optimistic, warp sync, all forks) grouped together.
+//! All syncing strategies grouped together.
 //!
-//! This state machine combines GrandPa warp syncing, optimistic syncing, and all forks syncing
-//! into one state machine.
+//! This state machine combines GrandPa warp syncing and all forks syncing into one state machine.
 //!
 //! # Overview
 //!
@@ -35,14 +34,14 @@ use crate::{
     executor::host,
     finality::decode,
     header,
-    sync::{all_forks, optimistic, warp_sync},
+    sync::{all_forks, warp_sync},
     trie::Nibble,
     verify,
 };
 
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
-    cmp, iter, marker, mem,
+    iter, marker, mem,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,
@@ -54,6 +53,8 @@ pub use warp_sync::{
     BuildRuntimeError as WarpSyncBuildRuntimeError, ConfigCodeTrieNodeHint, VerifyFragmentError,
     WarpSyncFragment,
 };
+
+use super::all_forks::AllForksSync;
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -111,10 +112,9 @@ pub struct Config {
     /// block requests.
     pub download_ahead_blocks: NonZeroU32,
 
-    /// If `true`, the block bodies and storage are also synchronized and the block bodies are
-    /// verified.
-    // TODO: change this now that we don't verify block bodies here
-    pub full_mode: bool,
+    /// If true, the body of a block is downloaded (if necessary) before a
+    /// [`ProcessOne::VerifyBlock`] is generated.
+    pub download_bodies: bool,
 
     /// Known valid Merkle value and storage value combination for the `:code` key.
     ///
@@ -181,57 +181,45 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
         AllSync {
-            inner: if config.full_mode {
-                AllSyncInner::Optimistic {
-                    inner: optimistic::OptimisticSync::new(optimistic::Config {
-                        chain_information: config.chain_information,
+            inner: match warp_sync::start_warp_sync(warp_sync::Config {
+                start_chain_information: config.chain_information,
+                block_number_bytes: config.block_number_bytes,
+                sources_capacity: config.sources_capacity,
+                requests_capacity: config.sources_capacity, // TODO: ?! add as config?
+                code_trie_node_hint: config.code_trie_node_hint,
+                num_download_ahead_fragments: 128, // TODO: make configurable?
+                // TODO: make configurable?
+                // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
+                warp_sync_minimum_gap: 0,
+                download_block_body: config.download_bodies,
+            }) {
+                Ok(inner) => AllSyncInner::WarpSync {
+                    inner,
+                    ready_to_transition: None,
+                },
+                Err((
+                    chain_information,
+                    warp_sync::WarpSyncInitError::NotGrandpa
+                    | warp_sync::WarpSyncInitError::UnknownConsensus,
+                )) => {
+                    // On error, `warp_sync` returns back the chain information that was
+                    // provided in its configuration.
+                    AllSyncInner::AllForks(AllForksSync::new(all_forks::Config {
+                        chain_information,
                         block_number_bytes: config.block_number_bytes,
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
-                        download_ahead_blocks: config.download_ahead_blocks,
-                        download_bodies: config.full_mode,
-                    }),
-                }
-            } else {
-                match warp_sync::start_warp_sync(warp_sync::Config {
-                    start_chain_information: config.chain_information,
-                    block_number_bytes: config.block_number_bytes,
-                    sources_capacity: config.sources_capacity,
-                    requests_capacity: config.sources_capacity, // TODO: ?! add as config?
-                    code_trie_node_hint: config.code_trie_node_hint,
-                    num_download_ahead_fragments: 128, // TODO: make configurable?
-                    // TODO: make configurable?
-                    // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
-                    warp_sync_minimum_gap: 0,
-                }) {
-                    Ok(inner) => AllSyncInner::WarpSync {
-                        inner,
-                        ready_to_transition: None,
-                    },
-                    Err((
-                        chain_information,
-                        warp_sync::WarpSyncInitError::NotGrandpa
-                        | warp_sync::WarpSyncInitError::UnknownConsensus,
-                    )) => {
-                        // On error, `warp_sync` returns back the chain information that was
-                        // provided in its configuration.
-                        AllSyncInner::Optimistic {
-                            inner: optimistic::OptimisticSync::new(optimistic::Config {
-                                chain_information,
-                                block_number_bytes: config.block_number_bytes,
-                                sources_capacity: config.sources_capacity,
-                                blocks_capacity: config.blocks_capacity,
-                                download_ahead_blocks: config.download_ahead_blocks,
-                                download_bodies: false,
-                            }),
-                        }
-                    }
+                        download_bodies: false,
+                        allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
+                        max_disjoint_headers: config.max_disjoint_headers,
+                        max_requests_per_block: config.max_requests_per_block,
+                    }))
                 }
             },
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
-                full_mode: config.full_mode,
+                download_bodies: config.download_bodies,
                 sources_capacity: config.sources_capacity,
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
@@ -253,7 +241,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.as_chain_information(),
             AllSyncInner::WarpSync { inner, .. } => inner.as_chain_information(),
-            AllSyncInner::Optimistic { inner } => inner.as_chain_information(),
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -289,7 +276,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_block_number,
                 },
             },
-            AllSyncInner::Optimistic { .. } => Status::Sync, // TODO: right now we don't differentiate between AllForks and Optimistic, as they're kind of similar anyway
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -298,7 +284,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn finalized_block_header(&self) -> header::HeaderRef {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.finalized_block_header(),
-            AllSyncInner::Optimistic { inner } => inner.finalized_block_header(),
             AllSyncInner::WarpSync { inner, .. } => {
                 inner.as_chain_information().as_ref().finalized_block_header
             }
@@ -313,7 +298,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn best_block_header(&self) -> header::HeaderRef {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.best_block_header(),
-            AllSyncInner::Optimistic { inner } => inner.best_block_header(),
             AllSyncInner::WarpSync { .. } => self.finalized_block_header(),
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -326,7 +310,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn best_block_number(&self) -> u64 {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.best_block_number(),
-            AllSyncInner::Optimistic { inner } => inner.best_block_number(),
             AllSyncInner::WarpSync { .. } => self.best_block_header().number,
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -339,7 +322,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn best_block_hash(&self) -> [u8; 32] {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.best_block_hash(),
-            AllSyncInner::Optimistic { inner } => inner.best_block_hash(),
             AllSyncInner::WarpSync { .. } => self
                 .best_block_header()
                 .hash(self.shared.block_number_bytes),
@@ -350,8 +332,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Returns consensus information about the current best block of the chain.
     pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
         match &self.inner {
-            AllSyncInner::AllForks(_) => todo!(), // TODO:
-            AllSyncInner::Optimistic { inner } => inner.best_block_consensus(),
+            AllSyncInner::AllForks(_) => todo!(),     // TODO:
             AllSyncInner::WarpSync { .. } => todo!(), // TODO: ?!
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -365,11 +346,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync.non_finalized_blocks_unordered();
                 either::Left(iter)
             }
-            AllSyncInner::Optimistic { inner } => {
-                let iter = inner.non_finalized_blocks_unordered();
-                either::Right(either::Left(iter))
-            }
-            AllSyncInner::WarpSync { .. } => either::Right(either::Right(iter::empty())),
+            AllSyncInner::WarpSync { .. } => either::Right(iter::empty()),
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -384,11 +361,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync.non_finalized_blocks_ancestry_order();
                 either::Left(iter)
             }
-            AllSyncInner::Optimistic { inner } => {
-                let iter = inner.non_finalized_blocks_ancestry_order();
-                either::Right(either::Left(iter))
-            }
-            AllSyncInner::WarpSync { .. } => either::Right(either::Right(iter::empty())),
+            AllSyncInner::WarpSync { .. } => either::Right(iter::empty()),
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -400,7 +373,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn is_near_head_of_chain_heuristic(&self) -> bool {
         match &self.inner {
             AllSyncInner::AllForks(_) => true,
-            AllSyncInner::Optimistic { .. } => false,
             AllSyncInner::WarpSync { .. } => false,
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -470,23 +442,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 self.inner = AllSyncInner::AllForks(all_forks);
                 outer_source_id
             }
-            AllSyncInner::Optimistic { mut inner } => {
-                let outer_source_id_entry = self.shared.sources.vacant_entry();
-                let outer_source_id = SourceId(outer_source_id_entry.key());
-
-                let source_id = inner.add_source(
-                    OptimisticSourceExtra {
-                        user_data,
-                        outer_source_id,
-                        best_block_hash,
-                    },
-                    best_block_number,
-                );
-                outer_source_id_entry.insert(SourceMapping::Optimistic(source_id));
-
-                self.inner = AllSyncInner::Optimistic { inner };
-                outer_source_id
-            }
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -535,33 +490,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 (user_data.user_data, requests)
             }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(source_id)) => {
-                let (user_data, requests) = inner.remove_source(source_id);
-                // TODO: do properly
-                let self_requests = &mut self.shared.requests;
-                let requests = requests
-                    .map(move |(_inner_request_id, request_inner_user_data)| {
-                        debug_assert!(
-                            self_requests.contains(request_inner_user_data.outer_request_id.0)
-                        );
-                        let _removed =
-                            self_requests.remove(request_inner_user_data.outer_request_id.0);
-                        debug_assert!(matches!(
-                            _removed,
-                            RequestMapping::Optimistic(_inner_request_id)
-                        ));
-                        (
-                            request_inner_user_data.outer_request_id,
-                            request_inner_user_data.user_data,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter();
-
-                // TODO: also handle the "inline" requests
-
-                (user_data.user_data, requests)
-            }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(source_id)) => {
                 let (user_data, requests) = inner.remove_source(source_id);
 
@@ -599,10 +527,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         }
     }
 
@@ -613,13 +537,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = inner.sources().map(move |id| inner[id].outer_source_id);
                 either::Left(iter)
             }
-            AllSyncInner::Optimistic { inner: sync } => {
-                let iter = sync.sources().map(move |id| sync[id].outer_source_id);
-                either::Right(either::Left(iter))
-            }
             AllSyncInner::AllForks(sync) => {
                 let iter = sync.sources().map(move |id| sync[id].outer_source_id);
-                either::Right(either::Right(iter))
+                either::Right(iter)
             }
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -646,9 +566,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
                 sync.source_num_ongoing_requests(*src)
             }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                inner.source_num_ongoing_requests(*src)
-            }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
                 inner.source_num_ongoing_requests(*src)
             }
@@ -659,10 +576,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         };
 
         num_inline + num_inner
@@ -683,11 +596,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
                 sync.source_best_block(*src)
             }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                let height = inner.source_best_block(*src);
-                let hash = &inner[*src].best_block_hash;
-                (height, hash)
-            }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
                 let ud = &inner[*src];
                 (ud.best_block_number, &ud.best_block_hash)
@@ -699,10 +607,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         }
     }
 
@@ -728,10 +632,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
                 sync.source_knows_non_finalized_block(*src, height, hash)
             }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                // TODO: is this correct?
-                inner.source_best_block(*src) >= height
-            }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
                 assert!(
                     height
@@ -752,10 +652,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         }
     }
 
@@ -799,15 +695,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync
                     .knows_non_finalized_block(height, hash)
                     .map(move |id| sync[id].outer_source_id);
-                either::Left(either::Left(iter))
-            }
-            AllSyncInner::Optimistic { inner } => {
-                // TODO: is this correct?
-                let iter = inner
-                    .sources()
-                    .filter(move |source_id| inner.source_best_block(*source_id) >= height)
-                    .map(move |source_id| inner[source_id].outer_source_id);
-                either::Left(either::Right(iter))
+                either::Left(iter)
             }
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -858,21 +746,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         (
                             sync[inner_source_id].outer_source_id,
                             &src_user_data.user_data,
-                            all_forks_request_convert(rq_params, self.shared.full_mode),
+                            all_forks_request_convert(rq_params, self.shared.download_bodies),
                         )
                     },
                 );
-
-                either::Left(either::Right(iter))
-            }
-            AllSyncInner::Optimistic { inner } => {
-                let iter = inner.desired_requests().map(move |rq_detail| {
-                    (
-                        inner[rq_detail.source_id].outer_source_id,
-                        &inner[rq_detail.source_id].user_data,
-                        optimistic_request_convert(rq_detail, self.shared.full_mode),
-                    )
-                });
 
                 either::Right(iter)
             }
@@ -886,6 +763,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                     sync_start_block_hash: block_hash,
                                 }
                             }
+                            warp_sync::DesiredRequest::BlockBodyDownload {
+                                block_hash,
+                                block_number,
+                                ..
+                            } => DesiredRequest::BlocksRequest {
+                                first_block_height: block_number,
+                                first_block_hash: Some(block_hash),
+                                ascending: true,
+                                num_blocks: NonZeroU64::new(1).unwrap(),
+                                request_headers: false,
+                                request_bodies: true,
+                                request_justification: false,
+                            },
                             warp_sync::DesiredRequest::StorageGetMerkleProof {
                                 block_hash,
                                 state_trie_root,
@@ -913,7 +803,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         )
                     });
 
-                either::Left(either::Left(iter))
+                either::Left(iter)
             }
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -970,39 +860,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 return outer_request_id;
             }
             (
-                AllSyncInner::Optimistic { inner },
-                RequestDetail::BlocksRequest {
-                    ascending: true, // TODO: ?
-                    first_block_height,
-                    num_blocks,
-                    ..
-                },
-            ) => {
-                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
-                    SourceMapping::Optimistic(inner_source_id) => *inner_source_id,
-                    _ => unreachable!(),
-                };
-
-                let request_mapping_entry = self.shared.requests.vacant_entry();
-                let outer_request_id = RequestId(request_mapping_entry.key());
-
-                let inner_request_id = inner.insert_request(
-                    optimistic::RequestDetail {
-                        source_id: inner_source_id,
-                        block_height: NonZeroU64::new(*first_block_height).unwrap(), // TODO: correct to unwrap?
-                        num_blocks: NonZeroU32::new(u32::try_from(num_blocks.get()).unwrap())
-                            .unwrap(), // TODO: don't unwrap
-                    },
-                    OptimisticRequestExtra {
-                        outer_request_id,
-                        user_data,
-                    },
-                );
-
-                request_mapping_entry.insert(RequestMapping::Optimistic(inner_request_id));
-                return outer_request_id;
-            }
-            (
                 AllSyncInner::WarpSync { inner, .. },
                 RequestDetail::WarpSync {
                     sync_start_block_hash,
@@ -1024,6 +881,38 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     },
                     warp_sync::RequestDetail::WarpSyncRequest {
                         block_hash: *sync_start_block_hash,
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
+                return outer_request_id;
+            }
+            (
+                AllSyncInner::WarpSync { inner, .. },
+                RequestDetail::BlocksRequest {
+                    first_block_height,
+                    first_block_hash: Some(first_block_hash),
+                    request_bodies: true,
+                    ..
+                },
+            ) => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::WarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    WarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
+                    warp_sync::RequestDetail::BlockBodyDownload {
+                        block_hash: *first_block_hash,
+                        block_number: *first_block_height,
                     },
                 );
 
@@ -1090,7 +979,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 return outer_request_id;
             }
             (AllSyncInner::AllForks { .. }, _) => {}
-            (AllSyncInner::Optimistic { .. }, _) => {}
             (AllSyncInner::WarpSync { .. }, _) => {}
             (AllSyncInner::Poisoned, _) => unreachable!(),
         }
@@ -1125,20 +1013,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     );
                 either::Left(iter)
             }
-            AllSyncInner::Optimistic { inner } => {
-                let iter = inner
-                    .obsolete_requests()
-                    .map(move |(_, rq)| rq.outer_request_id)
-                    .chain(
-                        self.shared
-                            .requests
-                            .iter()
-                            .filter(|(_, rq)| matches!(rq, RequestMapping::Inline(..)))
-                            .map(|(id, _)| RequestId(id)),
-                    );
-                either::Right(either::Left(iter))
-            }
-            AllSyncInner::WarpSync { .. } => either::Right(either::Right(iter::empty())), // TODO: not implemented properly
+            AllSyncInner::WarpSync { .. } => either::Right(iter::empty()), // TODO: not implemented properly
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -1152,9 +1027,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn request_source_id(&self, request_id: RequestId) -> SourceId {
         match (&self.inner, &self.shared.requests[request_id.0]) {
             (AllSyncInner::AllForks(inner), RequestMapping::AllForks(rq)) => {
-                inner[inner.request_source_id(*rq)].outer_source_id
-            }
-            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(rq)) => {
                 inner[inner.request_source_id(*rq)].outer_source_id
             }
             (AllSyncInner::WarpSync { inner, .. }, RequestMapping::WarpSync(rq)) => {
@@ -1212,6 +1084,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let (
                     new_inner,
                     finalized_block_runtime,
+                    finalized_body,
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
@@ -1223,6 +1096,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 ProcessOne::WarpSyncFinished {
                     sync: self,
                     finalized_block_runtime,
+                    finalized_body,
                     finalized_storage_code,
                     finalized_storage_heap_pages,
                     finalized_storage_code_merkle_value,
@@ -1243,24 +1117,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 all_forks::ProcessOne::FinalityProofVerify(verify) => {
                     ProcessOne::VerifyFinalityProof(FinalityProofVerify {
                         inner: FinalityProofVerifyInner::AllForks(verify),
-                        shared: self.shared,
-                    })
-                }
-            },
-            AllSyncInner::Optimistic { inner } => match inner.process_one() {
-                optimistic::ProcessOne::Idle { sync } => {
-                    self.inner = AllSyncInner::Optimistic { inner: sync };
-                    ProcessOne::AllSync(self)
-                }
-                optimistic::ProcessOne::VerifyBlock(inner) => {
-                    ProcessOne::VerifyBlock(BlockVerify {
-                        inner: BlockVerifyInner::Optimistic(inner),
-                        shared: self.shared,
-                    })
-                }
-                optimistic::ProcessOne::VerifyJustification(inner) => {
-                    ProcessOne::VerifyFinalityProof(FinalityProofVerify {
-                        inner: FinalityProofVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
                 }
@@ -1302,21 +1158,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }
                 }
             }
-            (AllSyncInner::Optimistic { inner }, &SourceMapping::Optimistic(source_id)) => {
-                match header::decode(&announced_scale_encoded_header, inner.block_number_bytes()) {
-                    Ok(header) => {
-                        if is_best {
-                            inner.raise_source_best_block(source_id, header.number);
-                            inner[source_id].best_block_hash =
-                                header::hash_from_scale_encoded_header(
-                                    &announced_scale_encoded_header,
-                                );
-                        }
-                        BlockAnnounceOutcome::Discarded
-                    }
-                    Err(err) => BlockAnnounceOutcome::InvalidHeader(err),
-                }
-            }
             (AllSyncInner::WarpSync { inner, .. }, &SourceMapping::WarpSync(source_id)) => {
                 match header::decode(
                     &announced_scale_encoded_header,
@@ -1344,10 +1185,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         }
     }
 
@@ -1368,7 +1205,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
                 sync.update_source_finality_state(*source_id, finalized_block_height)
             }
-            (AllSyncInner::Optimistic { .. }, _) => {} // TODO: the optimistic sync could get some help from the finalized block
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(source_id)) => {
                 inner.set_source_finality_state(*source_id, finalized_block_height);
             }
@@ -1414,7 +1250,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 inner.set_source_finality_state(*source_id, block_number);
                 GrandpaCommitMessageOutcome::Discarded
             }
-            (AllSyncInner::Optimistic { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
 
             // Invalid internal states.
             (AllSyncInner::AllForks(_), _) => unreachable!(),
@@ -1440,7 +1275,24 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
         match (&mut self.inner, request) {
             (_, RequestMapping::Inline(_, _, user_data)) => (user_data, ResponseOutcome::Outdated),
-            (AllSyncInner::WarpSync { .. }, _) => panic!(), // Grandpa warp sync never starts block requests.
+            (AllSyncInner::WarpSync { inner, .. }, RequestMapping::WarpSync(inner_request_id)) => {
+                match blocks
+                    .and_then(|mut b| b.next().ok_or(()))
+                    .map(|b| b.scale_encoded_extrinsics)
+                {
+                    Ok(body) => {
+                        let user_data = inner
+                            .body_download_success(inner_request_id, body)
+                            .user_data;
+                        (user_data, ResponseOutcome::Queued)
+                    }
+                    Err(_) => {
+                        // TODO: report source misbehaviour
+                        let user_data = inner.remove_request(inner_request_id).user_data;
+                        (user_data, ResponseOutcome::Outdated)
+                    }
+                }
+            }
             (
                 sync_container @ AllSyncInner::AllForks(_),
                 RequestMapping::AllForks(inner_request_id),
@@ -1454,7 +1306,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let (sync, request_user_data, outcome) = if let Ok(blocks) = blocks {
                     let (request_user_data, mut blocks_append) =
-                        sync.finish_ancestry_search(inner_request_id);
+                        sync.finish_request(inner_request_id);
                     let mut blocks_iter = blocks.into_iter().enumerate();
 
                     loop {
@@ -1515,7 +1367,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         }
                     }
                 } else {
-                    let (ud, sync) = sync.ancestry_search_failed(inner_request_id);
+                    let (ud, finish_request) = sync.finish_request(inner_request_id);
+                    let sync = finish_request.finish();
                     // TODO: `Queued`?! doesn't seem right
                     (sync, ud, ResponseOutcome::Queued)
                 };
@@ -1525,41 +1378,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 debug_assert_eq!(request_user_data.outer_request_id, request_id);
                 (request_user_data.user_data.unwrap(), outcome)
-            }
-            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(inner_request_id)) => {
-                let (request_user_data, outcome) = if let Ok(blocks) = blocks {
-                    let (request_user_data, outcome) = inner.finish_request_success(
-                        inner_request_id,
-                        blocks.map(|block| optimistic::RequestSuccessBlock {
-                            scale_encoded_header: block.scale_encoded_header,
-                            scale_encoded_justifications: block
-                                .scale_encoded_justifications
-                                .into_iter()
-                                .map(|j| (j.engine_id, j.justification))
-                                .collect(),
-                            scale_encoded_extrinsics: block.scale_encoded_extrinsics,
-                            user_data: block.user_data,
-                        }),
-                    );
-
-                    match outcome {
-                        optimistic::FinishRequestOutcome::Obsolete => {
-                            (request_user_data, ResponseOutcome::Outdated)
-                        }
-                        optimistic::FinishRequestOutcome::Queued => {
-                            (request_user_data, ResponseOutcome::Queued)
-                        }
-                    }
-                } else {
-                    // TODO: `ResponseOutcome::Queued` is a hack
-                    (
-                        inner.finish_request_failed(inner_request_id),
-                        ResponseOutcome::Queued,
-                    )
-                };
-
-                debug_assert_eq!(request_user_data.outer_request_id, request_id);
-                (request_user_data.user_data, outcome)
             }
             _ => unreachable!(),
         }
@@ -1608,7 +1426,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let user_data = if let Some((fragments, is_finished)) = response {
                     inner.warp_sync_request_success(request_id, fragments, is_finished)
                 } else {
-                    inner.fail_request(request_id)
+                    inner.remove_request(request_id)
                 };
 
                 (user_data.user_data, ResponseOutcome::Queued)
@@ -1669,7 +1487,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Err(_),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                let user_data = inner.fail_request(request_id).user_data;
+                let user_data = inner.remove_request(request_id).user_data;
                 self.inner = AllSyncInner::WarpSync {
                     inner,
                     ready_to_transition,
@@ -1734,7 +1552,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Err(_),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                let user_data = inner.fail_request(request_id);
+                let user_data = inner.remove_request(request_id);
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::WarpSync {
                     inner,
@@ -1763,9 +1581,6 @@ impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => &sync[*src].user_data,
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                &inner[*src].user_data
-            }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
                 &inner[*src].user_data
             }
@@ -1776,10 +1591,6 @@ impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         }
     }
 }
@@ -1795,9 +1606,6 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
                 &mut sync[*src].user_data
             }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                &mut inner[*src].user_data
-            }
             (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
                 &mut inner[*src].user_data
             }
@@ -1808,10 +1616,6 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
             // other.
             (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::WarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::WarpSync(_)) => unreachable!(),
         }
     }
 }
@@ -1823,7 +1627,6 @@ impl<'a, TRq, TSrc, TBl> ops::Index<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, 
     fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
         match &self.inner {
             AllSyncInner::AllForks(inner) => inner[(block_height, block_hash)].as_ref().unwrap(),
-            AllSyncInner::Optimistic { inner, .. } => &inner[block_hash],
             AllSyncInner::WarpSync { .. } => panic!("unknown block"), // No block is ever stored during the warp syncing.
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -1835,7 +1638,6 @@ impl<'a, TRq, TSrc, TBl> ops::IndexMut<(u64, &'a [u8; 32])> for AllSync<TRq, TSr
     fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
         match &mut self.inner {
             AllSyncInner::AllForks(inner) => inner[(block_height, block_hash)].as_mut().unwrap(),
-            AllSyncInner::Optimistic { inner, .. } => &mut inner[block_hash],
             AllSyncInner::WarpSync { .. } => panic!("unknown block"), // No block is ever stored during the warp syncing.
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -1900,23 +1702,6 @@ pub enum DesiredRequest {
     },
 }
 
-impl DesiredRequest {
-    /// Caps the number of blocks to request to `max`.
-    // TODO: consider removing due to the many types of requests
-    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
-        if let DesiredRequest::BlocksRequest { num_blocks, .. } = self {
-            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
-        }
-    }
-
-    /// Caps the number of blocks to request to `max`.
-    // TODO: consider removing due to the many types of requests
-    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
-        self.num_blocks_clamp(max);
-        self
-    }
-}
-
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -1971,21 +1756,6 @@ pub enum RequestDetail {
         /// Concatenated SCALE-encoded parameters to provide to the call.
         parameter_vectored: Cow<'static, [u8]>,
     },
-}
-
-impl RequestDetail {
-    /// Caps the number of blocks to request to `max`.
-    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
-        if let RequestDetail::BlocksRequest { num_blocks, .. } = self {
-            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
-        }
-    }
-
-    /// Caps the number of blocks to request to `max`.
-    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
-        self.num_blocks_clamp(max);
-        self
-    }
 }
 
 impl From<DesiredRequest> for RequestDetail {
@@ -2109,6 +1879,11 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
         /// >           block this runtime corresponds to.
         finalized_block_runtime: host::HostVmPrototype,
 
+        /// SCALE-encoded extrinsics of the finalized block. The ordering is important.
+        ///
+        /// `Some` if and only if [`Config::download_bodies`] was `true`.
+        finalized_body: Option<Vec<Vec<u8>>>,
+
         /// Storage value at the `:code` key of the finalized block.
         finalized_storage_code: Option<Vec<u8>>,
 
@@ -2200,9 +1975,6 @@ enum BlockVerifyInner<TRq, TSrc, TBl> {
     AllForks(
         all_forks::BlockVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
     ),
-    Optimistic(
-        optimistic::BlockVerify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
-    ),
 }
 
 impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
@@ -2210,23 +1982,17 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
             BlockVerifyInner::AllForks(verify) => *verify.hash(),
-            BlockVerifyInner::Optimistic(verify) => verify.hash(),
         }
     }
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full_mode`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            BlockVerifyInner::AllForks(verify) => verify
-                .scale_encoded_extrinsics()
-                .map(|iter| either::Left(iter.map(either::Left))),
-            BlockVerifyInner::Optimistic(verify) => verify
-                .scale_encoded_extrinsics()
-                .map(|iter| either::Right(iter.map(either::Right))),
+            BlockVerifyInner::AllForks(verify) => verify.scale_encoded_extrinsics(),
         }
     }
 
@@ -2234,7 +2000,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     pub fn scale_encoded_header(&self) -> Vec<u8> {
         match &self.inner {
             BlockVerifyInner::AllForks(verify) => verify.scale_encoded_header(),
-            BlockVerifyInner::Optimistic(verify) => verify.scale_encoded_header().to_vec(),
         }
     }
 
@@ -2276,31 +2041,6 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                                     HeaderVerifyError::ConsensusMismatch
                                 }
                             },
-                        }
-                    }
-                }
-            }
-            BlockVerifyInner::Optimistic(verify) => {
-                let verified_block_hash = verify.hash();
-
-                match verify.verify_header(now_from_unix_epoch) {
-                    optimistic::BlockVerification::NewBest { success, .. } => {
-                        HeaderVerifyOutcome::Success {
-                            is_new_best: true,
-                            success: HeaderVerifySuccess {
-                                inner: HeaderVerifySuccessInner::Optimistic(success),
-                                shared: self.shared,
-                                verified_block_hash,
-                            },
-                        }
-                    }
-                    optimistic::BlockVerification::Reset { sync, .. } => {
-                        HeaderVerifyOutcome::Error {
-                            sync: AllSync {
-                                inner: AllSyncInner::Optimistic { inner: sync },
-                                shared: self.shared,
-                            },
-                            error: HeaderVerifyError::ConsensusMismatch, // TODO: dummy error cause /!\
                         }
                     }
                 }
@@ -2353,13 +2093,6 @@ enum HeaderVerifySuccessInner<TRq, TSrc, TBl> {
             AllForksSourceExtra<TSrc>,
         >,
     ),
-    Optimistic(
-        optimistic::BlockVerifySuccess<
-            OptimisticRequestExtra<TRq>,
-            OptimisticSourceExtra<TSrc>,
-            TBl,
-        >,
-    ),
 }
 
 impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
@@ -2367,7 +2100,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn height(&self) -> u64 {
         match &self.inner {
             HeaderVerifySuccessInner::AllForks(verify) => verify.height(),
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.height(),
         }
     }
 
@@ -2375,23 +2107,17 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
             HeaderVerifySuccessInner::AllForks(verify) => *verify.hash(),
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.hash(),
         }
     }
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
     ///
-    /// This is `Some` if and only if [`Config::full_mode`] is `true`
+    /// This is `Some` if and only if [`Config::download_bodies`] is `true`
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
         match &self.inner {
-            HeaderVerifySuccessInner::AllForks(verify) => verify
-                .scale_encoded_extrinsics()
-                .map(|iter| either::Left(iter.map(either::Left))),
-            HeaderVerifySuccessInner::Optimistic(verify) => verify
-                .scale_encoded_extrinsics()
-                .map(|iter| either::Right(iter.map(either::Right))),
+            HeaderVerifySuccessInner::AllForks(verify) => verify.scale_encoded_extrinsics(),
         }
     }
 
@@ -2399,7 +2125,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn parent_hash(&self) -> &[u8; 32] {
         match &self.inner {
             HeaderVerifySuccessInner::AllForks(verify) => verify.parent_hash(),
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_hash(),
         }
     }
 
@@ -2410,7 +2135,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
             HeaderVerifySuccessInner::AllForks(verify) => {
                 verify.parent_user_data().map(|ud| ud.as_ref().unwrap()) // TODO: don't unwrap
             }
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.parent_user_data(),
         }
     }
 
@@ -2418,7 +2142,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
             HeaderVerifySuccessInner::AllForks(verify) => verify.scale_encoded_header(),
-            HeaderVerifySuccessInner::Optimistic(verify) => verify.scale_encoded_header(),
         }
     }
 
@@ -2426,7 +2149,19 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
         match &self.inner {
             HeaderVerifySuccessInner::AllForks(inner) => inner.parent_scale_encoded_header(),
-            HeaderVerifySuccessInner::Optimistic(inner) => inner.parent_scale_encoded_header(),
+        }
+    }
+
+    /// Cancel the block verification.
+    pub fn cancel(self) -> AllSync<TRq, TSrc, TBl> {
+        match self.inner {
+            HeaderVerifySuccessInner::AllForks(inner) => {
+                let sync = inner.cancel();
+                AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                }
+            }
         }
     }
 
@@ -2437,13 +2172,6 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
                 let sync = inner.reject_bad_block();
                 AllSync {
                     inner: AllSyncInner::AllForks(sync),
-                    shared: self.shared,
-                }
-            }
-            HeaderVerifySuccessInner::Optimistic(inner) => {
-                let sync = inner.reject_bad_block();
-                AllSync {
-                    inner: AllSyncInner::Optimistic { inner: sync },
                     shared: self.shared,
                 }
             }
@@ -2462,18 +2190,10 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
                     shared: self.shared,
                 }
             }
-            HeaderVerifySuccessInner::Optimistic(inner) => {
-                let sync = inner.finish(user_data);
-                AllSync {
-                    inner: AllSyncInner::Optimistic { inner: sync },
-                    shared: self.shared,
-                }
-            }
         }
     }
 }
 
-// TODO: should be used by the optimistic syncing as well
 pub struct FinalityProofVerify<TRq, TSrc, TBl> {
     inner: FinalityProofVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
@@ -2487,13 +2207,6 @@ enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
             AllForksSourceExtra<TSrc>,
         >,
     ),
-    Optimistic(
-        optimistic::JustificationVerify<
-            OptimisticRequestExtra<TRq>,
-            OptimisticSourceExtra<TSrc>,
-            TBl,
-        >,
-    ),
 }
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
@@ -2501,10 +2214,6 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     pub fn sender(&self) -> (SourceId, &TSrc) {
         match &self.inner {
             FinalityProofVerifyInner::AllForks(inner) => {
-                let sender = inner.sender().1;
-                (sender.outer_source_id, &sender.user_data)
-            }
-            FinalityProofVerifyInner::Optimistic(inner) => {
                 let sender = inner.sender().1;
                 (sender.outer_source_id, &sender.user_data)
             }
@@ -2570,40 +2279,6 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                     outcome,
                 )
             }
-            FinalityProofVerifyInner::Optimistic(verify) => match verify.perform(randomness_seed) {
-                (
-                    inner,
-                    optimistic::JustificationVerification::Finalized {
-                        finalized_blocks_newest_to_oldest: finalized_blocks,
-                    },
-                ) => (
-                    // TODO: transition to all_forks
-                    AllSync {
-                        inner: AllSyncInner::Optimistic { inner },
-                        shared: self.shared,
-                    },
-                    FinalityProofVerifyOutcome::NewFinalized {
-                        finalized_blocks_newest_to_oldest: finalized_blocks
-                            .into_iter()
-                            .map(|b| Block {
-                                header: b.header,
-                                justifications: b.justifications,
-                                user_data: b.user_data,
-                                full: b.full.map(|b| BlockFull { body: b.body }),
-                            })
-                            .collect(),
-                        pruned_blocks: Vec::new(),
-                        updates_best_block: false,
-                    },
-                ),
-                (inner, optimistic::JustificationVerification::Reset { error, .. }) => (
-                    AllSync {
-                        inner: AllSyncInner::Optimistic { inner },
-                        shared: self.shared,
-                    },
-                    FinalityProofVerifyOutcome::JustificationError(error),
-                ),
-            },
         }
     }
 }
@@ -2758,13 +2433,6 @@ enum AllSyncInner<TRq, TSrc, TBl> {
         inner: warp_sync::WarpSync<WarpSyncSourceExtra<TSrc>, WarpSyncRequestExtra<TRq>>,
         ready_to_transition: Option<warp_sync::RuntimeInformation>,
     },
-    Optimistic {
-        inner: optimistic::OptimisticSync<
-            OptimisticRequestExtra<TRq>,
-            OptimisticSourceExtra<TSrc>,
-            TBl,
-        >,
-    },
     // TODO: we store an `Option<TBl>` instead of `TBl` due to API issues; the all.rs doesn't let you insert user datas for pending blocks while the AllForksSync lets you; `None` is stored while a block is pending
     AllForks(
         all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
@@ -2780,17 +2448,6 @@ struct AllForksSourceExtra<TSrc> {
 struct AllForksRequestExtra<TRq> {
     outer_request_id: RequestId,
     user_data: Option<TRq>, // TODO: why option?
-}
-
-struct OptimisticSourceExtra<TSrc> {
-    user_data: TSrc,
-    best_block_hash: [u8; 32],
-    outer_source_id: SourceId,
-}
-
-struct OptimisticRequestExtra<TRq> {
-    outer_request_id: RequestId,
-    user_data: TRq,
 }
 
 struct WarpSyncSourceExtra<TSrc> {
@@ -2809,8 +2466,8 @@ struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
 
-    /// See [`Config::full_mode`].
-    full_mode: bool,
+    /// See [`Config::download_bodies`].
+    download_bodies: bool,
 
     /// Value passed through [`Config::sources_capacity`].
     sources_capacity: usize,
@@ -2836,6 +2493,7 @@ impl<TRq> Shared<TRq> {
     ) -> (
         all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         host::HostVmPrototype,
+        Option<Vec<Vec<u8>>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
@@ -2851,7 +2509,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
-            download_bodies: false,
+            download_bodies: self.download_bodies,
         });
 
         debug_assert!(self
@@ -2876,6 +2534,18 @@ impl<TRq> Shared<TRq> {
                         sync_start_block_hash: block_hash,
                     }
                 }
+                warp_sync::RequestDetail::BlockBodyDownload {
+                    block_hash,
+                    block_number,
+                } => RequestDetail::BlocksRequest {
+                    first_block_height: block_number,
+                    first_block_hash: Some(block_hash),
+                    ascending: true,
+                    num_blocks: NonZeroU64::new(1).unwrap(),
+                    request_headers: false,
+                    request_bodies: true,
+                    request_justification: false,
+                },
                 warp_sync::RequestDetail::StorageGetMerkleProof { block_hash, keys } => {
                     RequestDetail::StorageGet { block_hash, keys }
                 }
@@ -2941,6 +2611,7 @@ impl<TRq> Shared<TRq> {
         (
             all_forks,
             ready_to_transition.finalized_runtime,
+            ready_to_transition.finalized_body,
             ready_to_transition.finalized_storage_code,
             ready_to_transition.finalized_storage_heap_pages,
             ready_to_transition.finalized_storage_code_merkle_value,
@@ -2953,7 +2624,6 @@ impl<TRq> Shared<TRq> {
 enum RequestMapping<TRq> {
     Inline(SourceId, RequestDetail, TRq),
     AllForks(all_forks::RequestId),
-    Optimistic(optimistic::RequestId),
     WarpSync(warp_sync::RequestId),
 }
 
@@ -2961,34 +2631,18 @@ enum RequestMapping<TRq> {
 enum SourceMapping {
     WarpSync(warp_sync::SourceId),
     AllForks(all_forks::SourceId),
-    Optimistic(optimistic::SourceId),
 }
 
 fn all_forks_request_convert(
     rq_params: all_forks::RequestParams,
-    full_node: bool,
+    download_body: bool,
 ) -> DesiredRequest {
     DesiredRequest::BlocksRequest {
         ascending: false, // Hardcoded based on the logic of the all-forks syncing.
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
         num_blocks: rq_params.num_blocks,
-        request_bodies: full_node,
-        request_headers: true,
-        request_justification: true,
-    }
-}
-
-fn optimistic_request_convert(
-    rq_params: optimistic::RequestDetail,
-    full_node: bool,
-) -> DesiredRequest {
-    DesiredRequest::BlocksRequest {
-        ascending: true, // Hardcoded based on the logic of the optimistic syncing.
-        first_block_hash: None,
-        first_block_height: rq_params.block_height.get(),
-        num_blocks: rq_params.num_blocks.into(),
-        request_bodies: full_node,
+        request_bodies: download_body,
         request_headers: true,
         request_justification: true,
     }

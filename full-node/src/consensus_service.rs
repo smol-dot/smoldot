@@ -35,29 +35,32 @@ use futures_util::{
     SinkExt as _, StreamExt as _,
 };
 use hashbrown::HashSet;
+use rand::seq::IteratorRandom;
 use smol::lock::Mutex;
 use smoldot::{
     author,
     chain::chain_information,
     database::full_sqlite,
-    executor, header,
+    executor::{self, host, runtime_host},
+    header,
     identity::keystore,
     informant::HashDisplay,
     libp2p,
     network::{self, codec::BlockData},
     sync::all,
     trie,
-    verify::body_only::{self, StorageChanges, TrieEntryVersion},
+    verify::body_only,
 };
 use std::{
     array,
     borrow::Cow,
+    cmp,
     future::Future,
     iter,
     num::{NonZeroU64, NonZeroUsize},
     pin::Pin,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Configuration for a [`ConsensusService`].
@@ -309,7 +312,7 @@ impl ConsensusService {
                 // the chain and the machine of the user.
                 NonZeroU32::new(2000).unwrap()
             },
-            full_mode: true,
+            download_bodies: true,
             code_trie_node_hint: None,
         });
 
@@ -322,7 +325,7 @@ impl ConsensusService {
             executor::host::HostVmPrototype::new(executor::host::Config {
                 module: finalized_code,
                 heap_pages,
-                exec_hint: executor::vm::ExecHint::ValidateAndCompile, // TODO: probably should be decided by the optimisticsync
+                exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
                 allow_unresolved_imports: false,
             })
             .map_err(InitError::FinalizedRuntimeInit)?
@@ -339,7 +342,7 @@ impl ConsensusService {
             authored_block: None,
             slot_duration_author_ratio: config.slot_duration_author_ratio,
             keystore: config.keystore,
-            finalized_runtime: Arc::new(Mutex::new(Some(finalized_runtime))),
+            finalized_runtime: Arc::new(finalized_runtime),
             network_service: config.network_service.0,
             network_chain_id: config.network_service.1,
             network_local_chain_update_needed: true,
@@ -349,6 +352,9 @@ impl ConsensusService {
             pending_notification: None,
             from_network_service: config.network_events_receiver,
             database: config.database,
+            database_catch_up_download: DatabaseCatchUpDownload::NoDownloadInProgress,
+            database_catch_up_download_block_verification:
+                DatabaseCatchUpDownloadBlockVerification::None,
             peers_source_id_map: Default::default(),
             sub_tasks: FuturesUnordered::new(),
             log_callback: config.log_callback,
@@ -533,7 +539,7 @@ pub enum Notification {
         /// Changes to the storage that the block has performed.
         ///
         /// Note that this field is only available when a new block is available.
-        storage_changes: Arc<StorageChanges>,
+        storage_changes: Arc<runtime_host::StorageChanges>,
     },
 }
 
@@ -624,7 +630,7 @@ struct SyncBackground {
     /// The runtime is extracted when necessary then put back it place.
     ///
     /// The `Arc` is shared with [`NonFinalizedBlock::Verified::runtime`].
-    finalized_runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
+    finalized_runtime: Arc<executor::host::HostVmPrototype>,
 
     /// Used to receive messages from the frontend service, and to detect when it shuts down.
     to_background_rx: mpsc::Receiver<ToBackground>,
@@ -670,6 +676,14 @@ struct SyncBackground {
     /// See [`Config::database`].
     database: Arc<database_thread::DatabaseThread>,
 
+    /// Whether an old block or storage item from an old block is currently being downloaded or
+    /// must be downloaded.
+    database_catch_up_download: DatabaseCatchUpDownload,
+
+    /// Whether an old block or storage item from an old block is currently being downloaded or
+    /// must be downloaded.
+    database_catch_up_download_block_verification: DatabaseCatchUpDownloadBlockVerification,
+
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
 }
@@ -682,7 +696,7 @@ enum NonFinalizedBlock {
         /// different one.
         ///
         /// The `Arc` is shared with [`SyncBackground::finalized_runtime`].
-        runtime: Arc<Mutex<Option<executor::host::HostVmPrototype>>>,
+        runtime: Arc<executor::host::HostVmPrototype>,
     },
 }
 
@@ -722,18 +736,51 @@ enum SubtaskFinished {
     },
 }
 
+#[derive(Debug, Clone)]
+enum DatabaseCatchUpDownload {
+    /// No download currently in progress.
+    NoDownloadInProgress,
+    /// No download currently in progress, and we know that nothing is missing from the database.
+    NothingToDownloadCache,
+    /// Currently downloading.
+    InProgress(all::RequestId),
+}
+
+#[derive(Debug, Clone)]
+enum DatabaseCatchUpDownloadBlockVerification {
+    /// No download is required.
+    None,
+    /// A call proof download should be started next.
+    CallProofDesired {
+        block_hash: [u8; 32],
+        block_number: u64,
+        function_name: String,
+        parameter: Vec<u8>,
+    },
+    /// A storage proof download should be started next.
+    CodeStorageProofDesired {
+        block_hash: [u8; 32],
+        block_number: u64,
+    },
+    /// Currently downloading.
+    InProgress(all::RequestId),
+}
+
 impl SyncBackground {
     async fn run(mut self) {
         let mut process_sync = true;
 
         loop {
-            self.start_network_requests().await;
-
             enum WakeUpReason {
                 ReadyToAuthor,
                 FrontendEvent(ToBackground),
                 FrontendClosed,
                 SendPendingNotification(Notification),
+                StartNetworkRequest {
+                    source_id: all::SourceId,
+                    request: all::DesiredRequest,
+                    database_catch_up_type: DbCatchUpType,
+                },
                 NetworkEvent(network_service::Event),
                 NetworkLocalChainUpdate,
                 AnnounceBlock(Vec<u8>, [u8; 32], u64),
@@ -741,12 +788,20 @@ impl SyncBackground {
                 SyncProcess,
             }
 
+            enum DbCatchUpType {
+                No,
+                BlockVerification,
+                Database,
+            }
+
             let wake_up_reason: WakeUpReason = {
                 // Creating the block authoring state and prepare a future that is ready when something
                 // related to the block authoring is ready.
                 // TODO: refactor as a separate task?
+                // TODO: restore block authoring after https://github.com/smol-dot/smoldot/issues/1109
                 let authoring_ready_future = {
-                    // TODO: overhead to call best_block_consensus() multiple times
+                    future::pending::<WakeUpReason>()
+                    /*// TODO: overhead to call best_block_consensus() multiple times
                     let local_authorities = {
                         let namespace_filter = match self.sync.best_block_consensus() {
                             chain_information::ChainInformationConsensusRef::Aura { .. } => {
@@ -831,7 +886,7 @@ impl SyncBackground {
                                 delay,
                             )))
                         }
-                    }
+                    }*/
                 };
 
                 async {
@@ -875,11 +930,257 @@ impl SyncBackground {
                     };
                     WakeUpReason::SubtaskFinished(subtask_finished)
                 })
-                .or(async {
-                    if !process_sync {
+                .or({
+                    async {
+                        // TODO: handle obsolete requests
+                        // Ask the sync state machine whether any new network request should
+                        // be started.
+                        // `desired_requests()` returns, in decreasing order of priority, the
+                        // requests that should be started in order for the syncing to proceed. We
+                        // simply pick the first request, but enforce one ongoing request per
+                        // source.
+                        // TODO: desired_requests() is expensive and done at every iteration
+                        let request_to_start = self.sync.desired_requests().find(
+                            |(source_id, source_info, request_details)| {
+                                if source_info
+                                    .as_ref()
+                                    .map_or(false, |info| info.is_disconnected)
+                                {
+                                    // Source is a networking source that has already been disconnected.
+                                    false
+                                } else if *source_id != self.block_author_sync_source {
+                                    // Remote source.
+                                    self.sync.source_num_ongoing_requests(*source_id) == 0
+                                } else {
+                                    // Locally-authored blocks source.
+                                    match (request_details, &self.authored_block) {
+                                        (
+                                            all::DesiredRequest::BlocksRequest {
+                                                first_block_hash: None,
+                                                first_block_height,
+                                                ..
+                                            },
+                                            Some((authored_height, _, _, _)),
+                                        ) if first_block_height == authored_height => true,
+                                        (
+                                            all::DesiredRequest::BlocksRequest {
+                                                first_block_hash: Some(first_block_hash),
+                                                first_block_height,
+                                                ..
+                                            },
+                                            Some((authored_height, authored_hash, _, _)),
+                                        ) if first_block_hash == authored_hash
+                                            && first_block_height == authored_height =>
+                                        {
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                }
+                            },
+                        );
+                        if let Some((source_id, _, request)) = request_to_start {
+                            return WakeUpReason::StartNetworkRequest {
+                                source_id,
+                                request,
+                                database_catch_up_type: DbCatchUpType::No,
+                            };
+                        }
+
+                        match self.database_catch_up_download_block_verification.clone() {
+                            _ if !matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                                    | DatabaseCatchUpDownload::NothingToDownloadCache
+                            ) => {}
+                            DatabaseCatchUpDownloadBlockVerification::None => {}
+                            DatabaseCatchUpDownloadBlockVerification::InProgress(_) => {}
+                            DatabaseCatchUpDownloadBlockVerification::CallProofDesired {
+                                block_hash,
+                                block_number,
+                                function_name,
+                                parameter,
+                            } => {
+                                // Choose which source to query. We have to use an `if` because
+                                // `knows_non_finalized_block` panics if the parameter is inferior
+                                // or equal to the finalized block number.
+                                let source_id = if block_number
+                                    <= self.sync.finalized_block_header().number
+                                {
+                                    self.sync
+                                        .sources()
+                                        .filter(|s| *s != self.block_author_sync_source)
+                                        .choose(&mut rand::thread_rng())
+                                } else {
+                                    self.sync
+                                        .knows_non_finalized_block(block_number, &block_hash)
+                                        .filter(|source_id| {
+                                            *source_id != self.block_author_sync_source
+                                                && self.sync.source_num_ongoing_requests(*source_id)
+                                                    == 0
+                                        })
+                                        .choose(&mut rand::thread_rng())
+                                };
+
+                                if let Some(source_id) = source_id {
+                                    return WakeUpReason::StartNetworkRequest {
+                                        source_id,
+                                        request: all::DesiredRequest::RuntimeCallMerkleProof {
+                                            block_hash,
+                                            function_name: function_name.into(),
+                                            parameter_vectored: parameter.into(),
+                                        },
+                                        database_catch_up_type: DbCatchUpType::BlockVerification,
+                                    };
+                                }
+                            }
+                            DatabaseCatchUpDownloadBlockVerification::CodeStorageProofDesired {
+                                block_hash,
+                                block_number,
+                            } => {
+                                // Choose which source to query. We have to use an `if` because
+                                // `knows_non_finalized_block` panics if the parameter is inferior
+                                // or equal to the finalized block number.
+                                let source_id = if block_number
+                                    <= self.sync.finalized_block_header().number
+                                {
+                                    self.sync
+                                        .sources()
+                                        .filter(|s| *s != self.block_author_sync_source)
+                                        .choose(&mut rand::thread_rng())
+                                } else {
+                                    self.sync
+                                        .knows_non_finalized_block(block_number, &block_hash)
+                                        .filter(|source_id| {
+                                            *source_id != self.block_author_sync_source
+                                                && self.sync.source_num_ongoing_requests(*source_id)
+                                                    == 0
+                                        })
+                                        .choose(&mut rand::thread_rng())
+                                };
+
+                                if let Some(source_id) = source_id {
+                                    return WakeUpReason::StartNetworkRequest {
+                                        source_id,
+                                        request: all::DesiredRequest::StorageGetMerkleProof {
+                                            block_hash,
+                                            state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
+                                            keys: vec![":code".into(), ":heappages".into()],
+                                        },
+                                        database_catch_up_type: DbCatchUpType::BlockVerification,
+                                    };
+                                }
+                            }
+                        }
+
+                        // If the sync state machine doesn't require any additional request, ask
+                        // the database whether any storage item is missing.
+                        if matches!(
+                            self.database_catch_up_download,
+                            DatabaseCatchUpDownload::NoDownloadInProgress
+                        ) {
+                            // TODO: this has a O(n^2) complexity; in case all sources are busy, we iterate a lot
+                            let missing_items = self
+                                .database
+                                .with_database(|db| {
+                                    db.finalized_and_above_missing_trie_nodes_unordered()
+                                })
+                                .await
+                                .unwrap();
+                            if missing_items.is_empty() {
+                                self.database_catch_up_download =
+                                    DatabaseCatchUpDownload::NothingToDownloadCache;
+                            }
+
+                            for missing_item in missing_items
+                                .into_iter()
+                                .flat_map(|item| item.blocks.into_iter())
+                            {
+                                // Since the database and sync state machine are supposed to have the
+                                // same finalized block, it is guaranteed that the missing item are
+                                // in the finalized block or above.
+                                debug_assert!(
+                                    missing_item.number
+                                        >= self.sync.finalized_block_header().number
+                                );
+
+                                // Choose which source to query. We have to use an `if` because
+                                // `knows_non_finalized_block` panics if the parameter is inferior
+                                // or equal to the finalized block number.
+                                let source_id = if missing_item.number
+                                    <= self.sync.finalized_block_header().number
+                                {
+                                    let Some(source_id) = self
+                                        .sync
+                                        .sources()
+                                        .filter(|s| *s != self.block_author_sync_source)
+                                        .choose(&mut rand::thread_rng())
+                                    else {
+                                        break;
+                                    };
+                                    source_id
+                                } else {
+                                    let Some(source_id) = self
+                                        .sync
+                                        .knows_non_finalized_block(
+                                            missing_item.number,
+                                            &missing_item.hash,
+                                        )
+                                        .filter(|source_id| {
+                                            *source_id != self.block_author_sync_source
+                                                && self.sync.source_num_ongoing_requests(*source_id)
+                                                    == 0
+                                        })
+                                        .choose(&mut rand::thread_rng())
+                                    else {
+                                        continue;
+                                    };
+                                    source_id
+                                };
+
+                                return WakeUpReason::StartNetworkRequest {
+                                    source_id,
+                                    request: all::DesiredRequest::StorageGetMerkleProof {
+                                        block_hash: missing_item.hash,
+                                        state_trie_root: [0; 32], // TODO: wrong, but field value unused so it's fine temporarily
+                                        keys: vec![trie::nibbles_to_bytes_suffix_extend(
+                                            missing_item
+                                                .trie_node_key_nibbles
+                                                .into_iter()
+                                                // In order to download more than one item at a time,
+                                                // we add some randomly-generated nibbles to the
+                                                // requested key. The request will target the missing
+                                                // key plus a few other random keys.
+                                                .chain((0..32).map(|_| {
+                                                    rand::Rng::gen_range(
+                                                        &mut rand::thread_rng(),
+                                                        0..16,
+                                                    )
+                                                }))
+                                                .map(|n| trie::Nibble::try_from(n).unwrap()),
+                                        )
+                                        .collect::<Vec<_>>()],
+                                    },
+                                    database_catch_up_type: DbCatchUpType::Database,
+                                };
+                            }
+                        }
+
+                        // No network request to start.
                         future::pending().await
                     }
-                    WakeUpReason::SyncProcess
+                })
+                .or({
+                    let is_downloading = matches!(
+                        self.database_catch_up_download_block_verification,
+                        DatabaseCatchUpDownloadBlockVerification::None
+                    );
+                    async move {
+                        if !process_sync || !is_downloading {
+                            future::pending().await
+                        }
+                        WakeUpReason::SyncProcess
+                    }
                 })
                 .await
             };
@@ -955,7 +1256,7 @@ impl SyncBackground {
                             let runtime_update = if Arc::ptr_eq(&self.finalized_runtime, &runtime) {
                                 None
                             } else {
-                                Some(Arc::new(runtime.lock().await.clone().unwrap()))
+                                Some(runtime.clone())
                             };
                             blocks_out.push(BlockNotification {
                                 is_new_best: header::hash_from_scale_encoded_header(
@@ -975,9 +1276,7 @@ impl SyncBackground {
                         id: SubscriptionId(0), // TODO:
                         finalized_block_hash,
                         finalized_block_scale_encoded_header,
-                        finalized_block_runtime: Arc::new(
-                            self.finalized_runtime.lock().await.clone().unwrap(),
-                        ),
+                        finalized_block_runtime: self.finalized_runtime.clone(),
                         non_finalized_blocks_ancestry_order,
                         new_blocks,
                     });
@@ -1163,11 +1462,311 @@ impl SyncBackground {
                     // Different chain index.
                 }
 
+                WakeUpReason::StartNetworkRequest {
+                    source_id,
+                    request: request_info @ all::DesiredRequest::BlocksRequest { .. },
+                    database_catch_up_type,
+                } if source_id == self.block_author_sync_source => {
+                    debug_assert!(matches!(database_catch_up_type, DbCatchUpType::No));
+
+                    self.log_callback.log(
+                        LogLevel::Debug,
+                        "queue-locally-authored-block-for-import".to_string(),
+                    );
+
+                    let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
+                        self.authored_block.take().unwrap();
+
+                    let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
+
+                    // Create a request that is immediately answered right below.
+                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
+                    // TODO: announce the block on the network, but only after it's been imported
+                    self.sync.blocks_request_response(
+                        request_id,
+                        Ok(iter::once(all::BlockRequestSuccessBlock {
+                            scale_encoded_header,
+                            scale_encoded_extrinsics,
+                            scale_encoded_justifications: Vec::new(),
+                            user_data: NonFinalizedBlock::NotVerified,
+                        })),
+                    );
+                }
+
+                WakeUpReason::StartNetworkRequest {
+                    source_id,
+                    request:
+                        all::DesiredRequest::BlocksRequest {
+                            first_block_hash,
+                            first_block_height,
+                            ascending,
+                            num_blocks,
+                            request_headers,
+                            request_bodies,
+                            request_justification,
+                        },
+                    database_catch_up_type,
+                } => {
+                    // Before notifying the syncing of the request, clamp the number of blocks to
+                    // the number of blocks we expect to receive.
+                    let num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), 64)).unwrap();
+
+                    let peer_id = {
+                        let info = self.sync[source_id].clone().unwrap();
+                        // Disconnected sources are filtered out above.
+                        debug_assert!(!info.is_disconnected);
+                        info.peer_id
+                    };
+
+                    // TODO: add jaeger span
+
+                    let request = self.network_service.clone().blocks_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::BlocksRequestConfig {
+                            start: if let Some(first_block_hash) = first_block_hash {
+                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
+                            } else {
+                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
+                            },
+                            desired_count: NonZeroU32::new(
+                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                            )
+                            .unwrap(),
+                            direction: if ascending {
+                                network::codec::BlocksRequestDirection::Ascending
+                            } else {
+                                network::codec::BlocksRequestDirection::Descending
+                            },
+                            fields: network::codec::BlocksRequestFields {
+                                header: true, // TODO: always set to true due to unwrapping the header when the response comes
+                                body: request_bodies,
+                                justifications: request_justification,
+                            },
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::DesiredRequest::BlocksRequest {
+                            first_block_hash,
+                            first_block_height,
+                            ascending,
+                            num_blocks,
+                            request_headers,
+                            request_bodies,
+                            request_justification,
+                        }
+                        .into(),
+                        (),
+                    );
+
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
+                    }
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::BlocksRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
+                WakeUpReason::StartNetworkRequest {
+                    source_id,
+                    request:
+                        all::DesiredRequest::WarpSync {
+                            sync_start_block_hash,
+                        },
+                    database_catch_up_type,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().warp_sync_request(
+                        peer_id,
+                        self.network_chain_id,
+                        sync_start_block_hash,
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::WarpSync {
+                            sync_start_block_hash,
+                        },
+                        (),
+                    );
+
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
+                    }
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::WarpSyncRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
+                WakeUpReason::StartNetworkRequest {
+                    source_id,
+                    request:
+                        all::DesiredRequest::StorageGetMerkleProof {
+                            block_hash, keys, ..
+                        },
+                    database_catch_up_type,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().storage_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::StorageProofRequestConfig {
+                            block_hash,
+                            keys: keys.clone().into_iter(),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::StorageGet { block_hash, keys },
+                        (),
+                    );
+
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
+                    }
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::StorageRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
+                WakeUpReason::StartNetworkRequest {
+                    source_id,
+                    request:
+                        all::DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash,
+                            function_name,
+                            parameter_vectored,
+                        },
+                    database_catch_up_type,
+                } => {
+                    // TODO: don't unwrap? could this target the virtual sync source?
+                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                    let request = self.network_service.clone().call_proof_request(
+                        peer_id,
+                        self.network_chain_id,
+                        network::codec::CallProofRequestConfig {
+                            block_hash,
+                            method: function_name.clone(),
+                            parameter_vectored: iter::once(parameter_vectored.clone()),
+                        },
+                    );
+
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        all::RequestDetail::RuntimeCallMerkleProof {
+                            block_hash,
+                            function_name,
+                            parameter_vectored,
+                        },
+                        (),
+                    );
+
+                    match database_catch_up_type {
+                        DbCatchUpType::No => {}
+                        DbCatchUpType::Database => {
+                            debug_assert!(matches!(
+                                self.database_catch_up_download,
+                                DatabaseCatchUpDownload::NoDownloadInProgress
+                            ));
+                            self.database_catch_up_download =
+                                DatabaseCatchUpDownload::InProgress(request_id);
+                        }
+                        DbCatchUpType::BlockVerification => {
+                            self.database_catch_up_download_block_verification =
+                                DatabaseCatchUpDownloadBlockVerification::InProgress(request_id);
+                        }
+                    }
+
+                    self.sub_tasks.push(Box::pin(async move {
+                        let result = request.await;
+                        SubtaskFinished::CallProofRequestFinished {
+                            request_id,
+                            source_id,
+                            result,
+                        }
+                    }));
+                }
+
                 WakeUpReason::SubtaskFinished(SubtaskFinished::BlocksRequestFinished {
                     request_id,
                     source_id,
                     result: Ok(blocks),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
+
+                    // TODO: insert blocks in database if they are referenced through a parent_hash?
+
                     let _ = self.sync.blocks_request_response(
                         request_id,
                         Ok(blocks
@@ -1211,6 +1810,17 @@ impl SyncBackground {
                     source_id,
                     result: Err(_),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
+
                     // Note that we perform the ban even if the source is now disconnected.
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
                     self.network_service
@@ -1249,6 +1859,17 @@ impl SyncBackground {
                     source_id,
                     result: Ok(result),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
+
                     let decoded = result.decode();
                     let fragments = decoded
                         .fragments
@@ -1287,6 +1908,17 @@ impl SyncBackground {
                     source_id,
                     result: Err(_),
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
+
                     // Note that we perform the ban even if the source is now disconnected.
                     let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
                     self.network_service
@@ -1323,6 +1955,69 @@ impl SyncBackground {
                     source_id,
                     result,
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
+
+                    if let Ok(result) = &result {
+                        let result = result.clone();
+                        self.database
+                            .with_database(move |database| {
+                                if let Ok(decoded) = trie::proof_decode::decode_and_verify_proof(
+                                    trie::proof_decode::Config {
+                                        proof: result.decode(),
+                                    },
+                                ) {
+                                    for (_, entry) in decoded.iter_ordered() {
+                                        // TODO: check the state root hash; while this can't lead to a vulnerability, it can bloat the database
+                                        database.insert_trie_nodes(
+                                            iter::once(full_sqlite::InsertTrieNode {
+                                                merkle_value: Cow::Borrowed(entry.merkle_value),
+                                                partial_key_nibbles: Cow::Owned(entry.partial_key_nibbles.into_iter().map(|n| u8::from(n)).collect()),
+                                                children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
+                                                storage_value: match entry.trie_node_info.storage_value {
+                                                    trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                        _,
+                                                    ) => return,
+                                                    trie::proof_decode::StorageValue::None => {
+                                                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                                    }
+                                                    trie::proof_decode::StorageValue::Known {
+                                                        value, ..
+                                                    } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                        value: Cow::Borrowed(value),
+                                                        references_merkle_value: false, // TODO:
+                                                    },
+                                                },
+                                            }),
+                                            match entry.trie_node_info.storage_value {
+                                                trie::proof_decode::StorageValue::None => 0, // TODO: ?!
+                                                trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                    ..
+                                                ) => return,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: true,
+                                                    ..
+                                                } => 0,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: false,
+                                                    ..
+                                                } => 1,
+                                            },
+                                        ).unwrap();
+                                    }
+                                }
+                            })
+                            .await;
+                    }
+
                     if result.is_err() {
                         // Note that we perform the ban even if the source is now disconnected.
                         let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
@@ -1363,6 +2058,70 @@ impl SyncBackground {
                     source_id,
                     result,
                 }) => {
+                    if matches!(self.database_catch_up_download, DatabaseCatchUpDownload::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download =
+                            DatabaseCatchUpDownload::NoDownloadInProgress;
+                    }
+                    if matches!(self.database_catch_up_download_block_verification, DatabaseCatchUpDownloadBlockVerification::InProgress(r) if r == request_id)
+                    {
+                        self.database_catch_up_download_block_verification =
+                            DatabaseCatchUpDownloadBlockVerification::None;
+                    }
+
+                    // TODO: DRY with above
+                    if let Ok(result) = &result {
+                        let result = result.clone();
+                        self.database
+                            .with_database(move |database| {
+                                if let Ok(decoded) = trie::proof_decode::decode_and_verify_proof(
+                                    trie::proof_decode::Config {
+                                        proof: result.decode(),
+                                    },
+                                ) {
+                                    for (_, entry) in decoded.iter_ordered() {
+                                        // TODO: check the state root hash; while this can't lead to a vulnerability, it can bloat the database
+                                        database.insert_trie_nodes(
+                                            iter::once(full_sqlite::InsertTrieNode {
+                                                merkle_value: Cow::Borrowed(entry.merkle_value),
+                                                partial_key_nibbles: Cow::Owned(entry.partial_key_nibbles.into_iter().map(|n| u8::from(n)).collect()),
+                                                children_merkle_values: std::array::from_fn(|n| entry.trie_node_info.children.child(trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap()).merkle_value().map(Cow::Borrowed)),
+                                                storage_value: match entry.trie_node_info.storage_value {
+                                                    trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                        _,
+                                                    ) => return,
+                                                    trie::proof_decode::StorageValue::None => {
+                                                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                                    }
+                                                    trie::proof_decode::StorageValue::Known {
+                                                        value, ..
+                                                    } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                                        value: Cow::Borrowed(value),
+                                                        references_merkle_value: false, // TODO:
+                                                    },
+                                                },
+                                            }),
+                                            match entry.trie_node_info.storage_value {
+                                                trie::proof_decode::StorageValue::None => 0, // TODO: ?!
+                                                trie::proof_decode::StorageValue::HashKnownValueMissing(
+                                                    ..
+                                                ) => return,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: true,
+                                                    ..
+                                                } => 0,
+                                                trie::proof_decode::StorageValue::Known {
+                                                    inline: false,
+                                                    ..
+                                                } => 1,
+                                            },
+                                        ).unwrap();
+                                    }
+                                }
+                            })
+                            .await;
+                    }
+
                     if result.is_err() {
                         // Note that we perform the ban even if the source is now disconnected.
                         let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone();
@@ -1405,6 +2164,14 @@ impl SyncBackground {
                     debug_assert!(self.pending_notification.is_none());
                     // Similarly, verifying a block might generate a block announce.
                     debug_assert!(self.pending_block_announce.is_none());
+
+                    // Given that a block verification might require downloading some storage
+                    // items due to missing storage items, and that we only want one download at
+                    // a time, we don't verify blocks if a download is in progress.
+                    debug_assert!(matches!(
+                        self.database_catch_up_download_block_verification,
+                        DatabaseCatchUpDownloadBlockVerification::None
+                    ));
 
                     let (new_self, maybe_more_to_process) = self.process_blocks().await;
                     process_sync = maybe_more_to_process;
@@ -1482,7 +2249,7 @@ impl SyncBackground {
                 } else {
                     self.finalized_runtime.clone()
                 };
-            let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
+            let parent_runtime = (*parent_runtime_arc).clone();
 
             // Start the block authoring process.
             let mut block_authoring = {
@@ -1534,20 +2301,11 @@ impl SyncBackground {
                             }
                         };
 
-                        // Put back the parent runtime that we extracted.
-                        *parent_runtime_arc.try_lock().unwrap() = Some(success.parent_runtime);
-
                         break (success.scale_encoded_header, success.body, success.logs);
                     }
 
-                    author::build::BuilderAuthoring::Error {
-                        error,
-                        parent_runtime,
-                    } => {
+                    author::build::BuilderAuthoring::Error { error, .. } => {
                         // Block authoring process stopped because of an error.
-
-                        // Put back the parent runtime that we extracted.
-                        *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
 
                         // In order to prevent the block authoring from restarting immediately
                         // after and failing again repeatedly, we switch the block authoring to
@@ -1604,12 +2362,14 @@ impl SyncBackground {
                                 )
                             })
                             .await
+                            // TODO: don't panic in case of incomplete storage
                             .expect("database access error");
 
                         block_authoring = req.inject_value(value.as_ref().map(|(val, vers)| {
                             (
                                 iter::once(&val[..]),
-                                TrieEntryVersion::try_from(*vers).expect("corrupted database"),
+                                runtime_host::TrieEntryVersion::try_from(*vers)
+                                    .expect("corrupted database"),
                             )
                         }));
                     }
@@ -1632,6 +2392,7 @@ impl SyncBackground {
                                 )
                             })
                             .await
+                            // TODO: don't panic in case of incomplete storage
                             .expect("database access error");
 
                         block_authoring =
@@ -1664,6 +2425,7 @@ impl SyncBackground {
                                 )
                             })
                             .await
+                            // TODO: don't panic in case of incomplete storage
                             .expect("database access error");
 
                         block_authoring = req
@@ -1742,244 +2504,6 @@ impl SyncBackground {
         ));
     }
 
-    /// Starts all the new network requests that should be started.
-    // TODO: handle obsolete requests
-    async fn start_network_requests(&mut self) {
-        loop {
-            // `desired_requests()` returns, in decreasing order of priority, the requests
-            // that should be started in order for the syncing to proceed. We simply pick the
-            // first request, but enforce one ongoing request per source.
-            let (source_id, _, mut request_info) = match self.sync.desired_requests().find(
-                |(source_id, source_info, request_details)| {
-                    if source_info
-                        .as_ref()
-                        .map_or(false, |info| info.is_disconnected)
-                    {
-                        // Source is a networking source that has already been disconnected.
-                        false
-                    } else if *source_id != self.block_author_sync_source {
-                        // Remote source.
-                        self.sync.source_num_ongoing_requests(*source_id) == 0
-                    } else {
-                        // Locally-authored blocks source.
-                        match (request_details, &self.authored_block) {
-                            (
-                                all::DesiredRequest::BlocksRequest {
-                                    first_block_hash: None,
-                                    first_block_height,
-                                    ..
-                                },
-                                Some((authored_height, _, _, _)),
-                            ) if first_block_height == authored_height => true,
-                            (
-                                all::DesiredRequest::BlocksRequest {
-                                    first_block_hash: Some(first_block_hash),
-                                    first_block_height,
-                                    ..
-                                },
-                                Some((authored_height, authored_hash, _, _)),
-                            ) if first_block_hash == authored_hash
-                                && first_block_height == authored_height =>
-                            {
-                                true
-                            }
-                            _ => false,
-                        }
-                    }
-                },
-            ) {
-                Some(v) => v,
-                None => break,
-            };
-
-            // Before notifying the syncing of the request, clamp the number of blocks to the
-            // number of blocks we expect to receive.
-            request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
-
-            match request_info {
-                all::DesiredRequest::BlocksRequest { .. }
-                    if source_id == self.block_author_sync_source =>
-                {
-                    self.log_callback.log(
-                        LogLevel::Debug,
-                        "queue-locally-authored-block-for-import".to_string(),
-                    );
-
-                    let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
-                        self.authored_block.take().unwrap();
-
-                    let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
-
-                    // Create a request that is immediately answered right below.
-                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
-
-                    // TODO: announce the block on the network, but only after it's been imported
-                    self.sync.blocks_request_response(
-                        request_id,
-                        Ok(iter::once(all::BlockRequestSuccessBlock {
-                            scale_encoded_header,
-                            scale_encoded_extrinsics,
-                            scale_encoded_justifications: Vec::new(),
-                            user_data: NonFinalizedBlock::NotVerified,
-                        })),
-                    );
-                }
-
-                all::DesiredRequest::BlocksRequest {
-                    first_block_hash,
-                    first_block_height,
-                    ascending,
-                    num_blocks,
-                    request_headers,
-                    request_bodies,
-                    request_justification,
-                } => {
-                    let peer_id = {
-                        let info = self.sync[source_id].clone().unwrap();
-                        // Disconnected sources are filtered out above.
-                        debug_assert!(!info.is_disconnected);
-                        info.peer_id
-                    };
-
-                    // TODO: add jaeger span
-
-                    let request = self.network_service.clone().blocks_request(
-                        peer_id,
-                        self.network_chain_id,
-                        network::codec::BlocksRequestConfig {
-                            start: if let Some(first_block_hash) = first_block_hash {
-                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
-                            } else {
-                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
-                            },
-                            desired_count: NonZeroU32::new(
-                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                            )
-                            .unwrap(),
-                            direction: if ascending {
-                                network::codec::BlocksRequestDirection::Ascending
-                            } else {
-                                network::codec::BlocksRequestDirection::Descending
-                            },
-                            fields: network::codec::BlocksRequestFields {
-                                header: request_headers,
-                                body: request_bodies,
-                                justifications: request_justification,
-                            },
-                        },
-                    );
-
-                    let request_id = self.sync.add_request(source_id, request_info.into(), ());
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::BlocksRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-                all::DesiredRequest::WarpSync {
-                    sync_start_block_hash,
-                } => {
-                    // TODO: don't unwrap? could this target the virtual sync source?
-                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                    let request = self.network_service.clone().warp_sync_request(
-                        peer_id,
-                        self.network_chain_id,
-                        sync_start_block_hash,
-                    );
-
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        all::RequestDetail::WarpSync {
-                            sync_start_block_hash,
-                        },
-                        (),
-                    );
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::WarpSyncRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-                all::DesiredRequest::StorageGetMerkleProof {
-                    block_hash, keys, ..
-                } => {
-                    // TODO: don't unwrap? could this target the virtual sync source?
-                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                    let request = self.network_service.clone().storage_request(
-                        peer_id,
-                        self.network_chain_id,
-                        network::codec::StorageProofRequestConfig {
-                            block_hash,
-                            keys: keys.clone().into_iter(),
-                        },
-                    );
-
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        all::RequestDetail::StorageGet { block_hash, keys },
-                        (),
-                    );
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::StorageRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-                all::DesiredRequest::RuntimeCallMerkleProof {
-                    block_hash,
-                    function_name,
-                    parameter_vectored,
-                } => {
-                    // TODO: don't unwrap? could this target the virtual sync source?
-                    let peer_id = self.sync[source_id].as_ref().unwrap().peer_id.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                    let request = self.network_service.clone().call_proof_request(
-                        peer_id,
-                        self.network_chain_id,
-                        network::codec::CallProofRequestConfig {
-                            block_hash,
-                            method: function_name.clone(),
-                            parameter_vectored: iter::once(parameter_vectored.clone()),
-                        },
-                    );
-
-                    let request_id = self.sync.add_request(
-                        source_id,
-                        all::RequestDetail::RuntimeCallMerkleProof {
-                            block_hash,
-                            function_name,
-                            parameter_vectored,
-                        },
-                        (),
-                    );
-
-                    self.sub_tasks.push(Box::pin(async move {
-                        let result = request.await;
-                        SubtaskFinished::CallProofRequestFinished {
-                            request_id,
-                            source_id,
-                            result,
-                        }
-                    }));
-                }
-            }
-        }
-    }
-
     async fn process_blocks(mut self) -> (Self, bool) {
         // The sync state machine can be in a few various states. At the time of writing:
         // idle, verifying header, verifying block, verifying grandpa warp sync proof,
@@ -2043,7 +2567,7 @@ impl SyncBackground {
             }
             all::ProcessOne::WarpSyncBuildRuntime(build_runtime) => {
                 let (new_sync, outcome) =
-                    build_runtime.build(all::ExecHint::ValidateAndCompile, true);
+                    build_runtime.build(all::ExecHint::CompileAheadOfTime, true);
                 self.sync = new_sync;
                 if let Err(err) = outcome {
                     self.log_callback.log(
@@ -2064,15 +2588,52 @@ impl SyncBackground {
                 }
                 (self, true)
             }
-            all::ProcessOne::WarpSyncFinished { .. } => {
-                // Warp syncing is currently disabled for the full node.
-                unimplemented!()
+            all::ProcessOne::WarpSyncFinished {
+                sync,
+                finalized_body: Some(finalized_body),
+                finalized_block_runtime,
+                ..
+            } => {
+                self.sync = sync;
+
+                // Destory all existing subscriptions due to the gap in the chain.
+                self.pending_notification = None;
+                self.blocks_notifications.clear();
+
+                self.finalized_runtime = Arc::new(finalized_block_runtime);
+                let chain_info: chain_information::ValidChainInformation =
+                    self.sync.as_chain_information().into();
+                self.database
+                    .with_database(move |database| {
+                        database
+                            .reset(
+                                chain_info.as_ref(),
+                                finalized_body.iter().map(|e| &e[..]),
+                                None,
+                            )
+                            .unwrap();
+                    })
+                    .await;
+                // TODO: what is known about the finalized storage into the database is currently done when a proof is downloaded; however if the proof download finished code no longer inserts entries related to unknown blocks, then we should do it here instead
+
+                if matches!(
+                    self.database_catch_up_download,
+                    DatabaseCatchUpDownload::NothingToDownloadCache
+                ) {
+                    self.database_catch_up_download = DatabaseCatchUpDownload::NoDownloadInProgress;
+                }
+
+                (self, true)
+            }
+            all::ProcessOne::WarpSyncFinished {
+                finalized_body: None,
+                ..
+            } => {
+                unreachable!()
             }
             all::ProcessOne::VerifyBlock(verify) => {
                 // TODO: ban peer in case of verification failure
                 let when_verification_started = Instant::now();
-                let mut database_accesses_duration = Duration::new(0, 0);
-                let mut runtime_build_duration = Duration::new(0, 0);
                 let hash_to_verify = verify.hash();
 
                 let _jaeger_span = self.jaeger_service.block_verify_span(&hash_to_verify);
@@ -2100,7 +2661,6 @@ impl SyncBackground {
                         }
                     };
 
-                let parent_hash = *header_verification_success.parent_hash();
                 let parent_info = header_verification_success.parent_user_data().map(|b| {
                     let NonFinalizedBlock::Verified { runtime } = b else {
                         unreachable!()
@@ -2111,336 +2671,174 @@ impl SyncBackground {
                     .as_ref()
                     .cloned()
                     .unwrap_or_else(|| self.finalized_runtime.clone());
-                let parent_runtime = parent_runtime_arc.try_lock().unwrap().take().unwrap();
-
-                let parent_scale_encoded_header =
-                    header_verification_success.parent_scale_encoded_header();
-                let mut body_verification = body_only::verify(body_only::Config {
-                    parent_runtime,
-                    parent_block_header: header::decode(
-                        &parent_scale_encoded_header,
-                        block_number_bytes,
-                    )
-                    .unwrap(),
-                    now_from_unix_epoch: unix_time,
-                    // TODO: shouldn't have to decode here
-                    block_header: header::decode(
-                        header_verification_success.scale_encoded_header(),
-                        block_number_bytes,
-                    )
-                    .unwrap(),
-                    block_number_bytes,
-                    block_body: header_verification_success
-                        .scale_encoded_extrinsics()
-                        .unwrap(),
-                    max_log_level: 3,
-                    calculate_trie_changes: true,
-                });
 
                 // TODO: check this block against the chain spec's badBlocks
-                loop {
-                    match body_verification {
-                        body_only::Verify::Finished(Err((error, parent_runtime))) => {
-                            // Print a separate warning because it is important for the user
-                            // to be aware of the verification failure.
-                            // `error` is last because it's quite big.
-                            self.log_callback.log(
-                                LogLevel::Warn,
-                                format!(
-                                    "failed-block-verification; hash={}; height={}; \
-                                    total_duration={:?}; error={}",
-                                    HashDisplay(&hash_to_verify),
-                                    header_verification_success.height(),
-                                    when_verification_started.elapsed(),
-                                    error
-                                ),
-                            );
-                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-                            self.sync = header_verification_success.reject_bad_block();
-                            return (self, true);
-                        }
-                        body_only::Verify::Finished(Ok(body_only::Success {
-                            storage_changes,
-                            state_trie_version,
-                            parent_runtime,
-                            new_runtime,
-                            ..
-                        })) => {
-                            let storage_changes = Arc::new(storage_changes);
 
-                            // Insert the block in the database.
-                            let when_database_access_started = Instant::now();
-                            self.database
-                                .with_database_detached({
-                                    let storage_changes = storage_changes.clone();
-                                    let scale_encoded_header = header_verification_success.scale_encoded_header().to_vec();
-                                    let body = header_verification_success
-                                        .scale_encoded_extrinsics().unwrap()
-                                        .map(|tx| tx.as_ref().to_owned())
-                                        .collect::<Vec<_>>();
-                                    move |database| {
-                                        let result = database.insert(
-                                            &scale_encoded_header,
-                                            is_new_best,
-                                            body.into_iter(),
-                                        );
+                let height = header_verification_success.height();
+                let scale_encoded_header =
+                    header_verification_success.scale_encoded_header().to_vec();
 
-                                        match result {
-                                            Ok(()) => {}
-                                            Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                            Err(err) => panic!("{}", err),
-                                        }
+                let execute_block_success = match execute_block_and_insert(
+                    &self.database,
+                    (*parent_runtime_arc).clone(),
+                    &header_verification_success.parent_hash(),
+                    header_verification_success.scale_encoded_header(),
+                    block_number_bytes,
+                    header_verification_success
+                        .scale_encoded_extrinsics()
+                        .unwrap(),
+                    unix_time,
+                    is_new_best,
+                )
+                .await
+                {
+                    Ok(success) => success,
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                            error: full_sqlite::StorageAccessError::IncompleteStorage,
+                            context,
+                        },
+                    )) => {
+                        // The block verification failed because the storage of the parent
+                        // is still being downloaded from the network.
+                        self.log_callback.log(
+                            LogLevel::Debug,
+                            format!(
+                                "block-verification-incomplete-storage; hash={}; height={}; \
+                                time_before_interrupt={:?}",
+                                HashDisplay(&hash_to_verify),
+                                header_verification_success.height(),
+                                when_verification_started.elapsed()
+                            ),
+                        );
 
-                                        let trie_nodes = storage_changes.trie_changes_iter_ordered().unwrap().filter_map(
-                                            |(_child_trie, key, change)| {
-                                                let body_only::TrieChange::InsertUpdate {
-                                                    new_merkle_value,
-                                                    partial_key,
-                                                    children_merkle_values,
-                                                    new_storage_value
-                                                } = &change
-                                                    else { return None };
-
-                                                // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
-                                                let references_merkle_value = key.iter().copied()
-                                                    .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
-                                                    .all(|(a, b)| a == b);
-
-                                                Some(full_sqlite::InsertTrieNode {
-                                                    merkle_value: (&new_merkle_value[..]).into(),
-                                                    children_merkle_values: array::from_fn(|n| {
-                                                        children_merkle_values[n]
-                                                            .as_ref()
-                                                            .map(|v| From::from(&v[..]))
-                                                    }),
-                                                    storage_value: match new_storage_value {
-                                                        body_only::TrieChangeStorageValue::Modified {
-                                                            new_value: Some(value),
-                                                        } => full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                            value: Cow::Borrowed(value),
-                                                            references_merkle_value,
-                                                        },
-                                                        body_only::TrieChangeStorageValue::Modified {
-                                                            new_value: None,
-                                                        } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                                        body_only::TrieChangeStorageValue::Unmodified => {
-                                                            // TODO: overhead, and no child trie support
-                                                            if let Some((value_in_parent, _)) = database.block_storage_get(&parent_hash, iter::empty::<iter::Empty<_>>(), key.iter().map(|n| u8::from(*n))).unwrap() {
-                                                                full_sqlite::InsertTrieNodeStorageValue::Value {
-                                                                    value: Cow::Owned(value_in_parent),
-                                                                    references_merkle_value,
-                                                                }
-                                                            } else {
-                                                                full_sqlite::InsertTrieNodeStorageValue::NoValue
-                                                            }
-                                                        }
-                                                    },
-                                                    partial_key_nibbles: partial_key
-                                                        .iter()
-                                                        .map(|n| u8::from(*n))
-                                                        .collect::<Vec<_>>()
-                                                        .into(),
-                                                })
-                                           },
-                                        ).collect::<Vec<_>>();
-
-                                        let result = database.insert_trie_nodes(
-                                            trie_nodes.into_iter(),
-                                            u8::from(state_trie_version),
-                                        );
-
-                                        match result {
-                                            Ok(()) => {}
-                                            Err(err) => panic!("{}", err),
-                                        }
-                                    }
-                                }).await;
-                            database_accesses_duration += when_database_access_started.elapsed();
-
-                            let height = header_verification_success.height();
-                            let scale_encoded_header =
-                                header_verification_success.scale_encoded_header().to_vec();
-
-                            self.log_callback.log(
-                                LogLevel::Debug,
-                                format!(
-                                    "block-verification-success; hash={}; height={}; \
-                                    total_duration={:?}; database_accesses_duration={:?}; \
-                                    runtime_build_duration={:?}; is_new_best={:?}",
-                                    HashDisplay(&hash_to_verify),
-                                    height,
-                                    when_verification_started.elapsed(),
-                                    database_accesses_duration,
-                                    runtime_build_duration,
-                                    is_new_best
-                                ),
-                            );
-
-                            // Notify the subscribers.
-                            debug_assert!(self.pending_notification.is_none());
-                            self.pending_notification = Some(Notification::Block {
-                                block: BlockNotification {
-                                    is_new_best,
-                                    scale_encoded_header: scale_encoded_header.clone(),
-                                    block_hash: header_verification_success.hash(),
-                                    runtime_update: new_runtime
-                                        .as_ref()
-                                        .map(|new_runtime| Arc::new(new_runtime.clone())),
-                                    parent_hash,
-                                },
-                                storage_changes: storage_changes.clone(),
-                            });
-
-                            // Processing has made a step forward.
-
-                            *parent_runtime_arc.try_lock().unwrap() = Some(parent_runtime);
-
-                            self.sync =
-                                header_verification_success.finish(NonFinalizedBlock::NotVerified);
-
-                            // Store the storage of the children.
-                            self.sync[(height, &hash_to_verify)] = NonFinalizedBlock::Verified {
-                                runtime: if let Some(new_runtime) = new_runtime {
-                                    Arc::new(Mutex::new(Some(new_runtime)))
-                                } else {
-                                    parent_runtime_arc
-                                },
-                            };
-
-                            if is_new_best {
-                                // Update the networking.
-                                self.network_local_chain_update_needed = true;
-                                // Reset the block authoring, in order to potentially build a
-                                // block on top of this new best.
-                                self.block_authoring = None;
+                        debug_assert!(matches!(
+                            self.database_catch_up_download_block_verification,
+                            DatabaseCatchUpDownloadBlockVerification::None
+                        ));
+                        match context {
+                            ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess => {
+                                self.database_catch_up_download_block_verification = DatabaseCatchUpDownloadBlockVerification::CodeStorageProofDesired {
+                                    block_hash: *header_verification_success.parent_hash(),
+                                    block_number: header_verification_success.height() - 1,
+                                };
                             }
-
-                            // Announce the newly-verified block to all the sources that might
-                            // not be aware of it.
-                            debug_assert!(self.pending_block_announce.is_none());
-                            self.pending_block_announce =
-                                Some((scale_encoded_header, hash_to_verify, height));
-
-                            return (self, true);
+                            ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                function_name,
+                                parameter,
+                            } => {
+                                self.database_catch_up_download_block_verification =
+                                    DatabaseCatchUpDownloadBlockVerification::CallProofDesired {
+                                        block_hash: *header_verification_success.parent_hash(),
+                                        block_number: header_verification_success.height() - 1,
+                                        function_name: function_name.to_owned(),
+                                        parameter,
+                                    };
+                            }
                         }
 
-                        body_only::Verify::StorageGet(req) => {
-                            let when_database_access_started = Instant::now();
-                            let parent_paths = req.child_trie().map(|child_trie| {
-                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                                    .chain(trie::bytes_to_nibbles(
-                                        child_trie.as_ref().iter().copied(),
-                                    ))
-                                    .map(u8::from)
-                                    .collect::<Vec<_>>()
-                            });
-                            let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
-                                .map(u8::from)
-                                .collect::<Vec<_>>();
-                            let value = self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_get(
-                                        &parent_hash,
-                                        parent_paths.into_iter().map(|p| p.into_iter()),
-                                        key.iter().copied(),
-                                    )
-                                })
-                                .await
-                                .expect("database access error");
-                            let value = value.as_ref().map(|(val, vers)| {
-                                (
-                                    iter::once(&val[..]),
-                                    TrieEntryVersion::try_from(*vers).expect("corrupted database"),
-                                )
-                            });
-
-                            database_accesses_duration += when_database_access_started.elapsed();
-                            body_verification = req.inject_value(value);
-                        }
-                        body_only::Verify::StorageClosestDescendantMerkleValue(req) => {
-                            let when_database_access_started = Instant::now();
-
-                            let parent_paths = req.child_trie().map(|child_trie| {
-                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                                    .chain(trie::bytes_to_nibbles(
-                                        child_trie.as_ref().iter().copied(),
-                                    ))
-                                    .map(u8::from)
-                                    .collect::<Vec<_>>()
-                            });
-                            let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
-
-                            let merkle_value = self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_closest_descendant_merkle_value(
-                                        &parent_hash,
-                                        parent_paths.into_iter().map(|p| p.into_iter()),
-                                        key_nibbles.iter().copied(),
-                                    )
-                                })
-                                .await
-                                .expect("database access error");
-
-                            database_accesses_duration += when_database_access_started.elapsed();
-                            body_verification =
-                                req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
-                        }
-                        body_only::Verify::StorageNextKey(req) => {
-                            let when_database_access_started = Instant::now();
-
-                            let parent_paths = req.child_trie().map(|child_trie| {
-                                trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                                    .chain(trie::bytes_to_nibbles(
-                                        child_trie.as_ref().iter().copied(),
-                                    ))
-                                    .map(u8::from)
-                                    .collect::<Vec<_>>()
-                            });
-                            let key_nibbles = req
-                                .key()
-                                .map(u8::from)
-                                .chain(if req.or_equal() { None } else { Some(0u8) })
-                                .collect::<Vec<_>>();
-                            let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
-
-                            let branch_nodes = req.branch_nodes();
-                            let next_key = self
-                                .database
-                                .with_database(move |db| {
-                                    db.block_storage_next_key(
-                                        &parent_hash,
-                                        parent_paths.into_iter().map(|p| p.into_iter()),
-                                        key_nibbles.iter().copied(),
-                                        prefix_nibbles.iter().copied(),
-                                        branch_nodes,
-                                    )
-                                })
-                                .await
-                                .expect("database access error");
-
-                            database_accesses_duration += when_database_access_started.elapsed();
-                            body_verification = req.inject_key(next_key.map(|k| {
-                                k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
-                            }));
-                        }
-                        body_only::Verify::OffchainStorageSet(req) => {
-                            // Ignore offchain storage writes at the moment.
-                            body_verification = req.resume();
-                        }
-                        body_only::Verify::RuntimeCompilation(rt) => {
-                            let before_runtime_build = Instant::now();
-                            let outcome = rt.build();
-                            runtime_build_duration += before_runtime_build.elapsed();
-                            body_verification = outcome;
-                        }
-                        body_only::Verify::LogEmit(req) => {
-                            // Logs are ignored.
-                            body_verification = req.resume();
-                        }
+                        self.sync = header_verification_success.cancel();
+                        return (self, true);
                     }
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                            error, ..
+                        },
+                    )) => {
+                        panic!("corrupted database: {error}")
+                    }
+                    Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase
+                        | ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase(_)
+                        | ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion,
+                    )) => panic!("corrupted database"),
+                    Err(error) => {
+                        // Print a separate warning because it is important for the user
+                        // to be aware of the verification failure.
+                        // `error` is last because it's quite big.
+                        self.log_callback.log(
+                            LogLevel::Warn,
+                            format!(
+                                "failed-block-verification; hash={}; height={}; \
+                                total_duration={:?}; error={error}",
+                                HashDisplay(&hash_to_verify),
+                                header_verification_success.height(),
+                                when_verification_started.elapsed()
+                            ),
+                        );
+                        // Note that some errors are verification failures errors that shouldn't
+                        // lead to the block being marked as bad. However, there's not much else
+                        // we can do here as trying to verify the block again would likely lead to
+                        // the same error again. Marking the block as bad is a reasonable solution.
+                        self.sync = header_verification_success.reject_bad_block();
+                        return (self, true);
+                    }
+                };
+
+                self.log_callback.log(
+                    LogLevel::Debug,
+                    format!(
+                        "block-verification-success; hash={}; height={}; \
+                            total_duration={:?}; database_accesses_duration={:?}; \
+                            runtime_build_duration={:?}; is_new_best={:?}",
+                        HashDisplay(&hash_to_verify),
+                        height,
+                        when_verification_started.elapsed(),
+                        execute_block_success.database_accesses_duration,
+                        execute_block_success.runtime_build_duration,
+                        is_new_best
+                    ),
+                );
+
+                match execute_block_success.block_insertion {
+                    Ok(()) => {}
+                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                    Err(error) => panic!("failed to insert block in database: {error}"),
                 }
+
+                // Notify the subscribers.
+                debug_assert!(self.pending_notification.is_none());
+                self.pending_notification = Some(Notification::Block {
+                    block: BlockNotification {
+                        is_new_best,
+                        scale_encoded_header: scale_encoded_header.clone(),
+                        block_hash: header_verification_success.hash(),
+                        runtime_update: execute_block_success
+                            .new_runtime
+                            .as_ref()
+                            .map(|new_runtime| Arc::new(new_runtime.clone())),
+                        parent_hash: *header_verification_success.parent_hash(),
+                    },
+                    storage_changes: execute_block_success.storage_changes.clone(),
+                });
+
+                // Processing has made a step forward.
+
+                self.sync = header_verification_success.finish(NonFinalizedBlock::NotVerified);
+
+                // Store the storage of the children.
+                self.sync[(height, &hash_to_verify)] = NonFinalizedBlock::Verified {
+                    runtime: if let Some(new_runtime) = execute_block_success.new_runtime {
+                        Arc::new(new_runtime)
+                    } else {
+                        parent_runtime_arc
+                    },
+                };
+
+                if is_new_best {
+                    // Update the networking.
+                    self.network_local_chain_update_needed = true;
+                    // Reset the block authoring, in order to potentially build a
+                    // block on top of this new best.
+                    self.block_authoring = None;
+                }
+
+                // Announce the newly-verified block to all the sources that might
+                // not be aware of it.
+                debug_assert!(self.pending_block_announce.is_none());
+                self.pending_block_announce = Some((scale_encoded_header, hash_to_verify, height));
+
+                return (self, true);
             }
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
@@ -2567,4 +2965,524 @@ impl SyncBackground {
             }
         }
     }
+}
+
+/// Executes the given block. On success, inserts it and its storage into the database.
+// TODO: use a config struct for the parameters?
+pub async fn execute_block_and_insert(
+    database: &database_thread::DatabaseThread,
+    mut parent_runtime: host::HostVmPrototype,
+    parent_block_hash: &[u8; 32],
+    block_header: &[u8],
+    block_number_bytes: usize,
+    block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+    now_from_unix_epoch: Duration,
+    is_new_best: bool,
+) -> Result<ExecuteBlockSuccess, ExecuteBlockError> {
+    let mut database_accesses_duration = Duration::new(0, 0);
+    let mut runtime_build_duration = Duration::new(0, 0);
+
+    let mut storage_changes = runtime_host::StorageChanges::empty();
+    let mut state_trie_version = runtime_host::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
+    for (call_function, call_parameter) in [
+        (
+            body_only::CHECK_INHERENTS_FUNCTION_NAME,
+            body_only::check_inherents_parameter(
+                block_header,
+                block_number_bytes,
+                block_body.clone(),
+                now_from_unix_epoch,
+            )
+            .unwrap()
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
+        ),
+        (
+            body_only::EXECUTE_BLOCK_FUNCTION_NAME,
+            body_only::execute_block_parameter(
+                block_header,
+                block_number_bytes,
+                block_body.clone(),
+            )
+            .unwrap()
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
+        ),
+    ] {
+        let mut call = runtime_host::run(runtime_host::Config {
+            virtual_machine: parent_runtime,
+            function_to_call: call_function,
+            parameter: iter::once(&call_parameter),
+            storage_main_trie_changes: storage_changes.into_main_trie_diff(),
+            max_log_level: 0,
+            calculate_trie_changes: true,
+        })
+        .map_err(|(err, _)| ExecuteBlockVerificationFailureError::RuntimeStartError(err))?;
+
+        loop {
+            match call {
+                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                    return Err(ExecuteBlockError::InvalidBlock(
+                        ExecuteBlockInvalidBlockError::RuntimeExecutionError(error.detail),
+                    ));
+                }
+                runtime_host::RuntimeHostVm::Finished(Ok(runtime_host::Success {
+                    virtual_machine,
+                    storage_changes: storage_changes_update,
+                    state_trie_version: state_trie_version_update,
+                    ..
+                })) => {
+                    // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
+                    let error = {
+                        let output = virtual_machine.value();
+                        if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
+                            body_only::check_check_inherents_output(output.as_ref())
+                                .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
+                                .err()
+                        } else {
+                            body_only::check_execute_block_output(output.as_ref())
+                                .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
+                                .err()
+                        }
+                    };
+                    if let Some(error) = error {
+                        return Err(ExecuteBlockError::InvalidBlock(error));
+                    }
+
+                    storage_changes = storage_changes_update;
+                    state_trie_version = state_trie_version_update;
+                    parent_runtime = virtual_machine.into_prototype();
+                    break;
+                }
+
+                runtime_host::RuntimeHostVm::StorageGet(req) => {
+                    let when_database_access_started = Instant::now();
+                    let parent_paths = req.child_trie().map(|child_trie| {
+                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                            .map(u8::from)
+                            .collect::<Vec<_>>()
+                    });
+                    let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                        .map(u8::from)
+                        .collect::<Vec<_>>();
+                    let parent_block_hash = *parent_block_hash;
+                    let value = database
+                        .with_database(move |db| {
+                            db.block_storage_get(
+                                &parent_block_hash,
+                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                key.iter().copied(),
+                            )
+                        })
+                        .await;
+                    let value = match value {
+                        Ok(Some((ref val, vers))) => Some((
+                            iter::once(&val[..]),
+                            runtime_host::TrieEntryVersion::try_from(vers)
+                                .map_err(|_| ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion)?
+                        )),
+                        Ok(None) => None,
+                        Err(error) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                            function_name: call_function,
+                                            parameter: call_parameter,
+                                        },
+                                },
+                            ))
+                        }
+                    };
+
+                    database_accesses_duration += when_database_access_started.elapsed();
+                    call = req.inject_value(value);
+                }
+                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
+                    let when_database_access_started = Instant::now();
+
+                    let parent_paths = req.child_trie().map(|child_trie| {
+                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                            .map(u8::from)
+                            .collect::<Vec<_>>()
+                    });
+                    let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                    let parent_block_hash = *parent_block_hash;
+                    let merkle_value = database
+                        .with_database(move |db| {
+                            db.block_storage_closest_descendant_merkle_value(
+                                &parent_block_hash,
+                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                key_nibbles.iter().copied(),
+                            )
+                        })
+                        .await;
+                    let merkle_value = match merkle_value {
+                        Ok(mv) => mv,
+                        Err(error) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                            function_name: call_function,
+                                            parameter: call_parameter,
+                                        },
+                                },
+                            ))
+                        }
+                    };
+
+                    database_accesses_duration += when_database_access_started.elapsed();
+                    call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+                }
+                runtime_host::RuntimeHostVm::NextKey(req) => {
+                    let when_database_access_started = Instant::now();
+
+                    let parent_paths = req.child_trie().map(|child_trie| {
+                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                            .map(u8::from)
+                            .collect::<Vec<_>>()
+                    });
+                    let key_nibbles = req
+                        .key()
+                        .map(u8::from)
+                        .chain(if req.or_equal() { None } else { Some(0u8) })
+                        .collect::<Vec<_>>();
+                    let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                    let branch_nodes = req.branch_nodes();
+                    let parent_block_hash = *parent_block_hash;
+                    let next_key = database
+                        .with_database(move |db| {
+                            db.block_storage_next_key(
+                                &parent_block_hash,
+                                parent_paths.into_iter().map(|p| p.into_iter()),
+                                key_nibbles.iter().copied(),
+                                prefix_nibbles.iter().copied(),
+                                branch_nodes,
+                            )
+                        })
+                        .await;
+                    let next_key = match next_key {
+                        Ok(k) => k,
+                        Err(error) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                                            function_name: call_function,
+                                            parameter: call_parameter,
+                                        },
+                                },
+                            ))
+                        }
+                    };
+
+                    database_accesses_duration += when_database_access_started.elapsed();
+                    call = req.inject_key(
+                        next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
+                    );
+                }
+                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                    // Ignore offchain storage writes at the moment.
+                    call = req.resume();
+                }
+                runtime_host::RuntimeHostVm::LogEmit(req) => {
+                    // Logs are ignored.
+                    call = req.resume();
+                }
+                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                    call = sig.verify_and_resume();
+                }
+                runtime_host::RuntimeHostVm::Offchain(_) => {
+                    // Offchain storage calls are forbidden.
+                    return Err(ExecuteBlockError::VerificationFailure(
+                        ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
+                    ));
+                }
+            }
+        }
+    }
+
+    // If the block performs a runtime upgrade, compile the new runtime.
+    // The block is rejected if the new runtime doesn't successfully compile.
+    let new_runtime: Option<executor::host::HostVmPrototype> = match (
+        storage_changes.main_trie_diff_get(b":code"),
+        storage_changes.main_trie_diff_get(b":heappages"),
+    ) {
+        (None, None) => None,
+        (new_code, new_heap_pages) => {
+            let new_code = match new_code {
+                Some(Some(c)) => Cow::Borrowed(c),
+                Some(None) => {
+                    return Err(ExecuteBlockError::InvalidBlock(
+                        ExecuteBlockInvalidBlockError::EmptyCode,
+                    ))
+                }
+                None => {
+                    let parent_block_hash = *parent_block_hash;
+                    let access = database
+                        .with_database(move |db| {
+                            db.block_storage_get(
+                                &parent_block_hash,
+                                iter::empty::<iter::Empty<_>>(),
+                                trie::bytes_to_nibbles(b":code".into_iter().copied()).map(u8::from),
+                            )
+                        })
+                        .await;
+                    match access {
+                        Ok(Some((v, _))) => Cow::Owned(v),
+                        Ok(None) => {
+                            return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::ParentCodeEmptyInDatabase,
+                            ))
+                        }
+                        Err(error) => return Err(ExecuteBlockError::VerificationFailure(
+                            ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                error,
+                                context:
+                                    ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess,
+                            },
+                        )),
+                    }
+                }
+            };
+
+            let new_heap_pages = match new_heap_pages {
+                Some(c) => executor::storage_heap_pages_to_value(c)
+                    .map_err(ExecuteBlockInvalidBlockError::InvalidNewHeapPages)?,
+                None => executor::storage_heap_pages_to_value(
+                    {
+                        let parent_block_hash = *parent_block_hash;
+                        let access = database
+                            .with_database(move |db| {
+                                db.block_storage_get(
+                                    &parent_block_hash,
+                                    iter::empty::<iter::Empty<_>>(),
+                                    trie::bytes_to_nibbles(b":heappages".into_iter().copied())
+                                        .map(u8::from),
+                                )
+                            })
+                            .await;
+                        match access {
+                            Ok(Some((v, _))) => Some(v),
+                            Ok(None) => None,
+                            Err(error) => return Err(ExecuteBlockError::VerificationFailure(
+                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                                    error,
+                                    context:
+                                        ExecuteBlockDatabaseAccessFailureContext::ParentRuntimeAccess,
+                                },
+                            )),
+                        }
+                    }
+                    .as_deref(),
+                )
+                .map_err(ExecuteBlockVerificationFailureError::InvaliParentHeapPagesInDatabase)?,
+            };
+
+            let before_runtime_build = Instant::now();
+            let vm = host::HostVmPrototype::new(host::Config {
+                module: &new_code,
+                heap_pages: new_heap_pages,
+                exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
+                allow_unresolved_imports: false,
+            })
+            .map_err(ExecuteBlockInvalidBlockError::InvalidNewRuntime)?;
+            runtime_build_duration += before_runtime_build.elapsed();
+            Some(vm)
+        }
+    };
+
+    let storage_changes = Arc::new(storage_changes);
+
+    // Insert the block in the database.
+    let when_database_access_started = Instant::now();
+    let block_insertion = database
+        .with_database({
+            let parent_block_hash = *parent_block_hash;
+            let storage_changes = storage_changes.clone();
+            let block_header = block_header.to_owned();
+            let block_body = block_body
+                .map(|tx| tx.as_ref().to_owned())
+                .collect::<Vec<_>>();
+            move |database| {
+                database.insert(&block_header, is_new_best, block_body.into_iter())?;
+
+                let trie_nodes = storage_changes
+                    .trie_changes_iter_ordered()
+                    .unwrap()
+                    .filter_map(|(_child_trie, key, change)| {
+                        let runtime_host::TrieChange::InsertUpdate {
+                            new_merkle_value,
+                            partial_key,
+                            children_merkle_values,
+                            new_storage_value,
+                        } = &change
+                        else {
+                            return None;
+                        };
+
+                        // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                        let references_merkle_value = key
+                            .iter()
+                            .copied()
+                            .zip(trie::bytes_to_nibbles(b":child_storage:".iter().copied()))
+                            .all(|(a, b)| a == b);
+
+                        Some(full_sqlite::InsertTrieNode {
+                            merkle_value: (&new_merkle_value[..]).into(),
+                            children_merkle_values: array::from_fn(|n| {
+                                children_merkle_values[n]
+                                    .as_ref()
+                                    .map(|v| From::from(&v[..]))
+                            }),
+                            storage_value: match new_storage_value {
+                                runtime_host::TrieChangeStorageValue::Modified {
+                                    new_value: Some(value),
+                                } => full_sqlite::InsertTrieNodeStorageValue::Value {
+                                    value: Cow::Borrowed(value),
+                                    references_merkle_value,
+                                },
+                                runtime_host::TrieChangeStorageValue::Modified {
+                                    new_value: None,
+                                } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
+                                runtime_host::TrieChangeStorageValue::Unmodified => {
+                                    // TODO: overhead, and no child trie support
+                                    if let Some((value_in_parent, _)) = database
+                                        .block_storage_get(
+                                            &parent_block_hash,
+                                            iter::empty::<iter::Empty<_>>(),
+                                            key.iter().map(|n| u8::from(*n)),
+                                        )
+                                        .unwrap()
+                                    {
+                                        full_sqlite::InsertTrieNodeStorageValue::Value {
+                                            value: Cow::Owned(value_in_parent),
+                                            references_merkle_value,
+                                        }
+                                    } else {
+                                        full_sqlite::InsertTrieNodeStorageValue::NoValue
+                                    }
+                                }
+                            },
+                            partial_key_nibbles: partial_key
+                                .iter()
+                                .map(|n| u8::from(*n))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                database
+                    .insert_trie_nodes(trie_nodes.into_iter(), u8::from(state_trie_version))
+                    .map_err(full_sqlite::InsertError::Corrupted)
+            }
+        })
+        .await;
+    database_accesses_duration += when_database_access_started.elapsed();
+
+    Ok(ExecuteBlockSuccess {
+        block_insertion,
+        new_runtime,
+        storage_changes,
+        database_accesses_duration,
+        runtime_build_duration,
+    })
+}
+
+/// Returned by [`execute_block_and_insert`] in case of success.
+#[derive(Debug)]
+pub struct ExecuteBlockSuccess {
+    /// Whether the block was successfully inserted in the database.
+    pub block_insertion: Result<(), full_sqlite::InsertError>,
+
+    /// If the block modifies the runtime, this contains the new runtime.
+    pub new_runtime: Option<host::HostVmPrototype>,
+
+    /// Changes to the storage performed during the execution.
+    pub storage_changes: Arc<runtime_host::StorageChanges>,
+
+    /// Total time the database accesses combined took.
+    pub database_accesses_duration: Duration,
+
+    /// Total time compiling the new runtime took. Equal to 0 if no runtime upgrade happened.
+    pub runtime_build_duration: Duration,
+}
+
+/// Error returned by [`execute_block_and_insert`].
+#[derive(Debug, derive_more::Display, derive_more::From)]
+pub enum ExecuteBlockError {
+    /// Failed to verify block.
+    VerificationFailure(ExecuteBlockVerificationFailureError),
+    /// Block has been verified as being invalid.
+    InvalidBlock(ExecuteBlockInvalidBlockError),
+}
+
+/// See [`ExecuteBlockError::VerificationFailure`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockVerificationFailureError {
+    /// Error starting the runtime execution.
+    RuntimeStartError(executor::host::StartErr),
+    /// Error while accessing the parent block in the database.
+    #[display(fmt = "Error while accessing the parent block in the database: {error}")]
+    DatabaseParentAccess {
+        /// Error that happened.
+        error: full_sqlite::StorageAccessError,
+        /// In which context the error hapened.
+        context: ExecuteBlockDatabaseAccessFailureContext,
+    },
+    /// State trie version stored in database is invalid.
+    DatabaseInvalidStateTrieVersion,
+    /// Runtime has tried to call a forbidden host function.
+    ForbiddenHostFunction,
+    /// The `:code` of the parent block in database is empty.
+    ParentCodeEmptyInDatabase,
+    /// The `:heappages` after the execution is invalid.
+    InvaliParentHeapPagesInDatabase(executor::InvalidHeapPagesError),
+}
+
+/// See [`ExecuteBlockVerificationFailureError::DatabaseParentAccess`].
+#[derive(Debug)]
+pub enum ExecuteBlockDatabaseAccessFailureContext {
+    /// Error while accessing the `:code` or `:heappages` key of the parent.
+    ParentRuntimeAccess,
+    /// Error while performing a runtime call.
+    FunctionCall {
+        /// Name of the function that was being called during the access error.
+        function_name: &'static str,
+        /// Parameter to the function that was being called during the access error.
+        parameter: Vec<u8>,
+    },
+}
+
+/// See [`ExecuteBlockError::InvalidBlock`].
+#[derive(Debug, derive_more::Display)]
+pub enum ExecuteBlockInvalidBlockError {
+    /// Error while executing the runtime.
+    RuntimeExecutionError(runtime_host::ErrorDetail),
+    /// Error in the output of `BlockBuilder_check_inherents`.
+    #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
+    CheckInherentsOutputError(body_only::InherentsOutputError),
+    /// Error in the output of `Core_execute_block`.
+    #[display(fmt = "Error in the output of Core_execute_block: {_0}")]
+    ExecuteBlockOutputError(body_only::ExecuteBlockOutputError),
+    /// The new `:code` after the execution is empty.
+    EmptyCode,
+    /// The `:heappages` after the execution is invalid.
+    InvalidNewHeapPages(executor::InvalidHeapPagesError),
+    /// Failed to compile the new runtime that the block upgrades to.
+    InvalidNewRuntime(host::NewErr),
 }

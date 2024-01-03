@@ -21,7 +21,7 @@
 use futures_channel::oneshot;
 use smol::{channel, lock::Mutex, stream::StreamExt as _};
 use smoldot::database::full_sqlite::SqliteFullDatabase;
-use std::thread;
+use std::{pin::pin, thread};
 
 pub use smoldot::database::full_sqlite::{CorruptedError, StorageAccessError};
 
@@ -74,13 +74,14 @@ impl DatabaseThread {
 
 impl From<SqliteFullDatabase> for DatabaseThread {
     fn from(db: SqliteFullDatabase) -> DatabaseThread {
-        let (sender, mut rx) = channel::bounded::<Box<dyn FnOnce(&SqliteFullDatabase) + Send>>(256);
+        let (sender, rx) = channel::bounded::<Box<dyn FnOnce(&SqliteFullDatabase) + Send>>(256);
 
         thread::Builder::new()
             .name("sqlite-database".into())
             .spawn(move || {
                 // When the `DatabaseThread` is dropped, the sender will close, `rx.next()`
                 // will return `None`, and the closure here will finish, ending the thread.
+                let mut rx = pin!(rx);
                 while let Some(closure) = smol::block_on(rx.next()) {
                     closure(&db)
                 }

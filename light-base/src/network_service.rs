@@ -136,7 +136,7 @@ pub struct ConfigChain {
 
 pub struct NetworkService<TPlat: PlatformRef> {
     /// Channel connected to the background service.
-    messages_tx: async_channel::Sender<ToBackground>,
+    messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 
     /// See [`Config::platform`].
     platform: TPlat,
@@ -197,8 +197,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             grandpa_warp_sync_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             storage_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
             call_proof_requests: HashMap::with_capacity_and_hasher(8, Default::default()),
-            next_discovery_period: Duration::from_secs(5),
-            next_discovery: Box::pin(config.platform.sleep(Duration::from_secs(5))),
+            chains_by_next_discovery: BTreeMap::new(),
         }));
 
         config
@@ -244,6 +243,8 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
                     block_number_bytes: config.block_number_bytes,
                     num_out_slots: config.num_out_slots,
                     num_references: NonZeroUsize::new(1).unwrap(),
+                    next_discovery_period: Duration::from_secs(2),
+                    next_discovery_when: self.platform.now(),
                 },
             };
 
@@ -269,7 +270,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
 pub struct NetworkServiceChain<TPlat: PlatformRef> {
     /// Copy of [`NetworkService::messages_tx`]. Used in order to maintain the network service
     /// background task alive.
-    _keep_alive_messages_tx: async_channel::Sender<ToBackground>,
+    _keep_alive_messages_tx: async_channel::Sender<ToBackground<TPlat>>,
 
     /// Channel to send messages to the background task.
     messages_tx: async_channel::Sender<ToBackgroundChain>,
@@ -659,10 +660,10 @@ impl CallProofRequestError {
     }
 }
 
-enum ToBackground {
+enum ToBackground<TPlat: PlatformRef> {
     AddChain {
         messages_rx: async_channel::Receiver<ToBackgroundChain>,
-        config: service::ChainConfig<Chain>,
+        config: service::ChainConfig<Chain<TPlat>>,
     },
 }
 
@@ -755,7 +756,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<
-        Chain,
+        Chain<TPlat>,
         async_channel::Sender<service::CoordinatorToConnection>,
         TPlat::Instant,
     >,
@@ -802,7 +803,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
     pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
 
-    main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground>>>,
+    main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
 
     messages_rx:
         stream::SelectAll<Pin<Box<dyn stream::Stream<Item = (ChainId, ToBackgroundChain)> + Send>>>,
@@ -831,12 +832,11 @@ struct BackgroundTask<TPlat: PlatformRef> {
         fnv::FnvBuildHasher,
     >,
 
-    next_discovery_period: Duration,
-
-    next_discovery: Pin<Box<TPlat::Delay>>,
+    /// All chains, indexed by the value of [`Chain::next_discovery_when`].
+    chains_by_next_discovery: BTreeMap<(TPlat::Instant, ChainId), Pin<Box<TPlat::Delay>>>,
 }
 
-struct Chain {
+struct Chain<TPlat: PlatformRef> {
     log_name: String,
 
     // TODO: this field is a hack due to the fact that `add_chain` can't be `async`; should eventually be fixed after a lib.rs refactor
@@ -848,6 +848,13 @@ struct Chain {
 
     /// See [`ConfigChain::num_out_slots`].
     num_out_slots: usize,
+
+    /// When the next discovery should be started for this chain.
+    next_discovery_when: TPlat::Instant,
+
+    /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
+    /// the given duration.
+    next_discovery_period: Duration,
 }
 
 #[derive(Clone)]
@@ -861,9 +868,9 @@ struct OpenGossipLinkState {
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
-        enum WakeUpReason {
+        enum WakeUpReason<TPlat: PlatformRef> {
             ForegroundClosed,
-            Message(ToBackground),
+            Message(ToBackground<TPlat>),
             MessageForChain(ChainId, ToBackgroundChain),
             NetworkEvent(service::Event<async_channel::Sender<service::CoordinatorToConnection>>),
             CanAssignSlot(PeerId, ChainId),
@@ -879,7 +886,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 message: service::CoordinatorToConnection,
             },
             EventSendersReady,
-            StartDiscovery,
+            StartDiscovery(ChainId),
         }
 
         let wake_up_reason = {
@@ -1014,11 +1021,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             };
             let start_discovery = async {
-                (&mut task.next_discovery).await;
-                task.next_discovery_period =
-                    cmp::min(task.next_discovery_period * 2, Duration::from_secs(120));
-                task.next_discovery = Box::pin(task.platform.sleep(task.next_discovery_period));
-                WakeUpReason::StartDiscovery
+                let Some(mut next_discovery) = task.chains_by_next_discovery.first_entry() else {
+                    future::pending().await
+                };
+                next_discovery.get_mut().await;
+                let ((_, chain_id), _) = next_discovery.remove_entry();
+                WakeUpReason::StartDiscovery(chain_id)
             };
 
             message_for_chain_received
@@ -1052,6 +1060,14 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         existing_identical
                     }
                 };
+
+                task.chains_by_next_discovery.insert(
+                    (task.network[chain_id].next_discovery_when.clone(), chain_id),
+                    Box::pin(
+                        task.platform
+                            .sleep_until(task.network[chain_id].next_discovery_when.clone()),
+                    ),
+                );
 
                 task.messages_rx
                     .push(Box::pin(
@@ -1163,6 +1179,11 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id));
                     debug_assert!(_was_in.is_some());
                 }
+
+                let _was_in = task
+                    .chains_by_next_discovery
+                    .remove(&(task.network[chain_id].next_discovery_when.clone(), chain_id));
+                debug_assert!(_was_in.is_some());
 
                 log::debug!(target: "network", "Chains <= RemoveChain(id={})", task.network[chain_id].log_name);
                 task.network.remove_chain(chain_id).unwrap();
@@ -1547,52 +1568,57 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         .collect(),
                 );
             }
-            WakeUpReason::StartDiscovery => {
-                for chain_id in task.network.chains().collect::<Vec<_>>() {
-                    let random_peer_id = {
-                        let mut pub_key = [0; 32];
-                        rand_chacha::rand_core::RngCore::fill_bytes(
-                            &mut task.randomness,
-                            &mut pub_key,
-                        );
-                        PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+            WakeUpReason::StartDiscovery(chain_id) => {
+                // Re-insert the chain in `chains_by_next_discovery`.
+                let chain = &mut task.network[chain_id];
+                chain.next_discovery_when = task.platform.now() + chain.next_discovery_period;
+                chain.next_discovery_period =
+                    cmp::min(chain.next_discovery_period * 2, Duration::from_secs(120));
+                task.chains_by_next_discovery.insert(
+                    (chain.next_discovery_when.clone(), chain_id),
+                    Box::pin(
+                        task.platform
+                            .sleep(task.network[chain_id].next_discovery_period),
+                    ),
+                );
+
+                let random_peer_id = {
+                    let mut pub_key = [0; 32];
+                    rand_chacha::rand_core::RngCore::fill_bytes(&mut task.randomness, &mut pub_key);
+                    PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+                };
+
+                // TODO: select target closest to the random peer instead
+                let target = task
+                    .network
+                    .gossip_connected_peers(chain_id, service::GossipKind::ConsensusTransactions)
+                    .next()
+                    .cloned();
+
+                if let Some(target) = target {
+                    match task.network.start_kademlia_find_node_request(
+                        &target,
+                        chain_id,
+                        &random_peer_id,
+                        Duration::from_secs(20),
+                    ) {
+                        Ok(_) => {}
+                        Err(service::StartRequestError::NoConnection) => unreachable!(),
                     };
 
-                    // TODO: select target closest to the random peer instead
-                    let target = task
-                        .network
-                        .gossip_connected_peers(
-                            chain_id,
-                            service::GossipKind::ConsensusTransactions,
-                        )
-                        .next()
-                        .cloned();
-
-                    if let Some(target) = target {
-                        match task.network.start_kademlia_find_node_request(
-                            &target,
-                            chain_id,
-                            &random_peer_id,
-                            Duration::from_secs(20),
-                        ) {
-                            Ok(_) => {}
-                            Err(service::StartRequestError::NoConnection) => unreachable!(),
-                        };
-
-                        log::debug!(
-                            target: "network",
-                            "Discovery({}) => FindNode(request_target={}, requested_peer_id={})",
-                            &task.network[chain_id].log_name,
-                            target,
-                            random_peer_id
-                        );
-                    } else {
-                        log::debug!(
-                            target: "network",
-                            "Discovery({}) => NoPeer",
-                            &task.network[chain_id].log_name
-                        );
-                    }
+                    log::debug!(
+                        target: "network",
+                        "Discovery({}) => FindNode(request_target={}, requested_peer_id={})",
+                        &task.network[chain_id].log_name,
+                        target,
+                        random_peer_id
+                    );
+                } else {
+                    log::debug!(
+                        target: "network",
+                        "Discovery({}) => NoPeer",
+                        &task.network[chain_id].log_name
+                    );
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
