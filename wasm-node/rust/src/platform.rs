@@ -154,8 +154,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 if poll_duration.as_millis() >= 150 {
                     log::warn!(
                         "The task named `{}` has occupied the CPU for an unreasonable amount \
-                        of time ({}ms). Please report this issue: \
-                        <https://github.com/smol-dot/smoldot/issues>.",
+                        of time ({}ms).",
                         this.name,
                         poll_duration.as_millis(),
                     );
