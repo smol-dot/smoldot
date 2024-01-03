@@ -832,6 +832,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
         fnv::FnvBuildHasher,
     >,
 
+    /// All chains, indexed by the value of [`Chain::next_discovery_when`].
     chains_by_next_discovery: BTreeMap<(TPlat::Instant, ChainId), Pin<Box<TPlat::Delay>>>,
 }
 
@@ -848,9 +849,12 @@ struct Chain<TPlat: PlatformRef> {
     /// See [`ConfigChain::num_out_slots`].
     num_out_slots: usize,
 
-    next_discovery_period: Duration,
-
+    /// When the next discovery should be started for this chain.
     next_discovery_when: TPlat::Instant,
+
+    /// After [`Chain::next_discovery_when`] is reached, the following discovery happens after
+    /// the given duration.
+    next_discovery_period: Duration,
 }
 
 #[derive(Clone)]
