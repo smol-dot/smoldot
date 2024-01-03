@@ -813,10 +813,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(
-        mut self,
-        request_id: RequestId,
-    ) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
+    pub fn finish_request(mut self, request_id: RequestId) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
