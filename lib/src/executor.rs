@@ -26,11 +26,11 @@
 //! valid.
 //!
 //! This module contains everything necessary to execute runtime code. The highest-level
-//! sub-module is [`runtime_host`].
+//! sub-module is [`runtime_call`].
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;
-pub mod runtime_host;
+pub mod runtime_call;
 pub mod storage_diff;
 pub mod trie_root_calculator;
 pub mod vm;

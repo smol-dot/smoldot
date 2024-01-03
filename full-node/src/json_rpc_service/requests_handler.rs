@@ -323,7 +323,7 @@ pub fn spawn_requests_handler(config: Config) {
                         };
 
                         let mut call =
-                            match executor::runtime_host::run(executor::runtime_host::Config {
+                            match executor::runtime_call::run(executor::runtime_call::Config {
                                 virtual_machine: runtime,
                                 function_to_call: "Metadata_metadata",
                                 parameter: iter::empty::<&'static [u8]>(),
@@ -340,7 +340,7 @@ pub fn spawn_requests_handler(config: Config) {
 
                         loop {
                             match call {
-                                executor::runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                                executor::runtime_call::RuntimeCall::Finished(Ok(success)) => {
                                     match methods::remove_metadata_length_prefix(success.virtual_machine.value().as_ref()) {
                                         Ok(m) => request.respond(methods::Response::state_getMetadata(methods::HexString(m.to_vec()))),
                                         Err(_) => {
@@ -349,11 +349,11 @@ pub fn spawn_requests_handler(config: Config) {
                                     }
                                     break;
                                 }
-                                executor::runtime_host::RuntimeHostVm::Finished(Err(_)) => {
+                                executor::runtime_call::RuntimeCall::Finished(Err(_)) => {
                                     request.fail(service::ErrorResponse::InternalError);
                                     break;
                                 }
-                                executor::runtime_host::RuntimeHostVm::StorageGet(req) => {
+                                executor::runtime_call::RuntimeCall::StorageGet(req) => {
                                     let parent_paths = req.child_trie().map(|child_trie| {
                                         trie::bytes_to_nibbles(
                                             b":child_storage:default:".iter().copied(),
@@ -385,14 +385,14 @@ pub fn spawn_requests_handler(config: Config) {
                                     let value = value.as_ref().map(|(val, vers)| {
                                         (
                                             iter::once(&val[..]),
-                                            executor::runtime_host::TrieEntryVersion::try_from(*vers)
+                                            executor::runtime_call::TrieEntryVersion::try_from(*vers)
                                                 .expect("corrupted database"),
                                         )
                                     });
 
                                     call = req.inject_value(value);
                                 }
-                                executor::runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
+                                executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(req) => {
                                     let parent_paths = req.child_trie().map(|child_trie| {
                                         trie::bytes_to_nibbles(
                                             b":child_storage:default:".iter().copied(),
@@ -424,7 +424,7 @@ pub fn spawn_requests_handler(config: Config) {
                                     call = req
                                         .inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                                 }
-                                executor::runtime_host::RuntimeHostVm::NextKey(req) => {
+                                executor::runtime_call::RuntimeCall::NextKey(req) => {
                                     let parent_paths = req.child_trie().map(|child_trie| {
                                         trie::bytes_to_nibbles(
                                             b":child_storage:default:".iter().copied(),
@@ -466,17 +466,17 @@ pub fn spawn_requests_handler(config: Config) {
                                         k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())
                                     }));
                                 }
-                                executor::runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                                executor::runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                                     call = req.resume();
                                 }
-                                executor::runtime_host::RuntimeHostVm::SignatureVerification(req) => {
+                                executor::runtime_call::RuntimeCall::SignatureVerification(req) => {
                                     call = req.verify_and_resume();
                                 }
-                                executor::runtime_host::RuntimeHostVm::Offchain(_) => {
+                                executor::runtime_call::RuntimeCall::Offchain(_) => {
                                     request.fail(service::ErrorResponse::InternalError);
                                     break;
                                 }
-                                executor::runtime_host::RuntimeHostVm::LogEmit(req) => {
+                                executor::runtime_call::RuntimeCall::LogEmit(req) => {
                                     // Logs are ignored.
                                     call = req.resume();
                                 }

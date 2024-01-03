@@ -48,7 +48,7 @@
 mod tests;
 
 use crate::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_call},
     header, util,
     verify::inherents,
 };
@@ -56,7 +56,7 @@ use crate::{
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{
+pub use runtime_call::{
     Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
 };
 
@@ -132,7 +132,7 @@ pub struct Success {
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    WasmVm(runtime_host::ErrorDetail),
+    WasmVm(runtime_call::ErrorDetail),
     /// Error while initializing the Wasm virtual machine.
     #[display(fmt = "{_0}")]
     VmInit(host::StartErr),
@@ -164,7 +164,7 @@ pub enum Error {
 
 /// Start a block building process.
 pub fn build_block(config: Config) -> BlockBuild {
-    let init_result = runtime_host::run(runtime_host::Config {
+    let init_result = runtime_call::run(runtime_call::Config {
         function_to_call: "Core_initialize_block",
         parameter: {
             // The `Core_initialize_block` function expects a SCALE-encoded partially-initialized
@@ -262,41 +262,39 @@ pub enum BlockBuild {
 }
 
 impl BlockBuild {
-    fn from_inner(inner: runtime_host::RuntimeHostVm, mut shared: Shared) -> Self {
+    fn from_inner(inner: runtime_call::RuntimeCall, mut shared: Shared) -> Self {
         enum Inner {
-            Runtime(runtime_host::RuntimeHostVm),
-            Transition(runtime_host::Success),
+            Runtime(runtime_call::RuntimeCall),
+            Transition(runtime_call::Success),
         }
 
         let mut inner = Inner::Runtime(inner);
 
         loop {
             match (inner, &mut shared.stage) {
-                (Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Err(err))), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::Finished(Err(err))), _) => {
                     return BlockBuild::Finished(Err((Error::WasmVm(err.detail), err.prototype)));
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
                 }
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
-                        inner,
-                    )),
+                    Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(inner)),
                     _,
                 ) => {
                     return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                         inner, shared,
                     ))
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::OffchainStorageSet(inner)), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::OffchainStorageSet(inner)), _) => {
                     return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared))
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::InitializeBlock,
                 ) => {
                     if !success.virtual_machine.value().as_ref().is_empty() {
@@ -317,7 +315,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::InherentExtrinsics,
                 ) => {
                     let parse_result =
@@ -343,7 +341,7 @@ impl BlockBuild {
                 {
                     let extrinsic = &extrinsics[0];
 
-                    let init_result = runtime_host::run(runtime_host::Config {
+                    let init_result = runtime_call::run(runtime_call::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
@@ -369,7 +367,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::ApplyInherentExtrinsic { .. },
                 ) => {
                     let (extrinsic, new_stage) = match shared.stage {
@@ -415,7 +413,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::ApplyExtrinsic(_),
                 ) => {
                     let parse_result =
@@ -452,7 +450,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::FinalizeBlock,
                 ) => {
                     shared.logs.push_str(&success.logs);
@@ -473,7 +471,7 @@ impl BlockBuild {
     }
 }
 
-/// Extra information maintained in parallel of the [`runtime_host::RuntimeHostVm`].
+/// Extra information maintained in parallel of the [`runtime_call::RuntimeCall`].
 #[derive(Debug)]
 struct Shared {
     /// The block building process is separated into multiple stages.
@@ -528,7 +526,7 @@ impl InherentExtrinsics {
     ) -> BlockBuild {
         debug_assert!(matches!(self.shared.stage, Stage::InherentExtrinsics));
 
-        let init_result = runtime_host::run(runtime_host::Config {
+        let init_result = runtime_call::run(runtime_call::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_inherent_extrinsics",
             parameter: {
@@ -576,7 +574,7 @@ impl ApplyExtrinsic {
     ///
     /// See the module-level documentation for more information.
     pub fn add_extrinsic(mut self, extrinsic: Vec<u8>) -> BlockBuild {
-        let init_result = runtime_host::run(runtime_host::Config {
+        let init_result = runtime_call::run(runtime_call::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
@@ -599,7 +597,7 @@ impl ApplyExtrinsic {
     pub fn finish(mut self) -> BlockBuild {
         self.shared.stage = Stage::FinalizeBlock;
 
-        let init_result = runtime_host::run(runtime_host::Config {
+        let init_result = runtime_call::run(runtime_call::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
@@ -619,7 +617,7 @@ impl ApplyExtrinsic {
 
 /// Loading a storage value from the parent storage is required in order to continue.
 #[must_use]
-pub struct StorageGet(runtime_host::StorageGet, Shared);
+pub struct StorageGet(runtime_call::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -644,7 +642,7 @@ impl StorageGet {
 /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
 /// to continue.
 #[must_use]
-pub struct ClosestDescendantMerkleValue(runtime_host::ClosestDescendantMerkleValue, Shared);
+pub struct ClosestDescendantMerkleValue(runtime_call::ClosestDescendantMerkleValue, Shared);
 
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
@@ -678,7 +676,7 @@ impl ClosestDescendantMerkleValue {
 /// Fetching the key that follows a given one in the parent storage is required in order to
 /// continue.
 #[must_use]
-pub struct NextKey(runtime_host::NextKey, Shared);
+pub struct NextKey(runtime_call::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
@@ -722,7 +720,7 @@ impl NextKey {
 
 /// Setting the value of an offchain storage value is required.
 #[must_use]
-pub struct OffchainStorageSet(runtime_host::OffchainStorageSet, Shared);
+pub struct OffchainStorageSet(runtime_call::OffchainStorageSet, Shared);
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.

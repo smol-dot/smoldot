@@ -40,7 +40,7 @@ use futures_util::{FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
-    executor::{self, runtime_host},
+    executor::{self, runtime_call},
     header,
     json_rpc::{self, methods, service},
     network::codec,
@@ -1356,7 +1356,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 match pre_runtime_call {
                     Ok((runtime_call_lock, virtual_machine)) => {
-                        match runtime_host::run(runtime_host::Config {
+                        match runtime_call::run(runtime_call::Config {
                             virtual_machine,
                             function_to_call: &function_to_call,
                             parameter: iter::once(&call_parameters),
@@ -1377,7 +1377,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             Ok(mut runtime_call) => {
                                 loop {
                                     match runtime_call {
-                                        runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                                        runtime_call::RuntimeCall::Finished(Ok(success)) => {
                                             let output =
                                                 success.virtual_machine.value().as_ref().to_owned();
                                             runtime_call_lock
@@ -1391,7 +1391,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             }}).await;
                                             break;
                                         }
-                                        runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                                        runtime_call::RuntimeCall::Finished(Err(error)) => {
                                             runtime_call_lock.unlock(error.prototype);
                                             let _ = to_main_task.send(OperationEvent {
                                                 operation_id: operation_id.clone(),
@@ -1402,7 +1402,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             }}).await;
                                             break;
                                         }
-                                        runtime_host::RuntimeHostVm::StorageGet(get) => {
+                                        runtime_call::RuntimeCall::StorageGet(get) => {
                                             // TODO: what if the remote lied to us?
                                             let storage_value = {
                                                 let child_trie = get.child_trie();
@@ -1412,7 +1412,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 Ok(v) => v,
                                                 Err(_) => {
                                                     runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::StorageGet(
+                                                        runtime_call::RuntimeCall::StorageGet(
                                                             get,
                                                         )
                                                         .into_prototype(),
@@ -1431,7 +1431,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                     .map(|(val, vers)| (iter::once(val), vers)),
                                             );
                                         }
-                                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+                                        runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                                             // TODO: what if the remote lied to us?
                                             let merkle_value = {
                                                 let child_trie = mv.child_trie();
@@ -1442,7 +1442,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 Ok(v) => v,
                                                 Err(_) => {
                                                     runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
+                                                        runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
                                                             mv,
                                                         )
                                                         .into_prototype(),
@@ -1459,7 +1459,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             runtime_call = mv.inject_merkle_value(merkle_value);
                                         }
-                                        runtime_host::RuntimeHostVm::NextKey(nk) => {
+                                        runtime_call::RuntimeCall::NextKey(nk) => {
                                             // TODO: what if the remote lied to us?
                                             let next_key = {
                                                 let child_trie = nk.child_trie();
@@ -1475,7 +1475,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                                 Ok(v) => v,
                                                 Err(_) => {
                                                     runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::NextKey(
+                                                        runtime_call::RuntimeCall::NextKey(
                                                             nk,
                                                         )
                                                         .into_prototype(),
@@ -1492,14 +1492,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             };
                                             runtime_call = nk.inject_key(next_key);
                                         }
-                                        runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                                        runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                                             runtime_call = req.resume();
                                         }
-                                        runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                                        runtime_call::RuntimeCall::SignatureVerification(sig) => {
                                             runtime_call = sig.verify_and_resume();
                                         }
-                                        runtime_host::RuntimeHostVm::Offchain(ctx) => {
-                                            runtime_call_lock.unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
+                                        runtime_call::RuntimeCall::Offchain(ctx) => {
+                                            runtime_call_lock.unlock(runtime_call::RuntimeCall::Offchain(ctx).into_prototype());
                                             let _ = to_main_task.send(OperationEvent {
                                                 operation_id: operation_id.clone(),
                                                 is_done: true,
@@ -1510,7 +1510,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             }).await;
                                             break;
                                         }
-                                        runtime_host::RuntimeHostVm::LogEmit(log) => {
+                                        runtime_call::RuntimeCall::LogEmit(log) => {
                                             // Logs are ignored. 
                                             runtime_call = log.resume();
                                         }
