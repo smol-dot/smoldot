@@ -97,13 +97,13 @@ use smoldot::{
 
 mod database;
 mod json_rpc_service;
-mod network_service;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
 mod util;
 
 pub mod platform;
+pub mod network_service;
 
 pub use json_rpc_service::HandleRpcError;
 
