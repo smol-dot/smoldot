@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix the nodes discovery process being slow for chains that are added long after the smoldot client has started. This was caused by the fact that the discovery was started at the same time for all chains, and that this discovery intentionally slows down over time. The discovery is now performed and slowed down for each chain individually. ([#1544](https://github.com/smol-dot/smoldot/pull/1544))
+
 ## 2.0.16 - 2023-12-29
 
 ### Changed
