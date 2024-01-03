@@ -13,6 +13,8 @@ RUN cargo build --target $TARGET --package smoldot-full-node --release --verbose
 
 FROM alpine:latest
 LABEL maintainer "Pierre Krieger <pierre.krieger1708@gmail.com>"
+ARG TARGET
+
 COPY --from=builder /build/target/$TARGET/release/full-node /usr/local/bin
 
 EXPOSE 30333
