@@ -101,7 +101,7 @@ impl<'a> fmt::Display for InformantLine<'a> {
 
         let (header, header_len) = if let Some(relay_chain) = &self.relay_chain {
             let header = format!(
-                "    {cyan}{chain_name}{reset}   {white_bold}{local_best:<8}{reset} {light_gray}({relay_chain_name} {relay_best}){reset} [",
+                "    {cyan}{chain_name}{reset}   {white_bold}{local_best:<10}{reset} {light_gray}({relay_chain_name} {relay_best}){reset} [",
                 cyan = cyan,
                 reset = reset,
                 white_bold = white_bold,
@@ -112,11 +112,11 @@ impl<'a> fmt::Display for InformantLine<'a> {
                 relay_best = BlockNumberDisplay(relay_chain.best_number),
             );
 
-            let header_len = self.chain_name.chars().count() + relay_chain.chain_name.len() + 27; // TODO: ? it's easier to do that than deal with unicode
+            let header_len = self.chain_name.chars().count() + relay_chain.chain_name.len() + 29; // TODO: ? it's easier to do that than deal with unicode
             (header, header_len)
         } else {
             let header = format!(
-                "    {cyan}{chain_name}{reset}   {white_bold}{local_best:<8}{reset} [",
+                "    {cyan}{chain_name}{reset}   {white_bold}{local_best:<10}{reset} [",
                 cyan = cyan,
                 reset = reset,
                 white_bold = white_bold,
@@ -124,7 +124,7 @@ impl<'a> fmt::Display for InformantLine<'a> {
                 local_best = BlockNumberDisplay(self.best_number),
             );
 
-            let header_len = self.chain_name.chars().count() + 17; // TODO: ? it's easier to do that than deal with unicode
+            let header_len = self.chain_name.chars().count() + 19; // TODO: ? it's easier to do that than deal with unicode
             (header, header_len)
         };
 

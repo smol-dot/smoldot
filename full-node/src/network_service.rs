@@ -275,13 +275,17 @@ struct Inner {
     log_callback: Arc<dyn LogCallback + Send + Sync>,
 
     /// Channel for the frontend to send messages to the background task.
-    to_background_rx: channel::Receiver<ToBackground>,
+    to_background_rx: Pin<Box<channel::Receiver<ToBackground>>>,
 
     /// Channel where connections send messages destined to the coordinator.
-    from_connections_rx: channel::Receiver<(
-        service::ConnectionId,
-        Option<service::ConnectionToCoordinator>,
-    )>,
+    from_connections_rx: Pin<
+        Box<
+            channel::Receiver<(
+                service::ConnectionId,
+                Option<service::ConnectionToCoordinator>,
+            )>,
+        >,
+    >,
 
     /// Sending side of [`Inner::from_connections_rx`].
     from_connections_tx: channel::Sender<(
@@ -493,8 +497,8 @@ impl NetworkService {
             event_senders: either::Left(event_senders),
             event_pending_send: None,
             num_pending_out_attempts: 0,
-            to_background_rx,
-            from_connections_rx,
+            to_background_rx: Box::pin(to_background_rx),
+            from_connections_rx: Box::pin(from_connections_rx),
             from_connections_tx,
             tasks_executor: config.tasks_executor,
             log_callback: config.log_callback,
