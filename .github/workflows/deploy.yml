@@ -61,7 +61,6 @@ jobs:
     needs:
       build-docker-image
     permissions:
-      contents: read
       packages: write
     steps:
     - uses: actions/download-artifact@v4
