@@ -32,7 +32,7 @@ jobs:
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
-    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'macos-latest-xlarge' }}
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'macos-latest' }}
     permissions:
       contents: read
     steps:
