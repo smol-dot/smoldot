@@ -51,7 +51,7 @@ jobs:
         outputs: type=docker,dest=./image.tar
     - uses: actions/upload-artifact@v4
       with:
-        name: docker-image-${{ matrix.platform }}
+        name: docker-image-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
         path: ./image.tar
         if-no-files-found: error
         retention-days: 1
