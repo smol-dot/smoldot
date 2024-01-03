@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1 AS builder
+FROM rust:1 AS builder
 LABEL maintainer "Pierre Krieger <pierre.krieger1708@gmail.com>"
 
 ARG TARGET
