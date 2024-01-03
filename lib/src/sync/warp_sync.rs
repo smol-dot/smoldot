@@ -1102,8 +1102,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    // TODO: rename to `cancel_request` to convey the meaning that nothing negative will happen to the source
-    pub fn fail_request(&mut self, id: RequestId) -> TRq {
+    pub fn remove_request(&mut self, id: RequestId) -> TRq {
         if self.warp_sync_fragments_download == Some(id) {
             self.warp_sync_fragments_download = None;
         }

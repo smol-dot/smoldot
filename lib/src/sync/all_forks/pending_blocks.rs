@@ -80,7 +80,7 @@
 //! obtain the list of requests that should be started.
 //!
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request.
-//! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished or been
+//! Call [`PendingBlocks::remove_request`] to destroy a request after it has finished or been
 //! canceled. Note that this method doesn't require to be passed the response to that request.
 //! The user is encouraged to update the state machine according to the response, but this must
 //! be done manually.
@@ -813,7 +813,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         request_id
     }
 
-    /// Marks a request as finished.
+    /// Removes a request from the state machine.
     ///
     /// Returns the parameters that were passed to [`PendingBlocks::add_request`].
     ///
@@ -829,7 +829,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`RequestId`] is invalid.
     ///
     #[track_caller]
-    pub fn finish_request(&mut self, request_id: RequestId) -> (RequestParams, SourceId, TRq) {
+    pub fn remove_request(&mut self, request_id: RequestId) -> (RequestParams, SourceId, TRq) {
         assert!(self.requests.contains(request_id.0));
         let request = self.requests.remove(request_id.0);
 
@@ -878,7 +878,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Returns a list of requests that are considered obsolete and can be removed using
-    /// [`PendingBlocks::finish_request`].
+    /// [`PendingBlocks::remove_request`].
     ///
     /// A request is considered obsolete if the state of the requested blocks changes in such a
     /// way that they don't need to be requested anymore. The request wouldn't be returned by

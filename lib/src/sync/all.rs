@@ -1288,7 +1288,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }
                     Err(_) => {
                         // TODO: report source misbehaviour
-                        let user_data = inner.fail_request(inner_request_id).user_data;
+                        let user_data = inner.remove_request(inner_request_id).user_data;
                         (user_data, ResponseOutcome::Outdated)
                     }
                 }
@@ -1306,7 +1306,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let (sync, request_user_data, outcome) = if let Ok(blocks) = blocks {
                     let (request_user_data, mut blocks_append) =
-                        sync.finish_ancestry_search(inner_request_id);
+                        sync.finish_request(inner_request_id);
                     let mut blocks_iter = blocks.into_iter().enumerate();
 
                     loop {
@@ -1367,7 +1367,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         }
                     }
                 } else {
-                    let (ud, sync) = sync.ancestry_search_failed(inner_request_id);
+                    let (ud, finish_request) = sync.finish_request(inner_request_id);
+                    let sync = finish_request.finish();
                     // TODO: `Queued`?! doesn't seem right
                     (sync, ud, ResponseOutcome::Queued)
                 };
@@ -1425,7 +1426,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let user_data = if let Some((fragments, is_finished)) = response {
                     inner.warp_sync_request_success(request_id, fragments, is_finished)
                 } else {
-                    inner.fail_request(request_id)
+                    inner.remove_request(request_id)
                 };
 
                 (user_data.user_data, ResponseOutcome::Queued)
@@ -1486,7 +1487,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Err(_),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                let user_data = inner.fail_request(request_id).user_data;
+                let user_data = inner.remove_request(request_id).user_data;
                 self.inner = AllSyncInner::WarpSync {
                     inner,
                     ready_to_transition,
@@ -1551,7 +1552,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Err(_),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                let user_data = inner.fail_request(request_id);
+                let user_data = inner.remove_request(request_id);
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::WarpSync {
                     inner,
