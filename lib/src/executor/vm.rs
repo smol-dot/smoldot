@@ -70,10 +70,14 @@ mod interpreter;
     any(
         all(
             target_arch = "x86_64",
-            any(target_os = "windows", target_os = "linux", target_os = "macos")
+            any(
+                target_os = "windows",
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos"
+            )
         ),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "s390x", target_os = "linux")
+        all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"),
+        all(target_arch = "s390x", target_os = "linux", target_env = "gnu")
     ),
     feature = "wasmtime"
 ))]
@@ -114,10 +118,14 @@ enum VirtualMachinePrototypeInner {
         any(
             all(
                 target_arch = "x86_64",
-                any(target_os = "windows", target_os = "linux", target_os = "macos")
+                any(
+                    target_os = "windows",
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos"
+                )
             ),
-            all(target_arch = "aarch64", target_os = "linux"),
-            all(target_arch = "s390x", target_os = "linux")
+            all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+            all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
         ),
         feature = "wasmtime"
     ))]
@@ -138,10 +146,14 @@ impl VirtualMachinePrototype {
                     any(
                         all(
                             target_arch = "x86_64",
-                            any(target_os = "windows", target_os = "linux", target_os = "macos")
+                            any(
+                                target_os = "windows",
+                                all(target_os = "linux", target_env = "gnu"),
+                                target_os = "macos"
+                            )
                         ),
-                        all(target_arch = "aarch64", target_os = "linux"),
-                        all(target_arch = "s390x", target_os = "linux")
+                        all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                        all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                     ),
                     feature = "wasmtime"
                 ))]
@@ -152,10 +164,14 @@ impl VirtualMachinePrototype {
                     any(
                         all(
                             target_arch = "x86_64",
-                            any(target_os = "windows", target_os = "linux", target_os = "macos")
+                            any(
+                                target_os = "windows",
+                                all(target_os = "linux", target_env = "gnu"),
+                                target_os = "macos"
+                            )
                         ),
-                        all(target_arch = "aarch64", target_os = "linux"),
-                        all(target_arch = "s390x", target_os = "linux")
+                        all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                        all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                     ),
                     feature = "wasmtime"
                 )))]
@@ -175,10 +191,14 @@ impl VirtualMachinePrototype {
                     any(
                         all(
                             target_arch = "x86_64",
-                            any(target_os = "windows", target_os = "linux", target_os = "macos")
+                            any(
+                                target_os = "windows",
+                                all(target_os = "linux", target_env = "gnu"),
+                                target_os = "macos"
+                            )
                         ),
-                        all(target_arch = "aarch64", target_os = "linux"),
-                        all(target_arch = "s390x", target_os = "linux")
+                        all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                        all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                     ),
                     feature = "wasmtime"
                 ))]
@@ -199,10 +219,14 @@ impl VirtualMachinePrototype {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -220,10 +244,14 @@ impl VirtualMachinePrototype {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -242,10 +270,14 @@ impl VirtualMachinePrototype {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -266,10 +298,14 @@ impl fmt::Debug for VirtualMachinePrototype {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -288,10 +324,14 @@ enum PrepareInner {
         any(
             all(
                 target_arch = "x86_64",
-                any(target_os = "windows", target_os = "linux", target_os = "macos")
+                any(
+                    target_os = "windows",
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos"
+                )
             ),
-            all(target_arch = "aarch64", target_os = "linux"),
-            all(target_arch = "s390x", target_os = "linux")
+            all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+            all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
         ),
         feature = "wasmtime"
     ))]
@@ -308,10 +348,14 @@ impl Prepare {
                     any(
                         all(
                             target_arch = "x86_64",
-                            any(target_os = "windows", target_os = "linux", target_os = "macos")
+                            any(
+                                target_os = "windows",
+                                all(target_os = "linux", target_env = "gnu"),
+                                target_os = "macos"
+                            )
                         ),
-                        all(target_arch = "aarch64", target_os = "linux"),
-                        all(target_arch = "s390x", target_os = "linux")
+                        all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                        all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                     ),
                     feature = "wasmtime"
                 ))]
@@ -332,10 +376,14 @@ impl Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -357,10 +405,14 @@ impl Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -369,10 +421,14 @@ impl Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -381,10 +437,14 @@ impl Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             )))]
@@ -401,10 +461,14 @@ impl Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -423,10 +487,14 @@ impl Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -448,10 +516,14 @@ impl Prepare {
                     any(
                         all(
                             target_arch = "x86_64",
-                            any(target_os = "windows", target_os = "linux", target_os = "macos")
+                            any(
+                                target_os = "windows",
+                                all(target_os = "linux", target_env = "gnu"),
+                                target_os = "macos"
+                            )
                         ),
-                        all(target_arch = "aarch64", target_os = "linux"),
-                        all(target_arch = "s390x", target_os = "linux")
+                        all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                        all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                     ),
                     feature = "wasmtime"
                 ))]
@@ -489,10 +561,14 @@ impl fmt::Debug for Prepare {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -511,10 +587,14 @@ enum VirtualMachineInner {
         any(
             all(
                 target_arch = "x86_64",
-                any(target_os = "windows", target_os = "linux", target_os = "macos")
+                any(
+                    target_os = "windows",
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos"
+                )
             ),
-            all(target_arch = "aarch64", target_os = "linux"),
-            all(target_arch = "s390x", target_os = "linux")
+            all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+            all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
         ),
         feature = "wasmtime"
     ))]
@@ -536,10 +616,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -557,10 +641,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -582,10 +670,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -594,10 +686,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -608,10 +704,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             )))]
@@ -628,10 +728,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -650,10 +754,14 @@ impl VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -670,10 +778,14 @@ impl VirtualMachine {
                     any(
                         all(
                             target_arch = "x86_64",
-                            any(target_os = "windows", target_os = "linux", target_os = "macos")
+                            any(
+                                target_os = "windows",
+                                all(target_os = "linux", target_env = "gnu"),
+                                target_os = "macos"
+                            )
                         ),
-                        all(target_arch = "aarch64", target_os = "linux"),
-                        all(target_arch = "s390x", target_os = "linux")
+                        all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                        all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                     ),
                     feature = "wasmtime"
                 ))]
@@ -695,10 +807,14 @@ impl fmt::Debug for VirtualMachine {
                 any(
                     all(
                         target_arch = "x86_64",
-                        any(target_os = "windows", target_os = "linux", target_os = "macos")
+                        any(
+                            target_os = "windows",
+                            all(target_os = "linux", target_env = "gnu"),
+                            target_os = "macos"
+                        )
                     ),
-                    all(target_arch = "aarch64", target_os = "linux"),
-                    all(target_arch = "s390x", target_os = "linux")
+                    all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                    all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
                 ),
                 feature = "wasmtime"
             ))]
@@ -732,10 +848,14 @@ pub enum ExecHint {
         any(
             all(
                 target_arch = "x86_64",
-                any(target_os = "windows", target_os = "linux", target_os = "macos")
+                any(
+                    target_os = "windows",
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos"
+                )
             ),
-            all(target_arch = "aarch64", target_os = "linux"),
-            all(target_arch = "s390x", target_os = "linux")
+            all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+            all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
         ),
         feature = "wasmtime"
     ))]
@@ -745,10 +865,14 @@ pub enum ExecHint {
             any(
                 all(
                     target_arch = "x86_64",
-                    any(target_os = "windows", target_os = "linux", target_os = "macos")
+                    any(
+                        target_os = "windows",
+                        all(target_os = "linux", target_env = "gnu"),
+                        target_os = "macos"
+                    )
                 ),
-                all(target_arch = "aarch64", target_os = "linux"),
-                all(target_arch = "s390x", target_os = "linux")
+                all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
             ),
             feature = "wasmtime"
         )))
@@ -770,10 +894,14 @@ impl ExecHint {
             any(
                 all(
                     target_arch = "x86_64",
-                    any(target_os = "windows", target_os = "linux", target_os = "macos")
+                    any(
+                        target_os = "windows",
+                        all(target_os = "linux", target_env = "gnu"),
+                        target_os = "macos"
+                    )
                 ),
-                all(target_arch = "aarch64", target_os = "linux"),
-                all(target_arch = "s390x", target_os = "linux")
+                all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
             ),
             feature = "wasmtime"
         ))]
@@ -784,10 +912,14 @@ impl ExecHint {
             any(
                 all(
                     target_arch = "x86_64",
-                    any(target_os = "windows", target_os = "linux", target_os = "macos")
+                    any(
+                        target_os = "windows",
+                        all(target_os = "linux", target_env = "gnu"),
+                        target_os = "macos"
+                    )
                 ),
-                all(target_arch = "aarch64", target_os = "linux"),
-                all(target_arch = "s390x", target_os = "linux")
+                all(target_arch = "aarch64", all(target_os = "linux", target_env = "gnu")),
+                all(target_arch = "s390x", all(target_os = "linux", target_env = "gnu"))
             ),
             feature = "wasmtime"
         )))]
@@ -922,10 +1054,14 @@ impl<'a> TryFrom<&'a wasmi::FuncType> for Signature {
     any(
         all(
             target_arch = "x86_64",
-            any(target_os = "windows", target_os = "linux", target_os = "macos")
+            any(
+                target_os = "windows",
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos"
+            )
         ),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "s390x", target_os = "linux")
+        all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"),
+        all(target_arch = "s390x", target_os = "linux", target_env = "gnu")
     ),
     feature = "wasmtime"
 ))]
@@ -1040,10 +1176,14 @@ impl From<WasmValue> for wasmi::Value {
     any(
         all(
             target_arch = "x86_64",
-            any(target_os = "windows", target_os = "linux", target_os = "macos")
+            any(
+                target_os = "windows",
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos"
+            )
         ),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "s390x", target_os = "linux")
+        all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"),
+        all(target_arch = "s390x", target_os = "linux", target_env = "gnu")
     ),
     feature = "wasmtime"
 ))]
@@ -1060,10 +1200,14 @@ impl From<WasmValue> for wasmtime::Val {
     any(
         all(
             target_arch = "x86_64",
-            any(target_os = "windows", target_os = "linux", target_os = "macos")
+            any(
+                target_os = "windows",
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos"
+            )
         ),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "s390x", target_os = "linux")
+        all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"),
+        all(target_arch = "s390x", target_os = "linux", target_env = "gnu")
     ),
     feature = "wasmtime"
 ))]
@@ -1104,10 +1248,14 @@ impl TryFrom<wasmi::core::ValueType> for ValueType {
     any(
         all(
             target_arch = "x86_64",
-            any(target_os = "windows", target_os = "linux", target_os = "macos")
+            any(
+                target_os = "windows",
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos"
+            )
         ),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "s390x", target_os = "linux")
+        all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"),
+        all(target_arch = "s390x", target_os = "linux", target_env = "gnu")
     ),
     feature = "wasmtime"
 ))]
