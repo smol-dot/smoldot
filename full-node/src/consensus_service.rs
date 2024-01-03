@@ -3013,204 +3013,66 @@ pub async fn execute_block_and_insert(
             }),
         ),
     ] {
-        let mut call = runtime_call::run(runtime_call::Config {
-            virtual_machine: parent_runtime,
-            function_to_call: call_function,
-            parameter: iter::once(&call_parameter),
-            storage_main_trie_changes: storage_changes.into_main_trie_diff(),
-            max_log_level: 0,
-            calculate_trie_changes: true,
-        })
-        .map_err(|(err, _)| ExecuteBlockVerificationFailureError::RuntimeStartError(err))?;
-
-        loop {
-            match call {
-                runtime_call::RuntimeCall::Finished(Err(error)) => {
-                    return Err(ExecuteBlockError::InvalidBlock(
-                        ExecuteBlockInvalidBlockError::RuntimeExecutionError(error.detail),
-                    ));
-                }
-                runtime_call::RuntimeCall::Finished(Ok(runtime_call::Success {
-                    virtual_machine,
-                    storage_changes: storage_changes_update,
-                    state_trie_version: state_trie_version_update,
-                    ..
-                })) => {
-                    // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
-                    let error = {
-                        let output = virtual_machine.value();
-                        if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
-                            body_only::check_check_inherents_output(output.as_ref())
-                                .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
-                                .err()
-                        } else {
-                            body_only::check_execute_block_output(output.as_ref())
-                                .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
-                                .err()
-                        }
-                    };
-                    if let Some(error) = error {
-                        return Err(ExecuteBlockError::InvalidBlock(error));
-                    }
-
-                    storage_changes = storage_changes_update;
-                    state_trie_version = state_trie_version_update;
-                    parent_runtime = virtual_machine.into_prototype();
-                    break;
+        match runtime_call(
+            database,
+            parent_block_hash,
+            parent_runtime,
+            call_function,
+            &call_parameter,
+            storage_changes,
+        )
+        .await
+        {
+            Ok(success) => {
+                // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
+                let error = if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
+                    body_only::check_check_inherents_output(&success.output)
+                        .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
+                        .err()
+                } else {
+                    body_only::check_execute_block_output(&success.output)
+                        .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
+                        .err()
+                };
+                if let Some(error) = error {
+                    return Err(ExecuteBlockError::InvalidBlock(error));
                 }
 
-                runtime_call::RuntimeCall::StorageGet(req) => {
-                    let when_database_access_started = Instant::now();
-                    let parent_paths = req.child_trie().map(|child_trie| {
-                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
-                            .map(u8::from)
-                            .collect::<Vec<_>>()
-                    });
-                    let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
-                        .map(u8::from)
-                        .collect::<Vec<_>>();
-                    let parent_block_hash = *parent_block_hash;
-                    let value = database
-                        .with_database(move |db| {
-                            db.block_storage_get(
-                                &parent_block_hash,
-                                parent_paths.into_iter().map(|p| p.into_iter()),
-                                key.iter().copied(),
-                            )
-                        })
-                        .await;
-                    let value = match value {
-                        Ok(Some((ref val, vers))) => Some((
-                            iter::once(&val[..]),
-                            runtime_call::TrieEntryVersion::try_from(vers)
-                                .map_err(|_| ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion)?
-                        )),
-                        Ok(None) => None,
-                        Err(error) => {
-                            return Err(ExecuteBlockError::VerificationFailure(
-                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
-                                    error,
-                                    context:
-                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
-                                            function_name: call_function,
-                                            parameter: call_parameter,
-                                        },
-                                },
-                            ))
-                        }
-                    };
-
-                    database_accesses_duration += when_database_access_started.elapsed();
-                    call = req.inject_value(value);
-                }
-                runtime_call::RuntimeCall::ClosestDescendantMerkleValue(req) => {
-                    let when_database_access_started = Instant::now();
-
-                    let parent_paths = req.child_trie().map(|child_trie| {
-                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
-                            .map(u8::from)
-                            .collect::<Vec<_>>()
-                    });
-                    let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
-
-                    let parent_block_hash = *parent_block_hash;
-                    let merkle_value = database
-                        .with_database(move |db| {
-                            db.block_storage_closest_descendant_merkle_value(
-                                &parent_block_hash,
-                                parent_paths.into_iter().map(|p| p.into_iter()),
-                                key_nibbles.iter().copied(),
-                            )
-                        })
-                        .await;
-                    let merkle_value = match merkle_value {
-                        Ok(mv) => mv,
-                        Err(error) => {
-                            return Err(ExecuteBlockError::VerificationFailure(
-                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
-                                    error,
-                                    context:
-                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
-                                            function_name: call_function,
-                                            parameter: call_parameter,
-                                        },
-                                },
-                            ))
-                        }
-                    };
-
-                    database_accesses_duration += when_database_access_started.elapsed();
-                    call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
-                }
-                runtime_call::RuntimeCall::NextKey(req) => {
-                    let when_database_access_started = Instant::now();
-
-                    let parent_paths = req.child_trie().map(|child_trie| {
-                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
-                            .map(u8::from)
-                            .collect::<Vec<_>>()
-                    });
-                    let key_nibbles = req
-                        .key()
-                        .map(u8::from)
-                        .chain(if req.or_equal() { None } else { Some(0u8) })
-                        .collect::<Vec<_>>();
-                    let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
-
-                    let branch_nodes = req.branch_nodes();
-                    let parent_block_hash = *parent_block_hash;
-                    let next_key = database
-                        .with_database(move |db| {
-                            db.block_storage_next_key(
-                                &parent_block_hash,
-                                parent_paths.into_iter().map(|p| p.into_iter()),
-                                key_nibbles.iter().copied(),
-                                prefix_nibbles.iter().copied(),
-                                branch_nodes,
-                            )
-                        })
-                        .await;
-                    let next_key = match next_key {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return Err(ExecuteBlockError::VerificationFailure(
-                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
-                                    error,
-                                    context:
-                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
-                                            function_name: call_function,
-                                            parameter: call_parameter,
-                                        },
-                                },
-                            ))
-                        }
-                    };
-
-                    database_accesses_duration += when_database_access_started.elapsed();
-                    call = req.inject_key(
-                        next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
-                    );
-                }
-                runtime_call::RuntimeCall::OffchainStorageSet(req) => {
-                    // Ignore offchain storage writes at the moment.
-                    call = req.resume();
-                }
-                runtime_call::RuntimeCall::LogEmit(req) => {
-                    // Logs are ignored.
-                    call = req.resume();
-                }
-                runtime_call::RuntimeCall::SignatureVerification(sig) => {
-                    call = sig.verify_and_resume();
-                }
-                runtime_call::RuntimeCall::Offchain(_) => {
-                    // Offchain storage calls are forbidden.
-                    return Err(ExecuteBlockError::VerificationFailure(
-                        ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
-                    ));
-                }
+                parent_runtime = success.runtime;
+                storage_changes = success.storage_changes;
+                state_trie_version = success.state_trie_version;
+                database_accesses_duration += success.database_accesses_duration;
+            }
+            Err(RuntimeCallError::RuntimeStartError(error)) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::RuntimeStartError(error),
+                ))
+            }
+            Err(RuntimeCallError::RuntimeExecutionError(error)) => {
+                return Err(ExecuteBlockError::InvalidBlock(
+                    ExecuteBlockInvalidBlockError::RuntimeExecutionError(error),
+                ))
+            }
+            Err(RuntimeCallError::DatabaseParentAccess(error)) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                        error,
+                        context: ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                            function_name: call_function,
+                            parameter: call_parameter.to_owned(),
+                        },
+                    },
+                ))
+            }
+            Err(RuntimeCallError::ForbiddenHostFunction) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
+                ))
+            }
+            Err(RuntimeCallError::DatabaseInvalidStateTrieVersion) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion,
+                ))
             }
         }
     }
@@ -3485,4 +3347,204 @@ pub enum ExecuteBlockInvalidBlockError {
     InvalidNewHeapPages(executor::InvalidHeapPagesError),
     /// Failed to compile the new runtime that the block upgrades to.
     InvalidNewRuntime(host::NewErr),
+}
+
+/// Perform a runtime call, using the database as the source for storage data.
+pub async fn runtime_call(
+    database: &database_thread::DatabaseThread,
+    storage_block_hash: &[u8; 32],
+    runtime: host::HostVmPrototype,
+    function_to_call: &str,
+    parameter: &[u8],
+    initial_storage_changes: runtime_call::StorageChanges,
+) -> Result<RuntimeCallSuccess, RuntimeCallError> {
+    let mut call = runtime_call::run(runtime_call::Config {
+        virtual_machine: runtime,
+        function_to_call,
+        parameter: iter::once(&parameter),
+        storage_main_trie_changes: initial_storage_changes.into_main_trie_diff(),
+        max_log_level: 0,
+        calculate_trie_changes: true,
+    })
+    .map_err(|(err, _)| RuntimeCallError::RuntimeStartError(err))?;
+
+    let mut database_accesses_duration = Duration::new(0, 0);
+
+    loop {
+        match call {
+            runtime_call::RuntimeCall::Finished(Err(error)) => {
+                return Err(RuntimeCallError::RuntimeExecutionError(error.detail));
+            }
+            runtime_call::RuntimeCall::Finished(Ok(runtime_call::Success {
+                virtual_machine,
+                storage_changes,
+                state_trie_version,
+                ..
+            })) => {
+                let output = virtual_machine.value().as_ref().to_owned();
+                return Ok(RuntimeCallSuccess {
+                    output,
+                    runtime: virtual_machine.into_prototype(),
+                    storage_changes,
+                    state_trie_version,
+                    database_accesses_duration,
+                });
+            }
+
+            runtime_call::RuntimeCall::StorageGet(req) => {
+                let when_database_access_started = Instant::now();
+                let parent_paths = req.child_trie().map(|child_trie| {
+                    trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                        .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                        .map(u8::from)
+                        .collect::<Vec<_>>()
+                });
+                let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                    .map(u8::from)
+                    .collect::<Vec<_>>();
+                let storage_block_hash = *storage_block_hash;
+                let value = database
+                    .with_database(move |db| {
+                        db.block_storage_get(
+                            &storage_block_hash,
+                            parent_paths.into_iter().map(|p| p.into_iter()),
+                            key.iter().copied(),
+                        )
+                    })
+                    .await;
+                let value = match value {
+                    Ok(Some((ref val, vers))) => Some((
+                        iter::once(&val[..]),
+                        runtime_call::TrieEntryVersion::try_from(vers)
+                            .map_err(|_| RuntimeCallError::DatabaseInvalidStateTrieVersion)?,
+                    )),
+                    Ok(None) => None,
+                    Err(error) => return Err(RuntimeCallError::DatabaseParentAccess(error)),
+                };
+
+                database_accesses_duration += when_database_access_started.elapsed();
+                call = req.inject_value(value);
+            }
+            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(req) => {
+                let when_database_access_started = Instant::now();
+
+                let parent_paths = req.child_trie().map(|child_trie| {
+                    trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                        .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                        .map(u8::from)
+                        .collect::<Vec<_>>()
+                });
+                let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                let storage_block_hash = *storage_block_hash;
+                let merkle_value = database
+                    .with_database(move |db| {
+                        db.block_storage_closest_descendant_merkle_value(
+                            &storage_block_hash,
+                            parent_paths.into_iter().map(|p| p.into_iter()),
+                            key_nibbles.iter().copied(),
+                        )
+                    })
+                    .await;
+                let merkle_value = match merkle_value {
+                    Ok(mv) => mv,
+                    Err(error) => return Err(RuntimeCallError::DatabaseParentAccess(error)),
+                };
+
+                database_accesses_duration += when_database_access_started.elapsed();
+                call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+            }
+            runtime_call::RuntimeCall::NextKey(req) => {
+                let when_database_access_started = Instant::now();
+
+                let parent_paths = req.child_trie().map(|child_trie| {
+                    trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                        .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                        .map(u8::from)
+                        .collect::<Vec<_>>()
+                });
+                let key_nibbles = req
+                    .key()
+                    .map(u8::from)
+                    .chain(if req.or_equal() { None } else { Some(0u8) })
+                    .collect::<Vec<_>>();
+                let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                let branch_nodes = req.branch_nodes();
+                let storage_block_hash = *storage_block_hash;
+                let next_key = database
+                    .with_database(move |db| {
+                        db.block_storage_next_key(
+                            &storage_block_hash,
+                            parent_paths.into_iter().map(|p| p.into_iter()),
+                            key_nibbles.iter().copied(),
+                            prefix_nibbles.iter().copied(),
+                            branch_nodes,
+                        )
+                    })
+                    .await;
+                let next_key = match next_key {
+                    Ok(k) => k,
+                    Err(error) => return Err(RuntimeCallError::DatabaseParentAccess(error)),
+                };
+
+                database_accesses_duration += when_database_access_started.elapsed();
+                call = req.inject_key(
+                    next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
+                );
+            }
+            runtime_call::RuntimeCall::OffchainStorageSet(req) => {
+                // Ignore offchain storage writes at the moment.
+                call = req.resume();
+            }
+            runtime_call::RuntimeCall::LogEmit(req) => {
+                // Logs are ignored.
+                call = req.resume();
+            }
+            runtime_call::RuntimeCall::SignatureVerification(sig) => {
+                call = sig.verify_and_resume();
+            }
+            runtime_call::RuntimeCall::Offchain(_) => {
+                // Offchain storage calls are forbidden.
+                return Err(RuntimeCallError::ForbiddenHostFunction);
+            }
+        }
+    }
+}
+
+/// Returned by [`runtime_call`] in case of success.
+#[derive(Debug)]
+pub struct RuntimeCallSuccess {
+    /// Output of the runtime call.
+    pub output: Vec<u8>,
+
+    /// Runtime that was provided as input to [`runtime_call`].
+    pub runtime: host::HostVmPrototype,
+
+    /// Changes to the storage performed during the execution.
+    pub storage_changes: runtime_call::StorageChanges,
+
+    /// Version of the trie entries of the storage changes.
+    pub state_trie_version: runtime_call::TrieEntryVersion,
+
+    /// Total time the database accesses combined took.
+    pub database_accesses_duration: Duration,
+}
+
+/// Error returned by [`runtime_call`].
+#[derive(Debug, derive_more::Display, derive_more::From)]
+pub enum RuntimeCallError {
+    /// Error starting the runtime execution.
+    #[display(fmt = "{_0}")]
+    RuntimeStartError(executor::host::StartErr),
+    /// Error while executing the runtime.
+    #[display(fmt = "{_0}")]
+    RuntimeExecutionError(runtime_call::ErrorDetail),
+    /// Error while accessing the parent block in the database.
+    #[display(fmt = "{_0}")]
+    DatabaseParentAccess(full_sqlite::StorageAccessError),
+    /// State trie version stored in database is invalid.
+    DatabaseInvalidStateTrieVersion,
+    /// Runtime has tried to call a forbidden host function.
+    ForbiddenHostFunction,
 }
