@@ -1415,8 +1415,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
                 runtime_call = req.resume();
             }
             runtime_call::RuntimeCall::Offchain(req) => {
-                runtime_call_lock
-                    .unlock(runtime_call::RuntimeCall::Offchain(req).into_prototype());
+                runtime_call_lock.unlock(runtime_call::RuntimeCall::Offchain(req).into_prototype());
                 return Err(ParaheadError::OffchainWorkerHostFunction);
             }
             runtime_call::RuntimeCall::LogEmit(log) => {

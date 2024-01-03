@@ -115,9 +115,7 @@ fn execute_blocks() {
                     panic!("Error during test #{}: {:?}", test_num, err)
                 }
                 RuntimeCall::SignatureVerification(sig) => execution = sig.verify_and_resume(),
-                RuntimeCall::ClosestDescendantMerkleValue(req) => {
-                    execution = req.resume_unknown()
-                }
+                RuntimeCall::ClosestDescendantMerkleValue(req) => execution = req.resume_unknown(),
                 RuntimeCall::StorageGet(get) => {
                     let value = storage
                         .get(&(

@@ -1835,9 +1835,9 @@ impl Inner {
                 }
                 host::HostVm::OffchainTimestamp(req) => {
                     self.vm = req.into();
-                    return RuntimeCall::Offchain(OffchainContext::Timestamp(
-                        OffchainTimestamp { inner: self },
-                    ));
+                    return RuntimeCall::Offchain(OffchainContext::Timestamp(OffchainTimestamp {
+                        inner: self,
+                    }));
                 }
                 host::HostVm::OffchainRandomSeed(req) => {
                     self.vm = req.into();

@@ -94,9 +94,7 @@ fn validate_from_proof() {
                 validation_in_progress = r.verify_and_resume()
             }
             runtime_call::RuntimeCall::LogEmit(r) => validation_in_progress = r.resume(),
-            runtime_call::RuntimeCall::OffchainStorageSet(r) => {
-                validation_in_progress = r.resume()
-            }
+            runtime_call::RuntimeCall::OffchainStorageSet(r) => validation_in_progress = r.resume(),
             runtime_call::RuntimeCall::Offchain(_) => panic!(),
         }
     }

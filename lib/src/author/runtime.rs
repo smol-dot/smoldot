@@ -279,9 +279,7 @@ impl BlockBuild {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
                 }
                 (
-                    Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
-                        inner,
-                    )),
+                    Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(inner)),
                     _,
                 ) => {
                     return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(

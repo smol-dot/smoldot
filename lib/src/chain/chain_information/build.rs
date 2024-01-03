@@ -838,8 +838,7 @@ impl ChainInformationBuild {
                     call = req.resume();
                 }
                 runtime_call::RuntimeCall::Offchain(req) => {
-                    let virtual_machine =
-                        runtime_call::RuntimeCall::Offchain(req).into_prototype();
+                    let virtual_machine = runtime_call::RuntimeCall::Offchain(req).into_prototype();
                     break ChainInformationBuild::Finished {
                         result: Err(Error::OffchainWorkerHostFunction),
                         virtual_machine,
