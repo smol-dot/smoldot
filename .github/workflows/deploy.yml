@@ -77,8 +77,10 @@ jobs:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+    - run: docker -images   # TODO remove
     - run: |
-        docker buildx imagetools create -t ghcr.io/smol-dot/full-node:main $(docker images -q)
+        docker buildx imagetools create --dry-run -t ghcr.io/smol-dot/full-node:main $(docker images -q)
+    - run: docker -images   # TODO remove
     - run: docker push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
