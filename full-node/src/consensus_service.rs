@@ -41,7 +41,7 @@ use smoldot::{
     author,
     chain::chain_information,
     database::full_sqlite,
-    executor::{self, host, runtime_host},
+    executor::{self, host, runtime_call},
     header,
     identity::keystore,
     informant::HashDisplay,
@@ -539,7 +539,7 @@ pub enum Notification {
         /// Changes to the storage that the block has performed.
         ///
         /// Note that this field is only available when a new block is available.
-        storage_changes: Arc<runtime_host::StorageChanges>,
+        storage_changes: Arc<runtime_call::StorageChanges>,
     },
 }
 
@@ -2368,7 +2368,7 @@ impl SyncBackground {
                         block_authoring = req.inject_value(value.as_ref().map(|(val, vers)| {
                             (
                                 iter::once(&val[..]),
-                                runtime_host::TrieEntryVersion::try_from(*vers)
+                                runtime_call::TrieEntryVersion::try_from(*vers)
                                     .expect("corrupted database"),
                             )
                         }));
@@ -2982,8 +2982,8 @@ pub async fn execute_block_and_insert(
     let mut database_accesses_duration = Duration::new(0, 0);
     let mut runtime_build_duration = Duration::new(0, 0);
 
-    let mut storage_changes = runtime_host::StorageChanges::empty();
-    let mut state_trie_version = runtime_host::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
+    let mut storage_changes = runtime_call::StorageChanges::empty();
+    let mut state_trie_version = runtime_call::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
     for (call_function, call_parameter) in [
         (
             body_only::CHECK_INHERENTS_FUNCTION_NAME,
@@ -3013,7 +3013,7 @@ pub async fn execute_block_and_insert(
             }),
         ),
     ] {
-        let mut call = runtime_host::run(runtime_host::Config {
+        let mut call = runtime_call::run(runtime_call::Config {
             virtual_machine: parent_runtime,
             function_to_call: call_function,
             parameter: iter::once(&call_parameter),
@@ -3025,12 +3025,12 @@ pub async fn execute_block_and_insert(
 
         loop {
             match call {
-                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_call::RuntimeCall::Finished(Err(error)) => {
                     return Err(ExecuteBlockError::InvalidBlock(
                         ExecuteBlockInvalidBlockError::RuntimeExecutionError(error.detail),
                     ));
                 }
-                runtime_host::RuntimeHostVm::Finished(Ok(runtime_host::Success {
+                runtime_call::RuntimeCall::Finished(Ok(runtime_call::Success {
                     virtual_machine,
                     storage_changes: storage_changes_update,
                     state_trie_version: state_trie_version_update,
@@ -3059,7 +3059,7 @@ pub async fn execute_block_and_insert(
                     break;
                 }
 
-                runtime_host::RuntimeHostVm::StorageGet(req) => {
+                runtime_call::RuntimeCall::StorageGet(req) => {
                     let when_database_access_started = Instant::now();
                     let parent_paths = req.child_trie().map(|child_trie| {
                         trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
@@ -3083,7 +3083,7 @@ pub async fn execute_block_and_insert(
                     let value = match value {
                         Ok(Some((ref val, vers))) => Some((
                             iter::once(&val[..]),
-                            runtime_host::TrieEntryVersion::try_from(vers)
+                            runtime_call::TrieEntryVersion::try_from(vers)
                                 .map_err(|_| ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion)?
                         )),
                         Ok(None) => None,
@@ -3104,7 +3104,7 @@ pub async fn execute_block_and_insert(
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_value(value);
                 }
-                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
+                runtime_call::RuntimeCall::ClosestDescendantMerkleValue(req) => {
                     let when_database_access_started = Instant::now();
 
                     let parent_paths = req.child_trie().map(|child_trie| {
@@ -3144,7 +3144,7 @@ pub async fn execute_block_and_insert(
                     database_accesses_duration += when_database_access_started.elapsed();
                     call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
                 }
-                runtime_host::RuntimeHostVm::NextKey(req) => {
+                runtime_call::RuntimeCall::NextKey(req) => {
                     let when_database_access_started = Instant::now();
 
                     let parent_paths = req.child_trie().map(|child_trie| {
@@ -3194,18 +3194,18 @@ pub async fn execute_block_and_insert(
                         next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
                     );
                 }
-                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                     // Ignore offchain storage writes at the moment.
                     call = req.resume();
                 }
-                runtime_host::RuntimeHostVm::LogEmit(req) => {
+                runtime_call::RuntimeCall::LogEmit(req) => {
                     // Logs are ignored.
                     call = req.resume();
                 }
-                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();
                 }
-                runtime_host::RuntimeHostVm::Offchain(_) => {
+                runtime_call::RuntimeCall::Offchain(_) => {
                     // Offchain storage calls are forbidden.
                     return Err(ExecuteBlockError::VerificationFailure(
                         ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
@@ -3324,7 +3324,7 @@ pub async fn execute_block_and_insert(
                     .trie_changes_iter_ordered()
                     .unwrap()
                     .filter_map(|(_child_trie, key, change)| {
-                        let runtime_host::TrieChange::InsertUpdate {
+                        let runtime_call::TrieChange::InsertUpdate {
                             new_merkle_value,
                             partial_key,
                             children_merkle_values,
@@ -3334,7 +3334,7 @@ pub async fn execute_block_and_insert(
                             return None;
                         };
 
-                        // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                        // TODO: this punches through abstraction layers; maybe add some code to runtime_call to indicate this?
                         let references_merkle_value = key
                             .iter()
                             .copied()
@@ -3349,16 +3349,16 @@ pub async fn execute_block_and_insert(
                                     .map(|v| From::from(&v[..]))
                             }),
                             storage_value: match new_storage_value {
-                                runtime_host::TrieChangeStorageValue::Modified {
+                                runtime_call::TrieChangeStorageValue::Modified {
                                     new_value: Some(value),
                                 } => full_sqlite::InsertTrieNodeStorageValue::Value {
                                     value: Cow::Borrowed(value),
                                     references_merkle_value,
                                 },
-                                runtime_host::TrieChangeStorageValue::Modified {
+                                runtime_call::TrieChangeStorageValue::Modified {
                                     new_value: None,
                                 } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                runtime_host::TrieChangeStorageValue::Unmodified => {
+                                runtime_call::TrieChangeStorageValue::Unmodified => {
                                     // TODO: overhead, and no child trie support
                                     if let Some((value_in_parent, _)) = database
                                         .block_storage_get(
@@ -3413,7 +3413,7 @@ pub struct ExecuteBlockSuccess {
     pub new_runtime: Option<host::HostVmPrototype>,
 
     /// Changes to the storage performed during the execution.
-    pub storage_changes: Arc<runtime_host::StorageChanges>,
+    pub storage_changes: Arc<runtime_call::StorageChanges>,
 
     /// Total time the database accesses combined took.
     pub database_accesses_duration: Duration,
@@ -3472,7 +3472,7 @@ pub enum ExecuteBlockDatabaseAccessFailureContext {
 #[derive(Debug, derive_more::Display)]
 pub enum ExecuteBlockInvalidBlockError {
     /// Error while executing the runtime.
-    RuntimeExecutionError(runtime_host::ErrorDetail),
+    RuntimeExecutionError(runtime_call::ErrorDetail),
     /// Error in the output of `BlockBuilder_check_inherents`.
     #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
     CheckInherentsOutputError(body_only::InherentsOutputError),

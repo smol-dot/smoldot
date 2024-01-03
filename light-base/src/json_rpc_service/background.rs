@@ -39,7 +39,7 @@ use core::{
 };
 use futures_channel::oneshot;
 use smoldot::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_call},
     json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
 };
@@ -1039,7 +1039,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // The virtual machine might access the storage.
         // TODO: finish doc
 
-        let mut runtime_call = match runtime_host::run(runtime_host::Config {
+        let mut runtime_call = match runtime_call::run(runtime_call::Config {
             virtual_machine,
             function_to_call,
             parameter: call_parameters,
@@ -1056,16 +1056,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         loop {
             match runtime_call {
-                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                runtime_call::RuntimeCall::Finished(Ok(success)) => {
                     let output = success.virtual_machine.value().as_ref().to_vec();
                     runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                     break Ok((output, runtime_api_version));
                 }
-                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_call::RuntimeCall::Finished(Err(error)) => {
                     runtime_call_lock.unlock(error.prototype);
                     break Err(RuntimeCallError::RuntimeError(error.detail));
                 }
-                runtime_host::RuntimeHostVm::StorageGet(get) => {
+                runtime_call::RuntimeCall::StorageGet(get) => {
                     let storage_value = {
                         let child_trie = get.child_trie();
                         runtime_call_lock.storage_entry(
@@ -1077,7 +1077,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         Ok(v) => v,
                         Err(err) => {
                             runtime_call_lock.unlock(
-                                runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
+                                runtime_call::RuntimeCall::StorageGet(get).into_prototype(),
                             );
                             break Err(RuntimeCallError::Call(err));
                         }
@@ -1085,7 +1085,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     runtime_call =
                         get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
                 }
-                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+                runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                     let merkle_value = {
                         let child_trie = mv.child_trie();
                         runtime_call_lock.closest_descendant_merkle_value(
@@ -1097,7 +1097,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         Ok(v) => v,
                         Err(err) => {
                             runtime_call_lock.unlock(
-                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                                runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
                                     .into_prototype(),
                             );
                             break Err(RuntimeCallError::Call(err));
@@ -1105,7 +1105,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     };
                     runtime_call = mv.inject_merkle_value(merkle_value);
                 }
-                runtime_host::RuntimeHostVm::NextKey(nk) => {
+                runtime_call::RuntimeCall::NextKey(nk) => {
                     let next_key = {
                         let child_trie = nk.child_trie();
                         runtime_call_lock.next_key(
@@ -1120,24 +1120,24 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         Ok(v) => v,
                         Err(err) => {
                             runtime_call_lock
-                                .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                                .unlock(runtime_call::RuntimeCall::NextKey(nk).into_prototype());
                             break Err(RuntimeCallError::Call(err));
                         }
                     };
                     runtime_call = nk.inject_key(next_key);
                 }
-                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                     runtime_call = req.resume();
                 }
-                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     runtime_call = sig.verify_and_resume();
                 }
-                runtime_host::RuntimeHostVm::Offchain(ctx) => {
+                runtime_call::RuntimeCall::Offchain(ctx) => {
                     runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
+                        .unlock(runtime_call::RuntimeCall::Offchain(ctx).into_prototype());
                     break Err(RuntimeCallError::ForbiddenHostCall);
                 }
-                runtime_host::RuntimeHostVm::LogEmit(log) => {
+                runtime_call::RuntimeCall::LogEmit(log) => {
                     // Logs are ignored.
                     runtime_call = log.resume();
                 }
@@ -1167,7 +1167,7 @@ enum RuntimeCallError {
     #[display(fmt = "{_0}")]
     StartError(host::StartErr),
     #[display(fmt = "{_0}")]
-    RuntimeError(runtime_host::ErrorDetail),
+    RuntimeError(runtime_call::ErrorDetail),
     /// Required runtime API isn't supported by the runtime.
     #[display(fmt = "Required runtime API isn't supported by the runtime")]
     ApiNotFound,

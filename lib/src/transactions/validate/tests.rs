@@ -18,7 +18,7 @@
 #![cfg(test)]
 
 use crate::{
-    executor::{self, runtime_host},
+    executor::{self, runtime_call},
     header,
     trie::proof_decode,
 };
@@ -47,7 +47,7 @@ fn validate_from_proof() {
 
     let main_trie_root = header::decode(&scale_encoded_header, 4).unwrap().state_root;
 
-    let mut validation_in_progress = runtime_host::run(runtime_host::Config {
+    let mut validation_in_progress = runtime_call::run(runtime_call::Config {
         virtual_machine: runtime,
         function_to_call: super::VALIDATION_FUNCTION_NAME,
         parameter: super::validate_transaction_runtime_parameters_v3(
@@ -63,16 +63,16 @@ fn validate_from_proof() {
 
     loop {
         match validation_in_progress {
-            runtime_host::RuntimeHostVm::Finished(Ok(_)) => return, // Success,
-            runtime_host::RuntimeHostVm::Finished(Err(_)) => panic!(),
-            runtime_host::RuntimeHostVm::StorageGet(get) => {
+            runtime_call::RuntimeCall::Finished(Ok(_)) => return, // Success,
+            runtime_call::RuntimeCall::Finished(Err(_)) => panic!(),
+            runtime_call::RuntimeCall::StorageGet(get) => {
                 let value = call_proof
                     .storage_value(main_trie_root, get.key().as_ref())
                     .unwrap();
                 validation_in_progress =
                     get.inject_value(value.map(|(val, ver)| (iter::once(val), ver)));
             }
-            runtime_host::RuntimeHostVm::NextKey(nk) => {
+            runtime_call::RuntimeCall::NextKey(nk) => {
                 let next_key = call_proof
                     .next_key(
                         main_trie_root,
@@ -84,20 +84,20 @@ fn validate_from_proof() {
                     .unwrap();
                 validation_in_progress = nk.inject_key(next_key);
             }
-            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                 let value = call_proof
                     .closest_descendant_merkle_value(main_trie_root, mv.key())
                     .unwrap();
                 validation_in_progress = mv.inject_merkle_value(value);
             }
-            runtime_host::RuntimeHostVm::SignatureVerification(r) => {
+            runtime_call::RuntimeCall::SignatureVerification(r) => {
                 validation_in_progress = r.verify_and_resume()
             }
-            runtime_host::RuntimeHostVm::LogEmit(r) => validation_in_progress = r.resume(),
-            runtime_host::RuntimeHostVm::OffchainStorageSet(r) => {
+            runtime_call::RuntimeCall::LogEmit(r) => validation_in_progress = r.resume(),
+            runtime_call::RuntimeCall::OffchainStorageSet(r) => {
                 validation_in_progress = r.resume()
             }
-            runtime_host::RuntimeHostVm::Offchain(_) => panic!(),
+            runtime_call::RuntimeCall::Offchain(_) => panic!(),
         }
     }
 }

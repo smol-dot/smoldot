@@ -31,7 +31,7 @@ use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
-    executor::{host, runtime_host},
+    executor::{host, runtime_call},
     header,
     informant::HashDisplay,
     libp2p::PeerId,
@@ -1320,7 +1320,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 
     // TODO: move the logic below in the `para` module
 
-    let mut runtime_call = match runtime_host::run(runtime_host::Config {
+    let mut runtime_call = match runtime_call::run(runtime_call::Config {
         virtual_machine,
         function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
         parameter: para::persisted_validation_data_parameters(
@@ -1340,16 +1340,16 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 
     let output = loop {
         match runtime_call {
-            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+            runtime_call::RuntimeCall::Finished(Ok(success)) => {
                 let output = success.virtual_machine.value().as_ref().to_owned();
                 runtime_call_lock.unlock(success.virtual_machine.into_prototype());
                 break output;
             }
-            runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+            runtime_call::RuntimeCall::Finished(Err(error)) => {
                 runtime_call_lock.unlock(error.prototype);
                 return Err(ParaheadError::Runtime(error.detail));
             }
-            runtime_host::RuntimeHostVm::StorageGet(get) => {
+            runtime_call::RuntimeCall::StorageGet(get) => {
                 let storage_value = {
                     let child_trie = get.child_trie();
                     runtime_call_lock
@@ -1359,14 +1359,14 @@ async fn fetch_parahead<TPlat: PlatformRef>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock
-                            .unlock(runtime_host::RuntimeHostVm::StorageGet(get).into_prototype());
+                            .unlock(runtime_call::RuntimeCall::StorageGet(get).into_prototype());
                         return Err(ParaheadError::Call(err));
                     }
                 };
                 runtime_call =
                     get.inject_value(storage_value.map(|(val, ver)| (iter::once(val), ver)));
             }
-            runtime_host::RuntimeHostVm::NextKey(nk) => {
+            runtime_call::RuntimeCall::NextKey(nk) => {
                 let next_key = {
                     let child_trie = nk.child_trie();
                     runtime_call_lock.next_key(
@@ -1381,13 +1381,13 @@ async fn fetch_parahead<TPlat: PlatformRef>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock
-                            .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                            .unlock(runtime_call::RuntimeCall::NextKey(nk).into_prototype());
                         return Err(ParaheadError::Call(err));
                     }
                 };
                 runtime_call = nk.inject_key(next_key);
             }
-            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                 let merkle_value = {
                     let child_trie = mv.child_trie();
                     runtime_call_lock.closest_descendant_merkle_value(
@@ -1399,7 +1399,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(
-                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
                                 .into_prototype(),
                         );
                         return Err(ParaheadError::Call(err));
@@ -1407,19 +1407,19 @@ async fn fetch_parahead<TPlat: PlatformRef>(
                 };
                 runtime_call = mv.inject_merkle_value(merkle_value);
             }
-            runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+            runtime_call::RuntimeCall::SignatureVerification(sig) => {
                 runtime_call = sig.verify_and_resume();
             }
-            runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+            runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                 // Do nothing.
                 runtime_call = req.resume();
             }
-            runtime_host::RuntimeHostVm::Offchain(req) => {
+            runtime_call::RuntimeCall::Offchain(req) => {
                 runtime_call_lock
-                    .unlock(runtime_host::RuntimeHostVm::Offchain(req).into_prototype());
+                    .unlock(runtime_call::RuntimeCall::Offchain(req).into_prototype());
                 return Err(ParaheadError::OffchainWorkerHostFunction);
             }
-            runtime_host::RuntimeHostVm::LogEmit(log) => {
+            runtime_call::RuntimeCall::LogEmit(log) => {
                 // Logs are ignored.
                 runtime_call = log.resume();
             }
@@ -1449,7 +1449,7 @@ enum ParaheadError {
     StartError(host::StartErr),
     /// Error during the execution of the virtual machine to verify call proof.
     #[display(fmt = "Error during the call proof verification: {_0}")]
-    Runtime(runtime_host::ErrorDetail),
+    Runtime(runtime_call::ErrorDetail),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.

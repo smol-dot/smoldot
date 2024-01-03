@@ -89,7 +89,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_call},
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
@@ -361,7 +361,7 @@ pub enum ValidateTransactionError {
     WasmStart(host::StartErr),
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    WasmExecution(runtime_host::ErrorDetail),
+    WasmExecution(runtime_call::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError(validate::DecodeError),
     /// Runtime called a forbidden host function.
@@ -1401,7 +1401,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         ));
     }
 
-    let mut validation_in_progress = match runtime_host::run(runtime_host::Config {
+    let mut validation_in_progress = match runtime_call::run(runtime_call::Config {
         virtual_machine: runtime,
         function_to_call: validate::VALIDATION_FUNCTION_NAME,
         parameter: validate::validate_transaction_runtime_parameters_v3(
@@ -1424,7 +1424,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
 
     loop {
         match validation_in_progress {
-            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+            runtime_call::RuntimeCall::Finished(Ok(success)) => {
                 let decode_result = validate::decode_validate_transaction_return_value(
                     success.virtual_machine.value().as_ref(),
                 );
@@ -1441,14 +1441,14 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     )),
                 };
             }
-            runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+            runtime_call::RuntimeCall::Finished(Err(err)) => {
                 return Err(ValidationError::InvalidOrError(
                     InvalidOrError::ValidateError(ValidateTransactionError::WasmExecution(
                         err.detail,
                     )),
                 ));
             }
-            runtime_host::RuntimeHostVm::StorageGet(get) => {
+            runtime_call::RuntimeCall::StorageGet(get) => {
                 let storage_value = {
                     let child_trie = get.child_trie();
                     runtime_call_lock
@@ -1458,7 +1458,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock
-                            .unlock(runtime_host::RuntimeHostVm::StorageGet(get).into_prototype());
+                            .unlock(runtime_call::RuntimeCall::StorageGet(get).into_prototype());
                         return Err(ValidationError::InvalidOrError(
                             InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
@@ -1467,7 +1467,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 validation_in_progress =
                     get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
             }
-            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
+            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
                 let merkle_value = {
                     let child_trie = mv.child_trie();
                     runtime_call_lock.closest_descendant_merkle_value(
@@ -1479,7 +1479,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(
-                            runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
+                            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
                                 .into_prototype(),
                         );
                         return Err(ValidationError::InvalidOrError(
@@ -1489,7 +1489,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 };
                 validation_in_progress = mv.inject_merkle_value(merkle_value);
             }
-            runtime_host::RuntimeHostVm::NextKey(nk) => {
+            runtime_call::RuntimeCall::NextKey(nk) => {
                 let next_key = {
                     let child_trie = nk.child_trie();
                     runtime_call_lock.next_key(
@@ -1504,7 +1504,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock
-                            .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                            .unlock(runtime_call::RuntimeCall::NextKey(nk).into_prototype());
                         return Err(ValidationError::InvalidOrError(
                             InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
@@ -1512,19 +1512,19 @@ async fn validate_transaction<TPlat: PlatformRef>(
                 };
                 validation_in_progress = nk.inject_key(next_key);
             }
-            runtime_host::RuntimeHostVm::SignatureVerification(r) => {
+            runtime_call::RuntimeCall::SignatureVerification(r) => {
                 validation_in_progress = r.verify_and_resume();
             }
-            runtime_host::RuntimeHostVm::LogEmit(r) => {
+            runtime_call::RuntimeCall::LogEmit(r) => {
                 // Logs are ignored.
                 validation_in_progress = r.resume()
             }
-            runtime_host::RuntimeHostVm::Offchain(_) => {
+            runtime_call::RuntimeCall::Offchain(_) => {
                 return Err(ValidationError::InvalidOrError(
                     InvalidOrError::ValidateError(ValidateTransactionError::ForbiddenHostCall),
                 ));
             }
-            runtime_host::RuntimeHostVm::OffchainStorageSet(r) => {
+            runtime_call::RuntimeCall::OffchainStorageSet(r) => {
                 // Ignore offset storage writes.
                 validation_in_progress = r.resume();
             }
