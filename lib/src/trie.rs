@@ -102,7 +102,7 @@
 
 use crate::util;
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{cmp, ops::Bound};
 
 mod nibble;
@@ -180,52 +180,48 @@ pub const EMPTY_KECCAK256_TRIE_MERKLE_VALUE: [u8; 32] = [
 /// passed as parameter are `(key, value)`.
 ///
 /// The entries do not need to be ordered.
-///
-/// This function has a high complexity and exists mostly for convenience.
-// TODO: this function is actually used for real by the host, should we maybe sort entries or something?
 pub fn trie_root(
     version: TrieEntryVersion,
     hash_function: HashFunction,
     unordered_entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> [u8; 32] {
+    let ordered_entries = unordered_entries
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_ref()))
+        .collect::<BTreeMap<_, _>>();
+
     let mut calculation = calculate_root::root_merkle_value(hash_function);
 
     loop {
         match calculation {
             calculate_root::RootMerkleValueCalculation::Finished { hash } => return hash,
             calculate_root::RootMerkleValueCalculation::StorageValue(storage_value) => {
-                let val = unordered_entries
-                    .iter()
-                    .find(|(k, _)| k.as_ref().iter().copied().eq(storage_value.key()))
-                    .map(|(_, v)| v);
+                let val = ordered_entries.get(&storage_value.key().collect::<Vec<_>>()[..]);
                 calculation = storage_value.inject(val.map(|v| (v, version)));
             }
             calculate_root::RootMerkleValueCalculation::NextKey(next_key) => {
-                let mut maybe_next = None;
-                for (k, _) in unordered_entries {
-                    if maybe_next
-                        .as_ref()
-                        .map_or(false, |m| AsRef::as_ref(*m) <= k.as_ref())
-                    {
-                        continue;
-                    }
-                    match k.as_ref().iter().copied().cmp(next_key.key_before()) {
-                        cmp::Ordering::Less => continue,
-                        cmp::Ordering::Equal if !next_key.or_equal() => continue,
-                        _ => {}
-                    }
-                    maybe_next = Some(k);
-                }
-                if maybe_next.map_or(false, |m| {
-                    m.as_ref()
-                        .iter()
-                        .copied()
-                        .zip(next_key.prefix())
-                        .any(|(a, b)| a != b)
-                }) {
-                    maybe_next = None;
-                }
-                calculation = next_key.inject_key(maybe_next.map(util::as_ref_iter));
+                let key = next_key
+                    .key_before()
+                    .chain(next_key.or_equal().then_some(0))
+                    .collect::<Vec<_>>();
+                let result = ordered_entries
+                    .range(&key[..]..)
+                    .next()
+                    .filter(|(k, _)| {
+                        let mut k = k.iter();
+                        let mut p = next_key.prefix();
+                        loop {
+                            match (k.next(), p.next()) {
+                                (Some(a), Some(b)) if *a == b => {}
+                                (Some(_), Some(_)) => break false,
+                                (Some(_), None) => break true,
+                                (None, Some(_)) => break false,
+                                (None, None) => break true,
+                            }
+                        }
+                    })
+                    .map(|(k, _)| *k);
+                calculation = next_key.inject_key(result.map(|s| s.iter().copied()));
             }
         }
     }
