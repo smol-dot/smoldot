@@ -71,7 +71,11 @@
 #![cfg(feature = "database-sqlite")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
-use crate::{chain::chain_information, header, util};
+use crate::{
+    chain::chain_information,
+    executor::{self, host},
+    header, trie, util,
+};
 
 use alloc::borrow::Cow;
 use core::{fmt, iter, num::NonZeroU64};
@@ -242,90 +246,93 @@ impl SqliteFullDatabase {
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<chain_information::ValidChainInformation, StorageAccessError> {
-        let connection = self.database.lock();
-        if finalized_hash(&connection)? != *finalized_block_hash {
+        if finalized_hash(&self.database.lock())? != *finalized_block_hash {
             return Err(StorageAccessError::IncompleteStorage);
         }
 
-        let finalized_block_header = block_header(&connection, finalized_block_hash)?
-            .ok_or(CorruptedError::MissingBlockHeader)?;
-
-        let finality = match (
-            grandpa_authorities_set_id(&connection)?,
-            grandpa_finalized_triggered_authorities(&connection)?,
-            grandpa_finalized_scheduled_change(&connection)?,
-        ) {
-            (
-                Some(after_finalized_block_authorities_set_id),
-                finalized_triggered_authorities,
-                finalized_scheduled_change,
-            ) => chain_information::ChainInformationFinality::Grandpa {
-                after_finalized_block_authorities_set_id,
-                finalized_triggered_authorities,
-                finalized_scheduled_change,
-            },
-            (None, auth, None) if auth.is_empty() => {
-                chain_information::ChainInformationFinality::Outsourced
-            }
-            _ => {
-                return Err(StorageAccessError::Corrupted(
-                    CorruptedError::ConsensusAlgorithmMix,
-                ))
-            }
-        };
-
-        let consensus = match (
-            meta_get_number(&connection, "aura_slot_duration")?,
-            meta_get_number(&connection, "babe_slots_per_epoch")?,
-            meta_get_blob(&connection, "babe_finalized_next_epoch")?,
-        ) {
-            (None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
-                let slots_per_epoch = expect_nz_u64(slots_per_epoch)?;
-                let finalized_next_epoch_transition =
-                    Box::new(decode_babe_epoch_information(&finalized_next_epoch)?);
-                let finalized_block_epoch_information =
-                    meta_get_blob(&connection, "babe_finalized_epoch")?
-                        .map(|v| decode_babe_epoch_information(&v))
-                        .transpose()?
-                        .map(Box::new);
-                chain_information::ChainInformationConsensus::Babe {
-                    finalized_block_epoch_information,
-                    finalized_next_epoch_transition,
-                    slots_per_epoch,
-                }
-            }
-            (Some(slot_duration), None, None) => {
-                let slot_duration = expect_nz_u64(slot_duration)?;
-                let finalized_authorities_list = aura_finalized_authorities(&connection)?;
-                chain_information::ChainInformationConsensus::Aura {
-                    finalized_authorities_list,
-                    slot_duration,
-                }
-            }
-            (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
-            _ => {
-                return Err(StorageAccessError::Corrupted(
-                    CorruptedError::ConsensusAlgorithmMix,
-                ))
-            }
-        };
-
-        match chain_information::ValidChainInformation::try_from(
-            chain_information::ChainInformation {
-                finalized_block_header: {
-                    let header = header::decode(&finalized_block_header, self.block_number_bytes)
-                        .map_err(CorruptedError::BlockHeaderCorrupted)
-                        .map_err(StorageAccessError::Corrupted)?;
-                    Box::new(header.into())
+        let mut builder = chain_information::build::ChainInformationBuild::new(
+            chain_information::build::Config {
+                finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
+                    scale_encoded_header: self
+                        .block_scale_encoded_header(finalized_block_hash)?
+                        .ok_or(StorageAccessError::UnknownBlock)?, // TODO: inappropriate error
+                    known_finality: None,
                 },
-                consensus,
-                finality,
+                runtime: {
+                    let code = match self.block_storage_get(
+                        finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                    )? {
+                        Some((code, _)) => code,
+                        None => todo!(),
+                    };
+                    let heap_pages = match self.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                    )? {
+                        Some((hp, _)) => Some(hp),
+                        None => None,
+                    };
+                    let Ok(heap_pages) =
+                        executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                    else {
+                        todo!()
+                    };
+                    let Ok(runtime) = host::HostVmPrototype::new(host::Config {
+                        module: code,
+                        heap_pages,
+                        exec_hint: executor::vm::ExecHint::Oneshot,
+                        allow_unresolved_imports: true,
+                    }) else {
+                        todo!()
+                    };
+                    runtime
+                },
+                block_number_bytes: self.block_number_bytes,
             },
-        ) {
-            Ok(ci) => Ok(ci),
-            Err(err) => Err(StorageAccessError::Corrupted(
-                CorruptedError::InvalidChainInformation(err),
-            )),
+        );
+
+        // TODO: this whole code is racy because the database isn't locked
+        loop {
+            match builder {
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Ok(chain_information),
+                    .. // TODO: runtime thrown away
+                } => return Ok(chain_information),
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Err(_),
+                    .. // TODO: runtime thrown away
+                } => todo!(),
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::StorageGet(val),
+                ) => {
+                    // TODO: child trie support
+                    let value = self.block_storage_get(finalized_block_hash, iter::empty::<iter::Empty<_>>(), trie::bytes_to_nibbles(val.key().as_ref().iter().copied()).map(u8::from))?;
+                    let value = match value {
+                        Some((val, vers)) => {
+                            Some((iter::once(val), chain_information::build::TrieEntryVersion::try_from(vers).map_err(|_| StorageAccessError::Corrupted(CorruptedError::InvalidTrieEntryVersion))?))
+                        }
+                        None => None
+                    };
+                    builder = val.inject_value(value);
+                }
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::NextKey(val),
+                ) => {
+                    // TODO: child trie support
+                    let nk = self.block_storage_next_key(finalized_block_hash, iter::empty::<iter::Empty<_>>(), val.key().map(u8::from),val.prefix().map(u8::from), val.branch_nodes())?;
+                    builder = val.inject_key(nk.map(|nibbles| nibbles.into_iter().map(|n| trie::Nibble::try_from(n).unwrap())));
+                }
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::ClosestDescendantMerkleValue(val),
+                ) => {
+                    // TODO: child trie support
+                    let mv = self.block_storage_closest_descendant_merkle_value(finalized_block_hash, iter::empty::<iter::Empty<_>>(), val.key().map(u8::from))?;
+                    builder = val.inject_merkle_value(mv.as_deref());
+                }
+            }
         }
     }
 
