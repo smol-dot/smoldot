@@ -116,6 +116,12 @@ pub struct Config {
     /// [`ProcessOne::VerifyBlock`] is generated.
     pub download_bodies: bool,
 
+    /// If `true`, all the storage proofs and call proofs necessary in order to compute the chain
+    /// information of the warp synced block will be downloaded during the warp syncing process.
+    /// If `false`, the finality information of the warp synced block is inferred from the warp
+    /// sync fragments instead.
+    pub download_all_chain_information_storage_proofs: bool,
+
     /// Known valid Merkle value and storage value combination for the `:code` key.
     ///
     /// If provided, the warp syncing algorithm will first fetch the Merkle value of `:code`, and
@@ -186,6 +192,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 block_number_bytes: config.block_number_bytes,
                 sources_capacity: config.sources_capacity,
                 requests_capacity: config.sources_capacity, // TODO: ?! add as config?
+                download_all_chain_information_storage_proofs: config
+                    .download_all_chain_information_storage_proofs,
                 code_trie_node_hint: config.code_trie_node_hint,
                 num_download_ahead_fragments: 128, // TODO: make configurable?
                 // TODO: make configurable?
