@@ -313,6 +313,10 @@ impl ConsensusService {
                 NonZeroU32::new(2000).unwrap()
             },
             download_bodies: true,
+            // We ask for all the chain-information-related storage proofs and call proofs to be
+            // downloaded during the warp syncing in order to guarantee that the necessary
+            // information will be found in the database at the next reload.
+            download_all_chain_information_storage_proofs: true,
             code_trie_node_hint: None,
         });
 
