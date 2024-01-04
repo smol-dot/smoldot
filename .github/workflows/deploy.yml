@@ -70,7 +70,7 @@ jobs:
         path: .
     - uses: docker/setup-buildx-action@v3
     - run: |
-        ls -1 */*.tar | xargs docker load
+        ls -1 */*.tar | xargs docker load -i 
     - uses: docker/login-action@v3 
       # This `if` adds an additional safety against accidental pushes.
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
