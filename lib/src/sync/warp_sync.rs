@@ -163,6 +163,11 @@ pub struct Config {
     /// finishes.
     /// Determines whether [`RuntimeInformation::finalized_body`] is `Some`.
     pub download_block_body: bool,
+
+    /// If `true`, all the storage proofs and call proofs necessary in order to compute the chain
+    /// information of the warp synced block will be downloaded. If `false`, the finality
+    /// information of the warp synced block is inferred from the warp sync fragments instead.
+    pub download_all_chain_information_storage_proofs: bool,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -242,6 +247,8 @@ pub fn start_warp_sync<TSrc, TRq>(
         num_download_ahead_fragments: config.num_download_ahead_fragments,
         warp_sync_minimum_gap: config.warp_sync_minimum_gap,
         block_number_bytes: config.block_number_bytes,
+        download_all_chain_information_storage_proofs: config
+            .download_all_chain_information_storage_proofs,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
@@ -360,6 +367,8 @@ pub struct WarpSync<TSrc, TRq> {
     warp_sync_minimum_gap: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
+    /// See [`Config::download_all_chain_information_storage_proofs`].
+    download_all_chain_information_storage_proofs: bool,
     /// List of requests that have been added using [`WarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
     /// Subset of the entries as [`WarpSync::sources`] whose [`Source::finalized_block_height`]
@@ -2046,7 +2055,11 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             chain_information::build::Config {
                 finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
                     scale_encoded_header: self.inner.warped_header.clone(),
-                    known_finality: Some(self.inner.warped_finality.clone()),
+                    known_finality: if self.inner.download_all_chain_information_storage_proofs {
+                        None
+                    } else {
+                        Some(self.inner.warped_finality.clone())
+                    },
                 },
                 block_number_bytes: self.inner.block_number_bytes,
                 runtime,
