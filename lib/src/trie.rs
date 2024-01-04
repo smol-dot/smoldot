@@ -103,7 +103,7 @@
 use crate::util;
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::{cmp, ops::Bound};
+use core::ops::Bound;
 
 mod nibble;
 
