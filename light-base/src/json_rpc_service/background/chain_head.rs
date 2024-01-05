@@ -93,8 +93,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             // JSON-RPC client implementations are made aware of this limit. This number of 2 might
             // be relaxed and/or configurable in the future.
             if lock.len() >= 2 {
-                log::warn!(
-                    target: &self.log_target,
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
                     "Rejected `chainHead_unstable_follow` subscription due to limit reached."
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ApplicationDefined(
@@ -1031,8 +1033,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 -32000,
                 "Child key storage queries not supported yet",
             ));
-            log::warn!(
-                target: &self.log_target,
+            log!(
+                &self.platform,
+                Warn,
+                &self.log_target,
                 "chainHead_unstable_storage has been called with a non-null childTrie. \
                 This isn't supported by smoldot yet."
             );

@@ -376,12 +376,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     ) {
                         Ok(h) => h,
                         Err(error) => {
-                            log::warn!(
-                                target: &task.log_target,
-                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
-                                due to undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(current_finalized_block),
-                                error,
+                            log!(
+                                &task.platform,
+                                Warn,
+                                &task.log_target,
+                                format!(
+                                    "`chain_subscribeFinalizedHeads` subscription has skipped \
+                                    block due to undecodable header. Hash: {}. Error: {}",
+                                    HashDisplay(current_finalized_block),
+                                    error,
+                                )
                             );
                             continue;
                         }
@@ -420,12 +424,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 ) {
                     Ok(h) => h,
                     Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeNewHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(current_best_block),
-                            error,
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(current_best_block),
+                                error
+                            )
                         );
                         continue;
                     }
@@ -685,14 +693,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 ) {
                     Ok(h) => h,
                     Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeAllHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(&header::hash_from_scale_encoded_header(
-                                &block.scale_encoded_header
-                            )),
-                            error,
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeAllHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header
+                                )),
+                                error
+                            )
                         );
                         continue;
                     }
@@ -818,12 +830,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             ) {
                                 Ok(h) => h,
                                 Err(error) => {
-                                    log::warn!(
-                                        target: &task.log_target,
-                                        "`chain_subscribeNewHeads` subscription has skipped \
-                                        block due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(current_best_block),
-                                        error,
+                                    log!(
+                                        &task.platform,
+                                        Warn,
+                                        &task.log_target,
+                                        format!(
+                                            "`chain_subscribeNewHeads` subscription has \
+                                            skipped block due to undecodable header. Hash: {}. \
+                                            Error: {}",
+                                            HashDisplay(current_best_block),
+                                            error
+                                        )
                                     );
                                     continue;
                                 }
@@ -862,12 +879,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             ) {
                                 Ok(h) => h,
                                 Err(error) => {
-                                    log::warn!(
-                                        target: &task.log_target,
-                                        "`chain_subscribeFinalizedHeads` subscription has skipped \
-                                        block due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(current_finalized_block),
-                                        error,
+                                    log!(
+                                        &task.platform,
+                                        Warn,
+                                        &task.log_target,
+                                        format!(
+                                            "`chain_subscribeFinalizedHeads` subscription \
+                                            has skipped block due to undecodable header. \
+                                            Hash: {}. Error: {}",
+                                            HashDisplay(current_finalized_block),
+                                            error,
+                                        )
                                     );
                                     continue;
                                 }

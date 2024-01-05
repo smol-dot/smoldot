@@ -167,12 +167,13 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
             from_foreground,
         ));
 
-        config
-            .platform
-            .spawn_task(log_target.clone().into(), async move {
+        config.platform.spawn_task(log_target.clone().into(), {
+            let platform = config.platform.clone();
+            async move {
                 task.await;
-                log::debug!(target: &log_target, "Shutdown");
-            });
+                log!(&platform, Debug, &log_target, "shutdown");
+            }
+        });
 
         TransactionsService {
             to_background: async_lock::Mutex::new(to_background),
@@ -237,9 +238,9 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
                     // Sleep for a bit in order to avoid potential infinite loops
                     // of repeated crashing.
                     platform.sleep(Duration::from_secs(2)).await;
-                    log::debug!(target: &log_target, "Restart");
+                    log!(&platform, Debug, &log_target, "restart");
                     task.await;
-                    log::debug!(target: &log_target, "Shutdown");
+                    log!(&platform, Debug, &log_target, "shutdown");
                 },
             );
             *lock = tx;
@@ -520,10 +521,12 @@ async fn background_task<TPlat: PlatformRef>(
         worker.validations_in_progress.clear();
         worker.next_reannounce.clear();
 
-        log::debug!(
-            target: &config.log_target,
-            "Reset(new_finalized={}. dropped-transactions={{{}}})",
-            HashDisplay(&initial_finalized_block_hash),
+        log!(
+            &worker.platform,
+            Debug,
+            &config.log_target,
+            "reset",
+            new_finalized = HashDisplay(&initial_finalized_block_hash),
             dropped_transactions
         );
 
@@ -572,6 +575,7 @@ async fn background_task<TPlat: PlatformRef>(
 
                     // Make copies of everything in order to move the values into the future.
                     let runtime_service = worker.runtime_service.clone();
+                    let platform = worker.platform.clone();
                     let log_target = config.log_target.clone();
                     let relay_chain_sync_subscription_id = subscribe_all.new_blocks.id();
                     let scale_encoded_transaction = worker
@@ -582,6 +586,7 @@ async fn background_task<TPlat: PlatformRef>(
                     // TODO: race condition /!\ the block could be pruned and unpinned before this future starts executing
                     async move {
                         let result = validate_transaction(
+                            &platform,
                             &log_target,
                             &runtime_service,
                             relay_chain_sync_subscription_id,
@@ -632,11 +637,13 @@ async fn background_task<TPlat: PlatformRef>(
                 let (tx_body, mut transaction) =
                     worker.pending_transactions.remove_transaction(tx_id);
 
-                log::debug!(
-                    target: &config.log_target,
-                    "Discarded(tx_hash={}, error={:?})",
-                    HashDisplay(&blake2_hash(&tx_body)),
-                    error,
+                log!(
+                    &worker.platform,
+                    Debug,
+                    &config.log_target,
+                    "discarded",
+                    tx_hash = HashDisplay(&blake2_hash(&tx_body)),
+                    ?error
                 );
 
                 transaction.update_status(TransactionStatus::Dropped(match error {
@@ -709,10 +716,12 @@ async fn background_task<TPlat: PlatformRef>(
                     .unwrap()
                     .downloading = true;
 
-                log::debug!(
-                    target: &config.log_target,
-                    "BlockDownloads <= Start(block={})",
-                    HashDisplay(&block_hash)
+                log!(
+                    &worker.platform,
+                    Debug,
+                    &config.log_target,
+                    "blocks-download-started",
+                    block = HashDisplay(&block_hash)
                 );
             }
 
@@ -722,11 +731,13 @@ async fn background_task<TPlat: PlatformRef>(
                 // Unpin them when they're removed.
                 subscribe_all.new_blocks.unpin_block(block.block_hash).await;
 
-                log::debug!(
-                    target: &config.log_target,
-                    "Finalized(block={}, body-transactions={{{}}})",
-                    HashDisplay(&block.block_hash),
-                    block
+                log!(
+                    &worker.platform,
+                    Debug,
+                    &config.log_target,
+                    "finalized",
+                    block = HashDisplay(&block.block_hash),
+                    body_transactions = block
                         .included_transactions
                         .iter()
                         .map(|tx| HashDisplay(&blake2_hash(&tx.scale_encoding)).to_string())
@@ -865,12 +876,18 @@ async fn background_task<TPlat: PlatformRef>(
                             .set_block_body(&block_hash, block_body.into_iter())
                             .collect::<Vec<_>>();
 
-                        log::debug!(
-                            target: &config.log_target,
-                            "BlockDownloads => Success(block={}, included-transactions={{{}}})",
-                            HashDisplay(&block_hash),
-                            included_transactions.iter()
-                                .map(|(id, _)| HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "blocks-download-success",
+                            block = HashDisplay(&block_hash),
+                            included_transactions = included_transactions
+                                .iter()
+                                .map(|(id, _)| HashDisplay(&blake2_hash(
+                                    worker.pending_transactions.scale_encoding(*id).unwrap()
+                                ))
+                                .to_string())
                                 .join(", ")
                         );
 
@@ -888,10 +905,12 @@ async fn background_task<TPlat: PlatformRef>(
                         }
                     } else {
                         block.failed_downloads = block.failed_downloads.saturating_add(1);
-                        log::debug!(
-                            target: &config.log_target,
-                            "BlockDownloads => Failed(block={})",
-                            HashDisplay(&block_hash)
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "blocks-download-failure",
+                            block = HashDisplay(&block_hash)
                         );
                     }
                 }
@@ -957,11 +976,18 @@ async fn background_task<TPlat: PlatformRef>(
                                 .unwrap(),
                         )
                         .await;
-                    log::debug!(
-                        target: &config.log_target,
-                        "NetworkService <= Announced(tx={}, peers={{{}}})",
-                        HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap())),
-                        peers_sent.iter().join(", ")
+                    log!(
+                        &worker.platform,
+                        Debug,
+                        &config.log_target,
+                        "announced-to-network",
+                        transaction = HashDisplay(&blake2_hash(
+                            worker
+                                .pending_transactions
+                                .scale_encoding(maybe_reannounce_tx_id)
+                                .unwrap()
+                        )),
+                        peers = peers_sent.iter().join(", ")
                     );
 
                     // TODO: is this correct? and what should we do if announcing the same transaction multiple times? is it cumulative? `Broadcast` isn't super well documented
@@ -1013,31 +1039,39 @@ async fn background_task<TPlat: PlatformRef>(
                     // possible for the validation to have been performed against a block
                     // that has already been finalized and removed from the pool.
                     if !worker.pending_transactions.has_block(&block_hash) {
-                        log::debug!(
-                            target: &config.log_target,
-                            "TxValidations => ObsoleteBlock(tx={}, block={})",
-                            HashDisplay(&tx_hash),
-                            HashDisplay(&block_hash)
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "transaction-validation-obsolete-block",
+                            transaction = HashDisplay(&tx_hash),
+                            block = HashDisplay(&block_hash)
                         );
                         continue;
                     }
 
                     let validation_result = match validation_result {
                         Ok(result) => {
-                            log::debug!(
-                                target: &config.log_target,
-                                "TxValidations => Success(tx={}, block={}, priority={}, longevity={}, propagate={:?})",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                result.priority,
-                                result.longevity,
-                                result.propagate,
+                            log!(
+                                &worker.platform,
+                                Debug,
+                                &config.log_target,
+                                "transaction-validation-success",
+                                transaction = HashDisplay(&tx_hash),
+                                block = HashDisplay(&block_hash),
+                                priority = result.priority,
+                                longevity = result.longevity,
+                                propagate = ?result.propagate,
                             );
 
-                            log::info!(
-                                target: &config.log_target,
-                                "Successfully validated transaction {}",
-                                HashDisplay(&tx_hash)
+                            log!(
+                                &worker.platform,
+                                Info,
+                                &config.log_target,
+                                format!(
+                                    "Successfully validated transaction {}",
+                                    HashDisplay(&tx_hash)
+                                )
                             );
 
                             worker
@@ -1059,20 +1093,26 @@ async fn background_task<TPlat: PlatformRef>(
                             continue 'channels_rebuild;
                         }
                         Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(error))) => {
-                            log::debug!(
-                                target: &config.log_target,
-                                "TxValidations => Invalid(tx={}, block={}, error={:?})",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                error,
+                            log!(
+                                &worker.platform,
+                                Debug,
+                                &config.log_target,
+                                "transaction-validation-invalid-tx",
+                                transaction = HashDisplay(&tx_hash),
+                                block = HashDisplay(&block_hash),
+                                ?error,
                             );
 
-                            log::warn!(
-                                target: &config.log_target,
-                                "Transaction {} invalid against block {}: {}",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                error,
+                            log!(
+                                &worker.platform,
+                                Warn,
+                                &config.log_target,
+                                format!(
+                                    "Transaction {} invalid against block {}: {}",
+                                    HashDisplay(&tx_hash),
+                                    HashDisplay(&block_hash),
+                                    error,
+                                )
                             );
 
                             Err(InvalidOrError::Invalid(error))
@@ -1080,19 +1120,25 @@ async fn background_task<TPlat: PlatformRef>(
                         Err(ValidationError::InvalidOrError(InvalidOrError::ValidateError(
                             error,
                         ))) => {
-                            log::debug!(
-                                target: &config.log_target,
-                                "TxValidations => Error(tx={}, block={}, error={:?})",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                error,
+                            log!(
+                                &worker.platform,
+                                Debug,
+                                &config.log_target,
+                                "transaction-validation-error",
+                                transaction = HashDisplay(&tx_hash),
+                                block = HashDisplay(&block_hash),
+                                ?error,
                             );
 
-                            log::warn!(
-                                target: &config.log_target,
-                                "Failed to validate transaction {}: {}",
-                                HashDisplay(&tx_hash),
-                                error
+                            log!(
+                                &worker.platform,
+                                Warn,
+                                &config.log_target,
+                                format!(
+                                    "Failed to validate transaction {}: {}",
+                                    HashDisplay(&tx_hash),
+                                    error
+                                )
                             );
 
                             Err(InvalidOrError::ValidateError(error))
@@ -1239,15 +1285,27 @@ impl<TPlat: PlatformRef> Worker<TPlat> {
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
 
-        log::debug!(
-            target: log_target,
-            "BestChainUpdate(new-best-block={}, included-transactions={{{}}}, retracted-transactions={{{}}})",
-            HashDisplay(new_best_block_hash),
-            updates.included_transactions.iter()
-                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+        log!(
+            &self.platform,
+            Debug,
+            &log_target,
+            "best-chain-update",
+            new_best_block = HashDisplay(new_best_block_hash),
+            included_transactions = updates
+                .included_transactions
+                .iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(
+                    self.pending_transactions.scale_encoding(*id).unwrap()
+                ))
+                .to_string())
                 .join(", "),
-            updates.retracted_transactions.iter()
-                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+            retracted_transactions = updates
+                .retracted_transactions
+                .iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(
+                    self.pending_transactions.scale_encoding(*id).unwrap()
+                ))
+                .to_string())
                 .join(", ")
         );
 
@@ -1338,6 +1396,7 @@ impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
 async fn validate_transaction<TPlat: PlatformRef>(
+    platform: &TPlat,
     log_target: &str,
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_sync_subscription_id: runtime_service::SubscriptionId,
@@ -1357,12 +1416,14 @@ async fn validate_transaction<TPlat: PlatformRef>(
     };
 
     // TODO: move somewhere else?
-    log::debug!(
-        target: log_target,
-        "TxValidations <= Start(tx={}, block={}, block_height={})",
-        HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
-        HashDisplay(runtime_lock.block_hash()),
-        header::decode(
+    log!(
+        platform,
+        Debug,
+        &log_target,
+        "transaction-validation-started",
+        transaction = HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
+        block = HashDisplay(runtime_lock.block_hash()),
+        block_height = header::decode(
             block_scale_encoded_header,
             relay_chain_sync.block_number_bytes()
         )

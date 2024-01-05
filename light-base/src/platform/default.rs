@@ -160,9 +160,17 @@ impl PlatformRef for Arc<DefaultPlatform> {
         message: fmt::Arguments<'a>,
         key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     ) {
+        let log_level = match log_level {
+            LogLevel::Error => log::Level::Error,
+            LogLevel::Warn => log::Level::Warn,
+            LogLevel::Info => log::Level::Info,
+            LogLevel::Debug => log::Level::Debug,
+            LogLevel::Trace => log::Level::Trace,
+        };
+
         log::logger().log(
             &log::RecordBuilder::new()
-                //.level(todo!())
+                .level(log_level)
                 .target(log_target)
                 .args(message)
                 .build(),

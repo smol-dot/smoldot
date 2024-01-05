@@ -170,12 +170,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }
         };
 
-        config
-            .platform
-            .spawn_task(log_target.clone().into(), async move {
+        config.platform.spawn_task(log_target.clone().into(), {
+            let platform = config.platform.clone();
+            async move {
                 task.await;
-                log::debug!(target: &log_target, "Shutdown");
-            });
+                log!(&platform, Debug, &log_target, "shutdown");
+            }
+        });
 
         SyncService {
             to_background,

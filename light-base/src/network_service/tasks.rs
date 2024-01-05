@@ -69,25 +69,36 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                         || socket_read_write.write_bytes_queued != written_bytes_before
                         || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
                     {
-                        log::trace!(target: "connections",
-                            "Connection({address_string}) <=> read={}; written={}; wake_up_after={:?}; write_close={:?}",
-                            socket_read_write.read_bytes - read_bytes_before,
-                            socket_read_write.write_bytes_queued - written_bytes_before,
-                            socket_read_write.wake_up_after.as_ref().map(|w| {
+                        log!(
+                            &platform,
+                            Trace,
+                            "connections",
+                            "connection-activity",
+                            address = address_string,
+                            read = socket_read_write.read_bytes - read_bytes_before,
+                            written = socket_read_write.write_bytes_queued - written_bytes_before,
+                            wake_up_after = ?socket_read_write.wake_up_after.as_ref().map(|w| {
                                 if *w > socket_read_write.now {
                                     w.clone() - socket_read_write.now.clone()
                                 } else {
                                     Duration::new(0, 0)
                                 }
                             }),
-                            socket_read_write.write_bytes_queueable.is_none(),
+                            write_closed = socket_read_write.write_bytes_queueable.is_none(),
                         );
                     }
                 }
                 Err(err) => {
                     // Error on the socket.
                     if !task.is_reset_called() {
-                        log::trace!(target: "connections", "Connection({address_string}) => Reset(reason={err:?})");
+                        log!(
+                            &platform,
+                            Trace,
+                            "connections",
+                            "reset",
+                            address = address_string,
+                            reason = ?err
+                        );
                         task.reset();
                     }
                 }
@@ -123,7 +134,13 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
             // If the connection task has self-destructed and that no message is being sent, stop
             // the task altogether as nothing will happen.
             if connection_task.is_none() && message_sending.is_none() {
-                log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
+                log!(
+                    &platform,
+                    Trace,
+                    "connections",
+                    "shutdown",
+                    address = address_string
+                );
                 return;
             }
 
@@ -179,7 +196,13 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
             WakeUpReason::CoordinatorDead => {
-                log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
+                log!(
+                    &platform,
+                    Trace,
+                    "connections",
+                    "shutdown",
+                    address = address_string
+                );
                 return;
             }
             WakeUpReason::SocketEvent => {}
@@ -229,7 +252,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             .desired_outbound_substreams()
             .saturating_sub(pending_opening_out_substreams)
         {
-            log::trace!(target: "connections", "Connection({address_string}) <= OpenSubstream");
+            log!(
+                &platform,
+                Trace,
+                "connections",
+                "substream-open-start",
+                address = address_string
+            );
             platform.open_out_substream(&mut connection);
             pending_opening_out_substreams += 1;
         }
@@ -314,7 +343,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 connection_task.inject_coordinator_message(&platform.now(), message);
             }
             WakeUpReason::CoordinatorDead => {
-                log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
+                log!(
+                    &platform,
+                    Trace,
+                    "connections",
+                    "shutdown",
+                    address = address_string
+                );
                 return;
             }
             WakeUpReason::SocketEvent(mut socket, substream_id) => {
@@ -334,30 +369,49 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                             || socket_read_write.write_bytes_queued != written_bytes_before
                             || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
                         {
-                            log::trace!(target: "connections",
-                                "Connection({address_string}) <=> substream_id={substream_id}; read={}; written={}; wake_up_after={:?}; write_close={:?}",
-                                socket_read_write.read_bytes - read_bytes_before,
-                                socket_read_write.write_bytes_queued - written_bytes_before,
-                                socket_read_write.wake_up_after.as_ref().map(|w| {
+                            log!(
+                                &platform,
+                                Trace,
+                                "connections",
+                                "connection-activity",
+                                address = address_string,
+                                read = socket_read_write.read_bytes - read_bytes_before,
+                                written = socket_read_write.write_bytes_queued - written_bytes_before,
+                                wake_up_after = ?socket_read_write.wake_up_after.as_ref().map(|w| {
                                     if *w > socket_read_write.now {
                                         w.clone() - socket_read_write.now.clone()
                                     } else {
                                         Duration::new(0, 0)
                                     }
                                 }),
-                                socket_read_write.write_bytes_queueable.is_none(),
+                                write_close = ?socket_read_write.write_bytes_queueable.is_none(),
                             );
                         }
 
                         if let SubstreamFate::Reset = substream_fate {
-                            log::trace!(target: "connections", "Connection({address_string}) <= ResetSubstream(substream_id={substream_id})");
+                            log!(
+                                &platform,
+                                Trace,
+                                "connections",
+                                "reset-substream",
+                                address = address_string,
+                                substream_id
+                            );
                         }
 
                         substream_fate
                     }
                     Err(err) => {
                         // Error on the substream.
-                        log::trace!(target: "connections", "Connection({address_string}) => SubstreamReset(substream_id={substream_id}, error={err:?})");
+                        log!(
+                            &platform,
+                            Trace,
+                            "connections",
+                            "substream-reset-by-remote",
+                            address = address_string,
+                            substream_id,
+                            error = ?err
+                        );
                         connection_task.reset_substream(&substream_id);
                         SubstreamFate::Reset
                     }
@@ -379,7 +433,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                         ));
                     }
                 } else {
-                    log::trace!(target: "connections", "Connection({address_string}) => TaskShutdown");
+                    log!(
+                        &platform,
+                        Trace,
+                        "connections",
+                        "shutdown",
+                        address = address_string
+                    );
                     return;
                 }
 
@@ -397,7 +457,13 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
             WakeUpReason::MessageSent => {}
             WakeUpReason::ConnectionReset => {
                 debug_assert!(!connection_task.is_reset_called());
-                log::trace!(target: "connections", "Connection({address_string}) => Reset");
+                log!(
+                    &platform,
+                    Trace,
+                    "connections",
+                    "reset",
+                    address = address_string
+                );
                 connection_task.reset();
             }
             WakeUpReason::NewSubstream(substream, direction) => {
@@ -407,7 +473,15 @@ pub(super) async fn webrtc_multi_stream_connection_task<TPlat: PlatformRef>(
                 };
                 let substream_id = next_substream_id;
                 next_substream_id += 1;
-                log::trace!(target: "connections", "Connection({address_string}) => SubstreamOpened(substream_id={substream_id}, direction={direction:?})");
+                log!(
+                    &platform,
+                    Trace,
+                    "connections",
+                    "substream-opened",
+                    address = address_string,
+                    substream_id,
+                    ?direction
+                );
                 connection_task.add_substream(substream_id, outbound);
                 if outbound {
                     pending_opening_out_substreams -= 1;

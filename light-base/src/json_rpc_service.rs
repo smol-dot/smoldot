@@ -52,7 +52,10 @@ use core::num::NonZeroU32;
 use smoldot::{chain_spec, json_rpc::service};
 
 /// Configuration for [`service()`].
-pub struct Config {
+pub struct Config<TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -86,7 +89,7 @@ pub struct Config {
 /// be initialized using [`ServicePrototype::start`].
 ///
 /// Destroying the [`Frontend`] automatically shuts down the service.
-pub fn service(config: Config) -> (Frontend, ServicePrototype) {
+pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> (Frontend<TPlat>, ServicePrototype) {
     let log_target = format!("json-rpc-{}", config.log_name);
 
     let (requests_processing_task, requests_responses_io) =
@@ -96,6 +99,7 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
         });
 
     let frontend = Frontend {
+        platform: config.platform,
         log_target: log_target.clone(),
         requests_responses_io: Arc::new(requests_responses_io),
     };
@@ -116,7 +120,10 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 ///
 /// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
-pub struct Frontend {
+pub struct Frontend<TPlat> {
+    /// See [`Config::platform`].
+    platform: TPlat,
+
     /// Sending requests and receiving responses.
     ///
     /// Connected to the [`background`].
@@ -126,7 +133,7 @@ pub struct Frontend {
     log_target: String,
 }
 
-impl Frontend {
+impl<TPlat: PlatformRef> Frontend<TPlat> {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
@@ -142,10 +149,12 @@ impl Frontend {
             .try_send_request(json_rpc_request)
         {
             Ok(()) => {
-                log::debug!(
-                    target: &self.log_target,
-                    "JSON-RPC => {}",
-                    log_friendly_request
+                log!(
+                    &self.platform,
+                    Debug,
+                    &self.log_target,
+                    "json-rpc-request-queued",
+                    request = log_friendly_request
                 );
                 Ok(())
             }
@@ -172,13 +181,13 @@ impl Frontend {
             Err(service::WaitNextResponseError::ClientMainTaskDestroyed) => unreachable!(),
         };
 
-        log::debug!(
-            target: &self.log_target,
-            "JSON-RPC <= {}",
-            crate::util::truncated_str(
-                message.chars().filter(|c| !c.is_control()),
-                250,
-            )
+        log!(
+            &self.platform,
+            Debug,
+            &self.log_target,
+            "json-rpc-response-yielded",
+            response =
+                crate::util::truncated_str(message.chars().filter(|c| !c.is_control()), 250,)
         );
 
         message
@@ -202,6 +211,7 @@ pub struct ServicePrototype {
 /// Configuration for a JSON-RPC service.
 pub struct StartConfig<'a, TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
+    // TODO: redundant with Config above?
     pub platform: TPlat,
 
     /// Access to the network, and identifier of the chain from the point of view of the network
