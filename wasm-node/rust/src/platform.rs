@@ -30,8 +30,9 @@ use alloc::{
 };
 use async_lock::Mutex;
 use core::{
+    fmt::{self, Write as _},
     future, iter, mem, ops, pin, str,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
     task,
     time::Duration,
 };
@@ -44,6 +45,9 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
+
+/// Log level above which log entries aren't emitted.
+pub static MAX_LOG_LEVEL: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct PlatformRef {}
@@ -145,18 +149,33 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 // For this reason, the threshold above which a task takes too long must be
                 // above 16ms no matter what.
                 if poll_duration.as_millis() >= 20 {
-                    log::debug!(
-                        "Tasks({}) => LongPoll({}ms)",
-                        this.name,
-                        poll_duration.as_millis(),
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Debug,
+                        "smoldot",
+                        format_args!("task-too-long-time"),
+                        [
+                            ("name", this.name as &dyn fmt::Display),
+                            (
+                                "poll_duration_ms",
+                                &poll_duration.as_millis() as &dyn fmt::Display,
+                            ),
+                        ]
+                        .into_iter(),
                     );
                 }
                 if poll_duration.as_millis() >= 150 {
-                    log::warn!(
-                        "The task named `{}` has occupied the CPU for an unreasonable amount \
-                        of time ({}ms).",
-                        this.name,
-                        poll_duration.as_millis(),
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Warn,
+                        "smoldot",
+                        format_args!(
+                            "The task named `{}` has occupied the CPU for an \
+                            unreasonable amount of time ({}ms).",
+                            this.name,
+                            poll_duration.as_millis(),
+                        ),
+                        iter::empty(),
                     );
                 }
 
@@ -182,19 +201,59 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
     fn log<'a>(
         &self,
-        log_level: LogLevel,
+        log_level: smoldot_light::platform::LogLevel,
         log_target: &'a str,
         message: fmt::Arguments<'a>,
         key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     ) {
-        // TODO:
-        log::logger().log(
-            &log::RecordBuilder::new()
-                //.level(todo!())
-                .target(log_target)
-                .args(message)
-                .build(),
-        )
+        let log_level = match log_level {
+            smoldot_light::platform::LogLevel::Error => 1,
+            smoldot_light::platform::LogLevel::Warn => 2,
+            smoldot_light::platform::LogLevel::Info => 3,
+            smoldot_light::platform::LogLevel::Debug => 4,
+            smoldot_light::platform::LogLevel::Trace => 5,
+        };
+
+        if log_level > MAX_LOG_LEVEL.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut key_values = key_values.peekable();
+
+        if let (Some(static_message), None) = (message.as_str(), key_values.peek()) {
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(static_message.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(static_message.as_bytes().len()).unwrap(),
+                )
+            }
+        } else {
+            let mut message_build = String::with_capacity(128);
+            let _ = write!(message_build, "{}", message);
+            let mut first = true;
+            for (key, value) in key_values {
+                if first {
+                    let _ = write!(message_build, "; ");
+                    first = false;
+                } else {
+                    let _ = write!(message_build, ", ");
+                }
+                let _ = write!(message_build, "{}={}", key, value);
+            }
+
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message_build.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message_build.as_bytes().len()).unwrap(),
+                )
+            }
+        }
     }
 
     fn client_name(&self) -> Cow<str> {
