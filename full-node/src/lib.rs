@@ -270,6 +270,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     };
 
     // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
     let genesis_chain_information = chain_spec
         .to_chain_information()
         .map_err(StartError::InvalidGenesisInformation)?
@@ -284,6 +285,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     };
 
     // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
     let relay_genesis_chain_information = match &relay_chain_spec {
         Some(r) => Some(
             r.to_chain_information()
