@@ -18,7 +18,7 @@
 use super::ToBackground;
 use crate::{network_service, platform::PlatformRef, runtime_service, util};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},

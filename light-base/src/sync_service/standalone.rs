@@ -24,6 +24,7 @@ use crate::{network_service, platform::PlatformRef, util};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
+    format,
     string::String,
     sync::Arc,
     vec::Vec,
@@ -289,13 +290,17 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
                 match header::decode(decoded.scale_encoded_header, task.sync.block_number_bytes()) {
                     Ok(decoded_header) => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                            HashDisplay(decoded_header.parent_hash)
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                                decoded.scale_encoded_header
+                            )),
+                            is_best = decoded.is_best,
+                            parent_hash = HashDisplay(decoded_header.parent_hash)
                         );
                     }
                     Err(error) => {
@@ -414,15 +419,21 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 {
                     all::GrandpaCommitMessageOutcome::Queued => {
                         // TODO: print more details?
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= QueuedGrandpaCommit"
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "grandpa-commit-message-queued",
+                            sender = peer_id
                         );
                     }
                     all::GrandpaCommitMessageOutcome::Discarded => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= IgnoredGrandpaCommit"
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "grandpa-commit-message-ignored",
+                            sender = peer_id
                         );
                     }
                 }
@@ -900,11 +911,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         finalized_block_hash,
                         finalized_block_number,
                     } => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "GrandPa warp sync idle at block #{} (0x{})",
-                            finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "GrandPa warp sync idle at block #{} (0x{})",
+                                finalized_block_number,
+                                HashDisplay(&finalized_block_hash)
+                            ),
                         );
                     }
                     all::Status::WarpSyncFragments {
@@ -916,11 +931,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         finalized_block_hash,
                         finalized_block_number,
                     } => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "GrandPa warp sync in progress. Block: #{} (0x{}).",
-                            finalized_block_number,
-                            HashDisplay(&finalized_block_hash)
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "GrandPa warp sync in progress. Block: #{} (0x{}).",
+                                finalized_block_number,
+                                HashDisplay(&finalized_block_hash)
+                            )
                         );
                     }
                 };
@@ -1013,16 +1032,33 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let elapsed = self.platform.now() - before_instant;
                 match error {
                     Ok(()) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => WarpSyncRuntimeBuild(success=true, duration={:?})",
-                            elapsed
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-runtime-build-success",
+                            success = ?true,
+                            duration = ?elapsed
                         );
                     }
-                    Err(err) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
-                        if !matches!(err, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
-                            log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                    Err(error) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-runtime-build-error",
+                            ?error
+                        );
+                        if !matches!(error, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
+                            log!(
+                                &self.platform,
+                                Debug,
+                                &self.log_target,
+                                format!(
+                                    "Failed to compile runtime during warp syncing process: {}",
+                                    error
+                                )
+                            );
                         }
                     }
                 };
@@ -1060,11 +1096,15 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 self.sync = sync;
 
                 let finalized_header = self.sync.finalized_block_header();
-                log::info!(
-                    target: &self.log_target,
-                    "GrandPa warp sync finished to #{} ({})",
-                    finalized_header.number,
-                    HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                log!(
+                    &self.platform,
+                    Debug,
+                    &self.log_target,
+                    format!(
+                        "GrandPa warp sync finished to #{} ({})",
+                        finalized_header.number,
+                        HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                    )
                 );
 
                 self.warp_sync_taking_long_time_warning =
@@ -1102,11 +1142,17 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 match result {
                     Ok((fragment_hash, fragment_number)) => {
                         // TODO: must call `set_local_grandpa_state` and `set_local_best_block` so that other peers notify us of neighbor packets
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
-                            sender_if_still_connected.as_ref().map(|p| Cow::Owned(p.to_base58())).unwrap_or(Cow::Borrowed("<disconnected>")),
-                            HashDisplay(&fragment_hash)
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-fragment-verify-success",
+                            sender = sender_if_still_connected
+                                .as_ref()
+                                .map(|p| Cow::Owned(p.to_base58()))
+                                .unwrap_or(Cow::Borrowed("<disconnected>")),
+                            verified_hash = HashDisplay(&fragment_hash),
+                            verified_height = fragment_number
                         );
                     }
                     Err(err) => {
@@ -1146,11 +1192,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         let verified_height = success.height();
                         self.sync = success.finish(());
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => HeaderVerified(hash={}, new_best={})",
-                            HashDisplay(&verified_hash),
-                            if is_new_best { "yes" } else { "no" }
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "header-verify-success",
+                            hash = HashDisplay(&verified_hash),
+                            is_new_best = if is_new_best { "yes" } else { "no" }
                         );
 
                         if is_new_best {
@@ -1263,18 +1311,24 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.sync = sync;
 
                         // TODO: print which peer sent the header
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => HeaderVerifyError(hash={}, error={:?})",
-                            HashDisplay(&verified_hash),
-                            error
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "header-verify-error",
+                            hash = HashDisplay(&verified_hash),
+                            ?error
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying header {}: {}",
-                            HashDisplay(&verified_hash),
-                            error
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!(
+                                "Error while verifying header {}: {}",
+                                HashDisplay(&verified_hash),
+                                error
+                            )
                         );
 
                         // TODO: ban peers that have announced the block
@@ -1309,10 +1363,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     ) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => FinalityProofVerified(finalized_blocks={}, sender={sender})",
-                            finalized_blocks_newest_to_oldest.len(),
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-success",
+                            finalized_blocks = finalized_blocks_newest_to_oldest.len(),
+                            sender
                         );
 
                         if updates_best_block {
@@ -1347,15 +1404,21 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     (sync, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => JustificationVerificationError(error={error:?}, sender={sender})",
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-error",
+                            ?error,
+                            sender,
                         );
 
                         // TODO: don't print for consensusenginemismatch?
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying justification: {error}"
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!("Error while verifying justification: {error}")
                         );
 
                         // TODO: don't ban for consensusenginemismatch?
@@ -1371,15 +1434,20 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => GrandpaCommitVerificationError(error={error:?}, sender={sender})",
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-error",
+                            ?error,
+                            sender,
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying GrandPa commit: {}",
-                            error
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!("Error while verifying GrandPa commit: {}", error)
                         );
 
                         self.network_service
