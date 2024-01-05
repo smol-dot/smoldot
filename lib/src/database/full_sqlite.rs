@@ -1570,9 +1570,6 @@ pub enum CorruptedError {
     InvalidBlockHashLen,
     /// A trie hash is expected to be 32 bytes. This isn't the case.
     InvalidTrieHashLen,
-    /// Values in the database are all well-formatted, but are incoherent.
-    #[display(fmt = "Invalid chain information: {_0}")]
-    InvalidChainInformation(chain_information::ValidityError),
     /// The parent of a block in the database couldn't be found in that same database.
     BrokenChain,
     /// Missing a key in the `meta` table.
@@ -1583,10 +1580,6 @@ pub enum CorruptedError {
     /// The header of a block in the database has failed to decode.
     #[display(fmt = "Corrupted block header: {_0}")]
     BlockHeaderCorrupted(header::Error),
-    /// Multiple different consensus algorithms are mixed within the database.
-    ConsensusAlgorithmMix,
-    /// The information about a Babe epoch found in the database has failed to decode.
-    InvalidBabeEpochInformation,
     /// The version information about a storage entry has failed to decode.
     InvalidTrieEntryVersion,
     #[display(fmt = "Internal error: {_0}")]
