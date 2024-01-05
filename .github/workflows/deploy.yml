@@ -81,9 +81,12 @@ jobs:
     - run: docker images   # TODO remove
     - run: docker images --no-trunc -q ghcr.io/smol-dot/full-node | tr "\n" " "   # TODO: remove
     - run: |
-        docker buildx imagetools create --dry-run -t ghcr.io/smol-dot/full-node:main ghcr.io/smol-dot/full-node:amd64 ghcr.io/smol-dot/full-node:arm64
+        docker manifest create \
+          ghcr.io/smol-dot/full-node:main \
+          --amend ghcr.io/smol-dot/full-node:amd64 ghcr.io/smol-dot/full-node:arm64 \
+          --amend ghcr.io/smol-dot/full-node:amd64 ghcr.io/smol-dot/full-node:arm64
     - run: docker images   # TODO remove
-    - run: docker push ghcr.io/smol-dot/full-node:main
+    - run: docker manifest push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   build-js-doc:
