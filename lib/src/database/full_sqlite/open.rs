@@ -22,7 +22,6 @@
 // TODO:remove all the unwraps in this module that shouldn't be there
 
 use super::{CorruptedError, InternalError, SqliteFullDatabase};
-use crate::chain::chain_information;
 
 use std::path::Path;
 
@@ -116,31 +115,6 @@ Keys in that table:
 
  - `finalized` (number): Height of the finalized block, as a 64bits big endian number.
 
- - `grandpa_authorities_set_id` (number): Id of the authorities set that must finalize the block
- right after the finalized block. The value is 0 at the genesis block, and increased by 1 at every
- authorities change. Missing if and only if the chain doesn't use Grandpa.
-
- - `grandpa_scheduled_target` (number): Height of the block where the authorities found in
- `grandpa_scheduled_authorities` will be triggered. Blocks whose height is strictly higher than
- this value must be finalized using the new set of authorities. This authority change must have
- been scheduled in or before the finalized block. Missing if no change is scheduled or if the
- chain doesn't use Grandpa.
-
- - `aura_slot_duration` (number): Duration of an Aura slot in milliseconds. Missing if and only if
- the chain doesn't use Aura.
-
- - `babe_slots_per_epoch` (number): Number of slots per Babe epoch. Missing if and only if the
- chain doesn't use Babe.
-
- - `babe_finalized_epoch` (blob): SCALE encoding of a structure that contains the information
- about the Babe epoch used for the finalized block. Missing if and only if the finalized
- block is block #0 or the chain doesn't use Babe.
-
- - `babe_finalized_next_epoch` (blob): SCALE encoding of a structure that contains the information
- about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
- finalized block is block #0, then this contains information about epoch #0. Missing if and
- only if the chain doesn't use Babe.
-
 */
 CREATE TABLE meta(
     key STRING NOT NULL PRIMARY KEY,
@@ -221,37 +195,6 @@ CREATE TABLE blocks_body(
 );
 CREATE INDEX blocks_body_by_block ON blocks_body(hash);
 
-/*
-List of public keys and weights of the GrandPa authorities that must finalize the children of the
-finalized block. Empty if the chain doesn't use Grandpa.
-*/
-CREATE TABLE grandpa_triggered_authorities(
-    idx INTEGER NOT NULL PRIMARY KEY,
-    public_key BLOB NOT NULL,
-    weight INTEGER NOT NULL,
-    CHECK(length(public_key) == 32)
-);
-
-/*
-List of public keys and weights of the GrandPa authorities that will be triggered at the block
-found in `grandpa_scheduled_target` (see `meta`). Empty if the chain doesn't use Grandpa.
-*/
-CREATE TABLE grandpa_scheduled_authorities(
-    idx INTEGER NOT NULL PRIMARY KEY,
-    public_key BLOB NOT NULL,
-    weight INTEGER NOT NULL,
-    CHECK(length(public_key) == 32)
-);
-
-/*
-List of public keys of the Aura authorities that must author the children of the finalized block.
-*/
-CREATE TABLE aura_finalized_authorities(
-    idx INTEGER NOT NULL PRIMARY KEY,
-    public_key BLOB NOT NULL,
-    CHECK(length(public_key) == 32)
-);
-
 PRAGMA user_version = 1;
 
         "#,
@@ -330,13 +273,12 @@ pub struct DatabaseEmpty {
 }
 
 impl DatabaseEmpty {
-    /// Inserts the given [`chain_information::ChainInformationRef`] in the database prototype in
-    /// order to turn it into an actual database.
-    ///
-    /// Must also pass the body and justification of the finalized block.
+    /// Inserts the given finalized block in the database prototype in order to turn it into
+    /// an actual database.
+    // TODO: can a database not be empty?
     pub fn initialize<'a>(
         self,
-        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
+        finalized_block_header: &[u8],
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
     ) -> Result<SqliteFullDatabase, CorruptedError> {
@@ -346,7 +288,7 @@ impl DatabaseEmpty {
         };
 
         database.reset(
-            chain_information,
+            finalized_block_header,
             finalized_block_body,
             finalized_block_justification,
         )?;

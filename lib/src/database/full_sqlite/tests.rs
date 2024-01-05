@@ -21,7 +21,7 @@ use super::{
     open, Config, ConfigTy, DatabaseOpen, InsertTrieNode, InsertTrieNodeStorageValue,
     StorageAccessError,
 };
-use crate::{chain::chain_information, header, trie};
+use crate::{header, trie};
 
 use alloc::borrow::Cow;
 use core::{array, iter};
@@ -165,17 +165,14 @@ fn empty_database_fill_then_query() {
 
             let db = empty_db
                 .initialize(
-                    chain_information::ChainInformationRef {
-                        finalized_block_header: header::HeaderRef {
-                            number: 0,
-                            extrinsics_root: &[0; 32],
-                            parent_hash: &[0; 32],
-                            state_root,
-                            digest: header::DigestRef::empty(),
-                        },
-                        consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                        finality: chain_information::ChainInformationFinalityRef::Outsourced,
-                    },
+                    &header::HeaderRef {
+                        number: 0,
+                        extrinsics_root: &[0; 32],
+                        parent_hash: &[0; 32],
+                        state_root,
+                        digest: header::DigestRef::empty(),
+                    }
+                    .scale_encoding_vec(4),
                     iter::empty(),
                     None,
                 )
@@ -292,17 +289,14 @@ fn unknown_block() {
 
     let db = empty_db
         .initialize(
-            chain_information::ChainInformationRef {
-                finalized_block_header: header::HeaderRef {
-                    number: 0,
-                    extrinsics_root: &[0; 32],
-                    parent_hash: &[0; 32],
-                    state_root: &[1; 32],
-                    digest: header::DigestRef::empty(),
-                },
-                consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                finality: chain_information::ChainInformationFinalityRef::Outsourced,
-            },
+            &header::HeaderRef {
+                number: 0,
+                extrinsics_root: &[0; 32],
+                parent_hash: &[0; 32],
+                state_root: &[1; 32],
+                digest: header::DigestRef::empty(),
+            }
+            .scale_encoding_vec(4),
             iter::empty(),
             None,
         )
@@ -357,17 +351,14 @@ fn storage_get_partial() {
 
     let db = empty_db
         .initialize(
-            chain_information::ChainInformationRef {
-                finalized_block_header: header::HeaderRef {
-                    number: 0,
-                    extrinsics_root: &[0; 32],
-                    parent_hash: &[0; 32],
-                    state_root: &[1; 32],
-                    digest: header::DigestRef::empty(),
-                },
-                consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                finality: chain_information::ChainInformationFinalityRef::Outsourced,
-            },
+            &header::HeaderRef {
+                number: 0,
+                extrinsics_root: &[0; 32],
+                parent_hash: &[0; 32],
+                state_root: &[1; 32],
+                digest: header::DigestRef::empty(),
+            }
+            .scale_encoding_vec(4),
             iter::empty(),
             None,
         )
@@ -576,17 +567,14 @@ fn storage_next_key_partial() {
 
     let db = empty_db
         .initialize(
-            chain_information::ChainInformationRef {
-                finalized_block_header: header::HeaderRef {
-                    number: 0,
-                    extrinsics_root: &[0; 32],
-                    parent_hash: &[0; 32],
-                    state_root: &[1; 32],
-                    digest: header::DigestRef::empty(),
-                },
-                consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                finality: chain_information::ChainInformationFinalityRef::Outsourced,
-            },
+            &header::HeaderRef {
+                number: 0,
+                extrinsics_root: &[0; 32],
+                parent_hash: &[0; 32],
+                state_root: &[1; 32],
+                digest: header::DigestRef::empty(),
+            }
+            .scale_encoding_vec(4),
             iter::empty(),
             None,
         )
@@ -850,17 +838,14 @@ fn storage_closest_descendant_merkle_value_partial() {
 
     let db = empty_db
         .initialize(
-            chain_information::ChainInformationRef {
-                finalized_block_header: header::HeaderRef {
-                    number: 0,
-                    extrinsics_root: &[0; 32],
-                    parent_hash: &[0; 32],
-                    state_root: &[1; 32],
-                    digest: header::DigestRef::empty(),
-                },
-                consensus: chain_information::ChainInformationConsensusRef::Unknown,
-                finality: chain_information::ChainInformationFinalityRef::Outsourced,
-            },
+            &header::HeaderRef {
+                number: 0,
+                extrinsics_root: &[0; 32],
+                parent_hash: &[0; 32],
+                state_root: &[1; 32],
+                digest: header::DigestRef::empty(),
+            }
+            .scale_encoding_vec(4),
             iter::empty(),
             None,
         )

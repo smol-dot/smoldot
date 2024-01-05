@@ -71,10 +71,14 @@
 #![cfg(feature = "database-sqlite")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sqlite")))]
 
-use crate::{chain::chain_information, header, util};
+use crate::{
+    chain::chain_information,
+    executor::{self, host},
+    header, trie,
+};
 
 use alloc::borrow::Cow;
-use core::{fmt, iter, num::NonZeroU64};
+use core::{fmt, iter};
 use parking_lot::Mutex;
 use rusqlite::OptionalExtension as _;
 
@@ -242,90 +246,93 @@ impl SqliteFullDatabase {
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<chain_information::ValidChainInformation, StorageAccessError> {
-        let connection = self.database.lock();
-        if finalized_hash(&connection)? != *finalized_block_hash {
+        if finalized_hash(&self.database.lock())? != *finalized_block_hash {
             return Err(StorageAccessError::IncompleteStorage);
         }
 
-        let finalized_block_header = block_header(&connection, finalized_block_hash)?
-            .ok_or(CorruptedError::MissingBlockHeader)?;
-
-        let finality = match (
-            grandpa_authorities_set_id(&connection)?,
-            grandpa_finalized_triggered_authorities(&connection)?,
-            grandpa_finalized_scheduled_change(&connection)?,
-        ) {
-            (
-                Some(after_finalized_block_authorities_set_id),
-                finalized_triggered_authorities,
-                finalized_scheduled_change,
-            ) => chain_information::ChainInformationFinality::Grandpa {
-                after_finalized_block_authorities_set_id,
-                finalized_triggered_authorities,
-                finalized_scheduled_change,
-            },
-            (None, auth, None) if auth.is_empty() => {
-                chain_information::ChainInformationFinality::Outsourced
-            }
-            _ => {
-                return Err(StorageAccessError::Corrupted(
-                    CorruptedError::ConsensusAlgorithmMix,
-                ))
-            }
-        };
-
-        let consensus = match (
-            meta_get_number(&connection, "aura_slot_duration")?,
-            meta_get_number(&connection, "babe_slots_per_epoch")?,
-            meta_get_blob(&connection, "babe_finalized_next_epoch")?,
-        ) {
-            (None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
-                let slots_per_epoch = expect_nz_u64(slots_per_epoch)?;
-                let finalized_next_epoch_transition =
-                    Box::new(decode_babe_epoch_information(&finalized_next_epoch)?);
-                let finalized_block_epoch_information =
-                    meta_get_blob(&connection, "babe_finalized_epoch")?
-                        .map(|v| decode_babe_epoch_information(&v))
-                        .transpose()?
-                        .map(Box::new);
-                chain_information::ChainInformationConsensus::Babe {
-                    finalized_block_epoch_information,
-                    finalized_next_epoch_transition,
-                    slots_per_epoch,
-                }
-            }
-            (Some(slot_duration), None, None) => {
-                let slot_duration = expect_nz_u64(slot_duration)?;
-                let finalized_authorities_list = aura_finalized_authorities(&connection)?;
-                chain_information::ChainInformationConsensus::Aura {
-                    finalized_authorities_list,
-                    slot_duration,
-                }
-            }
-            (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
-            _ => {
-                return Err(StorageAccessError::Corrupted(
-                    CorruptedError::ConsensusAlgorithmMix,
-                ))
-            }
-        };
-
-        match chain_information::ValidChainInformation::try_from(
-            chain_information::ChainInformation {
-                finalized_block_header: {
-                    let header = header::decode(&finalized_block_header, self.block_number_bytes)
-                        .map_err(CorruptedError::BlockHeaderCorrupted)
-                        .map_err(StorageAccessError::Corrupted)?;
-                    Box::new(header.into())
+        let mut builder = chain_information::build::ChainInformationBuild::new(
+            chain_information::build::Config {
+                finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
+                    scale_encoded_header: self
+                        .block_scale_encoded_header(finalized_block_hash)?
+                        .ok_or(StorageAccessError::UnknownBlock)?, // TODO: inappropriate error
+                    known_finality: None,
                 },
-                consensus,
-                finality,
+                runtime: {
+                    let code = match self.block_storage_get(
+                        finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":code".iter().copied()).map(u8::from),
+                    )? {
+                        Some((code, _)) => code,
+                        None => todo!(),
+                    };
+                    let heap_pages = match self.block_storage_get(
+                        &finalized_block_hash,
+                        iter::empty::<iter::Empty<_>>(),
+                        trie::bytes_to_nibbles(b":heappages".iter().copied()).map(u8::from),
+                    )? {
+                        Some((hp, _)) => Some(hp),
+                        None => None,
+                    };
+                    let Ok(heap_pages) =
+                        executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                    else {
+                        todo!()
+                    };
+                    let Ok(runtime) = host::HostVmPrototype::new(host::Config {
+                        module: code,
+                        heap_pages,
+                        exec_hint: executor::vm::ExecHint::Oneshot,
+                        allow_unresolved_imports: true,
+                    }) else {
+                        todo!()
+                    };
+                    runtime
+                },
+                block_number_bytes: self.block_number_bytes,
             },
-        ) {
-            Ok(ci) => Ok(ci),
-            Err(err) => Err(StorageAccessError::Corrupted(
-                CorruptedError::InvalidChainInformation(err),
-            )),
+        );
+
+        // TODO: this whole code is racy because the database isn't locked
+        loop {
+            match builder {
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Ok(chain_information),
+                    .. // TODO: runtime thrown away
+                } => return Ok(chain_information),
+                chain_information::build::ChainInformationBuild::Finished {
+                    result: Err(_),
+                    .. // TODO: runtime thrown away
+                } => todo!(),
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::StorageGet(val),
+                ) => {
+                    // TODO: child trie support
+                    let value = self.block_storage_get(finalized_block_hash, iter::empty::<iter::Empty<_>>(), trie::bytes_to_nibbles(val.key().as_ref().iter().copied()).map(u8::from))?;
+                    let value = match value {
+                        Some((val, vers)) => {
+                            Some((iter::once(val), chain_information::build::TrieEntryVersion::try_from(vers).map_err(|_| StorageAccessError::Corrupted(CorruptedError::InvalidTrieEntryVersion))?))
+                        }
+                        None => None
+                    };
+                    builder = val.inject_value(value);
+                }
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::NextKey(val),
+                ) => {
+                    // TODO: child trie support
+                    let nk = self.block_storage_next_key(finalized_block_hash, iter::empty::<iter::Empty<_>>(), val.key().map(u8::from),val.prefix().map(u8::from), val.branch_nodes())?;
+                    builder = val.inject_key(nk.map(|nibbles| nibbles.into_iter().map(|n| trie::Nibble::try_from(n).unwrap())));
+                }
+                chain_information::build::ChainInformationBuild::InProgress(
+                    chain_information::build::InProgress::ClosestDescendantMerkleValue(val),
+                ) => {
+                    // TODO: child trie support
+                    let mv = self.block_storage_closest_descendant_merkle_value(finalized_block_hash, iter::empty::<iter::Empty<_>>(), val.key().map(u8::from))?;
+                    builder = val.inject_merkle_value(mv.as_deref());
+                }
+            }
         }
     }
 
@@ -700,111 +707,6 @@ impl SqliteFullDatabase {
         // corrupted.
         // Update the finalized block in meta.
         meta_set_number(&transaction, "finalized", new_finalized_header.number)?;
-
-        // Now update the finalized block storage.
-        for height in current_finalized + 1..=new_finalized_header.number {
-            let block_hash = {
-                let list = block_hashes_by_number(&transaction, height)?;
-                debug_assert_eq!(list.len(), 1);
-                list.into_iter().next().ok_or(SetFinalizedError::Corrupted(
-                    CorruptedError::MissingBlockHeader,
-                ))?
-            };
-
-            let block_header = block_header(&transaction, &block_hash)?.ok_or(
-                SetFinalizedError::Corrupted(CorruptedError::MissingBlockHeader),
-            )?;
-            let block_header = header::decode(&block_header, self.block_number_bytes)
-                .map_err(CorruptedError::BlockHeaderCorrupted)
-                .map_err(SetFinalizedError::Corrupted)?;
-
-            // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
-
-            if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
-                let epoch = meta_get_blob(&transaction, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
-                let decoded_epoch = decode_babe_epoch_information(&epoch)?;
-                transaction.execute(r#"INSERT OR REPLACE INTO meta(key, value_blob) SELECT "babe_finalized_epoch", value_blob FROM meta WHERE key = "babe_finalized_next_epoch""#, ()).unwrap();
-
-                let slot_number = block_header
-                    .digest
-                    .babe_pre_runtime()
-                    .unwrap()
-                    .slot_number();
-                let slots_per_epoch =
-                    expect_nz_u64(meta_get_number(&transaction, "babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
-
-                let new_epoch = if let Some(next_config) = next_config {
-                    chain_information::BabeEpochInformation {
-                        epoch_index: decoded_epoch.epoch_index.checked_add(1).unwrap(),
-                        start_slot_number: Some(
-                            decoded_epoch
-                                .start_slot_number
-                                .unwrap_or(slot_number)
-                                .checked_add(slots_per_epoch.get())
-                                .unwrap(),
-                        ),
-                        authorities: new_epoch.authorities.map(Into::into).collect(),
-                        randomness: *new_epoch.randomness,
-                        c: next_config.c,
-                        allowed_slots: next_config.allowed_slots,
-                    }
-                } else {
-                    chain_information::BabeEpochInformation {
-                        epoch_index: decoded_epoch.epoch_index.checked_add(1).unwrap(),
-                        start_slot_number: Some(
-                            decoded_epoch
-                                .start_slot_number
-                                .unwrap_or(slot_number)
-                                .checked_add(slots_per_epoch.get())
-                                .unwrap(),
-                        ),
-                        authorities: new_epoch.authorities.map(Into::into).collect(),
-                        randomness: *new_epoch.randomness,
-                        c: decoded_epoch.c,
-                        allowed_slots: decoded_epoch.allowed_slots,
-                    }
-                };
-
-                meta_set_blob(
-                    &transaction,
-                    "babe_finalized_next_epoch",
-                    &encode_babe_epoch_information(From::from(&new_epoch)),
-                )?;
-            }
-
-            // TODO: implement Aura
-
-            if grandpa_authorities_set_id(&transaction)?.is_some() {
-                for grandpa_digest_item in block_header.digest.logs().filter_map(|d| match d {
-                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
-                    _ => None,
-                }) {
-                    // TODO: implement items other than ScheduledChange
-                    if let header::GrandpaConsensusLogRef::ScheduledChange(change) =
-                        grandpa_digest_item
-                    {
-                        assert_eq!(change.delay, 0); // TODO: not implemented if != 0
-
-                        transaction
-                            .execute("DELETE FROM grandpa_triggered_authorities", ())
-                            .unwrap();
-
-                        let mut statement = transaction.prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
-                        for (index, item) in change.next_authorities.enumerate() {
-                            statement
-                                .execute((
-                                    i64::try_from(index).unwrap(),
-                                    &item.public_key[..],
-                                    i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
-                                ))
-                                .unwrap();
-                        }
-
-                        transaction.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#, ()).unwrap();
-                    }
-                }
-            }
-        }
 
         // It is possible that the best block has been pruned.
         // TODO: ^ yeah, how do we handle that exactly ^ ?
@@ -1483,7 +1385,7 @@ impl SqliteFullDatabase {
     /// If the block is already in the database, it is replaced by the one provided.
     pub fn reset<'a>(
         &self,
-        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
+        finalized_block_header: &[u8],
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
     ) -> Result<(), CorruptedError> {
@@ -1500,19 +1402,9 @@ impl SqliteFullDatabase {
             .execute("PRAGMA defer_foreign_keys = ON", ())
             .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
-        let chain_information = chain_information.into();
-
-        let finalized_block_hash = chain_information
-            .finalized_block_header
-            .hash(self.block_number_bytes);
-
-        let scale_encoded_finalized_block_header = chain_information
-            .finalized_block_header
-            .scale_encoding(self.block_number_bytes)
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
+        let finalized_block_hash = header::hash_from_scale_encoded_header(finalized_block_header);
+        // TODO: this module shouldn't decode blocks
+        let decoded = header::decode(finalized_block_header, self.block_number_bytes).unwrap();
 
         transaction
             .prepare_cached(
@@ -1521,12 +1413,12 @@ impl SqliteFullDatabase {
             .unwrap()
             .execute((
                 &finalized_block_hash[..],
-                if chain_information.finalized_block_header.number != 0 {
-                    Some(&chain_information.finalized_block_header.parent_hash[..])
+                if decoded.number != 0 {
+                    Some(&decoded.parent_hash[..])
                 } else { None },
-                &chain_information.finalized_block_header.state_root[..],
-                i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                &scale_encoded_finalized_block_header[..],
+                &decoded.state_root[..],
+                i64::try_from(decoded.number).unwrap(),
+                finalized_block_header,
                 finalized_block_justification.as_deref(),
             ))
             .unwrap();
@@ -1556,114 +1448,7 @@ impl SqliteFullDatabase {
         }
 
         meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
-        meta_set_number(
-            &transaction,
-            "finalized",
-            chain_information.finalized_block_header.number,
-        )?;
-
-        meta_clear(&transaction, "grandpa_authorities_set_id")?;
-        meta_clear(&transaction, "grandpa_scheduled_target")?;
-        transaction
-            .execute("DELETE FROM grandpa_triggered_authorities WHERE TRUE;", ())
-            .unwrap();
-        transaction
-            .execute("DELETE FROM grandpa_scheduled_authorities WHERE TRUE;", ())
-            .unwrap();
-
-        match &chain_information.finality {
-            chain_information::ChainInformationFinalityRef::Outsourced => {}
-            chain_information::ChainInformationFinalityRef::Grandpa {
-                finalized_triggered_authorities,
-                after_finalized_block_authorities_set_id,
-                finalized_scheduled_change,
-            } => {
-                meta_set_number(
-                    &transaction,
-                    "grandpa_authorities_set_id",
-                    *after_finalized_block_authorities_set_id,
-                )?;
-
-                let mut statement = transaction
-                    .prepare_cached("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
-                    .unwrap();
-                for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement
-                        .execute((
-                            i64::try_from(index).unwrap(),
-                            &item.public_key[..],
-                            i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
-                        ))
-                        .unwrap();
-                }
-
-                if let Some((height, list)) = finalized_scheduled_change {
-                    meta_set_number(&transaction, "grandpa_scheduled_target", *height)?;
-
-                    let mut statement = transaction
-                        .prepare_cached("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
-                        .unwrap();
-                    for (index, item) in list.iter().enumerate() {
-                        statement
-                            .execute((
-                                i64::try_from(index).unwrap(),
-                                &item.public_key[..],
-                                i64::from_ne_bytes(item.weight.get().to_ne_bytes()),
-                            ))
-                            .unwrap();
-                    }
-                }
-            }
-        }
-
-        meta_clear(&transaction, "aura_slot_duration")?;
-        transaction
-            .execute("DELETE FROM aura_finalized_authorities WHERE TRUE;", ())
-            .unwrap();
-        meta_clear(&transaction, "babe_slots_per_epoch")?;
-        meta_clear(&transaction, "babe_finalized_next_epoch")?;
-        meta_clear(&transaction, "babe_finalized_epoch")?;
-
-        match &chain_information.consensus {
-            chain_information::ChainInformationConsensusRef::Unknown => {}
-            chain_information::ChainInformationConsensusRef::Aura {
-                finalized_authorities_list,
-                slot_duration,
-            } => {
-                meta_set_number(&transaction, "aura_slot_duration", slot_duration.get()).unwrap();
-
-                let mut statement = transaction
-                    .prepare_cached(
-                        "INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)",
-                    )
-                    .unwrap();
-                for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement
-                        .execute((i64::try_from(index).unwrap(), &item.public_key[..]))
-                        .unwrap();
-                }
-            }
-            chain_information::ChainInformationConsensusRef::Babe {
-                slots_per_epoch,
-                finalized_next_epoch_transition,
-                finalized_block_epoch_information,
-            } => {
-                meta_set_number(&transaction, "babe_slots_per_epoch", slots_per_epoch.get())
-                    .unwrap();
-                meta_set_blob(
-                    &transaction,
-                    "babe_finalized_next_epoch",
-                    &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
-                )
-                .unwrap();
-
-                if let Some(finalized_block_epoch_information) = finalized_block_epoch_information {
-                    meta_set_blob(&transaction, "babe_finalized_epoch", &encode_babe_epoch_information(
-                    finalized_block_epoch_information.clone(),
-                    )[..]).unwrap();
-                }
-            }
-        }
+        meta_set_number(&transaction, "finalized", decoded.number)?;
 
         transaction
             .commit()
@@ -1785,9 +1570,6 @@ pub enum CorruptedError {
     InvalidBlockHashLen,
     /// A trie hash is expected to be 32 bytes. This isn't the case.
     InvalidTrieHashLen,
-    /// Values in the database are all well-formatted, but are incoherent.
-    #[display(fmt = "Invalid chain information: {_0}")]
-    InvalidChainInformation(chain_information::ValidityError),
     /// The parent of a block in the database couldn't be found in that same database.
     BrokenChain,
     /// Missing a key in the `meta` table.
@@ -1798,10 +1580,6 @@ pub enum CorruptedError {
     /// The header of a block in the database has failed to decode.
     #[display(fmt = "Corrupted block header: {_0}")]
     BlockHeaderCorrupted(header::Error),
-    /// Multiple different consensus algorithms are mixed within the database.
-    ConsensusAlgorithmMix,
-    /// The information about a Babe epoch found in the database has failed to decode.
-    InvalidBabeEpochInformation,
     /// The version information about a storage entry has failed to decode.
     InvalidTrieEntryVersion,
     #[display(fmt = "Internal error: {_0}")]
@@ -1836,15 +1614,6 @@ fn meta_get_number(
         .optional()
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(value.map(|value| u64::from_ne_bytes(value.to_ne_bytes())))
-}
-
-fn meta_clear(database: &rusqlite::Connection, key: &str) -> Result<(), CorruptedError> {
-    database
-        .prepare_cached(r#"DELETE FROM meta WHERE key = ?"#)
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .execute((key,))
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-    Ok(())
 }
 
 fn meta_set_blob(
@@ -2065,177 +1834,4 @@ fn purge_block_storage(database: &rusqlite::Connection, hash: &[u8]) -> Result<(
         })
         .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
     Ok(())
-}
-
-fn grandpa_authorities_set_id(
-    database: &rusqlite::Connection,
-) -> Result<Option<u64>, CorruptedError> {
-    meta_get_number(database, "grandpa_authorities_set_id")
-}
-
-fn grandpa_finalized_triggered_authorities(
-    database: &rusqlite::Connection,
-) -> Result<Vec<header::GrandpaAuthority>, CorruptedError> {
-    database
-        .prepare_cached(
-            r#"SELECT public_key, weight FROM grandpa_triggered_authorities ORDER BY idx ASC"#,
-        )
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .query_map((), |row| {
-            let pk = row.get::<_, Vec<u8>>(0)?;
-            let weight = row.get::<_, i64>(1)?;
-            Ok((pk, weight))
-        })
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .map(|result| {
-            let (public_key, weight) =
-                result.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            let public_key = <[u8; 32]>::try_from(&public_key[..])
-                .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
-            let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-                .ok_or(CorruptedError::InvalidNumber)?;
-            Ok(header::GrandpaAuthority { public_key, weight })
-        })
-        .collect::<Result<Vec<_>, _>>()
-}
-
-fn grandpa_finalized_scheduled_change(
-    database: &rusqlite::Connection,
-) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, CorruptedError> {
-    if let Some(height) = meta_get_number(database, "grandpa_scheduled_target")? {
-        // TODO: duplicated from above except different table name
-        let out = database
-            .prepare_cached(
-                r#"SELECT public_key, weight FROM grandpa_scheduled_authorities ORDER BY idx ASC"#,
-            )
-            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-            .query_map((), |row| {
-                let pk = row.get::<_, Vec<u8>>(0)?;
-                let weight = row.get::<_, i64>(1)?;
-                Ok((pk, weight))
-            })
-            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-            .map(|result| {
-                let (public_key, weight) =
-                    result.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-                let public_key = <[u8; 32]>::try_from(&public_key[..])
-                    .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
-                let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
-                    .ok_or(CorruptedError::InvalidNumber)?;
-                Ok(header::GrandpaAuthority { public_key, weight })
-            })
-            .collect::<Result<Vec<_>, CorruptedError>>()?;
-
-        Ok(Some((height, out)))
-    } else {
-        Ok(None)
-    }
-}
-
-fn expect_nz_u64(value: u64) -> Result<NonZeroU64, CorruptedError> {
-    NonZeroU64::new(value).ok_or(CorruptedError::InvalidNumber)
-}
-
-fn aura_finalized_authorities(
-    database: &rusqlite::Connection,
-) -> Result<Vec<header::AuraAuthority>, CorruptedError> {
-    database
-        .prepare_cached(r#"SELECT public_key FROM aura_finalized_authorities ORDER BY idx ASC"#)
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .query_map((), |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|err| CorruptedError::Internal(InternalError(err)))?
-        .map(|result| {
-            let public_key = result.map_err(|err| CorruptedError::Internal(InternalError(err)))?;
-            let public_key = <[u8; 32]>::try_from(&public_key[..])
-                .map_err(|_| CorruptedError::InvalidBlockHashLen)?;
-            Ok(header::AuraAuthority { public_key })
-        })
-        .collect::<Result<Vec<_>, CorruptedError>>()
-}
-
-fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRef) -> Vec<u8> {
-    let mut out = Vec::with_capacity(69 + info.authorities.len() * 40);
-    out.extend_from_slice(&info.epoch_index.to_le_bytes());
-    if let Some(start_slot_number) = info.start_slot_number {
-        out.extend_from_slice(&[1]);
-        out.extend_from_slice(&start_slot_number.to_le_bytes());
-    } else {
-        out.extend_from_slice(&[0]);
-    }
-    out.extend_from_slice(util::encode_scale_compact_usize(info.authorities.len()).as_ref());
-    for authority in info.authorities {
-        out.extend_from_slice(authority.public_key);
-        out.extend_from_slice(&authority.weight.to_le_bytes());
-    }
-    out.extend_from_slice(info.randomness);
-    out.extend_from_slice(&info.c.0.to_le_bytes());
-    out.extend_from_slice(&info.c.1.to_le_bytes());
-    out.extend_from_slice(match info.allowed_slots {
-        header::BabeAllowedSlots::PrimarySlots => &[0],
-        header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots => &[1],
-        header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots => &[2],
-    });
-    out
-}
-
-fn decode_babe_epoch_information(
-    value: &[u8],
-) -> Result<chain_information::BabeEpochInformation, CorruptedError> {
-    let result = nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            nom::number::streaming::le_u64,
-            util::nom_option_decode(nom::number::streaming::le_u64),
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                nom::multi::many_m_n(
-                    num_elems,
-                    num_elems,
-                    nom::combinator::map(
-                        nom::sequence::tuple((
-                            nom::bytes::streaming::take(32u32),
-                            nom::number::streaming::le_u64,
-                        )),
-                        move |(public_key, weight)| header::BabeAuthority {
-                            public_key: TryFrom::try_from(public_key).unwrap(),
-                            weight,
-                        },
-                    ),
-                )
-            }),
-            nom::bytes::streaming::take(32u32),
-            nom::sequence::tuple((
-                nom::number::streaming::le_u64,
-                nom::number::streaming::le_u64,
-            )),
-            nom::branch::alt((
-                nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
-                    header::BabeAllowedSlots::PrimarySlots
-                }),
-                nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
-                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
-                }),
-                nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
-                    header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
-                }),
-            )),
-        )),
-        |(epoch_index, start_slot_number, authorities, randomness, c, allowed_slots)| {
-            chain_information::BabeEpochInformation {
-                epoch_index,
-                start_slot_number,
-                authorities,
-                randomness: TryFrom::try_from(randomness).unwrap(),
-                c,
-                allowed_slots,
-            }
-        },
-    ))(value)
-    .map(|(_, v)| v)
-    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
-
-    let result = match result {
-        Ok(r) if r.validate().is_ok() => Ok(r),
-        Ok(_) | Err(()) => Err(()),
-    };
-
-    result.map_err(|()| CorruptedError::InvalidBabeEpochInformation)
 }
