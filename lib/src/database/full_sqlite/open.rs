@@ -19,8 +19,6 @@
 //!
 //! Contains everything related to the opening and initialization of the database.
 
-// TODO:remove all the unwraps in this module that shouldn't be there
-
 use super::{CorruptedError, InternalError, SqliteFullDatabase};
 
 use std::path::Path;
