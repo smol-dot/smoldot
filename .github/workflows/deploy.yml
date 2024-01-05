@@ -83,8 +83,8 @@ jobs:
     - run: |
         docker manifest create \
           ghcr.io/smol-dot/full-node:main \
-          --amend ghcr.io/smol-dot/full-node:amd64 ghcr.io/smol-dot/full-node:arm64 \
-          --amend ghcr.io/smol-dot/full-node:amd64 ghcr.io/smol-dot/full-node:arm64
+          --amend ghcr.io/smol-dot/full-node:amd64 \
+          --amend ghcr.io/smol-dot/full-node:arm64
     - run: docker images   # TODO remove
     - run: docker manifest push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
