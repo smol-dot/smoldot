@@ -1385,7 +1385,7 @@ impl SqliteFullDatabase {
     /// If the block is already in the database, it is replaced by the one provided.
     pub fn reset<'a>(
         &self,
-        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
+        finalized_block_header: &[u8],
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
     ) -> Result<(), CorruptedError> {
@@ -1402,19 +1402,9 @@ impl SqliteFullDatabase {
             .execute("PRAGMA defer_foreign_keys = ON", ())
             .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
-        let chain_information = chain_information.into();
-
-        let finalized_block_hash = chain_information
-            .finalized_block_header
-            .hash(self.block_number_bytes);
-
-        let scale_encoded_finalized_block_header = chain_information
-            .finalized_block_header
-            .scale_encoding(self.block_number_bytes)
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            });
+        let finalized_block_hash = header::hash_from_scale_encoded_header(finalized_block_header);
+        // TODO: this module shouldn't decode blocks
+        let decoded = header::decode(finalized_block_header, self.block_number_bytes).unwrap();
 
         transaction
             .prepare_cached(
@@ -1423,12 +1413,12 @@ impl SqliteFullDatabase {
             .unwrap()
             .execute((
                 &finalized_block_hash[..],
-                if chain_information.finalized_block_header.number != 0 {
-                    Some(&chain_information.finalized_block_header.parent_hash[..])
+                if decoded.number != 0 {
+                    Some(&decoded.parent_hash[..])
                 } else { None },
-                &chain_information.finalized_block_header.state_root[..],
-                i64::try_from(chain_information.finalized_block_header.number).unwrap(),
-                &scale_encoded_finalized_block_header[..],
+                &decoded.state_root[..],
+                i64::try_from(decoded.number).unwrap(),
+                finalized_block_header,
                 finalized_block_justification.as_deref(),
             ))
             .unwrap();
@@ -1458,11 +1448,7 @@ impl SqliteFullDatabase {
         }
 
         meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
-        meta_set_number(
-            &transaction,
-            "finalized",
-            chain_information.finalized_block_header.number,
-        )?;
+        meta_set_number(&transaction, "finalized", decoded.number)?;
 
         transaction
             .commit()

@@ -22,7 +22,6 @@
 // TODO:remove all the unwraps in this module that shouldn't be there
 
 use super::{CorruptedError, InternalError, SqliteFullDatabase};
-use crate::chain::chain_information;
 
 use std::path::Path;
 
@@ -274,13 +273,12 @@ pub struct DatabaseEmpty {
 }
 
 impl DatabaseEmpty {
-    /// Inserts the given [`chain_information::ChainInformationRef`] in the database prototype in
-    /// order to turn it into an actual database.
-    ///
-    /// Must also pass the body and justification of the finalized block.
+    /// Inserts the given finalized block in the database prototype in order to turn it into
+    /// an actual database.
+    // TODO: can a database not be empty?
     pub fn initialize<'a>(
         self,
-        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
+        finalized_block_header: &[u8],
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
     ) -> Result<SqliteFullDatabase, CorruptedError> {
@@ -290,7 +288,7 @@ impl DatabaseEmpty {
         };
 
         database.reset(
-            chain_information,
+            finalized_block_header,
             finalized_block_body,
             finalized_block_justification,
         )?;
