@@ -382,7 +382,7 @@ impl SqliteFullDatabase {
             .prepare_cached(
                 "INSERT INTO blocks(number, hash, parent_hash, state_trie_root_hash, header, is_best_chain, justification) VALUES (?, ?, ?, ?, ?, FALSE, NULL)",
             )
-            .unwrap()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
             .execute((
                 i64::try_from(header.number).unwrap(),
                 &block_hash[..],
@@ -390,12 +390,12 @@ impl SqliteFullDatabase {
                 &header.state_root[..],
                 scale_encoded_header
             ))
-            .unwrap();
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         {
             let mut statement = transaction
                 .prepare_cached("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
-                .unwrap();
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             for (index, item) in body.enumerate() {
                 statement
                     .execute((
@@ -403,7 +403,7 @@ impl SqliteFullDatabase {
                         i64::try_from(index).unwrap(),
                         item.as_ref(),
                     ))
-                    .unwrap();
+                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             }
         }
 
@@ -589,14 +589,19 @@ impl SqliteFullDatabase {
                     Err(err) => return Err(CorruptedError::Internal(InternalError(err))),
                 };
 
+                // The SQL query above uses `group_concat` and `hex` to convert a list of blobs
+                // into a string containing all these blobs. We now convert them back into lists
+                // of blobs.
+                // A panic here indicates a bug in SQLite.
                 let mut block_hashes_iter = block_hashes
                     .split(',')
-                    .map(|hash| hex::decode(hash).unwrap());
-                let mut block_numbers_iter = block_numbers
+                    .map(|hash| hex::decode(hash).unwrap_or_else(|_| unreachable!()));
+                let mut block_numbers_iter = block_numbers.split(',').map(|n| {
+                    <u64 as core::str::FromStr>::from_str(n).unwrap_or_else(|_| unreachable!())
+                });
+                let mut node_keys_iter = node_keys
                     .split(',')
-                    .map(|n| <u64 as core::str::FromStr>::from_str(n).unwrap());
-                let mut node_keys_iter =
-                    node_keys.split(',').map(|hash| hex::decode(hash).unwrap());
+                    .map(|hash| hex::decode(hash).unwrap_or_else(|_| unreachable!()));
 
                 let mut blocks = Vec::with_capacity(32);
                 loop {
@@ -1410,7 +1415,7 @@ impl SqliteFullDatabase {
             .prepare_cached(
                 "INSERT OR REPLACE INTO blocks(hash, parent_hash, state_trie_root_hash, number, header, is_best_chain, justification) VALUES(?, ?, ?, ?, ?, TRUE, ?)",
             )
-            .unwrap()
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?
             .execute((
                 &finalized_block_hash[..],
                 if decoded.number != 0 {
@@ -1421,21 +1426,21 @@ impl SqliteFullDatabase {
                 finalized_block_header,
                 finalized_block_justification.as_deref(),
             ))
-            .unwrap();
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         transaction
             .execute(
                 "DELETE FROM blocks_body WHERE hash = ?",
                 (&finalized_block_hash[..],),
             )
-            .unwrap();
+            .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
 
         {
             let mut statement = transaction
                 .prepare_cached(
                     "INSERT OR IGNORE INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)",
                 )
-                .unwrap();
+                .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             for (index, item) in finalized_block_body.enumerate() {
                 statement
                     .execute((
@@ -1443,11 +1448,11 @@ impl SqliteFullDatabase {
                         i64::try_from(index).unwrap(),
                         item,
                     ))
-                    .unwrap();
+                    .map_err(|err| CorruptedError::Internal(InternalError(err)))?;
             }
         }
 
-        meta_set_blob(&transaction, "best", &finalized_block_hash[..]).unwrap();
+        meta_set_blob(&transaction, "best", &finalized_block_hash[..])?;
         meta_set_number(&transaction, "finalized", decoded.number)?;
 
         transaction
