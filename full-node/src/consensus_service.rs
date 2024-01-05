@@ -39,7 +39,6 @@ use rand::seq::IteratorRandom;
 use smol::lock::Mutex;
 use smoldot::{
     author,
-    chain::chain_information,
     database::full_sqlite,
     executor::{self, host, runtime_call},
     header,
@@ -2605,13 +2604,17 @@ impl SyncBackground {
                 self.blocks_notifications.clear();
 
                 self.finalized_runtime = Arc::new(finalized_block_runtime);
-                let chain_info: chain_information::ValidChainInformation =
-                    self.sync.as_chain_information().into();
+                let finalized_block_header = self
+                    .sync
+                    .as_chain_information()
+                    .as_ref()
+                    .finalized_block_header
+                    .scale_encoding_vec(self.sync.block_number_bytes());
                 self.database
                     .with_database(move |database| {
                         database
                             .reset(
-                                chain_info.as_ref(),
+                                &finalized_block_header,
                                 finalized_body.iter().map(|e| &e[..]),
                                 None,
                             )
