@@ -148,6 +148,15 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         task: impl future::Future<Output = ()> + Send + 'static,
     );
 
+    /// Emit a log line.
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: fmt::Arguments<'a>,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    );
+
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
     /// performs an identification request. Reasonable value is `env!("CARGO_PKG_NAME")`.
     fn client_name(&self) -> Cow<str>;
@@ -261,6 +270,18 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         &self,
         stream: Pin<&'a mut Self::Stream>,
     ) -> Self::StreamUpdateFuture<'a>;
+}
+
+/// Log level of a log entry.
+///
+/// See [`PlatformRef::log`].
+#[derive(Debug)]
+pub enum LogLevel {
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
 }
 
 /// Established multistream connection information. See [`PlatformRef::connect_multistream`].

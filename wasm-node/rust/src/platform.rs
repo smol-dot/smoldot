@@ -180,6 +180,23 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         runnable.schedule();
     }
 
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: fmt::Arguments<'a>,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        // TODO:
+        log::logger().log(
+            &log::RecordBuilder::new()
+                //.level(todo!())
+                .target(log_target)
+                .args(message)
+                .build(),
+        )
+    }
+
     fn client_name(&self) -> Cow<str> {
         env!("CARGO_PKG_NAME").into()
     }

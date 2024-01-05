@@ -32,12 +32,12 @@
 //!
 
 use super::{
-    with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
-    PlatformRef, SubstreamDirection,
+    with_buffers, Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress,
+    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
 };
 
 use alloc::{borrow::Cow, sync::Arc};
-use core::{panic, pin::Pin, str, time::Duration};
+use core::{fmt, panic, pin::Pin, str, time::Duration};
 use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
 use std::{
@@ -151,6 +151,22 @@ impl PlatformRef for Arc<DefaultPlatform> {
                 .catch_unwind(),
             )
             .detach();
+    }
+
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: fmt::Arguments<'a>,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        log::logger().log(
+            &log::RecordBuilder::new()
+                //.level(todo!())
+                .target(log_target)
+                .args(message)
+                .build(),
+        )
     }
 
     fn client_name(&self) -> Cow<str> {
