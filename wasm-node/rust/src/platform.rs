@@ -25,6 +25,7 @@ use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    format,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -153,7 +154,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         &PLATFORM_REF,
                         smoldot_light::platform::LogLevel::Debug,
                         "smoldot",
-                        format_args!("task-too-long-time"),
+                        "task-too-long-time",
                         [
                             ("name", this.name as &dyn fmt::Display),
                             (
@@ -169,7 +170,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         &PLATFORM_REF,
                         smoldot_light::platform::LogLevel::Warn,
                         "smoldot",
-                        format_args!(
+                        &format!(
                             "The task named `{}` has occupied the CPU for an \
                             unreasonable amount of time ({}ms).",
                             this.name,
@@ -203,7 +204,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         &self,
         log_level: smoldot_light::platform::LogLevel,
         log_target: &'a str,
-        message: fmt::Arguments<'a>,
+        message: &'a str,
         key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     ) {
         let log_level = match log_level {
@@ -220,19 +221,19 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         let mut key_values = key_values.peekable();
 
-        if let (Some(static_message), None) = (message.as_str(), key_values.peek()) {
+        if key_values.peek().is_none() {
             unsafe {
                 bindings::log(
                     log_level,
                     u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
                     u32::try_from(log_target.as_bytes().len()).unwrap(),
-                    u32::try_from(static_message.as_bytes().as_ptr() as usize).unwrap(),
-                    u32::try_from(static_message.as_bytes().len()).unwrap(),
+                    u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message.as_bytes().len()).unwrap(),
                 )
             }
         } else {
             let mut message_build = String::with_capacity(128);
-            let _ = write!(message_build, "{}", message);
+            message_build.push_str(message);
             let mut first = true;
             for (key, value) in key_values {
                 if first {

@@ -17,7 +17,7 @@
 
 use crate::{allocator, bindings, platform, timers::Delay};
 
-use alloc::{boxed::Box, string::String};
+use alloc::{boxed::Box, format, string::String};
 use core::{iter, sync::atomic::Ordering, time::Duration};
 use futures_util::stream;
 use smoldot::informant::BytesDisplay;
@@ -63,7 +63,7 @@ pub(crate) fn init(max_log_level: u32) {
     platform::PLATFORM_REF.log(
         smoldot_light::platform::LogLevel::Info,
         "smoldot",
-        format_args!("Smoldot v{}", env!("CARGO_PKG_VERSION")),
+        &format!("Smoldot v{}", env!("CARGO_PKG_VERSION")),
         iter::empty(),
     );
 
@@ -101,7 +101,7 @@ pub(crate) fn init(max_log_level: u32) {
             platform::PLATFORM_REF.log(
                 smoldot_light::platform::LogLevel::Info,
                 "smoldot",
-                format_args!(
+                &format!(
                     "Smoldot v{}. Current memory usage: {}. \
                     Average download: {}/s. Average upload: {}/s.",
                     env!("CARGO_PKG_VERSION"),

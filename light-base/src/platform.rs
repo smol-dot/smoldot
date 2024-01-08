@@ -153,7 +153,7 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         &self,
         log_level: LogLevel,
         log_target: &'a str,
-        message: fmt::Arguments<'a>,
+        message: &'a str,
         key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     );
 
@@ -516,7 +516,7 @@ macro_rules! log {
             $plat,
             $crate::platform::LogLevel::$level,
             $target,
-            core::format_args!("{}", $message),
+            AsRef::<str>::as_ref(&$message),
             $crate::log_inner!($($params)*)
         )
     };

@@ -163,7 +163,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         &self,
         log_level: LogLevel,
         log_target: &'a str,
-        message: fmt::Arguments<'a>,
+        message: &'a str,
         key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     ) {
         // Note that this conversion is most likely completely optimized out by the compiler due
@@ -177,7 +177,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
         };
 
         let mut message_build = String::with_capacity(128);
-        let _ = write!(message_build, "{}", message);
+        message_build.push_str(message);
         let mut first = true;
         for (key, value) in key_values {
             if first {
