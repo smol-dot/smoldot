@@ -288,106 +288,25 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
-                match header::decode(decoded.scale_encoded_header, task.sync.block_number_bytes()) {
-                    Ok(decoded_header) => {
-                        log!(
-                            &task.platform,
-                            Debug,
-                            &task.log_target,
-                            "block-announce",
-                            sender = peer_id,
-                            hash = HashDisplay(&header::hash_from_scale_encoded_header(
-                                decoded.scale_encoded_header
-                            )),
-                            is_best = decoded.is_best,
-                            parent_hash = HashDisplay(decoded_header.parent_hash)
-                        );
-                    }
-                    Err(error) => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                        );
-
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => InvalidBlockHeader(error={})",
-                            error
-                        );
-
-                        log::warn!(
-                            target: &task.log_target,
-                            "Failed to decode header in block announce received from {}. Error: {}",
-                            peer_id, error,
-                        );
-                    }
-                }
+                // TODO: improve the logging here, requires some modifications to block_announce()
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "block-announce",
+                    sender = peer_id,
+                    hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                        decoded.scale_encoded_header
+                    )),
+                    is_best = decoded.is_best,
+                );
 
                 match task.sync.block_announce(
                     sync_source_id,
                     decoded.scale_encoded_header.to_owned(),
                     decoded.is_best,
                 ) {
-                    all::BlockAnnounceOutcome::HeaderVerify
-                    | all::BlockAnnounceOutcome::AlreadyInChain => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => Ok"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::Discarded => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => Discarded"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::StoredForLater {} => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => StoredForLater"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::TooOld {
-                        announce_block_height,
-                        ..
-                    } => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => TooOld"
-                        );
-
-                        log::warn!(
-                            target: &task.log_target,
-                            "Block announce header height (#{}) from {} is below finalized block",
-                            announce_block_height,
-                            peer_id
-                        );
-
-                        task.network_service
-                            .ban_and_disconnect(
-                                peer_id,
-                                network_service::BanSeverity::Low,
-                                "announced-block-below-known-finalized",
-                            )
-                            .await;
-                    }
-                    all::BlockAnnounceOutcome::NotFinalizedChain => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => NotFinalized"
-                        );
-
-                        log::warn!(
-                            target: &task.log_target,
-                            "Block announce from {} isn't part of finalized chain",
-                            peer_id
-                        );
-                    }
                     all::BlockAnnounceOutcome::InvalidHeader(_) => {
-                        // Log messages are already printed above.
                         task.network_service
                             .ban_and_disconnect(
                                 peer_id,
@@ -396,6 +315,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             )
                             .await;
                     }
+                    _ => {}
                 }
             }
 
@@ -1069,15 +989,31 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let (new_sync, error) = req.build();
                 match error {
                     Ok(()) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-chain-information-build-success"
+                        );
                     }
-                    Err(err) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
+                    Err(error) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-chain-information-build-error",
+                            ?error
+                        );
                         if !matches!(
-                            err,
+                            error,
                             all::WarpSyncBuildChainInformationError::SourceMisbehavior(_)
                         ) {
-                            log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                format!("Failed to build the chain information during warp syncing process: {}", error)
+                            );
                         }
                     }
                 };
@@ -1156,16 +1092,25 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         );
                     }
                     Err(err) => {
-                        log::warn!(
-                            target: &self.log_target,
-                            "Failed to verify warp sync fragment from {}: {}{}",
-                            sender_if_still_connected.as_ref().map(|p| Cow::Owned(p.to_base58())).unwrap_or(Cow::Borrowed("<disconnected>")),
-                            err,
-                            if matches!(err, all::VerifyFragmentError::JustificationVerify(_)) {
-                                ". This might be caused by a forced GrandPa authorities change having \
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            format!(
+                                "Failed to verify warp sync fragment from {}: {}{}",
+                                sender_if_still_connected
+                                    .as_ref()
+                                    .map(|p| Cow::Owned(p.to_base58()))
+                                    .unwrap_or(Cow::Borrowed("<disconnected>")),
+                                err,
+                                if matches!(err, all::VerifyFragmentError::JustificationVerify(_)) {
+                                    ". This might be caused by a forced GrandPa authorities change having \
                                 been enacted on the chain. If this is the case, please update the \
                                 chain specification with a checkpoint past this forced change."
-                            } else { "" }
+                                } else {
+                                    ""
+                                }
+                            )
                         );
                         if let Some(sender_if_still_connected) = sender_if_still_connected {
                             self.network_service
@@ -1271,11 +1216,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                                 .await
                                 .is_ok()
                             {
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Network <= BlockAnnounce(peer_id={}, hash={})",
-                                    source_peer_id,
-                                    HashDisplay(&verified_hash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "block-announce-received",
+                                    peer_id = source_peer_id,
+                                    block_hash = HashDisplay(&verified_hash)
                                 );
 
                                 // Update the sync state machine with the fact that the target of

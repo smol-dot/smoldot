@@ -131,13 +131,14 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         // Spawns a task that runs in the background and updates the content of the mutex.
         let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
+            let platform = config.platform.clone();
             let (tx, rx) = async_channel::bounded(16);
             let tx_weak = tx.downgrade();
             to_background = tx;
             let background_task_config = background_task_config.clone();
             async move {
                 run_background(background_task_config, rx, tx_weak).await;
-                log::debug!(target: &log_target, "Shutdown");
+                log!(&platform, Debug, &log_target, "shutdown");
             }
         });
 
@@ -392,6 +393,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 self.background_task_config.log_target.clone().into(),
                 {
                     let background_task_config = self.background_task_config.clone();
+                    let platform = background_task_config.platform.clone();
                     async move {
                         // Sleep for a bit in order to avoid infinite loops of repeated crashes.
                         background_task_config
@@ -399,9 +401,9 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                             .sleep(Duration::from_secs(2))
                             .await;
                         let log_target = background_task_config.log_target.clone();
-                        log::debug!(target: &log_target, "Restart");
+                        log!(&platform, Debug, &log_target, "restart");
                         run_background(background_task_config, rx, tx_weak).await;
-                        log::debug!(target: &log_target, "Shutdown");
+                        log!(&platform, Debug, &log_target, "shutdown");
                     }
                 },
             );
@@ -1101,10 +1103,12 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 };
 
-                log::debug!(
-                    target: &background.log_target,
-                    "Worker => NewDownload(block={})",
-                    HashDisplay(&download_params.block_user_data.hash)
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "block-runtime-download-started",
+                    block_hash = HashDisplay(&download_params.block_user_data.hash)
                 );
 
                 // Dispatches a runtime download task to `runtime_downloads`.
@@ -1204,9 +1208,12 @@ async fn run_background<TPlat: PlatformRef>(
                             })
                         }
                         Err(error) => {
-                            log::warn!(
-                                target: &background.log_target,
-                                "Failed to decode header from sync service: {}", error
+                            // TODO: move log somewhere else
+                            log!(
+                                &background.platform,
+                                Warn,
+                                &background.log_target,
+                                format!("Failed to decode header from sync service: {}", error)
                             );
 
                             Box::pin(async move {
@@ -1241,10 +1248,13 @@ async fn run_background<TPlat: PlatformRef>(
                             let best_block_hash = best_block_index
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
 
-                            log::debug!(
-                                target: &background.log_target,
-                                "Worker => OutputFinalized(hash={}, best={})",
-                                HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
+                            log!(
+                                &background.platform,
+                                Debug,
+                                &background.log_target,
+                                "output-chain-finalized",
+                                block_hash = HashDisplay(&finalized_block.hash),
+                                best_block_hash = HashDisplay(&best_block_hash)
                             );
 
                             // The finalization might cause some runtimes in the list of runtimes
@@ -1329,10 +1339,12 @@ async fn run_background<TPlat: PlatformRef>(
                                     tree.block_async_user_data(idx).unwrap().clone()
                                 });
 
-                            log::debug!(
-                                target: &background.log_target,
-                                "Worker => OutputNewBlock(hash={}, is_new_best={})",
-                                HashDisplay(&tree.block_user_data(block_index).hash),
+                            log!(
+                                &background.platform,
+                                Debug,
+                                &background.log_target,
+                                "output-chain-new-block",
+                                block_hash = HashDisplay(&tree.block_user_data(block_index).hash),
                                 is_new_best
                             );
 
@@ -1395,10 +1407,12 @@ async fn run_background<TPlat: PlatformRef>(
                                 .map_or(&*finalized_block, |idx| tree.block_user_data(idx))
                                 .hash;
 
-                            log::debug!(
-                                target: &background.log_target,
-                                "Worker => OutputBestBlockChanged(hash={})",
-                                HashDisplay(&hash),
+                            log!(
+                                &background.platform,
+                                Debug,
+                                &background.log_target,
+                                "output-chain-best-block-update",
+                                block_hash = HashDisplay(&hash),
                             );
 
                             let notif = Notification::BestBlockChanged { hash };
@@ -1449,10 +1463,13 @@ async fn run_background<TPlat: PlatformRef>(
                                     .map_or(new_finalized.hash, |idx| {
                                         tree.block_user_data(idx).hash
                                     });
-                                log::debug!(
-                                    target: &background.log_target,
-                                    "Worker => RuntimeKnown(finalized_hash={}, best={})",
-                                    HashDisplay(&new_finalized.hash), HashDisplay(&best_block_hash)
+                                log!(
+                                    &background.platform,
+                                    Debug,
+                                    &background.log_target,
+                                    "output-chain-initialized",
+                                    finalized_block_hash = HashDisplay(&new_finalized.hash),
+                                    best_block_hash = HashDisplay(&best_block_hash)
                                 );
 
                                 // Substitute `tree` with a dummy empty tree just in order to extract
@@ -1499,12 +1516,15 @@ async fn run_background<TPlat: PlatformRef>(
                 // but the sync service guarantees that `subscribe_all` returns very quickly.
                 let subscription = background.sync_service.subscribe_all(32, true).await;
 
-                log::debug!(
-                    target: &background.log_target,
-                    "Worker <= Reset(finalized_block: {})",
-                    HashDisplay(&header::hash_from_scale_encoded_header(
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "sync-service-subscription-started",
+                    finalized_block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                         &subscription.finalized_block_scale_encoded_header
-                    ))
+                    )),
+                    finalized_block_runtime_known = ?subscription.finalized_block_runtime.is_some()
                 );
 
                 // Update the state of `Background` with what we just grabbed.
@@ -1559,29 +1579,33 @@ async fn run_background<TPlat: PlatformRef>(
 
                         match &runtime.runtime {
                             Ok(runtime) => {
-                                log::info!(
-                                    target: &background.log_target,
-                                    "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
-                                    runtime.runtime_spec.decode().spec_version,
-                                    BytesDisplay(storage_code_len)
+                                log!(
+                                    &background.platform,
+                                    Info,
+                                    &background.log_target,
+                                    format!(
+                                        "Finalized block runtime ready. Spec version: {}. \
+                                        Size of `:code`: {}.",
+                                        runtime.runtime_spec.decode().spec_version,
+                                        BytesDisplay(storage_code_len)
+                                    )
                                 );
                             }
                             Err(error) => {
-                                log::warn!(
-                                    target: &background.log_target,
-                                    "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
-                                    This indicates an incompatibility between smoldot and the chain.",
-                                    BytesDisplay(storage_code_len),
-                                    error
+                                log!(
+                                    &background.platform,
+                                    Warn,
+                                    &background.log_target,
+                                    format!(
+                                        "Erronenous finalized block runtime. Size of \
+                                        `:code`: {}.\nError: {}\nThis indicates an incompatibility \
+                                        between smoldot and the chain.",
+                                        BytesDisplay(storage_code_len),
+                                        error
+                                    )
                                 );
                             }
                         }
-
-                        log::debug!(
-                            target: &background.log_target,
-                            "Worker => RuntimeKnown(finalized_hash={})",
-                            HashDisplay(&finalized_block_hash)
-                        );
 
                         background.tree = Tree::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
@@ -1881,8 +1905,13 @@ async fn run_background<TPlat: PlatformRef>(
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
-                    let runtime =
-                        SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+                    let runtime = SuccessfulRuntime::from_storage(
+                        &background.platform,
+                        &background.log_target,
+                        &storage_code,
+                        &storage_heap_pages,
+                    )
+                    .await;
                     let runtime = Arc::new(Runtime {
                         heap_pages: storage_heap_pages,
                         runtime_code: storage_code,
@@ -2031,12 +2060,16 @@ async fn run_background<TPlat: PlatformRef>(
             WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
                 // Sync service has reported a new block.
 
-                log::debug!(
-                    target: &background.log_target,
-                    "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
-                    HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
-                    HashDisplay(&new_block.parent_hash),
-                    new_block.is_new_best
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "input-chain-new-block",
+                    block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                        &new_block.scale_encoded_header
+                    )),
+                    parent_block_hash = HashDisplay(&new_block.parent_hash),
+                    is_new_best = new_block.is_new_best
                 );
 
                 let near_head_of_chain = background
@@ -2113,10 +2146,13 @@ async fn run_background<TPlat: PlatformRef>(
             })) => {
                 // Sync service has reported a finalized block.
 
-                log::debug!(
-                    target: &background.log_target,
-                    "Worker <= InputFinalized(hash={}, best={})",
-                    HashDisplay(&hash), HashDisplay(&best_block_hash)
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "input-chain-finalized",
+                    block_hash = HashDisplay(&hash),
+                    best_block_hash = HashDisplay(&best_block_hash)
                 );
 
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
@@ -2163,10 +2199,12 @@ async fn run_background<TPlat: PlatformRef>(
             })) => {
                 // Sync service has reported a change in the best block.
 
-                log::debug!(
-                    target: &background.log_target,
-                    "Worker <= BestBlockChanged(hash={})",
-                    HashDisplay(&hash)
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "input-chain-best-block-update",
+                    block_hash = HashDisplay(&hash)
                 );
 
                 let near_head_of_chain = background
@@ -2237,24 +2275,45 @@ async fn run_background<TPlat: PlatformRef>(
                 let runtime = if let Some(existing_runtime) = existing_runtime {
                     existing_runtime
                 } else {
-                    let runtime =
-                        SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+                    let runtime = SuccessfulRuntime::from_storage(
+                        &background.platform,
+                        &background.log_target,
+                        &storage_code,
+                        &storage_heap_pages,
+                    )
+                    .await;
                     match &runtime {
                         Ok(runtime) => {
-                            log::info!(
-                                target: &background.log_target,
-                                "Successfully compiled runtime. Spec version: {}. Size of `:code`: {}.",
-                                runtime.runtime_spec.decode().spec_version,
-                                BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap())
+                            log!(
+                                &background.platform,
+                                Info,
+                                &background.log_target,
+                                format!(
+                                    "Successfully compiled runtime. Spec version: {}. \
+                                    Size of `:code`: {}.",
+                                    runtime.runtime_spec.decode().spec_version,
+                                    BytesDisplay(
+                                        u64::try_from(storage_code.as_ref().map_or(0, |v| v.len()))
+                                            .unwrap()
+                                    )
+                                )
                             );
                         }
                         Err(error) => {
-                            log::warn!(
-                                target: &background.log_target,
-                                "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
-                                This indicates an incompatibility between smoldot and the chain.",
-                                BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap()),
-                                error
+                            log!(
+                                &background.platform,
+                                Warn,
+                                &background.log_target,
+                                format!(
+                                    "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
+                                    This indicates an incompatibility between smoldot and \
+                                    the chain.",
+                                    BytesDisplay(
+                                        u64::try_from(storage_code.as_ref().map_or(0, |v| v.len()))
+                                            .unwrap()
+                                    ),
+                                    error
+                                )
                             );
                         }
                     }
@@ -2301,18 +2360,23 @@ async fn run_background<TPlat: PlatformRef>(
                 .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
                 .to_string();
 
-                log::debug!(
-                    target: &background.log_target,
-                    "Worker <= FailedDownload(blocks=[{}], error={:?})",
-                    concerned_blocks,
-                    error
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "runtime-download-error",
+                    block_hashes = concerned_blocks,
+                    ?error
                 );
                 if !error.is_network_problem() {
-                    log::warn!(
-                        target: &background.log_target,
-                        "Failed to download :code and :heappages of blocks {}: {}",
-                        concerned_blocks,
-                        error
+                    log!(
+                        &background.platform,
+                        Warn,
+                        &background.log_target,
+                        format!(
+                            "Failed to download :code and :heappages of blocks {}: {}",
+                            concerned_blocks, error
+                        )
                     );
                 }
 
@@ -2522,7 +2586,9 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    async fn from_storage(
+    async fn from_storage<TPlat: PlatformRef>(
+        platform: &TPlat,
+        log_target: &str,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
@@ -2565,12 +2631,16 @@ impl SuccessfulRuntime {
                     allow_unresolved_imports: true,
                 }) {
                     Ok(vm) => {
-                        log::warn!(
-                            "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
-                            encounter errors later on. Please report this issue in \
-                            https://github.com/smol-dot/smoldot",
-                            module_name,
-                            function
+                        log!(
+                            platform,
+                            Warn,
+                            log_target,
+                            format!(
+                                "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
+                                encounter errors later on. Please report this issue in \
+                                https://github.com/smol-dot/smoldot",
+                                module_name, function
+                            )
                         );
 
                         Ok(SuccessfulRuntime {
