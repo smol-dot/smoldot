@@ -19,7 +19,7 @@
 
 use super::Background;
 
-use crate::{platform::PlatformRef, runtime_service, sync_service};
+use crate::{log, platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,

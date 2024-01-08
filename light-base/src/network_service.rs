@@ -40,7 +40,10 @@
 //! [`NetworkServiceChain::subscribe`]. These channels inform the foreground about updates to the
 //! network connectivity.
 
-use crate::platform::{self, address_parse, PlatformRef};
+use crate::{
+    log,
+    platform::{self, address_parse, PlatformRef},
+};
 
 use alloc::{
     borrow::ToOwned as _,

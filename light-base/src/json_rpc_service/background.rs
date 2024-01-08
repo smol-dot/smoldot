@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
-    util,
+    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    transactions_service, util,
 };
 
 use super::StartConfig;

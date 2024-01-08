@@ -19,7 +19,7 @@ use super::{
     BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
     SubscribeAll, ToBackground,
 };
-use crate::{network_service, platform::PlatformRef, util};
+use crate::{log, network_service, platform::PlatformRef, util};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},

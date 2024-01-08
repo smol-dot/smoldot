@@ -15,7 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::platform::{PlatformRef, SubstreamDirection};
+use crate::{
+    log,
+    platform::{PlatformRef, SubstreamDirection},
+};
 
 use alloc::{boxed::Box, string::String};
 use core::{pin, time::Duration};

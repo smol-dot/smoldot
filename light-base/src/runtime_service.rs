@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{platform::PlatformRef, sync_service};
+use crate::{log, platform::PlatformRef, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,

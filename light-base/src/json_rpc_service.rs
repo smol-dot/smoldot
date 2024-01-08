@@ -40,7 +40,8 @@
 mod background;
 
 use crate::{
-    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
+    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    transactions_service,
 };
 
 use alloc::{

@@ -96,54 +96,6 @@ use smoldot::{
     libp2p::{multiaddr, peer_id},
 };
 
-macro_rules! log_inner {
-    () => {
-        core::iter::empty()
-    };
-    (,) => {
-        core::iter::empty()
-    };
-    ($key:ident = $value:expr) => {
-        log_inner!($key = $value,)
-    };
-    ($key:ident = ?$value:expr) => {
-        log_inner!($key = ?$value,)
-    };
-    ($key:ident) => {
-        log_inner!($key = $key,)
-    };
-    (?$key:ident) => {
-        log_inner!($key = ?$key,)
-    };
-    ($key:ident = $value:expr, $($rest:tt)*) => {
-        core::iter::once((stringify!($key), &$value as &dyn core::fmt::Display)).chain(log_inner!($($rest)*))
-    };
-    ($key:ident = ?$value:expr, $($rest:tt)*) => {
-        core::iter::once((stringify!($key), &format_args!("{:?}", $value) as &dyn core::fmt::Display)).chain(log_inner!($($rest)*))
-    };
-    ($key:ident, $($rest:tt)*) => {
-        log_inner!($key = $key, $($rest)*)
-    };
-    (?$key:ident, $($rest:tt)*) => {
-        log_inner!($key = ?$key, $($rest)*)
-    };
-}
-
-macro_rules! log {
-    ($plat:expr, $level:ident, $target:expr, $message:expr) => {
-        log!($plat, $level, $target, $message,)
-    };
-    ($plat:expr, $level:ident, $target:expr, $message:expr, $($params:tt)*) => {
-        $crate::platform::PlatformRef::log(
-            $plat,
-            $crate::platform::LogLevel::$level,
-            $target,
-            core::format_args!("{}", $message),
-            log_inner!($($params)*)
-        )
-    };
-}
-
 mod database;
 mod json_rpc_service;
 mod runtime_service;

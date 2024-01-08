@@ -67,7 +67,7 @@
 //! transaction.
 //!
 
-use crate::{network_service, platform::PlatformRef, runtime_service, sync_service};
+use crate::{log, network_service, platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
