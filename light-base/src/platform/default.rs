@@ -22,6 +22,10 @@
 //!
 //! This module contains the [`DefaultPlatform`] struct, which implements [`PlatformRef`].
 //!
+//! The [`DefaultPlatform`] delegates the logging to the `log` crate. In order to see log
+//! messages, you should register as "logger" as documented by the `log` crate.
+//! See <https://docs.rs/log>.
+//!
 //! # Example
 //!
 //! ```rust
