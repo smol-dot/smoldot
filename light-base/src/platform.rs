@@ -149,6 +149,18 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     );
 
     /// Emit a log line.
+    ///
+    /// The `log_level` and `log_target` can be used in order to filter desired log lines.
+    ///
+    /// The `message` is typically a short constant message indicating the nature of the log line.
+    /// The `key_values` are a list of keys and values that are the parameters of the log message.
+    ///
+    /// For example, `message` can be `"block-announce-received"` and `key_values` can contain
+    /// the entries `("block_hash", ...)` and `("sender", ...)`.
+    ///
+    /// At the time of writing of this comment, `message` can also be a message written in plain
+    /// english and destined to the user of the library. This might disappear in the future.
+    // TODO: act on this last sentence ^
     fn log<'a>(
         &self,
         log_level: LogLevel,
@@ -506,6 +518,28 @@ macro_rules! log_inner {
     };
 }
 
+/// Helper macro for using the [`crate::platform::PlatformRef::log`] function.
+///
+/// This macro takes at least 4 parameters:
+///
+/// - A reference to an implementation of the [`crate::platform::PlatformRef`] trait.
+/// - A log level: `Error`, `Warn`, `Info`, `Debug`, or `Trace`. See [`crate::platform::LogLevel`].
+/// - A `&str` representing the target of the logging. This can be used in order to filter log
+/// entries belonging to a specific target.
+/// - An object that implements of `AsRef<str>` and that contains the log message itself.
+///
+/// In addition to these parameters, the macro accepts an unlimited number of extra
+/// (comma-separated) parameters.
+///
+/// Each parameter has one of these four syntaxes:
+///
+/// - `key = value`, where `key` is an identifier and `value` an expression that implements the
+/// `Display` trait.
+/// - `key = ?value`, where `key` is an identifier and `value` an expression that implements
+/// the `Debug` trait.
+/// - `key`, which is syntax sugar for `key = key`.
+/// - `?key`, which is syntax sugar for `key = ?key`.
+///
 #[macro_export]
 macro_rules! log {
     ($plat:expr, $level:ident, $target:expr, $message:expr) => {
