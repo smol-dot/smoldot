@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 async-lock = { version = "3.0.0", default-features = false }
 async-task = { version = "4.4.0", default-features = false }
-crossbeam-queue = { version = "0.3.8", default-features = false }
+crossbeam-queue = { version = "0.3.11", default-features = false }
 derive_more = "0.99.17"
 dlmalloc = { version = "0.2.4", default-features = false, features = ["global"] }
 event-listener = { version = "4.0.0", default-features = false }
