@@ -19,7 +19,7 @@
 
 use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 
-use crate::sync_service;
+use crate::{log, sync_service};
 
 use alloc::{format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, num::NonZeroU32, time::Duration};
@@ -70,11 +70,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 request.respond(methods::Response::system_accountNextIndex(u64::from(index)));
             }
             Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Returning error from `system_accountNextIndex`. \
-                    API user might not function properly. Error: {}",
-                    error
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Returning error from `system_accountNextIndex`. \
+                        API user might not function properly. Error: {error}"
+                    )
                 );
                 request.fail(service::ErrorResponse::ServerError(
                     -32000,
@@ -421,11 +424,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 )),
             },
             Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Returning error from `payment_queryInfo`. \
-                    API user might not function properly. Error: {}",
-                    error
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Returning error from `payment_queryInfo`. \
+                        API user might not function properly. Error: {error}"
+                    )
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
@@ -744,10 +750,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 &format!("Failed to decode metadata from runtime. Error: {error}"),
             )),
             Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Returning error from `state_getMetadata`. API user might not function \
-                    properly. Error: {error}"
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Returning error from `state_getMetadata`. API user might not function \
+                        properly. Error: {error}"
+                    )
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,

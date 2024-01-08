@@ -26,7 +26,7 @@
 //!
 //! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{network_service, platform::PlatformRef, runtime_service};
+use crate::{log, network_service, platform::PlatformRef, runtime_service};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{cmp, fmt, future::Future, mem, num::NonZeroU32, pin::Pin, time::Duration};
@@ -170,12 +170,13 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }
         };
 
-        config
-            .platform
-            .spawn_task(log_target.clone().into(), async move {
+        config.platform.spawn_task(log_target.clone().into(), {
+            let platform = config.platform.clone();
+            async move {
                 task.await;
-                log::debug!(target: &log_target, "Shutdown");
-            });
+                log!(&platform, Debug, &log_target, "shutdown");
+            }
+        });
 
         SyncService {
             to_background,

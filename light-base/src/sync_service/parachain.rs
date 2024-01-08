@@ -16,9 +16,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::{network_service, platform::PlatformRef, runtime_service, util};
+use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
-use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroUsize},
@@ -339,14 +339,21 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (WakeUpReason::NewSubscription(relay_chain_subscribe_all), _) => {
                     // Subscription to the relay chain has finished.
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => NewSubscription(finalized_hash={})",
-                        HashDisplay(&header::hash_from_scale_encoded_header(
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-new-subscription",
+                        finalized_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                             &relay_chain_subscribe_all.finalized_block_scale_encoded_header
                         ))
                     );
-                    log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "parahead-fetch-operations-cleared"
+                    );
 
                     let async_tree = {
                         let mut async_tree =
@@ -460,10 +467,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     }
                                 }
 
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Subscriptions <= ParablockFinalized(hash={})",
-                                    HashDisplay(&hash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "subscriptions-notify-parablock-finalized",
+                                    hash = HashDisplay(&hash)
                                 );
 
                                 let best_block_hash = runtime_subscription
@@ -532,10 +541,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                             .await;
                                     }
 
-                                    log::debug!(
-                                        target: &self.log_target,
-                                        "Subscriptions <= BestBlockChanged(hash={})",
-                                        HashDisplay(&parahash)
+                                    log!(
+                                        &self.platform,
+                                        Debug,
+                                        &self.log_target,
+                                        "subscriptions-notify-best-block-changed",
+                                        hash = HashDisplay(&parahash)
                                     );
 
                                     // Elements in `all_subscriptions` are removed one by one and
@@ -609,10 +620,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                                 .await;
                                         }
 
-                                        log::debug!(
-                                            target: &self.log_target,
-                                            "Subscriptions <= BestBlockChanged(hash={})",
-                                            HashDisplay(&parahash)
+                                        log!(
+                                            &self.platform,
+                                            Debug,
+                                            &self.log_target,
+                                            "subscriptions-notify-best-block-changed",
+                                            hash = HashDisplay(&parahash)
                                         );
 
                                         // Elements in `all_subscriptions` are removed one by one and
@@ -635,10 +648,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     continue;
                                 }
 
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Subscriptions <= NewParablock(hash={})",
-                                    HashDisplay(&parahash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "subscriptions-notify-new-parablock",
+                                    hash = HashDisplay(&parahash)
                                 );
 
                                 if is_new_best {
@@ -715,10 +730,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 Box::pin(future::pending());
                         }
                         async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                            log::debug!(
-                                target: &self.log_target,
-                                "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
-                                HashDisplay(op.block_user_data),
+                            log!(
+                                &self.platform,
+                                Debug,
+                                &self.log_target,
+                                "parahead-fetch-operation-started",
+                                relay_block_hash = HashDisplay(op.block_user_data),
                             );
 
                             runtime_subscription.in_progress_paraheads.push({
@@ -761,10 +778,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
                     // Relay chain has a new finalized block.
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => Finalized(hash={})",
-                        HashDisplay(&hash)
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-block-finalized",
+                        hash = HashDisplay(&hash)
                     );
 
                     let finalized = runtime_subscription
@@ -792,11 +811,13 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // Relay chain has a new block.
                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => Block(hash={}, parent_hash={})",
-                        HashDisplay(&hash),
-                        HashDisplay(&block.parent_hash)
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-new-block",
+                        hash = HashDisplay(&hash),
+                        parent_hash = HashDisplay(&block.parent_hash)
                     );
 
                     let parent = runtime_subscription
@@ -822,10 +843,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
                     // Relay chain has a new best block.
-                    log::debug!(
-                        target: &self.log_target,
-                        "RelayChain => BestBlockChanged(hash={})",
-                        HashDisplay(&hash)
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-best-block-changed",
+                        hash = HashDisplay(&hash)
                     );
 
                     // If the block isn't found in `async_tree`, assume that it is equal to the
@@ -844,7 +867,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (WakeUpReason::SubscriptionDead, _) => {
                     // Recreate the channel.
-                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-subscription-reset"
+                    );
                     self.subscription_state = ParachainBackgroundState::NotSubscribed {
                         all_subscriptions: Vec::new(),
                         subscribe_future: {
@@ -869,11 +897,19 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     ParachainBackgroundState::Subscribed(runtime_subscription),
                 ) => {
                     // A parahead fetching operation is successful.
-                    log::debug!(
-                        target: &self.log_target,
-                        "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
-                        HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
-                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "parahead-fetch-operation-success",
+                        parahead_hash = HashDisplay(
+                            blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()
+                        ),
+                        relay_blocks = runtime_subscription
+                            .async_tree
+                            .async_op_blocks(async_op_id)
+                            .map(|b| HashDisplay(b))
+                            .join(",")
                     );
 
                     // Unpin the relay blocks whose parahead is now known.
@@ -903,7 +939,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                     // The relay chain runtime service has some kind of gap or issue and has
                     // discarded the runtime.
                     // Destroy the subscription and recreate the channels.
-                    log::debug!(target: &self.log_target, "Subscriptions <= Reset");
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "relay-chain-subscription-reset"
+                    );
                     self.subscription_state = ParachainBackgroundState::NotSubscribed {
                         all_subscriptions: Vec::new(),
                         subscribe_future: {
@@ -943,19 +984,33 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .await
                         && !error.is_network_problem()
                     {
-                        log::error!(
-                            target: &self.log_target,
-                            "Failed to fetch the parachain head from relay chain blocks {}: {}",
-                            runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
-                            error
+                        log!(
+                            &self.platform,
+                            Error,
+                            &self.log_target,
+                            format!(
+                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                                runtime_subscription
+                                    .async_tree
+                                    .async_op_blocks(async_op_id)
+                                    .map(|b| HashDisplay(b))
+                                    .join(", "),
+                                error
+                            )
                         );
                     }
 
-                    log::debug!(
-                        target: &self.log_target,
-                        "ParaheadFetchOperations => Error(relay_blocks={}, error={:?})",
-                        runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
-                        error
+                    log!(
+                        &self.platform,
+                        Debug,
+                        &self.log_target,
+                        "parahead-fetch-operation-error",
+                        relay_blocks = runtime_subscription
+                            .async_tree
+                            .async_op_blocks(async_op_id)
+                            .map(|b| HashDisplay(b))
+                            .join(","),
+                        ?error
                     );
 
                     runtime_subscription

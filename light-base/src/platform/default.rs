@@ -22,22 +22,33 @@
 //!
 //! This module contains the [`DefaultPlatform`] struct, which implements [`PlatformRef`].
 //!
+//! The [`DefaultPlatform`] delegates the logging to the `log` crate. In order to see log
+//! messages, you should register as "logger" as documented by the `log` crate.
+//! See <https://docs.rs/log>.
+//!
 //! # Example
 //!
 //! ```rust
 //! use smoldot_light::{Client, platform::DefaultPlatform};
+//! env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 //! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
 //! # let _: Client<_, ()> = client;  // Used in this example to infer the generic parameters of the Client
 //! ```
 //!
 
 use super::{
-    with_buffers, Address, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
-    PlatformRef, SubstreamDirection,
+    with_buffers, Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress,
+    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
 };
 
 use alloc::{borrow::Cow, sync::Arc};
-use core::{panic, pin::Pin, str, time::Duration};
+use core::{
+    fmt::{self, Write as _},
+    panic,
+    pin::Pin,
+    str,
+    time::Duration,
+};
 use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
 use std::{
@@ -151,6 +162,45 @@ impl PlatformRef for Arc<DefaultPlatform> {
                 .catch_unwind(),
             )
             .detach();
+    }
+
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        // Note that this conversion is most likely completely optimized out by the compiler due
+        // to log levels having the same numerical values.
+        let log_level = match log_level {
+            LogLevel::Error => log::Level::Error,
+            LogLevel::Warn => log::Level::Warn,
+            LogLevel::Info => log::Level::Info,
+            LogLevel::Debug => log::Level::Debug,
+            LogLevel::Trace => log::Level::Trace,
+        };
+
+        let mut message_build = String::with_capacity(128);
+        message_build.push_str(message);
+        let mut first = true;
+        for (key, value) in key_values {
+            if first {
+                let _ = write!(message_build, "; ");
+                first = false;
+            } else {
+                let _ = write!(message_build, ", ");
+            }
+            let _ = write!(message_build, "{}={}", key, value);
+        }
+
+        log::logger().log(
+            &log::RecordBuilder::new()
+                .level(log_level)
+                .target(log_target)
+                .args(format_args!("{}", message_build))
+                .build(),
+        )
     }
 
     fn client_name(&self) -> Cow<str> {

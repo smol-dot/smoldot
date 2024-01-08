@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
-    util,
+    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    transactions_service, util,
 };
 
 use super::StartConfig;
@@ -325,16 +325,20 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     .printed_legacy_json_rpc_warning
                     .swap(true, atomic::Ordering::Relaxed)
                 {
-                    log::warn!(
-                        target: &self.log_target,
-                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
-                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
-                        cannot be properly implemented on a light client. You are encouraged to \
-                        use the new JSON-RPC API \
-                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
-                        legacy JSON-RPC API functions will be deprecated and removed in the \
-                        distant future.",
-                        request.request().name()
+                    log!(
+                        &self.platform,
+                        Warn,
+                        &self.log_target,
+                        format!(
+                            "The JSON-RPC client has just called a JSON-RPC function from \
+                            the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
+                            loose semantics and cannot be properly implemented on a light \
+                            client. You are encouraged to use the new JSON-RPC API \
+                            <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                            legacy JSON-RPC API functions will be deprecated and removed in the \
+                            distant future.",
+                            request.request().name()
+                        )
                     )
                 }
             }
@@ -503,7 +507,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
-                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!("JSON-RPC call not supported yet: {:?}", _method)
+                );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
                     "Not implemented in smoldot yet",
@@ -520,12 +529,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request: service::SubscriptionStartProcess,
     ) {
         // TODO: restore some form of logging
-        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );*/
 
         // Print a warning for legacy JSON-RPC functions.
         match request.request() {
@@ -593,16 +596,20 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     .printed_legacy_json_rpc_warning
                     .swap(true, atomic::Ordering::Relaxed)
                 {
-                    log::warn!(
-                        target: &self.log_target,
-                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
-                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
-                        cannot be properly implemented on a light client. You are encouraged to \
-                        use the new JSON-RPC API \
-                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
-                        legacy JSON-RPC API functions will be deprecated and removed in the \
-                        distant future.",
-                        request.request().name()
+                    log!(
+                        &self.platform,
+                        Warn,
+                        &self.log_target,
+                        format!(
+                            "The JSON-RPC client has just called a JSON-RPC function from \
+                            the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
+                            loose semantics and cannot be properly implemented on a light \
+                            client. You are encouraged to use the new JSON-RPC API \
+                            <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                            legacy JSON-RPC API functions will be deprecated and removed in the \
+                            distant future.",
+                            request.request().name()
+                        )
                     )
                 }
             }
@@ -650,7 +657,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
             _method @ methods::MethodCall::network_unstable_subscribeEvents { .. } => {
                 // TODO: implement the ones that make sense to implement ^
-                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!("JSON-RPC call not supported yet: {:?}", _method)
+                );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
                     "Not implemented in smoldot yet",
