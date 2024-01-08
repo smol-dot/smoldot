@@ -30,6 +30,7 @@
 //!
 //! ```rust
 //! use smoldot_light::{Client, platform::DefaultPlatform};
+//! env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 //! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
 //! # let _: Client<_, ()> = client;  // Used in this example to infer the generic parameters of the Client
 //! ```
