@@ -44,6 +44,9 @@ use smoldot::{
 mod parachain;
 mod standalone;
 
+pub use codec::CallProofRequestConfig;
+pub use network_service::EncodedMerkleProof;
+
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -807,11 +810,11 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     pub async fn call_proof_query(
         self: Arc<Self>,
         block_number: u64,
-        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
+        config: CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
+    ) -> Result<EncodedMerkleProof, CallProofQueryError> {
         let mut outcome_errors =
             Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
