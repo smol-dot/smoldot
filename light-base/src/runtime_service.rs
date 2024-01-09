@@ -272,6 +272,9 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         block_hash: [u8; 32],
         function_name: String,
         parameters_vectored: Vec<u8>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
     ) -> Result<Vec<u8>, PinnedBlockRuntimeCallError> {
         let (result_tx, result_rx) = oneshot::channel();
 

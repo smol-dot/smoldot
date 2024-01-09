@@ -106,9 +106,6 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Number of bytes used by the block number in the relay chain.
-    pub relay_chain_block_number_bytes: usize,
-
     /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
     /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
     /// block can be gathered.
@@ -155,7 +152,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.finalized_block_header,
                 config.block_number_bytes,
                 config_parachain.relay_chain_sync.clone(),
-                config_parachain.relay_chain_block_number_bytes,
                 config_parachain.para_id,
                 from_foreground,
                 config.network_service.clone(),

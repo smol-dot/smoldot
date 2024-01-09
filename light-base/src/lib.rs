@@ -1228,9 +1228,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                         finalized_block_header,
                         para_id,
                         relay_chain_sync: relay_chain.runtime_service.clone(),
-                        relay_chain_block_number_bytes: relay_chain
-                            .sync_service
-                            .block_number_bytes(),
                     },
                 ),
             }));
