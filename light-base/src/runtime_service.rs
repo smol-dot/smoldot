@@ -67,7 +67,7 @@ use alloc::{
 };
 use async_lock::{Mutex, MutexGuard};
 use core::{
-    iter, mem,
+    cmp, iter, mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
@@ -288,6 +288,9 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 block_hash,
                 function_name,
                 parameters_vectored,
+                total_attempts,
+                timeout_per_request,
+                _max_parallel: max_parallel,
             })
             .await;
 
@@ -1010,6 +1013,9 @@ enum ToBackground<TPlat: PlatformRef> {
         block_hash: [u8; 32],
         function_name: String,
         parameters_vectored: Vec<u8>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
     },
 }
 
@@ -2183,6 +2189,9 @@ async fn run_background<TPlat: PlatformRef>(
                 block_hash,
                 function_name,
                 parameters_vectored,
+                total_attempts,
+                timeout_per_request,
+                _max_parallel: _, // TODO: unused /!\
             }) => {
                 // Foreground wants to perform a runtime call.
 
@@ -2239,7 +2248,12 @@ async fn run_background<TPlat: PlatformRef>(
                             function_name,
                             parameters_vectored,
                             runtime,
-                            inaccessible_errors: Vec::with_capacity(3), // TODO: 3?
+                            total_attempts,
+                            timeout_per_request,
+                            inaccessible_errors: Vec::with_capacity(cmp::min(
+                                16,
+                                usize::try_from(total_attempts).unwrap_or(usize::MAX),
+                            )),
                             result_tx,
                         })
                     }));
@@ -2434,8 +2448,9 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // If we have failed to obtain a valid proof several times, abort the runtime
                 // call attempt altogether.
-                if operation.inaccessible_errors.len() >= 3 {
-                    // TODO: constant ^
+                if u32::try_from(operation.inaccessible_errors.len()).unwrap_or(u32::MAX)
+                    >= operation.total_attempts
+                {
                     let _ =
                         operation
                             .result_tx
@@ -2450,6 +2465,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // TODO: can there be a race condition where the sync service forgets that a peer has knowledge of a block? shouldn't we somehow cache the peers that know this block ahead of time or something?
                 background.progress_runtime_call_requests.push(Box::pin({
                     let call_proof_request_future =
+                        // TODO: change API of that function
                         background.sync_service.clone().call_proof_query(
                             operation.block_number,
                             sync_service::CallProofRequestConfig {
@@ -2460,7 +2476,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 ), // TODO: overhead
                             },
                             1,
-                            Duration::from_secs(10),
+                            operation.timeout_per_request,
                             NonZeroU32::new(1).unwrap(),
                         );
 
@@ -2982,6 +2998,8 @@ struct RuntimeCallRequest {
     function_name: String,
     parameters_vectored: Vec<u8>,
     runtime: executor::host::HostVmPrototype,
+    total_attempts: u32,
+    timeout_per_request: Duration,
     inaccessible_errors: Vec<PinnedBlockRuntimeCallInaccessibleError>,
     result_tx: oneshot::Sender<Result<Vec<u8>, PinnedBlockRuntimeCallError>>,
 }
