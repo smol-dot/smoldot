@@ -89,7 +89,6 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
-    executor::{host, runtime_call},
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
@@ -352,21 +351,28 @@ pub enum DropReason {
 /// Failed to check the validity of a transaction.
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ValidateTransactionError {
-    /// Error during the network request.
-    #[display(fmt = "{_0}")]
-    Call(runtime_service::RuntimeCallError),
-    /// Transaction validation API version unrecognized.
-    UnknownApiVersion,
-    /// Error while starting the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
-    WasmStart(host::StartErr),
-    /// Error while running the Wasm virtual machine.
-    #[display(fmt = "{_0}")]
-    WasmExecution(runtime_call::ErrorDetail),
+    /// The runtime of the requested block is invalid.
+    InvalidRuntime(runtime_service::RuntimeError),
+
+    /// Error during the execution of the runtime.
+    ///
+    /// There is no point in trying to validate the transaction call again, as it would result
+    /// in the same error.
+    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    Execution(runtime_service::PinnedBlockRuntimeCallExecutionError),
+
+    /// Error trying to access the storage required for the runtime call.
+    ///
+    /// Because these errors are non-fatal, the operation is attempted multiple times, and as such
+    /// there can be multiple errors.
+    ///
+    /// Trying the same transaction again might succeed.
+    #[display(fmt = "Error trying to access the storage required for the runtime call")]
+    // TODO: better display?
+    Inaccessible(Vec<runtime_service::PinnedBlockRuntimeCallInaccessibleError>),
+
     /// Error while decoding the output of the runtime.
     OutputDecodeError(validate::DecodeError),
-    /// Runtime called a forbidden host function.
-    ForbiddenHostCall,
 }
 
 #[derive(Debug, Clone)]
@@ -1148,6 +1154,7 @@ async fn background_task<TPlat: PlatformRef>(
                     // No matter whether the validation is successful, we store the result in
                     // the transactions pool. This will later be picked up by the code that removes
                     // invalid transactions from the pool.
+                    // TODO: shouldn't mark a transaction as invalid if it failed due to network errors
                     worker.pending_transactions.set_validation_result(
                         maybe_validated_tx_id,
                         &block_hash,
@@ -1405,15 +1412,23 @@ async fn validate_transaction<TPlat: PlatformRef>(
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
 ) -> Result<validate::ValidTransaction, ValidationError> {
-    let runtime_lock = match relay_chain_sync
-        .pinned_block_runtime_access(relay_chain_sync_subscription_id, block_hash)
-        .await
-    {
-        Ok(l) => l,
-        Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
-            return Err(ValidationError::ObsoleteSubscription)
-        }
-    };
+    let runtime_call_future = relay_chain_sync.pinned_block_runtime_call(
+        relay_chain_sync_subscription_id,
+        block_hash,
+        validate::VALIDATION_FUNCTION_NAME.to_owned(),
+        validate::validate_transaction_runtime_parameters_v3(
+            iter::once(scale_encoded_transaction.as_ref()),
+            source,
+            &block_hash,
+        )
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        }),
+        3,
+        Duration::from_secs(8),
+        NonZeroU32::new(1).unwrap(),
+    );
 
     // TODO: move somewhere else?
     log!(
@@ -1422,7 +1437,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         &log_target,
         "transaction-validation-started",
         transaction = HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
-        block = HashDisplay(runtime_lock.block_hash()),
+        block = HashDisplay(&block_hash),
         block_height = header::decode(
             block_scale_encoded_header,
             relay_chain_sync.block_number_bytes()
@@ -1432,25 +1447,8 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .unwrap_or_else(|| "unknown".to_owned())
     );
 
-    let block_hash = *runtime_lock.block_hash();
-    let (runtime_call_lock, runtime) = runtime_lock
-        .start(
-            validate::VALIDATION_FUNCTION_NAME,
-            validate::validate_transaction_runtime_parameters_v3(
-                iter::once(scale_encoded_transaction.as_ref()),
-                source,
-                &block_hash,
-            ),
-            1,
-            Duration::from_secs(8),
-            NonZeroU32::new(1).unwrap(),
-        )
-        .await
-        .map_err(ValidateTransactionError::Call)
-        .map_err(InvalidOrError::ValidateError)
-        .map_err(ValidationError::InvalidOrError)?;
-
-    if runtime
+    // TODO: restore
+    /*if runtime
         .runtime_version()
         .decode()
         .apis
@@ -1460,136 +1458,39 @@ async fn validate_transaction<TPlat: PlatformRef>(
         return Err(ValidationError::InvalidOrError(
             InvalidOrError::ValidateError(ValidateTransactionError::UnknownApiVersion),
         ));
-    }
+    }*/
 
-    let mut validation_in_progress = match runtime_call::run(runtime_call::Config {
-        virtual_machine: runtime,
-        function_to_call: validate::VALIDATION_FUNCTION_NAME,
-        parameter: validate::validate_transaction_runtime_parameters_v3(
-            iter::once(scale_encoded_transaction.as_ref()),
-            source,
-            &block_hash,
-        ),
-        storage_main_trie_changes: Default::default(),
-        max_log_level: 0,
-        calculate_trie_changes: false,
-    }) {
-        Ok(r) => r,
-        Err((err, virtual_machine)) => {
-            runtime_call_lock.unlock(virtual_machine);
-            return Err(ValidationError::InvalidOrError(
-                InvalidOrError::ValidateError(ValidateTransactionError::WasmStart(err)),
-            ));
+    let output = match runtime_call_future.await {
+        Ok(output) => output,
+        Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
+            return Err(ValidationError::ObsoleteSubscription)
         }
+        Err(runtime_service::PinnedBlockRuntimeCallError::Execution(error)) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
+            ))
+        }
+        Err(runtime_service::PinnedBlockRuntimeCallError::Inaccessible(errors)) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
+            ))
+        }
+        Err(runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(error)) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
+            ))
+        }
+        Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => unreachable!(),
     };
 
-    loop {
-        match validation_in_progress {
-            runtime_call::RuntimeCall::Finished(Ok(success)) => {
-                let decode_result = validate::decode_validate_transaction_return_value(
-                    success.virtual_machine.value().as_ref(),
-                );
-                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                return match decode_result {
-                    Ok(Ok(decoded)) => Ok(decoded),
-                    Ok(Err(err)) => Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
-                        err,
-                    ))),
-                    Err(err) => Err(ValidationError::InvalidOrError(
-                        InvalidOrError::ValidateError(ValidateTransactionError::OutputDecodeError(
-                            err,
-                        )),
-                    )),
-                };
-            }
-            runtime_call::RuntimeCall::Finished(Err(err)) => {
-                return Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::WasmExecution(
-                        err.detail,
-                    )),
-                ));
-            }
-            runtime_call::RuntimeCall::StorageGet(get) => {
-                let storage_value = {
-                    let child_trie = get.child_trie();
-                    runtime_call_lock
-                        .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
-                };
-                let storage_value = match storage_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(runtime_call::RuntimeCall::StorageGet(get).into_prototype());
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                };
-                validation_in_progress =
-                    get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
-            }
-            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
-                let merkle_value = {
-                    let child_trie = mv.child_trie();
-                    runtime_call_lock.closest_descendant_merkle_value(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        mv.key(),
-                    )
-                };
-                let merkle_value = match merkle_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
-                                .into_prototype(),
-                        );
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                };
-                validation_in_progress = mv.inject_merkle_value(merkle_value);
-            }
-            runtime_call::RuntimeCall::NextKey(nk) => {
-                let next_key = {
-                    let child_trie = nk.child_trie();
-                    runtime_call_lock.next_key(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        nk.key(),
-                        nk.or_equal(),
-                        nk.prefix(),
-                        nk.branch_nodes(),
-                    )
-                };
-                let next_key = match next_key {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(runtime_call::RuntimeCall::NextKey(nk).into_prototype());
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                };
-                validation_in_progress = nk.inject_key(next_key);
-            }
-            runtime_call::RuntimeCall::SignatureVerification(r) => {
-                validation_in_progress = r.verify_and_resume();
-            }
-            runtime_call::RuntimeCall::LogEmit(r) => {
-                // Logs are ignored.
-                validation_in_progress = r.resume()
-            }
-            runtime_call::RuntimeCall::Offchain(_) => {
-                return Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::ForbiddenHostCall),
-                ));
-            }
-            runtime_call::RuntimeCall::OffchainStorageSet(r) => {
-                // Ignore offset storage writes.
-                validation_in_progress = r.resume();
-            }
-        }
+    match validate::decode_validate_transaction_return_value(&output) {
+        Ok(Ok(decoded)) => Ok(decoded),
+        Ok(Err(err)) => Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
+            err,
+        ))),
+        Err(err) => Err(ValidationError::InvalidOrError(
+            InvalidOrError::ValidateError(ValidateTransactionError::OutputDecodeError(err)),
+        )),
     }
 }
 
