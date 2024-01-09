@@ -354,6 +354,9 @@ pub enum ValidateTransactionError {
     /// The runtime of the requested block is invalid.
     InvalidRuntime(runtime_service::RuntimeError),
 
+    /// The runtime doesn't implement the API required to validate transactions.
+    ApiVersionRequirementUnfulfilled,
+
     /// Error during the execution of the runtime.
     ///
     /// There is no point in trying to validate the transaction call again, as it would result
@@ -1416,6 +1419,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         relay_chain_sync_subscription_id,
         block_hash,
         validate::VALIDATION_FUNCTION_NAME.to_owned(),
+        Some(("TaggedTransactionQueue".to_owned(), 3)),
         validate::validate_transaction_runtime_parameters_v3(
             iter::once(scale_encoded_transaction.as_ref()),
             source,
@@ -1447,19 +1451,6 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .unwrap_or_else(|| "unknown".to_owned())
     );
 
-    // TODO: restore
-    /*if runtime
-        .runtime_version()
-        .decode()
-        .apis
-        .find_version("TaggedTransactionQueue")
-        != Some(3)
-    {
-        return Err(ValidationError::InvalidOrError(
-            InvalidOrError::ValidateError(ValidateTransactionError::UnknownApiVersion),
-        ));
-    }*/
-
     let output = match runtime_call_future.await {
         Ok(output) => output,
         Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
@@ -1478,6 +1469,13 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err(runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
+            ))
+        }
+        Err(runtime_service::PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(
+                    ValidateTransactionError::ApiVersionRequirementUnfulfilled,
+                ),
             ))
         }
         Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => unreachable!(),

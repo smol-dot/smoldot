@@ -271,6 +271,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
         function_name: String,
+        required_api_version: Option<(String, u32)>,
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
@@ -287,6 +288,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
                 subscription_id,
                 block_hash,
                 function_name,
+                required_api_version,
                 parameters_vectored,
                 total_attempts,
                 timeout_per_request,
@@ -623,6 +625,9 @@ pub enum PinnedBlockRuntimeCallError {
 
     /// The runtime of the requested block is invalid.
     InvalidRuntime(RuntimeError),
+
+    /// API version required for the call isn't fulfilled.
+    ApiVersionRequirementUnfulfilled,
 
     /// Error during the execution of the runtime.
     ///
@@ -1012,6 +1017,7 @@ enum ToBackground<TPlat: PlatformRef> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
         function_name: String,
+        required_api_version: Option<(String, u32)>,
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
@@ -2188,6 +2194,7 @@ async fn run_background<TPlat: PlatformRef>(
                 subscription_id,
                 block_hash,
                 function_name,
+                required_api_version,
                 parameters_vectored,
                 total_attempts,
                 timeout_per_request,
@@ -2237,6 +2244,22 @@ async fn run_background<TPlat: PlatformRef>(
                         continue;
                     }
                 };
+
+                if let Some((api_name, api_version)) = required_api_version {
+                    if runtime
+                        .runtime_version()
+                        .decode()
+                        .apis
+                        .find_version(&api_name)
+                        != Some(api_version)
+                    {
+                        // API version required by caller isn't fulfilled.
+                        let _ = result_tx.send(Err(
+                            PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled,
+                        ));
+                        continue;
+                    }
+                }
 
                 background
                     .progress_runtime_call_requests

@@ -1346,6 +1346,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
             subscription_id,
             *block_hash,
             para::PERSISTED_VALIDATION_FUNCTION_NAME.to_owned(),
+            None, // TODO: /!\
             para::persisted_validation_data_parameters(
                 parachain_id,
                 para::OccupiedCoreAssumption::TimedOut,
@@ -1400,6 +1401,7 @@ impl ParaheadError {
                 runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned
                 | runtime_service::PinnedBlockRuntimeCallError::Execution(_)
                 | runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(_)
+                | runtime_service::PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled
                 | runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
             ) => false,
             ParaheadError::NoCore => false,
