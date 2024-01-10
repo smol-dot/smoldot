@@ -430,7 +430,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         pinned_runtime: PinnedRuntime,
     ) -> Result<executor::CoreVersion, PinnedRuntimeSpecificationError> {
         match &pinned_runtime.0.runtime {
-            Ok(rt) => Ok(rt.runtime_spec.clone()),
+            Ok(rt) => Ok(rt.runtime_version().clone()),
             Err(error) => Err(PinnedRuntimeSpecificationError::InvalidRuntime(
                 error.clone(),
             )),
@@ -1260,7 +1260,7 @@ async fn run_background<TPlat: PlatformRef>(
                                         block_runtime
                                             .runtime
                                             .as_ref()
-                                            .map(|rt| rt.runtime_spec.clone())
+                                            .map(|rt| rt.runtime_version().clone())
                                             .map_err(|err| err.clone()),
                                     )
                                 } else {
@@ -1465,15 +1465,7 @@ async fn run_background<TPlat: PlatformRef>(
                             code_merkle_value: finalized_block_runtime.code_merkle_value,
                             closest_ancestor_excluding: finalized_block_runtime
                                 .closest_ancestor_excluding,
-                            runtime: Ok(SuccessfulRuntime {
-                                runtime_spec: finalized_block_runtime
-                                    .virtual_machine
-                                    .runtime_version()
-                                    .clone(),
-                                virtual_machine: Mutex::new(Some(
-                                    finalized_block_runtime.virtual_machine,
-                                )),
-                            }),
+                            runtime: Ok(finalized_block_runtime.virtual_machine),
                         });
 
                         match &runtime.runtime {
@@ -1485,7 +1477,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     format!(
                                         "Finalized block runtime ready. Spec version: {}. \
                                         Size of `:code`: {}.",
-                                        runtime.runtime_spec.decode().spec_version,
+                                        runtime.runtime_version().decode().spec_version,
                                         BytesDisplay(storage_code_len)
                                     )
                                 );
@@ -1718,7 +1710,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     runtime
                                         .runtime
                                         .as_ref()
-                                        .map(|rt| rt.runtime_spec.clone())
+                                        .map(|rt| rt.runtime_version().clone())
                                         .map_err(|err| err.clone()),
                                 )
                             } else {
@@ -1748,7 +1740,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .output_finalized_async_user_data()
                             .runtime
                             .as_ref()
-                            .map(|rt| rt.runtime_spec.clone())
+                            .map(|rt| rt.runtime_version().clone())
                             .map_err(|err| err.clone()),
                         non_finalized_blocks_ancestry_order,
                         new_blocks: Subscription {
@@ -1804,7 +1796,7 @@ async fn run_background<TPlat: PlatformRef>(
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
-                    let runtime = SuccessfulRuntime::from_storage(
+                    let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
@@ -1971,7 +1963,7 @@ async fn run_background<TPlat: PlatformRef>(
                 // Foreground wants to perform a runtime call.
 
                 let runtime = match &pinned_runtime.runtime {
-                    Ok(rt) => rt.virtual_machine.lock().await.clone().unwrap(),
+                    Ok(rt) => rt.clone(),
                     Err(error) => {
                         // The runtime call can't succeed because smoldot was incapable of
                         // compiling the runtime.
@@ -2465,7 +2457,7 @@ async fn run_background<TPlat: PlatformRef>(
                 let runtime = if let Some(existing_runtime) = existing_runtime {
                     existing_runtime
                 } else {
-                    let runtime = SuccessfulRuntime::from_storage(
+                    let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
@@ -2481,7 +2473,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 format!(
                                     "Successfully compiled runtime. Spec version: {}. \
                                     Size of `:code`: {}.",
-                                    runtime.runtime_spec.decode().spec_version,
+                                    runtime.runtime_version().decode().spec_version,
                                     BytesDisplay(
                                         u64::try_from(storage_code.as_ref().map_or(0, |v| v.len()))
                                             .unwrap()
@@ -2769,7 +2761,7 @@ struct RuntimeCallRequest {
 struct Runtime {
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
     /// happened, including a problem when obtaining the runtime specs.
-    runtime: Result<SuccessfulRuntime, RuntimeError>,
+    runtime: Result<executor::host::HostVmPrototype, RuntimeError>,
 
     /// Merkle value of the `:code` trie node.
     ///
@@ -2797,92 +2789,71 @@ struct Runtime {
     heap_pages: Option<Vec<u8>>,
 }
 
-struct SuccessfulRuntime {
-    /// Runtime specs extracted from the runtime.
-    runtime_spec: executor::CoreVersion,
+async fn compile_runtime<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    code: &Option<Vec<u8>>,
+    heap_pages: &Option<Vec<u8>>,
+) -> Result<executor::host::HostVmPrototype, RuntimeError> {
+    // Since compiling the runtime is a CPU-intensive operation, we yield once before.
+    futures_lite::future::yield_now().await;
 
-    /// Virtual machine itself, to perform additional calls.
-    ///
-    /// Always `Some`, except for temporary extractions necessary to execute the VM.
-    // TODO: remove Mutex and Option
-    virtual_machine: Mutex<Option<executor::host::HostVmPrototype>>,
-}
+    // Parameters for `HostVmPrototype::new`.
+    let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
+    let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
+        .map_err(RuntimeError::InvalidHeapPages)?;
+    let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
 
-impl SuccessfulRuntime {
-    async fn from_storage<TPlat: PlatformRef>(
-        platform: &TPlat,
-        log_target: &str,
-        code: &Option<Vec<u8>>,
-        heap_pages: &Option<Vec<u8>>,
-    ) -> Result<Self, RuntimeError> {
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        futures_lite::future::yield_now().await;
+    // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
+    // import, we try again but with `allowed_unresolved_imports: true`.
+    // Having unresolved imports might cause errors later on, for example when validating
+    // transactions or getting the parachain heads, but for now we continue the execution
+    // and print a warning.
+    match executor::host::HostVmPrototype::new(executor::host::Config {
+        module,
+        heap_pages,
+        exec_hint,
+        allow_unresolved_imports: false,
+    }) {
+        Ok(vm) => return Ok(vm),
+        Err(executor::host::NewErr::VirtualMachine(
+            executor::vm::NewErr::UnresolvedFunctionImport {
+                function,
+                module_name,
+            },
+        )) => {
+            match executor::host::HostVmPrototype::new(executor::host::Config {
+                module,
+                heap_pages,
+                exec_hint,
+                allow_unresolved_imports: true,
+            }) {
+                Ok(vm) => {
+                    log!(
+                        platform,
+                        Warn,
+                        log_target,
+                        format!(
+                            "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
+                            encounter errors later on. Please report this issue in \
+                            https://github.com/smol-dot/smoldot",
+                            module_name, function
+                        )
+                    );
 
-        // Parameters for `HostVmPrototype::new`.
-        let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
-        let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
-            .map_err(RuntimeError::InvalidHeapPages)?;
-        let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
-
-        // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
-        // import, we try again but with `allowed_unresolved_imports: true`.
-        // Having unresolved imports might cause errors later on, for example when validating
-        // transactions or getting the parachain heads, but for now we continue the execution
-        // and print a warning.
-        match executor::host::HostVmPrototype::new(executor::host::Config {
-            module,
-            heap_pages,
-            exec_hint,
-            allow_unresolved_imports: false,
-        }) {
-            Ok(vm) => {
-                return Ok(SuccessfulRuntime {
-                    runtime_spec: vm.runtime_version().clone(),
-                    virtual_machine: Mutex::new(Some(vm)),
-                })
-            }
-            Err(executor::host::NewErr::VirtualMachine(
-                executor::vm::NewErr::UnresolvedFunctionImport {
-                    function,
-                    module_name,
-                },
-            )) => {
-                match executor::host::HostVmPrototype::new(executor::host::Config {
-                    module,
-                    heap_pages,
-                    exec_hint,
-                    allow_unresolved_imports: true,
-                }) {
-                    Ok(vm) => {
-                        log!(
-                            platform,
-                            Warn,
-                            log_target,
-                            format!(
-                                "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
-                                encounter errors later on. Please report this issue in \
-                                https://github.com/smol-dot/smoldot",
-                                module_name, function
-                            )
-                        );
-
-                        Ok(SuccessfulRuntime {
-                            runtime_spec: vm.runtime_version().clone(),
-                            virtual_machine: Mutex::new(Some(vm)),
-                        })
-                    }
-                    Err(executor::host::NewErr::VirtualMachine(
-                        executor::vm::NewErr::UnresolvedFunctionImport { .. },
-                    )) => unreachable!(),
-                    Err(error) => {
-                        // It's still possible that errors other than an unresolved host
-                        // function happen.
-                        Err(RuntimeError::Build(error))
-                    }
+                    Ok(vm)
+                }
+                Err(executor::host::NewErr::VirtualMachine(
+                    executor::vm::NewErr::UnresolvedFunctionImport { .. },
+                )) => unreachable!(),
+                Err(error) => {
+                    // It's still possible that errors other than an unresolved host
+                    // function happen.
+                    Err(RuntimeError::Build(error))
                 }
             }
-            Err(error) => Err(RuntimeError::Build(error)),
         }
+        Err(error) => Err(RuntimeError::Build(error)),
     }
 }
 
