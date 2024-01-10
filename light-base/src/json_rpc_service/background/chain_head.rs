@@ -1373,7 +1373,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         // TODO: /!\ the pinned_block_runtime_call function should be split in two: first check if the subscription is correct, then only start the call
                         todo!()
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(error)) => {
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::InvalidRuntime(error),
+                    )) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),
@@ -1385,51 +1387,85 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled,
+                    )) => {
                         // We pass `None` for the API requirement, thus this error can never
                         // happen.
                         unreachable!()
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::Execution(
-                        runtime_service::PinnedBlockRuntimeCallExecutionError::ForbiddenHostFunction
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::Crash,
                     )) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: "Runtime has called an offchain host function".to_string().into(),
-                            }
-                        }).await;
+                        // TODO: is this the appropriate error?
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationInaccessible {
+                                    operation_id: operation_id.clone().into(),
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::Execution(
-                        runtime_service::PinnedBlockRuntimeCallExecutionError::Start(error)
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::Execution(
+                            runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
+                        ),
                     )) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: error.to_string().into(),
-                        }}).await;
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: "Runtime has called an offchain host function"
+                                        .to_string()
+                                        .into(),
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::Execution(
-                        runtime_service::PinnedBlockRuntimeCallExecutionError::Execution(error)
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::Execution(
+                            runtime_service::RuntimeCallExecutionError::Start(error),
+                        ),
                     )) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                            operation_id: operation_id.clone().into(),
-                            error: error.to_string().into(),
-                        }}).await;
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: error.to_string().into(),
+                                },
+                            })
+                            .await;
+                    }
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::Execution(
+                            runtime_service::RuntimeCallExecutionError::Execution(error),
+                        ),
+                    )) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: error.to_string().into(),
+                                },
+                            })
+                            .await;
                     }
                     Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => {
                         // We start the runtime call only after having made sure that the block
                         // was pinned. This can thus never happen.
                         unreachable!()
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::Inaccessible(_)) => {
+                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                        runtime_service::RuntimeCallError2::Inaccessible(_),
+                    )) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),

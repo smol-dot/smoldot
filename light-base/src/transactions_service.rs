@@ -357,12 +357,15 @@ pub enum ValidateTransactionError {
     /// The runtime doesn't implement the API required to validate transactions.
     ApiVersionRequirementUnfulfilled,
 
+    /// Runtime service has crashed while the call was in progress.
+    Crash,
+
     /// Error during the execution of the runtime.
     ///
     /// There is no point in trying to validate the transaction call again, as it would result
     /// in the same error.
     #[display(fmt = "Error during the execution of the runtime: {_0}")]
-    Execution(runtime_service::PinnedBlockRuntimeCallExecutionError),
+    Execution(runtime_service::RuntimeCallExecutionError),
 
     /// Error trying to access the storage required for the runtime call.
     ///
@@ -372,7 +375,7 @@ pub enum ValidateTransactionError {
     /// Trying the same transaction again might succeed.
     #[display(fmt = "Error trying to access the storage required for the runtime call")]
     // TODO: better display?
-    Inaccessible(Vec<runtime_service::PinnedBlockRuntimeCallInaccessibleError>),
+    Inaccessible(Vec<runtime_service::RuntimeCallInaccessibleError>),
 
     /// Error while decoding the output of the runtime.
     OutputDecodeError(validate::DecodeError),
@@ -1456,22 +1459,37 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
             return Err(ValidationError::ObsoleteSubscription)
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::Execution(error)) => {
+        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+            runtime_service::RuntimeCallError2::Execution(error),
+        )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::Inaccessible(errors)) => {
+        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+            runtime_service::RuntimeCallError2::Crash,
+        )) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::Crash),
+            ))
+        }
+        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+            runtime_service::RuntimeCallError2::Inaccessible(errors),
+        )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(error)) => {
+        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+            runtime_service::RuntimeCallError2::InvalidRuntime(error),
+        )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+            runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled,
+        )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(
                     ValidateTransactionError::ApiVersionRequirementUnfulfilled,

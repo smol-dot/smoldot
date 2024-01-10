@@ -1395,13 +1395,24 @@ impl ParaheadError {
     fn is_network_problem(&self) -> bool {
         match self {
             ParaheadError::RuntimeCall(
-                runtime_service::PinnedBlockRuntimeCallError::Inaccessible(_),
+                runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError2::Inaccessible(_),
+                ),
             ) => true,
             ParaheadError::RuntimeCall(
                 runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned
-                | runtime_service::PinnedBlockRuntimeCallError::Execution(_)
-                | runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(_)
-                | runtime_service::PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError2::Execution(_),
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError2::Crash,
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError2::InvalidRuntime(_),
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled,
+                )
                 | runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
             ) => false,
             ParaheadError::NoCore => false,

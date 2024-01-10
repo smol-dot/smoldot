@@ -102,9 +102,11 @@ pub struct Config<TPlat: PlatformRef> {
     pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
-/// Identifies a runtime currently pinned within a [`RuntimeService`].
+/// Runtime currently pinned within a [`RuntimeService`].
+///
+/// Destroying this object automatically unpins the runtime.
 #[derive(Clone)]
-pub struct PinnedRuntimeId(Arc<Runtime>);
+pub struct PinnedRuntime(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
@@ -253,6 +255,72 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         result_rx.await.unwrap_or(None)
     }
 
+    /// Returns the state trie root hash and number of a pinned block.
+    ///
+    /// Returns an error if the subscription is stale, meaning that it has been reset by the
+    /// runtime service.
+    pub async fn pinned_block_state_trie_root_hash_number(
+        &self,
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+    ) -> Result<([u8; 32], u64), PinnedBlockStateTrieRootHashNumberError> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background
+            .lock()
+            .await
+            .send(ToBackground::PinnedBlockStateTrieRootHashNumber {
+                result_tx,
+                subscription_id,
+                block_hash,
+            })
+            .await;
+
+        match result_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                // Background service has crashed. This means that the subscription is obsolete.
+                Err(PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription)
+            }
+        }
+    }
+
+    /// Pins the runtime of a pinned block.
+    ///
+    /// The hash of the block passed as parameter corresponds to the block whose runtime is to
+    /// be pinned. The block must be currently pinned in the context of the provided
+    /// [`SubscriptionId`].
+    ///
+    /// Returns an error if the subscription is stale, meaning that it has been reset by the
+    /// runtime service.
+    pub async fn pin_pinned_block_runtime(
+        &self,
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+    ) -> Result<PinnedRuntime, PinPinnedBlockRuntimeError> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let _ = self
+            .to_background
+            .lock()
+            .await
+            .send(ToBackground::PinPinnedBlockRuntime {
+                result_tx,
+                subscription_id,
+                block_hash,
+            })
+            .await;
+
+        match result_rx.await {
+            Ok(result) => result.map(PinnedRuntime),
+            Err(_) => {
+                // Background service has crashed. This means that the subscription is obsolete.
+                Err(PinPinnedBlockRuntimeError::ObsoleteSubscription)
+            }
+        }
+    }
+
     /// Performs a runtime call.
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
@@ -261,11 +329,57 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     ///
     /// Returns an error if the subscription is stale, meaning that it has been reset by the
     /// runtime service.
+    pub async fn runtime_call(
+        &self,
+        pinned_runtime: PinnedRuntime,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
+        function_name: String,
+        required_api_version: Option<(String, u32)>,
+        parameters_vectored: Vec<u8>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
+    ) -> Result<Vec<u8>, RuntimeCallError2> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        self.send_message_or_restart_service(ToBackground::RuntimeCall {
+            result_tx,
+            pinned_runtime: pinned_runtime.0,
+            block_hash,
+            block_number,
+            block_state_trie_root_hash,
+            function_name,
+            required_api_version,
+            parameters_vectored,
+            total_attempts,
+            timeout_per_request,
+            _max_parallel: max_parallel,
+        })
+        .await;
+
+        match result_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                // Background service has crashed.
+                Err(RuntimeCallError2::Crash)
+            }
+        }
+    }
+
+    /// Performs a runtime call against a pinned block.
     ///
-    /// # Panic
+    /// This function is a shortcut for calling [`RuntimeService::pin_pinned_block_runtime`],
+    /// [`RuntimeService::pinned_block_state_trie_root_hash_number`], and
+    /// [`RuntimeService:runtime_call`].
     ///
-    /// Panics if the given block isn't currently pinned by the given subscription.
+    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
+    /// to make the call. The block must be currently pinned in the context of the provided
+    /// [`SubscriptionId`].
     ///
+    /// Returns an error if the subscription is stale, meaning that it has been reset by the
+    /// runtime service.
     pub async fn pinned_block_runtime_call(
         &self,
         subscription_id: SubscriptionId,
@@ -277,32 +391,48 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<Vec<u8>, PinnedBlockRuntimeCallError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let _ = self
-            .to_background
-            .lock()
+        let (block_state_trie_root_hash, block_number) = match self
+            .pinned_block_state_trie_root_hash_number(subscription_id, block_hash)
             .await
-            .send(ToBackground::PinnedBlockRuntimeCall {
-                result_tx,
-                subscription_id,
-                block_hash,
-                function_name,
-                required_api_version,
-                parameters_vectored,
-                total_attempts,
-                timeout_per_request,
-                _max_parallel: max_parallel,
-            })
-            .await;
-
-        match result_rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                // Background service has crashed. This means that the subscription is obsolete.
-                Err(PinnedBlockRuntimeCallError::ObsoleteSubscription)
+        {
+            Ok(v) => v,
+            Err(PinnedBlockStateTrieRootHashNumberError::BlockNotPinned) => {
+                return Err(PinnedBlockRuntimeCallError::BlockNotPinned);
             }
-        }
+            Err(PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription) => {
+                return Err(PinnedBlockRuntimeCallError::ObsoleteSubscription)
+            }
+        };
+
+        let pinned_runtime = match self
+            .pin_pinned_block_runtime(subscription_id, block_hash)
+            .await
+        {
+            Ok(pinned_runtime) => pinned_runtime,
+            Err(PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                // Note that this path can only be reached if the API user unpins the block in
+                // parallel, as otherwise the error has already been detected above.
+                return Err(PinnedBlockRuntimeCallError::BlockNotPinned);
+            }
+            Err(PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                return Err(PinnedBlockRuntimeCallError::ObsoleteSubscription)
+            }
+        };
+
+        self.runtime_call(
+            pinned_runtime,
+            block_hash,
+            block_number,
+            block_state_trie_root_hash,
+            function_name,
+            required_api_version,
+            parameters_vectored,
+            total_attempts,
+            timeout_per_request,
+            max_parallel,
+        )
+        .await
+        .map_err(PinnedBlockRuntimeCallError::RuntimeCall)
     }
 
     /// Lock the runtime service and prepare a call to a runtime entry point.
@@ -354,14 +484,9 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
     /// to make the call. The block must be currently pinned in the context of the provided
     /// [`SubscriptionId`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
-    ///
     pub async fn pinned_runtime_access(
         &self,
-        pinned_runtime_id: PinnedRuntimeId,
+        pinned_runtime: PinnedRuntime,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
@@ -369,7 +494,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         RuntimeAccess {
             sync_service: self.background_task_config.sync_service.clone(),
             hash: block_hash,
-            runtime: pinned_runtime_id.0,
+            runtime: pinned_runtime.0,
             block_number,
             block_state_root_hash: block_state_trie_root_hash,
         }
@@ -385,7 +510,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) -> Result<PinnedRuntimeId, CompileAndPinRuntimeError> {
+    ) -> Result<PinnedRuntime, CompileAndPinRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -398,23 +523,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             })
             .await;
 
-        Ok(PinnedRuntimeId(
+        Ok(PinnedRuntime(
             result_rx
                 .await
                 .map_err(|_| CompileAndPinRuntimeError::Crash)?,
         ))
-    }
-
-    /// Un-pins a previously-pinned runtime.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
-    ///
-    pub async fn unpin_runtime(&self, id: PinnedRuntimeId) {
-        // Nothing to do.
-        // TODO: doesn't check whether id is stale
-        drop(id);
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -614,26 +727,46 @@ pub struct BlockNotification {
     pub new_runtime: Option<Result<executor::CoreVersion, RuntimeError>>,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_call`].
+/// See [`RuntimeService::pin_pinned_block_runtime`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeCallError {
+pub enum PinPinnedBlockRuntimeError {
     /// Subscription is dead.
     ObsoleteSubscription,
 
     /// Requested block isn't pinned by the subscription.
     BlockNotPinned,
+}
 
+/// See [`RuntimeService::pinned_block_state_trie_root_hash_number`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum PinnedBlockStateTrieRootHashNumberError {
+    /// Subscription is dead.
+    ObsoleteSubscription,
+
+    /// Requested block isn't pinned by the subscription.
+    BlockNotPinned,
+}
+
+// TODO: rename to RuntimeCallError
+/// See [`RuntimeService::runtime_call`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeCallError2 {
     /// The runtime of the requested block is invalid.
     InvalidRuntime(RuntimeError),
 
     /// API version required for the call isn't fulfilled.
     ApiVersionRequirementUnfulfilled,
 
+    /// Runtime service has crashed while the call was in progress.
+    ///
+    /// This doesn't necessarily indicate that the call was responsible for this crash.
+    Crash,
+
     /// Error during the execution of the runtime.
     ///
     /// There is no point in trying the same call again, as it would result in the same error.
     #[display(fmt = "Error during the execution of the runtime: {_0}")]
-    Execution(PinnedBlockRuntimeCallExecutionError),
+    Execution(RuntimeCallExecutionError),
 
     /// Error trying to access the storage required for the runtime call.
     ///
@@ -643,13 +776,26 @@ pub enum PinnedBlockRuntimeCallError {
     /// Trying the same call again might succeed.
     #[display(fmt = "Error trying to access the storage required for the runtime call")]
     // TODO: better display?
-    Inaccessible(Vec<PinnedBlockRuntimeCallInaccessibleError>),
+    Inaccessible(Vec<RuntimeCallInaccessibleError>),
 }
 
-/// See [`PinnedBlockRuntimeCallError::Execution`].
+/// See [`RuntimeService::pinned_block_runtime_call`].
 #[derive(Debug, derive_more::Display, Clone)]
-// TODO: rename to something shorter?
-pub enum PinnedBlockRuntimeCallExecutionError {
+pub enum PinnedBlockRuntimeCallError {
+    /// Subscription is dead.
+    ObsoleteSubscription,
+
+    /// Requested block isn't pinned by the subscription.
+    BlockNotPinned,
+
+    /// Error during the runtime call.
+    #[display(fmt = "{_0}")]
+    RuntimeCall(RuntimeCallError2),
+}
+
+/// See [`RuntimeCallError::Execution`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeCallExecutionError {
     /// Failed to initialize the virtual machine.
     Start(executor::host::StartErr),
     /// Error during the execution of the virtual machine.
@@ -658,10 +804,9 @@ pub enum PinnedBlockRuntimeCallExecutionError {
     ForbiddenHostFunction,
 }
 
-/// See [`PinnedBlockRuntimeCallError::Inaccessible`].
+/// See [`RuntimeCallError::Inaccessible`].
 #[derive(Debug, derive_more::Display, Clone)]
-// TODO: rename to something shorter?
-pub enum PinnedBlockRuntimeCallInaccessibleError {
+pub enum RuntimeCallInaccessibleError {
     /// Failed to download the call proof from the network.
     Network(sync_service::CallProofQueryError), // TODO: is it the correct error?
     /// Call proof downloaded from the network has an invalid format.
@@ -1012,10 +1157,23 @@ enum ToBackground<TPlat: PlatformRef> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
     },
-    PinnedBlockRuntimeCall {
-        result_tx: oneshot::Sender<Result<Vec<u8>, PinnedBlockRuntimeCallError>>,
+    PinPinnedBlockRuntime {
+        result_tx: oneshot::Sender<Result<Arc<Runtime>, PinPinnedBlockRuntimeError>>,
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
+    },
+    PinnedBlockStateTrieRootHashNumber {
+        result_tx:
+            oneshot::Sender<Result<([u8; 32], u64), PinnedBlockStateTrieRootHashNumberError>>,
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+    },
+    RuntimeCall {
+        result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError2>>,
+        pinned_runtime: Arc<Runtime>,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
         function_name: String,
         required_api_version: Option<(String, u32)>,
         parameters_vectored: Vec<u8>,
@@ -2189,18 +2347,12 @@ async fn run_background<TPlat: PlatformRef>(
                 })));
             }
 
-            WakeUpReason::ToBackground(ToBackground::PinnedBlockRuntimeCall {
+            WakeUpReason::ToBackground(ToBackground::PinPinnedBlockRuntime {
                 result_tx,
                 subscription_id,
                 block_hash,
-                function_name,
-                required_api_version,
-                parameters_vectored,
-                total_attempts,
-                timeout_per_request,
-                _max_parallel: _, // TODO: unused /!\
             }) => {
-                // Foreground wants to perform a runtime call.
+                // Foreground wants to pin the runtime of a pinned block.
 
                 let pinned_block = {
                     if let Tree::FinalizedBlockRuntimeKnown {
@@ -2217,10 +2369,10 @@ async fn run_background<TPlat: PlatformRef>(
                                     all_blocks_subscriptions.get(&subscription_id.0)
                                 {
                                     let _ = result_tx
-                                        .send(Err(PinnedBlockRuntimeCallError::BlockNotPinned));
+                                        .send(Err(PinPinnedBlockRuntimeError::BlockNotPinned));
                                 } else {
                                     let _ = result_tx.send(Err(
-                                        PinnedBlockRuntimeCallError::ObsoleteSubscription,
+                                        PinPinnedBlockRuntimeError::ObsoleteSubscription,
                                     ));
                                 }
                                 continue;
@@ -2228,19 +2380,82 @@ async fn run_background<TPlat: PlatformRef>(
                         }
                     } else {
                         let _ =
-                            result_tx.send(Err(PinnedBlockRuntimeCallError::ObsoleteSubscription));
+                            result_tx.send(Err(PinPinnedBlockRuntimeError::ObsoleteSubscription));
                         continue;
                     }
                 };
 
-                let runtime = match &pinned_block.runtime.runtime {
+                let _ = result_tx.send(Ok(pinned_block.runtime.clone()));
+            }
+
+            WakeUpReason::ToBackground(ToBackground::PinnedBlockStateTrieRootHashNumber {
+                result_tx,
+                subscription_id,
+                block_hash,
+            }) => {
+                // Foreground wants to know the state trie root hash and number of a pinned block.
+
+                let pinned_block = {
+                    if let Tree::FinalizedBlockRuntimeKnown {
+                        all_blocks_subscriptions,
+                        pinned_blocks,
+                        ..
+                    } = &mut background.tree
+                    {
+                        match pinned_blocks.get(&(subscription_id.0, block_hash)) {
+                            Some(v) => v.clone(),
+                            None => {
+                                // Cold path.
+                                if let Some((_, _)) =
+                                    all_blocks_subscriptions.get(&subscription_id.0)
+                                {
+                                    let _ = result_tx.send(Err(
+                                        PinnedBlockStateTrieRootHashNumberError::BlockNotPinned,
+                                    ));
+                                } else {
+                                    let _ = result_tx.send(Err(
+                                        PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription,
+                                    ));
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        let _ = result_tx.send(Err(
+                            PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription,
+                        ));
+                        continue;
+                    }
+                };
+
+                let _ = result_tx.send(Ok((
+                    pinned_block.state_trie_root_hash,
+                    pinned_block.block_number,
+                )));
+            }
+
+            WakeUpReason::ToBackground(ToBackground::RuntimeCall {
+                result_tx,
+                pinned_runtime,
+                block_hash,
+                block_number,
+                block_state_trie_root_hash,
+                function_name,
+                required_api_version,
+                parameters_vectored,
+                total_attempts,
+                timeout_per_request,
+                _max_parallel: _, // TODO: unused /!\
+            }) => {
+                // Foreground wants to perform a runtime call.
+
+                let runtime = match &pinned_runtime.runtime {
                     Ok(rt) => rt.virtual_machine.lock().await.clone().unwrap(),
                     Err(error) => {
                         // The runtime call can't succeed because smoldot was incapable of
                         // compiling the runtime.
-                        let _ = result_tx.send(Err(PinnedBlockRuntimeCallError::InvalidRuntime(
-                            error.clone(),
-                        )));
+                        let _ =
+                            result_tx.send(Err(RuntimeCallError2::InvalidRuntime(error.clone())));
                         continue;
                     }
                 };
@@ -2254,9 +2469,8 @@ async fn run_background<TPlat: PlatformRef>(
                         != Some(api_version)
                     {
                         // API version required by caller isn't fulfilled.
-                        let _ = result_tx.send(Err(
-                            PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled,
-                        ));
+                        let _ = result_tx
+                            .send(Err(RuntimeCallError2::ApiVersionRequirementUnfulfilled));
                         continue;
                     }
                 }
@@ -2266,8 +2480,8 @@ async fn run_background<TPlat: PlatformRef>(
                     .push(Box::pin(async move {
                         ProgressRuntimeCallRequest::Initialize(RuntimeCallRequest {
                             block_hash,
-                            block_number: pinned_block.block_number,
-                            block_state_root_hash: pinned_block.state_trie_root_hash,
+                            block_number,
+                            block_state_trie_root_hash,
                             function_name,
                             parameters_vectored,
                             runtime,
@@ -2295,7 +2509,7 @@ async fn run_background<TPlat: PlatformRef>(
                     } => {
                         operation
                             .inaccessible_errors
-                            .push(PinnedBlockRuntimeCallInaccessibleError::Network(error));
+                            .push(RuntimeCallInaccessibleError::Network(error));
                         (operation, None)
                     }
                 };
@@ -2330,11 +2544,10 @@ async fn run_background<TPlat: PlatformRef>(
                                 // call cannot possibly succeed.
                                 // This can happen for example because the requested function
                                 // doesn't exist.
-                                let _ = operation.result_tx.send(Err(
-                                    PinnedBlockRuntimeCallError::Execution(
-                                        PinnedBlockRuntimeCallExecutionError::Start(error),
-                                    ),
-                                ));
+                                let _ =
+                                    operation.result_tx.send(Err(RuntimeCallError2::Execution(
+                                        RuntimeCallExecutionError::Start(error),
+                                    )));
                                 continue 'background_main_loop;
                             }
                         };
@@ -2353,13 +2566,10 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
                                 // Execution finished with an error.
-                                let _ = operation.result_tx.send(Err(
-                                    PinnedBlockRuntimeCallError::Execution(
-                                        PinnedBlockRuntimeCallExecutionError::Execution(
-                                            error.detail,
-                                        ),
-                                    ),
-                                ));
+                                let _ =
+                                    operation.result_tx.send(Err(RuntimeCallError2::Execution(
+                                        RuntimeCallExecutionError::Execution(error.detail),
+                                    )));
                                 continue 'background_main_loop;
                             }
                             executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
@@ -2383,10 +2593,8 @@ async fn run_background<TPlat: PlatformRef>(
                             executor::runtime_call::RuntimeCall::Offchain(_) => {
                                 // Forbidden host function called.
                                 let _ =
-                                    operation
-                                        .result_tx
-                                        .send(Err(PinnedBlockRuntimeCallError::Execution(
-                                        PinnedBlockRuntimeCallExecutionError::ForbiddenHostFunction,
+                                    operation.result_tx.send(Err(RuntimeCallError2::Execution(
+                                        RuntimeCallExecutionError::ForbiddenHostFunction,
                                     )));
                                 continue 'background_main_loop;
                             }
@@ -2403,7 +2611,9 @@ async fn run_background<TPlat: PlatformRef>(
                             let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
                             key.extend_from_slice(PREFIX);
                             key.extend_from_slice(child_trie.as_ref());
-                            match call_proof.storage_value(&operation.block_state_root_hash, &key) {
+                            match call_proof
+                                .storage_value(&operation.block_state_trie_root_hash, &key)
+                            {
                                 Err(_) => break,
                                 Ok(None) => None,
                                 Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
@@ -2412,7 +2622,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 },
                             }
                         } else {
-                            Some(operation.block_state_root_hash)
+                            Some(operation.block_state_trie_root_hash)
                         };
 
                         match call {
@@ -2465,7 +2675,7 @@ async fn run_background<TPlat: PlatformRef>(
                     // TODO: must ban peer
                     operation
                         .inaccessible_errors
-                        .push(PinnedBlockRuntimeCallInaccessibleError::MissingProofEntry);
+                        .push(RuntimeCallInaccessibleError::MissingProofEntry);
                     todo!()
                 }
 
@@ -2474,12 +2684,11 @@ async fn run_background<TPlat: PlatformRef>(
                 if u32::try_from(operation.inaccessible_errors.len()).unwrap_or(u32::MAX)
                     >= operation.total_attempts
                 {
-                    let _ =
-                        operation
-                            .result_tx
-                            .send(Err(PinnedBlockRuntimeCallError::Inaccessible(
-                                operation.inaccessible_errors,
-                            )));
+                    let _ = operation
+                        .result_tx
+                        .send(Err(RuntimeCallError2::Inaccessible(
+                            operation.inaccessible_errors,
+                        )));
                     continue 'background_main_loop;
                 }
 
@@ -3017,14 +3226,14 @@ enum ProgressRuntimeCallRequest {
 struct RuntimeCallRequest {
     block_hash: [u8; 32],
     block_number: u64,
-    block_state_root_hash: [u8; 32],
+    block_state_trie_root_hash: [u8; 32],
     function_name: String,
     parameters_vectored: Vec<u8>,
     runtime: executor::host::HostVmPrototype,
     total_attempts: u32,
     timeout_per_request: Duration,
-    inaccessible_errors: Vec<PinnedBlockRuntimeCallInaccessibleError>,
-    result_tx: oneshot::Sender<Result<Vec<u8>, PinnedBlockRuntimeCallError>>,
+    inaccessible_errors: Vec<RuntimeCallInaccessibleError>,
+    result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError2>>,
 }
 
 struct Runtime {

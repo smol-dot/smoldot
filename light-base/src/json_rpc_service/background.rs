@@ -926,7 +926,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 }
             })?;
 
-        let precall = self
+        // TODO: consider keeping pinned runtimes in a cache instead
+        Ok(self
             .runtime_service
             .pinned_runtime_access(
                 pinned_runtime_id.clone(),
@@ -934,12 +935,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 block_number,
                 state_trie_root_hash,
             )
-            .await;
-
-        // TODO: consider keeping pinned runtimes in a cache instead
-        self.runtime_service.unpin_runtime(pinned_runtime_id).await;
-
-        Ok(precall)
+            .await)
     }
 
     /// Performs a runtime call to a random block.
