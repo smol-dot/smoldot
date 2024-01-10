@@ -858,8 +858,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     NonZeroU32::new(1).unwrap(),
                 )
                 .await
-                .map_err(runtime_service::RuntimeCallError::StorageQuery)
-                .map_err(RuntimeCallError::Call)?;
+                .map_err(RuntimeCallError::StorageQuery)?;
             // TODO: not elegant
             let heap_pages = entries
                 .iter()
@@ -923,7 +922,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .await
             .map_err(|err| match err {
                 runtime_service::CompileAndPinRuntimeError::Crash => {
-                    RuntimeCallError::RuntimeServiceCrash
+                    RuntimeCallError::Call(runtime_service::RuntimeCallError::Crash)
                 }
             })?;
 
@@ -1043,6 +1042,8 @@ enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
+    /// Error while downloading the runtime from the network.
+    StorageQuery(sync_service::StorageQueryError),
     #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
 }
