@@ -655,16 +655,6 @@ pub enum PinPinnedBlockRuntimeError {
     BlockNotPinned,
 }
 
-/// See [`RuntimeService::pinned_block_state_trie_root_hash_number`].
-#[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockStateTrieRootHashNumberError {
-    /// Subscription is dead.
-    ObsoleteSubscription,
-
-    /// Requested block isn't pinned by the subscription.
-    BlockNotPinned,
-}
-
 /// See [`RuntimeService::pinned_runtime_specification`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum PinnedRuntimeSpecificationError {
