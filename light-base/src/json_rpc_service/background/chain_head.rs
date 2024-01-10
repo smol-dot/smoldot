@@ -1283,9 +1283,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         };
 
         // Determine whether the requested block hash is valid and create a future of the call.
-        // Creating the future immediately is necessary in order to guarantee that the block is
-        // still pinned.
-        let runtime_call_future = match self.subscription {
+        // This is done immediately is order to guarantee that the block is still pinned.
+        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self.subscription {
             Subscription::WithRuntime {
                 subscription_id, ..
             } => {
@@ -1295,21 +1294,43 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     return;
                 }
 
-                let runtime_service = self.runtime_service.clone();
-                async move {
-                    runtime_service
-                        .pinned_block_runtime_call(
-                            subscription_id,
-                            hash.0,
-                            function_to_call,
-                            None,
-                            call_parameters,
-                            3,
-                            Duration::from_secs(20),
-                            NonZeroU32::new(2).unwrap(),
-                        )
-                        .await
-                }
+                let pinned_runtime = match self
+                    .runtime_service
+                    .pin_pinned_block_runtime(subscription_id, hash.0)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                        unreachable!()
+                    }
+                    Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                        // The runtime service subscription is dead.
+                        request.respond(methods::Response::chainHead_unstable_call(
+                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                        ));
+                        return;
+                    }
+                };
+
+                let (block_state_trie_root_hash, block_number) = match self
+                    .runtime_service
+                    .pinned_block_state_trie_root_hash_number(subscription_id, hash.0)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(runtime_service::PinnedBlockStateTrieRootHashNumberError::BlockNotPinned) => {
+                        unreachable!()
+                    }
+                    Err(runtime_service::PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription) => {
+                        // The runtime service subscription is dead.
+                        request.respond(methods::Response::chainHead_unstable_call(
+                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                        ));
+                        return;
+                    }
+                };
+
+                (pinned_runtime, block_state_trie_root_hash, block_number)
             }
             Subscription::WithoutRuntime(_) => {
                 // It is invalid to call this function for a "without runtime" subscription.
@@ -1324,6 +1345,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
         let interrupt = event_listener::Event::new();
         let on_interrupt = interrupt.listen();
+        let runtime_service = self.runtime_service.clone();
 
         let _was_in = self.operations_in_progress.insert(
             operation_id.clone(),
@@ -1344,13 +1366,22 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         self.platform.spawn_task(
             format!("{}-chain-head-call", self.log_target).into(),
             async move {
-                // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
+                // Perform the execution, but cancel if the JSON-RPC client unsubscribes.
                 let runtime_call_result = {
-                    match runtime_call_future
-                        .map(Some)
-                        .or(on_interrupt.map(|()| None))
-                        .await
-                    {
+                    let runtime_call = runtime_service.runtime_call(
+                        pinned_runtime,
+                        hash.0,
+                        block_number,
+                        block_state_trie_root_hash,
+                        function_to_call,
+                        None,
+                        call_parameters,
+                        3,
+                        Duration::from_secs(20),
+                        NonZeroU32::new(2).unwrap(),
+                    );
+
+                    match runtime_call.map(Some).or(on_interrupt.map(|()| None)).await {
                         Some(v) => v,
                         None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                     }
@@ -1369,13 +1400,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
-                        // TODO: /!\ the pinned_block_runtime_call function should be split in two: first check if the subscription is correct, then only start the call
-                        todo!()
-                    }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::InvalidRuntime(error),
-                    )) => {
+                    Err(runtime_service::RuntimeCallError2::InvalidRuntime(error)) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),
@@ -1387,16 +1412,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled,
-                    )) => {
+                    Err(runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled) => {
                         // We pass `None` for the API requirement, thus this error can never
                         // happen.
                         unreachable!()
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::Crash,
-                    )) => {
+                    Err(runtime_service::RuntimeCallError2::Crash) => {
                         // TODO: is this the appropriate error?
                         let _ = to_main_task
                             .send(OperationEvent {
@@ -1408,10 +1429,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::Execution(
-                            runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
-                        ),
+                    Err(runtime_service::RuntimeCallError2::Execution(
+                        runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
                     )) => {
                         let _ = to_main_task
                             .send(OperationEvent {
@@ -1426,10 +1445,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::Execution(
-                            runtime_service::RuntimeCallExecutionError::Start(error),
-                        ),
+                    Err(runtime_service::RuntimeCallError2::Execution(
+                        runtime_service::RuntimeCallExecutionError::Start(error),
                     )) => {
                         let _ = to_main_task
                             .send(OperationEvent {
@@ -1442,10 +1459,8 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::Execution(
-                            runtime_service::RuntimeCallExecutionError::Execution(error),
-                        ),
+                    Err(runtime_service::RuntimeCallError2::Execution(
+                        runtime_service::RuntimeCallExecutionError::Execution(error),
                     )) => {
                         let _ = to_main_task
                             .send(OperationEvent {
@@ -1458,14 +1473,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => {
-                        // We start the runtime call only after having made sure that the block
-                        // was pinned. This can thus never happen.
-                        unreachable!()
-                    }
-                    Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                        runtime_service::RuntimeCallError2::Inaccessible(_),
-                    )) => {
+                    Err(runtime_service::RuntimeCallError2::Inaccessible(_)) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),
