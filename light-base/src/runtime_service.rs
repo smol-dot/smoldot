@@ -347,9 +347,8 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
     /// Performs a runtime call against a pinned block.
     ///
-    /// This function is a shortcut for calling [`RuntimeService::pin_pinned_block_runtime`],
-    /// [`RuntimeService::pinned_block_state_trie_root_hash_number`], and
-    /// [`RuntimeService:runtime_call`].
+    /// This function is a shortcut for calling [`RuntimeService::pin_pinned_block_runtime`]
+    /// and [`RuntimeService::runtime_call`].
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
     /// to make the call. The block must be currently pinned in the context of the provided
@@ -399,8 +398,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
 
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
     /// heap pages. If none is found, compiles the runtime and stores it within the
-    /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
-    /// [`RuntimeService::unpin_runtime`].
+    /// [`RuntimeService`].
     pub async fn compile_and_pin_runtime(
         &self,
         storage_code: Option<Vec<u8>>,
@@ -427,10 +425,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         ))
     }
 
-    /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
-    /// heap pages. If none is found, compiles the runtime and stores it within the
-    /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
-    /// [`RuntimeService::unpin_runtime`].
+    /// Returns the runtime specification of the given runtime.
     pub async fn pinned_runtime_specification(
         &self,
         pinned_runtime: PinnedRuntime,
@@ -2803,7 +2798,7 @@ enum ProgressRuntimeCallRequest {
     },
 }
 
-/// See [`CallProofRequestDone::operation`].
+/// See [`ProgressRuntimeCallRequest`].
 struct RuntimeCallRequest {
     block_hash: [u8; 32],
     block_number: u64,
