@@ -1396,22 +1396,22 @@ impl ParaheadError {
         match self {
             ParaheadError::RuntimeCall(
                 runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError2::Inaccessible(_),
+                    runtime_service::RuntimeCallError::Inaccessible(_),
                 ),
             ) => true,
             ParaheadError::RuntimeCall(
                 runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned
                 | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError2::Execution(_),
+                    runtime_service::RuntimeCallError::Execution(_),
                 )
                 | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError2::Crash,
+                    runtime_service::RuntimeCallError::Crash,
                 )
                 | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError2::InvalidRuntime(_),
+                    runtime_service::RuntimeCallError::InvalidRuntime(_),
                 )
                 | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled,
+                    runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
                 )
                 | runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
             ) => false,

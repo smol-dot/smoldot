@@ -57,7 +57,7 @@ pub(super) enum Message {
         /// Hash of the block to query.
         block_hash: [u8; 32],
         /// How to send back the result.
-        result_tx: oneshot::Sender<Option<runtime_service::PinnedRuntime>>,
+        result_tx: oneshot::Sender<Option<(runtime_service::PinnedRuntime, [u8; 32], u64)>>,
     },
 
     /// The task must send back the current best block hash.

@@ -1380,7 +1380,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::RuntimeCallError2::InvalidRuntime(error)) => {
+                    Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),
@@ -1392,12 +1392,12 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled) => {
+                    Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
                         // We pass `None` for the API requirement, thus this error can never
                         // happen.
                         unreachable!()
                     }
-                    Err(runtime_service::RuntimeCallError2::Crash) => {
+                    Err(runtime_service::RuntimeCallError::Crash) => {
                         // TODO: is this the appropriate error?
                         let _ = to_main_task
                             .send(OperationEvent {
@@ -1409,7 +1409,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::RuntimeCallError2::Execution(
+                    Err(runtime_service::RuntimeCallError::Execution(
                         runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
                     )) => {
                         let _ = to_main_task
@@ -1425,7 +1425,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::RuntimeCallError2::Execution(
+                    Err(runtime_service::RuntimeCallError::Execution(
                         runtime_service::RuntimeCallExecutionError::Start(error),
                     )) => {
                         let _ = to_main_task
@@ -1439,7 +1439,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::RuntimeCallError2::Execution(
+                    Err(runtime_service::RuntimeCallError::Execution(
                         runtime_service::RuntimeCallExecutionError::Execution(error),
                     )) => {
                         let _ = to_main_task
@@ -1453,7 +1453,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             })
                             .await;
                     }
-                    Err(runtime_service::RuntimeCallError2::Inaccessible(_)) => {
+                    Err(runtime_service::RuntimeCallError::Inaccessible(_)) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),

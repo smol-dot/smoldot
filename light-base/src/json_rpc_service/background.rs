@@ -785,7 +785,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     ) -> Result<(runtime_service::PinnedRuntime, [u8; 32], u64), RuntimeCallError> {
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
         // should be in there.
-        if let Some(pinned_runtime) = {
+        if let Some((pinned_runtime, state_trie_root_hash, block_number)) = {
             let (tx, rx) = oneshot::channel();
             self.to_legacy
                 .lock()
@@ -798,7 +798,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .unwrap();
             rx.await.unwrap()
         } {
-            return Ok(pinned_runtime);
+            return Ok((pinned_runtime, state_trie_root_hash, block_number));
         };
 
         // Second situation: the block is not in the cache of recent blocks. This isn't great.
@@ -1044,7 +1044,7 @@ enum RuntimeCallError {
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
     #[display(fmt = "{_0}")]
-    Call(runtime_service::RuntimeCallError2),
+    Call(runtime_service::RuntimeCallError),
 }
 
 #[derive(Debug)]

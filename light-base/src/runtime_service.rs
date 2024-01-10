@@ -313,7 +313,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<Vec<u8>, RuntimeCallError2> {
+    ) -> Result<Vec<u8>, RuntimeCallError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         self.send_message_or_restart_service(ToBackground::RuntimeCall {
@@ -335,7 +335,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             Ok(result) => result,
             Err(_) => {
                 // Background service has crashed.
-                Err(RuntimeCallError2::Crash)
+                Err(RuntimeCallError::Crash)
             }
         }
     }
@@ -390,71 +390,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         )
         .await
         .map_err(PinnedBlockRuntimeCallError::RuntimeCall)
-    }
-
-    /// Lock the runtime service and prepare a call to a runtime entry point.
-    ///
-    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
-    /// to make the call. The block must be currently pinned in the context of the provided
-    /// [`SubscriptionId`].
-    ///
-    /// Returns an error if the subscription is stale, meaning that it has been reset by the
-    /// runtime service.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the given block isn't currently pinned by the given subscription.
-    ///
-    pub async fn pinned_block_runtime_access(
-        &self,
-        subscription_id: SubscriptionId,
-        block_hash: [u8; 32],
-    ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let _ = self
-            .to_background
-            .lock()
-            .await
-            .send(ToBackground::PinnedBlockRuntimeAccess {
-                result_tx,
-                subscription_id,
-                block_hash,
-            })
-            .await;
-
-        match result_rx.await {
-            Ok(Err(())) => {
-                // Background service indicates that the block isn't pinned.
-                panic!()
-            }
-            Ok(Ok(outcome)) => outcome,
-            Err(_) => {
-                // Background service has crashed. This means that the subscription is obsolete.
-                Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)
-            }
-        }
-    }
-
-    /// Lock the runtime service and prepare a call to a runtime entry point.
-    ///
-    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
-    /// to make the call. The block must be currently pinned in the context of the provided
-    /// [`SubscriptionId`].
-    pub async fn pinned_runtime_access(
-        &self,
-        pinned_runtime: PinnedRuntime,
-        block_hash: [u8; 32],
-        block_number: u64,
-        block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeAccess<TPlat> {
-        RuntimeAccess {
-            sync_service: self.background_task_config.sync_service.clone(),
-            hash: block_hash,
-            runtime: pinned_runtime.0,
-            block_number,
-            block_state_root_hash: block_state_trie_root_hash,
-        }
     }
 
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
@@ -704,10 +639,9 @@ pub enum PinnedBlockStateTrieRootHashNumberError {
     BlockNotPinned,
 }
 
-// TODO: rename to RuntimeCallError
 /// See [`RuntimeService::runtime_call`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum RuntimeCallError2 {
+pub enum RuntimeCallError {
     /// The runtime of the requested block is invalid.
     InvalidRuntime(RuntimeError),
 
@@ -747,7 +681,7 @@ pub enum PinnedBlockRuntimeCallError {
 
     /// Error during the runtime call.
     #[display(fmt = "{_0}")]
-    RuntimeCall(RuntimeCallError2),
+    RuntimeCall(RuntimeCallError),
 }
 
 /// See [`RuntimeCallError::Execution`].
@@ -770,298 +704,6 @@ pub enum RuntimeCallInaccessibleError {
     InvalidCallProof(proof_decode::Error),
     /// One or more entries are missing from the downloaded call proof.
     MissingProofEntry,
-}
-
-/// See [`RuntimeService::pinned_block_runtime_access`].
-#[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeAccessError {
-    /// Subscription is dead.
-    ObsoleteSubscription,
-}
-
-/// See [`RuntimeService::pinned_block_runtime_access`].
-#[must_use]
-pub struct RuntimeAccess<TPlat: PlatformRef> {
-    sync_service: Arc<sync_service::SyncService<TPlat>>,
-
-    block_number: u64,
-    block_state_root_hash: [u8; 32],
-    hash: [u8; 32],
-    runtime: Arc<Runtime>,
-}
-
-impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
-    /// Returns the hash of the block the call is being made against.
-    pub fn block_hash(&self) -> &[u8; 32] {
-        &self.hash
-    }
-
-    /// Returns the specification of the given runtime.
-    pub fn specification(&self) -> Result<executor::CoreVersion, RuntimeError> {
-        match self.runtime.runtime.as_ref() {
-            Ok(r) => Ok(r.runtime_spec.clone()),
-            Err(err) => Err(err.clone()),
-        }
-    }
-
-    pub async fn start<'b>(
-        &'b self,
-        method: &'b str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCall<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
-        // TODO: DRY :-/ this whole thing is messy
-
-        // Perform the call proof request.
-        // Note that `Background` is not locked.
-        // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
-        // TODO: also, an empty proof will be reported as an error right now, which is weird
-        let call_proof = self
-            .sync_service
-            .clone()
-            .call_proof_query(
-                self.block_number,
-                codec::CallProofRequestConfig {
-                    block_hash: self.hash,
-                    method: method.into(),
-                    parameter_vectored: parameter_vectored.clone(),
-                },
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .await
-            .map_err(RuntimeCallError::CallProof);
-
-        let call_proof = call_proof.and_then(|call_proof| {
-            proof_decode::decode_and_verify_proof(proof_decode::Config {
-                proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-            })
-            .map_err(RuntimeCallError::StorageRetrieval)
-        });
-
-        let (guarded, virtual_machine) = match self.runtime.runtime.as_ref() {
-            Ok(r) => {
-                let mut lock = r.virtual_machine.lock().await;
-                let vm = lock.take().unwrap();
-                (lock, vm)
-            }
-            Err(err) => {
-                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
-            }
-        };
-
-        let lock = RuntimeCall {
-            guarded,
-            block_state_root_hash: self.block_state_root_hash,
-            call_proof,
-        };
-
-        Ok((lock, virtual_machine))
-    }
-}
-
-/// See [`RuntimeService::pinned_block_runtime_access`].
-#[must_use]
-pub struct RuntimeCall<'a> {
-    guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
-    block_state_root_hash: [u8; 32],
-    call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
-}
-
-impl<'a> RuntimeCall<'a> {
-    /// Finds the given key in the call proof and returns the associated storage value.
-    ///
-    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
-    /// for the key in the main trie.
-    ///
-    /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
-    /// invalid.
-    // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_entry(
-        &self,
-        child_trie: Option<&[u8]>,
-        requested_key: &[u8],
-    ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        let trie_root = match child_trie {
-            Some(child_trie) => {
-                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
-                    Some(h) => h,
-                    None => return Ok(None),
-                }
-            }
-            None => self.block_state_root_hash,
-        };
-
-        match call_proof.storage_value(&trie_root, requested_key) {
-            Ok(v) => Ok(v),
-            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
-        }
-    }
-
-    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
-    ///
-    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
-    /// for the key in the main trie.
-    ///
-    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
-    /// trie. If `false`, then only keys that are strictly superior are returned.
-    ///
-    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
-    /// important as it can be the difference between `None` and `Some(None)`.
-    ///
-    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
-    ///
-    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
-    /// invalid.
-    pub fn next_key(
-        &'_ self,
-        child_trie: Option<&[u8]>,
-        key_before: impl Iterator<Item = trie::Nibble>,
-        or_equal: bool,
-        prefix: impl Iterator<Item = trie::Nibble>,
-        branch_nodes: bool,
-    ) -> Result<Option<proof_decode::EntryKeyIter<'_, Vec<u8>>>, RuntimeCallError> {
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        let trie_root = match child_trie {
-            Some(child_trie) => {
-                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
-                    Some(h) => h,
-                    None => return Ok(None),
-                }
-            }
-            None => self.block_state_root_hash,
-        };
-
-        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
-            Ok(v) => Ok(v),
-            Err(err) => return Err(RuntimeCallError::MissingProofEntry(err)),
-        }
-    }
-
-    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
-    /// value.
-    ///
-    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
-    /// for the key in the main trie.
-    ///
-    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
-    /// invalid.
-    ///
-    /// Returns `Ok(None)` if the child trie is known to not exist or if it is known that there is
-    /// no descendant.
-    pub fn closest_descendant_merkle_value(
-        &'_ self,
-        child_trie: Option<&[u8]>,
-        key: impl Iterator<Item = trie::Nibble>,
-    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        let trie_root = match child_trie {
-            Some(child_trie) => {
-                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
-                    Some(h) => h,
-                    None => return Ok(None),
-                }
-            }
-            None => self.block_state_root_hash,
-        };
-
-        call_proof
-            .closest_descendant_merkle_value(&trie_root, key)
-            .map_err(RuntimeCallError::MissingProofEntry)
-    }
-
-    /// End the runtime call.
-    ///
-    /// This method **must** be called.
-    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        debug_assert!(self.guarded.is_none());
-        *self.guarded = Some(vm);
-    }
-
-    fn child_trie_root(
-        proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
-        main_trie_root: &[u8; 32],
-        child_trie: &[u8],
-    ) -> Result<Option<[u8; 32]>, RuntimeCallError> {
-        // TODO: allocation here, but probably not problematic
-        const PREFIX: &[u8] = b":child_storage:default:";
-        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
-        key.extend_from_slice(PREFIX);
-        key.extend_from_slice(child_trie.as_ref());
-
-        match proof.storage_value(main_trie_root, &key) {
-            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
-            Ok(None) => Ok(None),
-            Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
-                Ok(hash) => Ok(Some(hash)),
-                Err(_) => Err(RuntimeCallError::InvalidChildTrieRoot),
-            },
-        }
-    }
-}
-
-impl<'a> Drop for RuntimeCall<'a> {
-    fn drop(&mut self) {
-        if self.guarded.is_none() {
-            // The [`RuntimeCall`] has been destroyed without being properly unlocked.
-            panic!()
-        }
-    }
-}
-
-/// Error that can happen when calling a runtime function.
-// TODO: clean up these errors
-#[derive(Debug, Clone, derive_more::Display)]
-pub enum RuntimeCallError {
-    /// Runtime of the block isn't valid.
-    #[display(fmt = "Runtime of the block isn't valid: {_0}")]
-    InvalidRuntime(RuntimeError),
-    /// Error while retrieving the storage item from other nodes.
-    // TODO: change error type?
-    #[display(fmt = "Error in call proof: {_0}")]
-    StorageRetrieval(proof_decode::Error),
-    /// One or more entries are missing from the call proof.
-    #[display(fmt = "One or more entries are missing from the call proof")]
-    MissingProofEntry(proof_decode::IncompleteProofError),
-    /// Call proof contains a reference to a child trie whose hash isn't 32 bytes.
-    InvalidChildTrieRoot,
-    /// Error while retrieving the call proof from the network.
-    #[display(fmt = "Error when retrieving the call proof: {_0}")]
-    CallProof(sync_service::CallProofQueryError),
-    /// Error while querying the storage of the block.
-    #[display(fmt = "Error while querying block storage: {_0}")]
-    StorageQuery(sync_service::StorageQueryError),
-}
-
-impl RuntimeCallError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    pub fn is_network_problem(&self) -> bool {
-        match self {
-            RuntimeCallError::InvalidRuntime(_) => false,
-            RuntimeCallError::StorageRetrieval(_) => false,
-            RuntimeCallError::MissingProofEntry(_) => false,
-            RuntimeCallError::InvalidChildTrieRoot => false,
-            RuntimeCallError::CallProof(err) => err.is_network_problem(),
-            RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
-        }
-    }
 }
 
 /// Error when analyzing the runtime.
@@ -1107,13 +749,6 @@ enum ToBackground<TPlat: PlatformRef> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
     },
-    PinnedBlockRuntimeAccess {
-        result_tx: oneshot::Sender<
-            Result<Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError>, ()>,
-        >,
-        subscription_id: SubscriptionId,
-        block_hash: [u8; 32],
-    },
     PinPinnedBlockRuntime {
         result_tx:
             oneshot::Sender<Result<(Arc<Runtime>, [u8; 32], u64), PinPinnedBlockRuntimeError>>,
@@ -1121,7 +756,7 @@ enum ToBackground<TPlat: PlatformRef> {
         block_hash: [u8; 32],
     },
     RuntimeCall {
-        result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError2>>,
+        result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError>>,
         pinned_runtime: Arc<Runtime>,
         block_hash: [u8; 32],
         block_number: u64,
@@ -2253,52 +1888,6 @@ async fn run_background<TPlat: PlatformRef>(
                 let _ = result_tx.send(Ok(()));
             }
 
-            WakeUpReason::ToBackground(ToBackground::PinnedBlockRuntimeAccess {
-                result_tx,
-                subscription_id,
-                block_hash,
-            }) => {
-                // Foreground wants to access the runtime of a pinned block.
-
-                let pinned_block = {
-                    if let Tree::FinalizedBlockRuntimeKnown {
-                        all_blocks_subscriptions,
-                        pinned_blocks,
-                        ..
-                    } = &mut background.tree
-                    {
-                        match pinned_blocks.get(&(subscription_id.0, block_hash)) {
-                            Some(v) => v.clone(),
-                            None => {
-                                // Cold path.
-                                if let Some((_, _)) =
-                                    all_blocks_subscriptions.get(&subscription_id.0)
-                                {
-                                    let _ = result_tx.send(Err(()));
-                                } else {
-                                    let _ = result_tx.send(Ok(Err(
-                                        PinnedBlockRuntimeAccessError::ObsoleteSubscription,
-                                    )));
-                                }
-                                continue;
-                            }
-                        }
-                    } else {
-                        let _ = result_tx
-                            .send(Ok(Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)));
-                        continue;
-                    }
-                };
-
-                let _ = result_tx.send(Ok(Ok(RuntimeAccess {
-                    sync_service: background.sync_service.clone(),
-                    hash: block_hash,
-                    runtime: pinned_block.runtime,
-                    block_number: pinned_block.block_number,
-                    block_state_root_hash: pinned_block.state_trie_root_hash,
-                })));
-            }
-
             WakeUpReason::ToBackground(ToBackground::PinPinnedBlockRuntime {
                 result_tx,
                 subscription_id,
@@ -2365,7 +1954,7 @@ async fn run_background<TPlat: PlatformRef>(
                         // The runtime call can't succeed because smoldot was incapable of
                         // compiling the runtime.
                         let _ =
-                            result_tx.send(Err(RuntimeCallError2::InvalidRuntime(error.clone())));
+                            result_tx.send(Err(RuntimeCallError::InvalidRuntime(error.clone())));
                         continue;
                     }
                 };
@@ -2379,8 +1968,8 @@ async fn run_background<TPlat: PlatformRef>(
                         .map_or(true, |v| !api_version.contains(&v))
                     {
                         // API version required by caller isn't fulfilled.
-                        let _ = result_tx
-                            .send(Err(RuntimeCallError2::ApiVersionRequirementUnfulfilled));
+                        let _ =
+                            result_tx.send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
                         continue;
                     }
                 }
@@ -2454,10 +2043,9 @@ async fn run_background<TPlat: PlatformRef>(
                                 // call cannot possibly succeed.
                                 // This can happen for example because the requested function
                                 // doesn't exist.
-                                let _ =
-                                    operation.result_tx.send(Err(RuntimeCallError2::Execution(
-                                        RuntimeCallExecutionError::Start(error),
-                                    )));
+                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
+                                    RuntimeCallExecutionError::Start(error),
+                                )));
                                 continue 'background_main_loop;
                             }
                         };
@@ -2476,10 +2064,9 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
                                 // Execution finished with an error.
-                                let _ =
-                                    operation.result_tx.send(Err(RuntimeCallError2::Execution(
-                                        RuntimeCallExecutionError::Execution(error.detail),
-                                    )));
+                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
+                                    RuntimeCallExecutionError::Execution(error.detail),
+                                )));
                                 continue 'background_main_loop;
                             }
                             executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
@@ -2502,10 +2089,9 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::Offchain(_) => {
                                 // Forbidden host function called.
-                                let _ =
-                                    operation.result_tx.send(Err(RuntimeCallError2::Execution(
-                                        RuntimeCallExecutionError::ForbiddenHostFunction,
-                                    )));
+                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
+                                    RuntimeCallExecutionError::ForbiddenHostFunction,
+                                )));
                                 continue 'background_main_loop;
                             }
                             executor::runtime_call::RuntimeCall::OffchainStorageSet(r) => {
@@ -2594,11 +2180,9 @@ async fn run_background<TPlat: PlatformRef>(
                 if u32::try_from(operation.inaccessible_errors.len()).unwrap_or(u32::MAX)
                     >= operation.total_attempts
                 {
-                    let _ = operation
-                        .result_tx
-                        .send(Err(RuntimeCallError2::Inaccessible(
-                            operation.inaccessible_errors,
-                        )));
+                    let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
+                        operation.inaccessible_errors,
+                    )));
                     continue 'background_main_loop;
                 }
 
@@ -3143,7 +2727,7 @@ struct RuntimeCallRequest {
     total_attempts: u32,
     timeout_per_request: Duration,
     inaccessible_errors: Vec<RuntimeCallInaccessibleError>,
-    result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError2>>,
+    result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError>>,
 }
 
 struct Runtime {

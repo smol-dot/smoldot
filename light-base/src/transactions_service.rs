@@ -1460,35 +1460,35 @@ async fn validate_transaction<TPlat: PlatformRef>(
             return Err(ValidationError::ObsoleteSubscription)
         }
         Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError2::Execution(error),
+            runtime_service::RuntimeCallError::Execution(error),
         )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
             ))
         }
         Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError2::Crash,
+            runtime_service::RuntimeCallError::Crash,
         )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Crash),
             ))
         }
         Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError2::Inaccessible(errors),
+            runtime_service::RuntimeCallError::Inaccessible(errors),
         )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
             ))
         }
         Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError2::InvalidRuntime(error),
+            runtime_service::RuntimeCallError::InvalidRuntime(error),
         )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
             ))
         }
         Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError2::ApiVersionRequirementUnfulfilled,
+            runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
         )) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(
