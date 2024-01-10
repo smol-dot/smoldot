@@ -51,10 +51,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "AccountNonceApi",
+                "AccountNonceApi".to_owned(),
                 1..=1,
-                "AccountNonceApi_account_nonce",
-                iter::once(&account.0),
+                "AccountNonceApi_account_nonce".to_owned(),
+                account.0,
                 4,
                 Duration::from_secs(4),
                 NonZeroU32::new(2).unwrap(),
@@ -402,10 +402,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "TransactionPaymentApi",
+                "TransactionPaymentApi".to_owned(),
                 1..=2,
-                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
-                json_rpc::payment_info::payment_info_parameters(&extrinsic.0),
+                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME.to_owned(),
+                json_rpc::payment_info::payment_info_parameters(&extrinsic.0).fold(
+                    Vec::new(),
+                    |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    },
+                ),
                 4,
                 Duration::from_secs(4),
                 NonZeroU32::new(2).unwrap(),
@@ -468,8 +474,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call_no_api_check(
                 &block_hash,
-                &function_to_call,
-                iter::once(call_parameters.0),
+                function_to_call.into_owned(),
+                call_parameters.0,
                 3,
                 Duration::from_secs(10),
                 NonZeroU32::new(3).unwrap(),
@@ -728,10 +734,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "Metadata",
+                "Metadata".to_owned(),
                 1..=2,
-                "Metadata_metadata",
-                iter::empty::<Vec<u8>>(),
+                "Metadata_metadata".to_owned(),
+                Vec::new(),
                 3,
                 Duration::from_secs(8),
                 NonZeroU32::new(1).unwrap(),
@@ -792,7 +798,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         match self
-            .runtime_access(&block_hash)
+            .pinned_runtime_and_block_info(&block_hash)
             .await
             .map(|l| l.specification())
         {

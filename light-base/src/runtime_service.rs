@@ -69,6 +69,7 @@ use async_lock::{Mutex, MutexGuard};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroUsize},
+    ops,
     pin::Pin,
     time::Duration,
 };
@@ -336,7 +337,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
         function_name: String,
-        required_api_version: Option<(String, u32)>,
+        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
@@ -385,7 +386,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
         function_name: String,
-        required_api_version: Option<(String, u32)>,
+        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
@@ -1175,7 +1176,7 @@ enum ToBackground<TPlat: PlatformRef> {
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
         function_name: String,
-        required_api_version: Option<(String, u32)>,
+        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
         parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
@@ -2466,7 +2467,7 @@ async fn run_background<TPlat: PlatformRef>(
                         .decode()
                         .apis
                         .find_version(&api_name)
-                        != Some(api_version)
+                        .map_or(true, |v| !api_version.contains(&v))
                     {
                         // API version required by caller isn't fulfilled.
                         let _ = result_tx

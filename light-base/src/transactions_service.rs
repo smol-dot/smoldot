@@ -1422,7 +1422,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         relay_chain_sync_subscription_id,
         block_hash,
         validate::VALIDATION_FUNCTION_NAME.to_owned(),
-        Some(("TaggedTransactionQueue".to_owned(), 3)),
+        Some(("TaggedTransactionQueue".to_owned(), 3..=3)),
         validate::validate_transaction_runtime_parameters_v3(
             iter::once(scale_encoded_transaction.as_ref()),
             source,
