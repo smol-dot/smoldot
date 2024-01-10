@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{log, network_service, platform::PlatformRef, sync_service};
+use crate::{log, platform::PlatformRef, sync_service};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
@@ -65,7 +65,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use async_lock::{Mutex, MutexGuard};
+use async_lock::Mutex;
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroUsize},
@@ -81,8 +81,7 @@ use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
-    network::codec,
-    trie::{self, proof_decode, Nibble, TrieEntryVersion},
+    trie::{self, proof_decode, Nibble},
 };
 
 /// Configuration for a runtime service.

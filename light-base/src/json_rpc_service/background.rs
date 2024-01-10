@@ -39,7 +39,6 @@ use core::{
 };
 use futures_channel::oneshot;
 use smoldot::{
-    executor::{host, runtime_call},
     json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
 };

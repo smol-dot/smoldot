@@ -1030,14 +1030,6 @@ pub struct CallProofQueryError {
     pub errors: Vec<network_service::CallProofRequestError>,
 }
 
-impl CallProofQueryError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    pub fn is_network_problem(&self) -> bool {
-        self.errors.iter().all(|err| err.is_network_problem())
-    }
-}
-
 impl fmt::Display for CallProofQueryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.errors.is_empty() {
