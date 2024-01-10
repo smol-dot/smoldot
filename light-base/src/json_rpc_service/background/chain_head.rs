@@ -40,8 +40,7 @@ use futures_util::{FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
-    executor::{self, runtime_call},
-    header,
+    executor, header,
     json_rpc::{self, methods, service},
     network::codec,
 };
@@ -1283,8 +1282,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
         };
 
-        // Determine whether the requested block hash is valid and start the call.
-        let pre_runtime_call = match self.subscription {
+        // Determine whether the requested block hash is valid and create a future of the call.
+        // Creating the future immediately is necessary in order to guarantee that the block is
+        // still pinned.
+        let runtime_call_future = match self.subscription {
             Subscription::WithRuntime {
                 subscription_id, ..
             } => {
@@ -1294,19 +1295,20 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     return;
                 }
 
-                match self
-                    .runtime_service
-                    .pinned_block_runtime_access(subscription_id, hash.0)
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
-                        // The runtime service subscription is dead.
-                        request.respond(methods::Response::chainHead_unstable_call(
-                            methods::ChainHeadBodyCallReturn::LimitReached {},
-                        ));
-                        return;
-                    }
+                let runtime_service = self.runtime_service.clone();
+                async move {
+                    runtime_service
+                        .pinned_block_runtime_call(
+                            subscription_id,
+                            hash.0,
+                            function_to_call,
+                            None,
+                            call_parameters,
+                            3,
+                            Duration::from_secs(20),
+                            NonZeroU32::new(2).unwrap(),
+                        )
+                        .await
                 }
             }
             Subscription::WithoutRuntime(_) => {
@@ -1339,252 +1341,107 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         ));
 
         // Finish the call asynchronously.
-        self.platform
-            .spawn_task(format!("{}-chain-head-call", self.log_target).into(), {
+        self.platform.spawn_task(
+            format!("{}-chain-head-call", self.log_target).into(),
             async move {
-                let pre_runtime_call = {
-                    let call_future = pre_runtime_call.start(
-                        &function_to_call,
-                        iter::once(&call_parameters),
-                        3,
-                        Duration::from_secs(20),
-                        NonZeroU32::new(2).unwrap(),
-                    );
-
-                    // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
-                    match call_future.map(Some).or(on_interrupt.map(|()| None)).await {
+                // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
+                let runtime_call_result = {
+                    match runtime_call_future
+                        .map(Some)
+                        .or(on_interrupt.map(|()| None))
+                        .await
+                    {
                         Some(v) => v,
-                        None => return  // JSON-RPC client has unsubscribed in the meanwhile.
+                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                     }
                 };
 
-                match pre_runtime_call {
-                    Ok((runtime_call_lock, virtual_machine)) => {
-                        match runtime_call::run(runtime_call::Config {
-                            virtual_machine,
-                            function_to_call: &function_to_call,
-                            parameter: iter::once(&call_parameters),
-                            storage_main_trie_changes: Default::default(),
-                            max_log_level: 0,
-                            calculate_trie_changes: false,
-                        }) {
-                            Err((error, prototype)) => {
-                                runtime_call_lock.unlock(prototype);
-                                let _ = to_main_task.send(OperationEvent {
-                                    operation_id: operation_id.clone(),
-                                    is_done: true,
-                                    notification: methods::FollowEvent::OperationError {
+                match runtime_call_result {
+                    Ok(output) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationCallDone {
+                                    operation_id: operation_id.clone().into(),
+                                    output: methods::HexString(output),
+                                },
+                            })
+                            .await;
+                    }
+                    Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
+                        // TODO: /!\ the pinned_block_runtime_call function should be split in two: first check if the subscription is correct, then only start the call
+                        todo!()
+                    }
+                    Err(runtime_service::PinnedBlockRuntimeCallError::InvalidRuntime(error)) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
                                     operation_id: operation_id.clone().into(),
                                     error: error.to_string().into(),
-                                }}).await;
-                            }
-                            Ok(mut runtime_call) => {
-                                loop {
-                                    match runtime_call {
-                                        runtime_call::RuntimeCall::Finished(Ok(success)) => {
-                                            let output =
-                                                success.virtual_machine.value().as_ref().to_owned();
-                                            runtime_call_lock
-                                                .unlock(success.virtual_machine.into_prototype());
-                                            let _ = to_main_task.send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationCallDone {
-                                                operation_id: operation_id.clone().into(),
-                                                output: methods::HexString(output),
-                                            }}).await;
-                                            break;
-                                        }
-                                        runtime_call::RuntimeCall::Finished(Err(error)) => {
-                                            runtime_call_lock.unlock(error.prototype);
-                                            let _ = to_main_task.send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: error.detail.to_string().into(),
-                                            }}).await;
-                                            break;
-                                        }
-                                        runtime_call::RuntimeCall::StorageGet(get) => {
-                                            // TODO: what if the remote lied to us?
-                                            let storage_value = {
-                                                let child_trie = get.child_trie();
-                                                runtime_call_lock.storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
-                                            };
-                                            let storage_value = match storage_value {
-                                                Ok(v) => v,
-                                                Err(_) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_call::RuntimeCall::StorageGet(
-                                                            get,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    let _ = to_main_task.send(OperationEvent {
-                                                        operation_id: operation_id.clone(),
-                                                        is_done: true,
-                                                        notification: methods::FollowEvent::OperationInaccessible {
-                                                        operation_id: operation_id.clone().into(),
-                                                    }}).await;
-                                                    break;
-                                                }
-                                            };
-                                            runtime_call = get.inject_value(
-                                                storage_value
-                                                    .map(|(val, vers)| (iter::once(val), vers)),
-                                            );
-                                        }
-                                        runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
-                                            // TODO: what if the remote lied to us?
-                                            let merkle_value = {
-                                                let child_trie = mv.child_trie();
-                                                runtime_call_lock
-                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), mv.key())
-                                            };
-                                            let merkle_value = match merkle_value {
-                                                Ok(v) => v,
-                                                Err(_) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
-                                                            mv,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    let _ = to_main_task.send(OperationEvent {
-                                                        operation_id: operation_id.clone(),
-                                                        is_done: true,
-                                                        notification: methods::FollowEvent::OperationInaccessible {
-                                                            operation_id: operation_id.clone().into(),
-                                                        }
-                                                    }).await;
-                                                    break;
-                                                }
-                                            };
-                                            runtime_call = mv.inject_merkle_value(merkle_value);
-                                        }
-                                        runtime_call::RuntimeCall::NextKey(nk) => {
-                                            // TODO: what if the remote lied to us?
-                                            let next_key = {
-                                                let child_trie = nk.child_trie();
-                                                runtime_call_lock.next_key(
-                                                    child_trie.as_ref().map(|c| c.as_ref()),
-                                                    nk.key(),
-                                                    nk.or_equal(),
-                                                    nk.prefix(),
-                                                    nk.branch_nodes(),
-                                                )
-                                            };
-                                            let next_key = match next_key {
-                                                Ok(v) => v,
-                                                Err(_) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_call::RuntimeCall::NextKey(
-                                                            nk,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    let _ = to_main_task.send(OperationEvent {
-                                                        operation_id: operation_id.clone(),
-                                                        is_done: true,
-                                                        notification: methods::FollowEvent::OperationInaccessible {
-                                                            operation_id: operation_id.clone().into(),
-                                                        }
-                                                    }).await;
-                                                    break;
-                                                }
-                                            };
-                                            runtime_call = nk.inject_key(next_key);
-                                        }
-                                        runtime_call::RuntimeCall::OffchainStorageSet(req) => {
-                                            runtime_call = req.resume();
-                                        }
-                                        runtime_call::RuntimeCall::SignatureVerification(sig) => {
-                                            runtime_call = sig.verify_and_resume();
-                                        }
-                                        runtime_call::RuntimeCall::Offchain(ctx) => {
-                                            runtime_call_lock.unlock(runtime_call::RuntimeCall::Offchain(ctx).into_prototype());
-                                            let _ = to_main_task.send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                    operation_id: operation_id.clone().into(),
-                                                    error: "Runtime has called an offchain host function".to_string().into(),
-                                                }
-                                            }).await;
-                                            break;
-                                        }
-                                        runtime_call::RuntimeCall::LogEmit(log) => {
-                                            // Logs are ignored. 
-                                            runtime_call = log.resume();
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
+                    Err(runtime_service::PinnedBlockRuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+                        // We pass `None` for the API requirement, thus this error can never
+                        // happen.
+                        unreachable!()
+                    }
+                    Err(runtime_service::PinnedBlockRuntimeCallError::Execution(
+                        runtime_service::PinnedBlockRuntimeCallExecutionError::ForbiddenHostFunction
+                    )) => {
                         let _ = to_main_task.send(OperationEvent {
                             operation_id: operation_id.clone(),
                             is_done: true,
                             notification: methods::FollowEvent::OperationError {
                                 operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
+                                error: "Runtime has called an offchain host function".to_string().into(),
                             }
                         }).await;
                     }
-                    Err(runtime_service::RuntimeCallError::StorageRetrieval(error)) => {
+                    Err(runtime_service::PinnedBlockRuntimeCallError::Execution(
+                        runtime_service::PinnedBlockRuntimeCallExecutionError::Start(error)
+                    )) => {
                         let _ = to_main_task.send(OperationEvent {
                             operation_id: operation_id.clone(),
                             is_done: true,
                             notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            }
-                        }).await;
+                            operation_id: operation_id.clone().into(),
+                            error: error.to_string().into(),
+                        }}).await;
                     }
-                    Err(runtime_service::RuntimeCallError::MissingProofEntry(_error)) => {
+                    Err(runtime_service::PinnedBlockRuntimeCallError::Execution(
+                        runtime_service::PinnedBlockRuntimeCallExecutionError::Execution(error)
+                    )) => {
                         let _ = to_main_task.send(OperationEvent {
                             operation_id: operation_id.clone(),
                             is_done: true,
                             notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: "incomplete call proof".into(),
-                            }
-                        }).await;
+                            operation_id: operation_id.clone().into(),
+                            error: error.to_string().into(),
+                        }}).await;
                     }
-                    Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: "invalid call proof".into(),
-                            }
-                        }).await;
+                    Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => {
+                        // We start the runtime call only after having made sure that the block
+                        // was pinned. This can thus never happen.
+                        unreachable!()
                     }
-                    Err(runtime_service::RuntimeCallError::CallProof(error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            }
-                        }).await;
-                    }
-                    Err(runtime_service::RuntimeCallError::StorageQuery(error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: format!("failed to fetch call proof: {error}").into(),
-                            }
-                        }).await;
+                    Err(runtime_service::PinnedBlockRuntimeCallError::Inaccessible(_)) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationInaccessible {
+                                    operation_id: operation_id.clone().into(),
+                                },
+                            })
+                            .await;
                     }
                 }
-            }
-        });
+            },
+        );
     }
 }
