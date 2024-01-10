@@ -1018,7 +1018,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             )
             .await
         {
-            Ok(output) => Ok((output, todo!())),
+            Ok(output) => Ok((output.output, output.api_version)),
             Err(error) => {
                 return Err(RuntimeCallError::Call(error));
             }

@@ -1454,7 +1454,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .unwrap_or_else(|| "unknown".to_owned())
     );
 
-    let output = match runtime_call_future.await {
+    let success = match runtime_call_future.await {
         Ok(output) => output,
         Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
             return Err(ValidationError::ObsoleteSubscription)
@@ -1499,7 +1499,7 @@ async fn validate_transaction<TPlat: PlatformRef>(
         Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => unreachable!(),
     };
 
-    match validate::decode_validate_transaction_return_value(&output) {
+    match validate::decode_validate_transaction_return_value(&success.output) {
         Ok(Ok(decoded)) => Ok(decoded),
         Ok(Err(err)) => Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
             err,

@@ -1368,14 +1368,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 };
 
                 match runtime_call_result {
-                    Ok(output) => {
+                    Ok(success) => {
                         let _ = to_main_task
                             .send(OperationEvent {
                                 operation_id: operation_id.clone(),
                                 is_done: true,
                                 notification: methods::FollowEvent::OperationCallDone {
                                     operation_id: operation_id.clone().into(),
-                                    output: methods::HexString(output),
+                                    output: methods::HexString(success.output),
                                 },
                             })
                             .await;

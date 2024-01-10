@@ -313,7 +313,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<Vec<u8>, RuntimeCallError> {
+    ) -> Result<RuntimeCallSuccess, RuntimeCallError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         self.send_message_or_restart_service(ToBackground::RuntimeCall {
@@ -362,7 +362,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
-    ) -> Result<Vec<u8>, PinnedBlockRuntimeCallError> {
+    ) -> Result<RuntimeCallSuccess, PinnedBlockRuntimeCallError> {
         let (pinned_runtime, block_state_trie_root_hash, block_number) = match self
             .pin_pinned_block_runtime(subscription_id, block_hash)
             .await
@@ -635,6 +635,16 @@ pub struct BlockNotification {
     pub new_runtime: Option<Result<executor::CoreVersion, RuntimeError>>,
 }
 
+/// Successful runtime call.
+#[derive(Debug)]
+pub struct RuntimeCallSuccess {
+    /// Output of the runtime call.
+    pub output: Vec<u8>,
+
+    /// Version of the API that was found. `Some` if and only if an API requirement was passed.
+    pub api_version: Option<u32>,
+}
+
 /// See [`RuntimeService::pin_pinned_block_runtime`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum PinPinnedBlockRuntimeError {
@@ -779,7 +789,7 @@ enum ToBackground<TPlat: PlatformRef> {
         block_hash: [u8; 32],
     },
     RuntimeCall {
-        result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError>>,
+        result_tx: oneshot::Sender<Result<RuntimeCallSuccess, RuntimeCallError>>,
         pinned_runtime: Arc<Runtime>,
         block_hash: [u8; 32],
         block_number: u64,
@@ -1982,20 +1992,31 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 };
 
-                if let Some((api_name, api_version)) = required_api_version {
-                    if runtime
-                        .runtime_version()
-                        .decode()
-                        .apis
-                        .find_version(&api_name)
-                        .map_or(true, |v| !api_version.contains(&v))
-                    {
-                        // API version required by caller isn't fulfilled.
-                        let _ =
-                            result_tx.send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
-                        continue;
-                    }
-                }
+                let api_version =
+                    if let Some((api_name, api_version_required)) = required_api_version {
+                        let Some(api_version) = runtime
+                            .runtime_version()
+                            .decode()
+                            .apis
+                            .find_version(&api_name)
+                        else {
+                            // API version required by caller isn't fulfilled.
+                            let _ = result_tx
+                                .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
+                            continue;
+                        };
+
+                        if !api_version_required.contains(&api_version) {
+                            // API version required by caller isn't fulfilled.
+                            let _ = result_tx
+                                .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
+                            continue;
+                        }
+
+                        Some(api_version)
+                    } else {
+                        None
+                    };
 
                 background
                     .progress_runtime_call_requests
@@ -2005,6 +2026,7 @@ async fn run_background<TPlat: PlatformRef>(
                             block_number,
                             block_state_trie_root_hash,
                             function_name,
+                            api_version,
                             parameters_vectored,
                             runtime,
                             total_attempts,
@@ -2078,11 +2100,11 @@ async fn run_background<TPlat: PlatformRef>(
                             executor::runtime_call::RuntimeCall::Finished(Ok(finished)) => {
                                 // Execution finished successfully.
                                 // This is the happy path.
-                                let _ = operation.result_tx.send(Ok(finished
-                                    .virtual_machine
-                                    .value()
-                                    .as_ref()
-                                    .to_owned()));
+                                let output = finished.virtual_machine.value().as_ref().to_owned();
+                                let _ = operation.result_tx.send(Ok(RuntimeCallSuccess {
+                                    output,
+                                    api_version: operation.api_version,
+                                }));
                                 continue 'background_main_loop;
                             }
                             executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
@@ -2745,12 +2767,14 @@ struct RuntimeCallRequest {
     block_number: u64,
     block_state_trie_root_hash: [u8; 32],
     function_name: String,
+    /// Version of the API that was found. `Some` if and only if an API requirement was passed.
+    api_version: Option<u32>,
     parameters_vectored: Vec<u8>,
     runtime: executor::host::HostVmPrototype,
     total_attempts: u32,
     timeout_per_request: Duration,
     inaccessible_errors: Vec<RuntimeCallInaccessibleError>,
-    result_tx: oneshot::Sender<Result<Vec<u8>, RuntimeCallError>>,
+    result_tx: oneshot::Sender<Result<RuntimeCallSuccess, RuntimeCallError>>,
 }
 
 struct Runtime {

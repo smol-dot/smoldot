@@ -1341,7 +1341,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
     // Call `ParachainHost_persisted_validation_data` in order to know where the parachain is.
-    let output = relay_chain_sync
+    let success = relay_chain_sync
         .pinned_block_runtime_call(
             subscription_id,
             *block_hash,
@@ -1365,7 +1365,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
     // Try decode the result of the runtime call.
     // If this fails, it indicates an incompatibility between smoldot and the relay chain.
     match para::decode_persisted_validation_data_return_value(
-        &output,
+        &success.output,
         relay_chain_sync.block_number_bytes(),
     ) {
         Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
