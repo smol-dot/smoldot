@@ -54,10 +54,10 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{log, platform::PlatformRef, sync_service};
+use crate::{log, network_service, platform::PlatformRef, sync_service};
 
 use alloc::{
-    borrow::ToOwned as _,
+    borrow::{Cow, ToOwned as _},
     boxed::Box,
     collections::BTreeMap,
     format,
@@ -65,10 +65,11 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use async_lock::{Mutex, MutexGuard};
+use async_lock::Mutex;
 use core::{
-    iter, mem,
+    cmp, iter, mem,
     num::{NonZeroU32, NonZeroUsize},
+    ops,
     pin::Pin,
     time::Duration,
 };
@@ -76,12 +77,13 @@ use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, Stream, StreamExt as _};
 use itertools::Itertools as _;
+use rand::seq::IteratorRandom as _;
+use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
-    network::codec,
-    trie::{self, proof_decode, Nibble, TrieEntryVersion},
+    trie::{self, proof_decode, Nibble},
 };
 
 /// Configuration for a runtime service.
@@ -98,13 +100,18 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
+    /// Service responsible for accessing the networking of the chain.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+
     /// Header of the genesis block of the chain, in SCALE encoding.
     pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
-/// Identifies a runtime currently pinned within a [`RuntimeService`].
+/// Runtime currently pinned within a [`RuntimeService`].
+///
+/// Destroying this object automatically unpins the runtime.
 #[derive(Clone)]
-pub struct PinnedRuntimeId(Arc<Runtime>);
+pub struct PinnedRuntime(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: PlatformRef> {
@@ -125,6 +132,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
             sync_service: config.sync_service,
+            network_service: config.network_service,
             genesis_block_scale_encoded_header: config.genesis_block_scale_encoded_header,
         };
 
@@ -253,31 +261,28 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         result_rx.await.unwrap_or(None)
     }
 
-    /// Lock the runtime service and prepare a call to a runtime entry point.
+    /// Pins the runtime of a pinned block.
     ///
-    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
-    /// to make the call. The block must be currently pinned in the context of the provided
+    /// The hash of the block passed as parameter corresponds to the block whose runtime is to
+    /// be pinned. The block must be currently pinned in the context of the provided
     /// [`SubscriptionId`].
+    ///
+    /// Returns the pinned runtime, plus the state trie root hash and height of the block.
     ///
     /// Returns an error if the subscription is stale, meaning that it has been reset by the
     /// runtime service.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the given block isn't currently pinned by the given subscription.
-    ///
-    pub async fn pinned_block_runtime_access(
+    pub async fn pin_pinned_block_runtime(
         &self,
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
-    ) -> Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError> {
+    ) -> Result<(PinnedRuntime, [u8; 32], u64), PinPinnedBlockRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
             .to_background
             .lock()
             .await
-            .send(ToBackground::PinnedBlockRuntimeAccess {
+            .send(ToBackground::PinPinnedBlockRuntime {
                 result_tx,
                 subscription_id,
                 block_hash,
@@ -285,55 +290,122 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             .await;
 
         match result_rx.await {
-            Ok(Err(())) => {
-                // Background service indicates that the block isn't pinned.
-                panic!()
-            }
-            Ok(Ok(outcome)) => outcome,
+            Ok(result) => result.map(|(r, v, n)| (PinnedRuntime(r), v, n)),
             Err(_) => {
                 // Background service has crashed. This means that the subscription is obsolete.
-                Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)
+                Err(PinPinnedBlockRuntimeError::ObsoleteSubscription)
             }
         }
     }
 
-    /// Lock the runtime service and prepare a call to a runtime entry point.
+    /// Performs a runtime call.
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
     /// to make the call. The block must be currently pinned in the context of the provided
     /// [`SubscriptionId`].
     ///
-    /// # Panic
-    ///
-    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
-    ///
-    pub async fn pinned_runtime_access(
+    /// Returns an error if the subscription is stale, meaning that it has been reset by the
+    /// runtime service.
+    pub async fn runtime_call(
         &self,
-        pinned_runtime_id: PinnedRuntimeId,
+        pinned_runtime: PinnedRuntime,
         block_hash: [u8; 32],
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
-    ) -> RuntimeAccess<TPlat> {
-        RuntimeAccess {
-            sync_service: self.background_task_config.sync_service.clone(),
-            hash: block_hash,
-            runtime: pinned_runtime_id.0,
+        function_name: String,
+        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
+        parameters_vectored: Vec<u8>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
+    ) -> Result<RuntimeCallSuccess, RuntimeCallError> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        self.send_message_or_restart_service(ToBackground::RuntimeCall {
+            result_tx,
+            pinned_runtime: pinned_runtime.0,
+            block_hash,
             block_number,
-            block_state_root_hash: block_state_trie_root_hash,
+            block_state_trie_root_hash,
+            function_name,
+            required_api_version,
+            parameters_vectored,
+            total_attempts,
+            timeout_per_request,
+            _max_parallel: max_parallel,
+        })
+        .await;
+
+        match result_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                // Background service has crashed.
+                Err(RuntimeCallError::Crash)
+            }
         }
+    }
+
+    /// Performs a runtime call against a pinned block.
+    ///
+    /// This function is a shortcut for calling [`RuntimeService::pin_pinned_block_runtime`]
+    /// and [`RuntimeService::runtime_call`].
+    ///
+    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
+    /// to make the call. The block must be currently pinned in the context of the provided
+    /// [`SubscriptionId`].
+    ///
+    /// Returns an error if the subscription is stale, meaning that it has been reset by the
+    /// runtime service.
+    pub async fn pinned_block_runtime_call(
+        &self,
+        subscription_id: SubscriptionId,
+        block_hash: [u8; 32],
+        function_name: String,
+        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
+        parameters_vectored: Vec<u8>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
+    ) -> Result<RuntimeCallSuccess, PinnedBlockRuntimeCallError> {
+        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self
+            .pin_pinned_block_runtime(subscription_id, block_hash)
+            .await
+        {
+            Ok(v) => v,
+            Err(PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                return Err(PinnedBlockRuntimeCallError::BlockNotPinned);
+            }
+            Err(PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                return Err(PinnedBlockRuntimeCallError::ObsoleteSubscription)
+            }
+        };
+
+        self.runtime_call(
+            pinned_runtime,
+            block_hash,
+            block_number,
+            block_state_trie_root_hash,
+            function_name,
+            required_api_version,
+            parameters_vectored,
+            total_attempts,
+            timeout_per_request,
+            max_parallel,
+        )
+        .await
+        .map_err(PinnedBlockRuntimeCallError::RuntimeCall)
     }
 
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
     /// heap pages. If none is found, compiles the runtime and stores it within the
-    /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
-    /// [`RuntimeService::unpin_runtime`].
+    /// [`RuntimeService`].
     pub async fn compile_and_pin_runtime(
         &self,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
         code_merkle_value: Option<Vec<u8>>,
         closest_ancestor_excluding: Option<Vec<Nibble>>,
-    ) -> Result<PinnedRuntimeId, CompileAndPinRuntimeError> {
+    ) -> Result<PinnedRuntime, CompileAndPinRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -346,23 +418,24 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             })
             .await;
 
-        Ok(PinnedRuntimeId(
+        Ok(PinnedRuntime(
             result_rx
                 .await
                 .map_err(|_| CompileAndPinRuntimeError::Crash)?,
         ))
     }
 
-    /// Un-pins a previously-pinned runtime.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
-    ///
-    pub async fn unpin_runtime(&self, id: PinnedRuntimeId) {
-        // Nothing to do.
-        // TODO: doesn't check whether id is stale
-        drop(id);
+    /// Returns the runtime specification of the given runtime.
+    pub async fn pinned_runtime_specification(
+        &self,
+        pinned_runtime: PinnedRuntime,
+    ) -> Result<executor::CoreVersion, PinnedRuntimeSpecificationError> {
+        match &pinned_runtime.0.runtime {
+            Ok(rt) => Ok(rt.runtime_version().clone()),
+            Err(error) => Err(PinnedRuntimeSpecificationError::InvalidRuntime(
+                error.clone(),
+            )),
+        }
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -562,296 +635,98 @@ pub struct BlockNotification {
     pub new_runtime: Option<Result<executor::CoreVersion, RuntimeError>>,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_access`].
+/// Successful runtime call.
+#[derive(Debug)]
+pub struct RuntimeCallSuccess {
+    /// Output of the runtime call.
+    pub output: Vec<u8>,
+
+    /// Version of the API that was found. `Some` if and only if an API requirement was passed.
+    pub api_version: Option<u32>,
+}
+
+/// See [`RuntimeService::pin_pinned_block_runtime`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeAccessError {
+pub enum PinPinnedBlockRuntimeError {
     /// Subscription is dead.
     ObsoleteSubscription,
+
+    /// Requested block isn't pinned by the subscription.
+    BlockNotPinned,
 }
 
-/// See [`RuntimeService::pinned_block_runtime_access`].
-#[must_use]
-pub struct RuntimeAccess<TPlat: PlatformRef> {
-    sync_service: Arc<sync_service::SyncService<TPlat>>,
-
-    block_number: u64,
-    block_state_root_hash: [u8; 32],
-    hash: [u8; 32],
-    runtime: Arc<Runtime>,
-}
-
-impl<TPlat: PlatformRef> RuntimeAccess<TPlat> {
-    /// Returns the hash of the block the call is being made against.
-    pub fn block_hash(&self) -> &[u8; 32] {
-        &self.hash
-    }
-
-    /// Returns the specification of the given runtime.
-    pub fn specification(&self) -> Result<executor::CoreVersion, RuntimeError> {
-        match self.runtime.runtime.as_ref() {
-            Ok(r) => Ok(r.runtime_spec.clone()),
-            Err(err) => Err(err.clone()),
-        }
-    }
-
-    pub async fn start<'b>(
-        &'b self,
-        method: &'b str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<(RuntimeCall<'b>, executor::host::HostVmPrototype), RuntimeCallError> {
-        // TODO: DRY :-/ this whole thing is messy
-
-        // Perform the call proof request.
-        // Note that `Background` is not locked.
-        // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
-        // TODO: also, an empty proof will be reported as an error right now, which is weird
-        let call_proof = self
-            .sync_service
-            .clone()
-            .call_proof_query(
-                self.block_number,
-                codec::CallProofRequestConfig {
-                    block_hash: self.hash,
-                    method: method.into(),
-                    parameter_vectored: parameter_vectored.clone(),
-                },
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .await
-            .map_err(RuntimeCallError::CallProof);
-
-        let call_proof = call_proof.and_then(|call_proof| {
-            proof_decode::decode_and_verify_proof(proof_decode::Config {
-                proof: call_proof.decode().to_owned(), // TODO: to_owned() inefficiency, need some help from the networking to obtain the owned data
-            })
-            .map_err(RuntimeCallError::StorageRetrieval)
-        });
-
-        let (guarded, virtual_machine) = match self.runtime.runtime.as_ref() {
-            Ok(r) => {
-                let mut lock = r.virtual_machine.lock().await;
-                let vm = lock.take().unwrap();
-                (lock, vm)
-            }
-            Err(err) => {
-                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
-            }
-        };
-
-        let lock = RuntimeCall {
-            guarded,
-            block_state_root_hash: self.block_state_root_hash,
-            call_proof,
-        };
-
-        Ok((lock, virtual_machine))
-    }
-}
-
-/// See [`RuntimeService::pinned_block_runtime_access`].
-#[must_use]
-pub struct RuntimeCall<'a> {
-    guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
-    block_state_root_hash: [u8; 32],
-    call_proof: Result<trie::proof_decode::DecodedTrieProof<Vec<u8>>, RuntimeCallError>,
-}
-
-impl<'a> RuntimeCall<'a> {
-    /// Finds the given key in the call proof and returns the associated storage value.
-    ///
-    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
-    /// for the key in the main trie.
-    ///
-    /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
-    /// invalid.
-    // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_entry(
-        &self,
-        child_trie: Option<&[u8]>,
-        requested_key: &[u8],
-    ) -> Result<Option<(&[u8], TrieEntryVersion)>, RuntimeCallError> {
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        let trie_root = match child_trie {
-            Some(child_trie) => {
-                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
-                    Some(h) => h,
-                    None => return Ok(None),
-                }
-            }
-            None => self.block_state_root_hash,
-        };
-
-        match call_proof.storage_value(&trie_root, requested_key) {
-            Ok(v) => Ok(v),
-            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
-        }
-    }
-
-    /// Find in the proof the trie node that follows `key_before` in lexicographic order.
-    ///
-    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
-    /// for the key in the main trie.
-    ///
-    /// If `or_equal` is `true`, then `key_before` is returned if it is equal to a node in the
-    /// trie. If `false`, then only keys that are strictly superior are returned.
-    ///
-    /// The returned value must always start with `prefix`. Note that the value of `prefix` is
-    /// important as it can be the difference between `None` and `Some(None)`.
-    ///
-    /// If `branch_nodes` is `false`, then trie nodes that don't have a storage value are skipped.
-    ///
-    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
-    /// invalid.
-    pub fn next_key(
-        &'_ self,
-        child_trie: Option<&[u8]>,
-        key_before: impl Iterator<Item = trie::Nibble>,
-        or_equal: bool,
-        prefix: impl Iterator<Item = trie::Nibble>,
-        branch_nodes: bool,
-    ) -> Result<Option<proof_decode::EntryKeyIter<'_, Vec<u8>>>, RuntimeCallError> {
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        let trie_root = match child_trie {
-            Some(child_trie) => {
-                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
-                    Some(h) => h,
-                    None => return Ok(None),
-                }
-            }
-            None => self.block_state_root_hash,
-        };
-
-        match call_proof.next_key(&trie_root, key_before, or_equal, prefix, branch_nodes) {
-            Ok(v) => Ok(v),
-            Err(err) => return Err(RuntimeCallError::MissingProofEntry(err)),
-        }
-    }
-
-    /// Find in the proof the closest trie node that descends from `key` and returns its Merkle
-    /// value.
-    ///
-    /// If `child_trie` is `Some`, look for the key in the given child trie. If it is `None`, look
-    /// for the key in the main trie.
-    ///
-    /// Returns an error if the proof doesn't contain enough information, meaning that the proof is
-    /// invalid.
-    ///
-    /// Returns `Ok(None)` if the child trie is known to not exist or if it is known that there is
-    /// no descendant.
-    pub fn closest_descendant_merkle_value(
-        &'_ self,
-        child_trie: Option<&[u8]>,
-        key: impl Iterator<Item = trie::Nibble>,
-    ) -> Result<Option<&'_ [u8]>, RuntimeCallError> {
-        let call_proof = match &self.call_proof {
-            Ok(p) => p,
-            Err(err) => return Err(err.clone()),
-        };
-
-        let trie_root = match child_trie {
-            Some(child_trie) => {
-                match Self::child_trie_root(call_proof, &self.block_state_root_hash, child_trie)? {
-                    Some(h) => h,
-                    None => return Ok(None),
-                }
-            }
-            None => self.block_state_root_hash,
-        };
-
-        call_proof
-            .closest_descendant_merkle_value(&trie_root, key)
-            .map_err(RuntimeCallError::MissingProofEntry)
-    }
-
-    /// End the runtime call.
-    ///
-    /// This method **must** be called.
-    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        debug_assert!(self.guarded.is_none());
-        *self.guarded = Some(vm);
-    }
-
-    fn child_trie_root(
-        proof: &proof_decode::DecodedTrieProof<Vec<u8>>,
-        main_trie_root: &[u8; 32],
-        child_trie: &[u8],
-    ) -> Result<Option<[u8; 32]>, RuntimeCallError> {
-        // TODO: allocation here, but probably not problematic
-        const PREFIX: &[u8] = b":child_storage:default:";
-        let mut key = Vec::with_capacity(PREFIX.len() + child_trie.as_ref().len());
-        key.extend_from_slice(PREFIX);
-        key.extend_from_slice(child_trie.as_ref());
-
-        match proof.storage_value(main_trie_root, &key) {
-            Err(err) => Err(RuntimeCallError::MissingProofEntry(err)),
-            Ok(None) => Ok(None),
-            Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
-                Ok(hash) => Ok(Some(hash)),
-                Err(_) => Err(RuntimeCallError::InvalidChildTrieRoot),
-            },
-        }
-    }
-}
-
-impl<'a> Drop for RuntimeCall<'a> {
-    fn drop(&mut self) {
-        if self.guarded.is_none() {
-            // The [`RuntimeCall`] has been destroyed without being properly unlocked.
-            panic!()
-        }
-    }
-}
-
-/// Error that can happen when calling a runtime function.
-// TODO: clean up these errors
-#[derive(Debug, Clone, derive_more::Display)]
-pub enum RuntimeCallError {
-    /// Runtime of the block isn't valid.
-    #[display(fmt = "Runtime of the block isn't valid: {_0}")]
+/// See [`RuntimeService::pinned_runtime_specification`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum PinnedRuntimeSpecificationError {
+    /// The runtime is invalid.
     InvalidRuntime(RuntimeError),
-    /// Error while retrieving the storage item from other nodes.
-    // TODO: change error type?
-    #[display(fmt = "Error in call proof: {_0}")]
-    StorageRetrieval(proof_decode::Error),
-    /// One or more entries are missing from the call proof.
-    #[display(fmt = "One or more entries are missing from the call proof")]
-    MissingProofEntry(proof_decode::IncompleteProofError),
-    /// Call proof contains a reference to a child trie whose hash isn't 32 bytes.
-    InvalidChildTrieRoot,
-    /// Error while retrieving the call proof from the network.
-    #[display(fmt = "Error when retrieving the call proof: {_0}")]
-    CallProof(sync_service::CallProofQueryError),
-    /// Error while querying the storage of the block.
-    #[display(fmt = "Error while querying block storage: {_0}")]
-    StorageQuery(sync_service::StorageQueryError),
 }
 
-impl RuntimeCallError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    pub fn is_network_problem(&self) -> bool {
-        match self {
-            RuntimeCallError::InvalidRuntime(_) => false,
-            RuntimeCallError::StorageRetrieval(_) => false,
-            RuntimeCallError::MissingProofEntry(_) => false,
-            RuntimeCallError::InvalidChildTrieRoot => false,
-            RuntimeCallError::CallProof(err) => err.is_network_problem(),
-            RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
-        }
-    }
+/// See [`RuntimeService::runtime_call`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeCallError {
+    /// The runtime of the requested block is invalid.
+    InvalidRuntime(RuntimeError),
+
+    /// API version required for the call isn't fulfilled.
+    ApiVersionRequirementUnfulfilled,
+
+    /// Runtime service has crashed while the call was in progress.
+    ///
+    /// This doesn't necessarily indicate that the call was responsible for this crash.
+    Crash,
+
+    /// Error during the execution of the runtime.
+    ///
+    /// There is no point in trying the same call again, as it would result in the same error.
+    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    Execution(RuntimeCallExecutionError),
+
+    /// Error trying to access the storage required for the runtime call.
+    ///
+    /// Because these errors are non-fatal, the operation is attempted multiple times, and as such
+    /// there can be multiple errors.
+    ///
+    /// Trying the same call again might succeed.
+    #[display(fmt = "Error trying to access the storage required for the runtime call")]
+    // TODO: better display?
+    Inaccessible(Vec<RuntimeCallInaccessibleError>),
+}
+
+/// See [`RuntimeService::pinned_block_runtime_call`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum PinnedBlockRuntimeCallError {
+    /// Subscription is dead.
+    ObsoleteSubscription,
+
+    /// Requested block isn't pinned by the subscription.
+    BlockNotPinned,
+
+    /// Error during the runtime call.
+    #[display(fmt = "{_0}")]
+    RuntimeCall(RuntimeCallError),
+}
+
+/// See [`RuntimeCallError::Execution`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeCallExecutionError {
+    /// Failed to initialize the virtual machine.
+    Start(executor::host::StartErr),
+    /// Error during the execution of the virtual machine.
+    Execution(executor::runtime_call::ErrorDetail),
+    /// Virtual machine has called a host function that it is not allowed to call.
+    ForbiddenHostFunction,
+}
+
+/// See [`RuntimeCallError::Inaccessible`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeCallInaccessibleError {
+    /// Failed to download the call proof from the network.
+    Network(network_service::CallProofRequestError),
+    /// Call proof downloaded from the network has an invalid format.
+    InvalidCallProof(proof_decode::Error),
+    /// One or more entries are missing from the downloaded call proof.
+    MissingProofEntry,
 }
 
 /// Error when analyzing the runtime.
@@ -897,12 +772,24 @@ enum ToBackground<TPlat: PlatformRef> {
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
     },
-    PinnedBlockRuntimeAccess {
-        result_tx: oneshot::Sender<
-            Result<Result<RuntimeAccess<TPlat>, PinnedBlockRuntimeAccessError>, ()>,
-        >,
+    PinPinnedBlockRuntime {
+        result_tx:
+            oneshot::Sender<Result<(Arc<Runtime>, [u8; 32], u64), PinPinnedBlockRuntimeError>>,
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
+    },
+    RuntimeCall {
+        result_tx: oneshot::Sender<Result<RuntimeCallSuccess, RuntimeCallError>>,
+        pinned_runtime: Arc<Runtime>,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
+        function_name: String,
+        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
+        parameters_vectored: Vec<u8>,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
     },
 }
 
@@ -946,6 +833,7 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     genesis_block_scale_encoded_header: Vec<u8>,
 }
 
@@ -982,6 +870,7 @@ async fn run_background<TPlat: PlatformRef>(
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
             sync_service: config.sync_service.clone(),
+            network_service: config.network_service.clone(),
             to_background: Box::pin(to_background.clone()),
             to_background_tx: to_background_tx.clone(),
             next_subscription_id: 0,
@@ -994,11 +883,12 @@ async fn run_background<TPlat: PlatformRef>(
             // Initialized to `ready` so that the downloads immediately start.
             wake_up_new_necessary_download: Box::pin(future::ready(())),
             runtime_downloads: stream::FuturesUnordered::new(),
+            progress_runtime_call_requests: stream::FuturesUnordered::new(),
         }
     };
 
     // Inner loop. Process incoming events.
-    loop {
+    'background_main_loop: loop {
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
             NewNecessaryDownload,
@@ -1019,6 +909,7 @@ async fn run_background<TPlat: PlatformRef>(
                     RuntimeDownloadError,
                 >,
             ),
+            ProgressRuntimeCallRequest(ProgressRuntimeCallRequest),
         }
 
         // Wait for something to happen or for some processing to be necessary.
@@ -1051,6 +942,17 @@ async fn run_background<TPlat: PlatformRef>(
                     let (async_op_id, download_result) =
                         background.runtime_downloads.select_next_some().await;
                     WakeUpReason::RuntimeDownloadFinished(async_op_id, download_result)
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if !background.progress_runtime_call_requests.is_empty() {
+                    let result = background
+                        .progress_runtime_call_requests
+                        .select_next_some()
+                        .await;
+                    WakeUpReason::ProgressRuntimeCallRequest(result)
                 } else {
                     future::pending().await
                 }
@@ -1361,7 +1263,7 @@ async fn run_background<TPlat: PlatformRef>(
                                         block_runtime
                                             .runtime
                                             .as_ref()
-                                            .map(|rt| rt.runtime_spec.clone())
+                                            .map(|rt| rt.runtime_version().clone())
                                             .map_err(|err| err.clone()),
                                     )
                                 } else {
@@ -1566,15 +1468,7 @@ async fn run_background<TPlat: PlatformRef>(
                             code_merkle_value: finalized_block_runtime.code_merkle_value,
                             closest_ancestor_excluding: finalized_block_runtime
                                 .closest_ancestor_excluding,
-                            runtime: Ok(SuccessfulRuntime {
-                                runtime_spec: finalized_block_runtime
-                                    .virtual_machine
-                                    .runtime_version()
-                                    .clone(),
-                                virtual_machine: Mutex::new(Some(
-                                    finalized_block_runtime.virtual_machine,
-                                )),
-                            }),
+                            runtime: Ok(finalized_block_runtime.virtual_machine),
                         });
 
                         match &runtime.runtime {
@@ -1586,7 +1480,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     format!(
                                         "Finalized block runtime ready. Spec version: {}. \
                                         Size of `:code`: {}.",
-                                        runtime.runtime_spec.decode().spec_version,
+                                        runtime.runtime_version().decode().spec_version,
                                         BytesDisplay(storage_code_len)
                                     )
                                 );
@@ -1819,7 +1713,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     runtime
                                         .runtime
                                         .as_ref()
-                                        .map(|rt| rt.runtime_spec.clone())
+                                        .map(|rt| rt.runtime_version().clone())
                                         .map_err(|err| err.clone()),
                                 )
                             } else {
@@ -1849,7 +1743,7 @@ async fn run_background<TPlat: PlatformRef>(
                             .output_finalized_async_user_data()
                             .runtime
                             .as_ref()
-                            .map(|rt| rt.runtime_spec.clone())
+                            .map(|rt| rt.runtime_version().clone())
                             .map_err(|err| err.clone()),
                         non_finalized_blocks_ancestry_order,
                         new_blocks: Subscription {
@@ -1905,7 +1799,7 @@ async fn run_background<TPlat: PlatformRef>(
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
-                    let runtime = SuccessfulRuntime::from_storage(
+                    let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
@@ -2011,12 +1905,12 @@ async fn run_background<TPlat: PlatformRef>(
                 let _ = result_tx.send(Ok(()));
             }
 
-            WakeUpReason::ToBackground(ToBackground::PinnedBlockRuntimeAccess {
+            WakeUpReason::ToBackground(ToBackground::PinPinnedBlockRuntime {
                 result_tx,
                 subscription_id,
                 block_hash,
             }) => {
-                // Foreground wants to access the runtime of a pinned block.
+                // Foreground wants to pin the runtime of a pinned block.
 
                 let pinned_block = {
                     if let Tree::FinalizedBlockRuntimeKnown {
@@ -2032,29 +1926,370 @@ async fn run_background<TPlat: PlatformRef>(
                                 if let Some((_, _)) =
                                     all_blocks_subscriptions.get(&subscription_id.0)
                                 {
-                                    let _ = result_tx.send(Err(()));
+                                    let _ = result_tx
+                                        .send(Err(PinPinnedBlockRuntimeError::BlockNotPinned));
                                 } else {
-                                    let _ = result_tx.send(Ok(Err(
-                                        PinnedBlockRuntimeAccessError::ObsoleteSubscription,
-                                    )));
+                                    let _ = result_tx.send(Err(
+                                        PinPinnedBlockRuntimeError::ObsoleteSubscription,
+                                    ));
                                 }
                                 continue;
                             }
                         }
                     } else {
-                        let _ = result_tx
-                            .send(Ok(Err(PinnedBlockRuntimeAccessError::ObsoleteSubscription)));
+                        let _ =
+                            result_tx.send(Err(PinPinnedBlockRuntimeError::ObsoleteSubscription));
                         continue;
                     }
                 };
 
-                let _ = result_tx.send(Ok(Ok(RuntimeAccess {
-                    sync_service: background.sync_service.clone(),
-                    hash: block_hash,
-                    runtime: pinned_block.runtime,
-                    block_number: pinned_block.block_number,
-                    block_state_root_hash: pinned_block.state_trie_root_hash,
-                })));
+                let _ = result_tx.send(Ok((
+                    pinned_block.runtime.clone(),
+                    pinned_block.state_trie_root_hash,
+                    pinned_block.block_number,
+                )));
+            }
+
+            WakeUpReason::ToBackground(ToBackground::RuntimeCall {
+                result_tx,
+                pinned_runtime,
+                block_hash,
+                block_number,
+                block_state_trie_root_hash,
+                function_name,
+                required_api_version,
+                parameters_vectored,
+                total_attempts,
+                timeout_per_request,
+                _max_parallel: _, // TODO: unused /!\
+            }) => {
+                // Foreground wants to perform a runtime call.
+
+                let runtime = match &pinned_runtime.runtime {
+                    Ok(rt) => rt.clone(),
+                    Err(error) => {
+                        // The runtime call can't succeed because smoldot was incapable of
+                        // compiling the runtime.
+                        let _ =
+                            result_tx.send(Err(RuntimeCallError::InvalidRuntime(error.clone())));
+                        continue;
+                    }
+                };
+
+                let api_version =
+                    if let Some((api_name, api_version_required)) = required_api_version {
+                        let Some(api_version) = runtime
+                            .runtime_version()
+                            .decode()
+                            .apis
+                            .find_version(&api_name)
+                        else {
+                            // API version required by caller isn't fulfilled.
+                            let _ = result_tx
+                                .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
+                            continue;
+                        };
+
+                        if !api_version_required.contains(&api_version) {
+                            // API version required by caller isn't fulfilled.
+                            let _ = result_tx
+                                .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
+                            continue;
+                        }
+
+                        Some(api_version)
+                    } else {
+                        None
+                    };
+
+                background
+                    .progress_runtime_call_requests
+                    .push(Box::pin(async move {
+                        ProgressRuntimeCallRequest::Initialize(RuntimeCallRequest {
+                            block_hash,
+                            block_number,
+                            block_state_trie_root_hash,
+                            function_name,
+                            api_version,
+                            parameters_vectored,
+                            runtime,
+                            total_attempts,
+                            timeout_per_request,
+                            inaccessible_errors: Vec::with_capacity(cmp::min(
+                                16,
+                                usize::try_from(total_attempts).unwrap_or(usize::MAX),
+                            )),
+                            result_tx,
+                        })
+                    }));
+            }
+
+            WakeUpReason::ProgressRuntimeCallRequest(progress) => {
+                let (mut operation, call_proof_and_sender) = match progress {
+                    ProgressRuntimeCallRequest::Initialize(operation) => (operation, None),
+                    ProgressRuntimeCallRequest::CallProofRequestDone {
+                        result: Ok(proof),
+                        call_proof_sender,
+                        operation,
+                    } => (operation, Some((proof, call_proof_sender))),
+                    ProgressRuntimeCallRequest::CallProofRequestDone {
+                        result: Err(error),
+                        mut operation,
+                        call_proof_sender,
+                    } => {
+                        operation
+                            .inaccessible_errors
+                            .push(RuntimeCallInaccessibleError::Network(error));
+                        background
+                            .network_service
+                            .ban_and_disconnect(
+                                call_proof_sender,
+                                network_service::BanSeverity::Low,
+                                "call-proof-request-failed",
+                            )
+                            .await;
+                        (operation, None)
+                    }
+                };
+
+                if let Some((call_proof, call_proof_sender)) = call_proof_and_sender {
+                    // Try to decode the proof. Succeed just means that the proof has the correct
+                    // encoding, and doesn't guarantee that the proof has all the necessary
+                    // entries.
+                    let call_proof =
+                        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
+                            proof: call_proof.decode(),
+                        });
+
+                    // Attempt the runtime call.
+                    // If the call succeed, we interrupt the flow and `continue`.
+                    let mut call =
+                        match executor::runtime_call::run(executor::runtime_call::Config {
+                            virtual_machine: operation.runtime.clone(),
+                            function_to_call: &operation.function_name,
+                            parameter: iter::once(&operation.parameters_vectored),
+                            storage_main_trie_changes: Default::default(),
+                            max_log_level: 0,
+                            calculate_trie_changes: false,
+                        }) {
+                            Ok(call) => call,
+                            Err((error, _)) => {
+                                // If starting the execution triggers an error, then the runtime
+                                // call cannot possibly succeed.
+                                // This can happen for example because the requested function
+                                // doesn't exist.
+                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
+                                    RuntimeCallExecutionError::Start(error),
+                                )));
+                                continue 'background_main_loop;
+                            }
+                        };
+
+                    let error = loop {
+                        let call_proof = match &call_proof {
+                            Ok(p) => p,
+                            Err(error) => {
+                                break RuntimeCallInaccessibleError::InvalidCallProof(
+                                    error.clone(),
+                                );
+                            }
+                        };
+
+                        // Yield once at every iteration. This avoids monopolizing the CPU for
+                        // too long.
+                        futures_lite::future::yield_now().await;
+
+                        let child_trie = match call {
+                            executor::runtime_call::RuntimeCall::Finished(Ok(finished)) => {
+                                // Execution finished successfully.
+                                // This is the happy path.
+                                let output = finished.virtual_machine.value().as_ref().to_owned();
+                                let _ = operation.result_tx.send(Ok(RuntimeCallSuccess {
+                                    output,
+                                    api_version: operation.api_version,
+                                }));
+                                continue 'background_main_loop;
+                            }
+                            executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
+                                // Execution finished with an error.
+                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
+                                    RuntimeCallExecutionError::Execution(error.detail),
+                                )));
+                                continue 'background_main_loop;
+                            }
+                            executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
+                                get.child_trie().map(|c| c.as_ref().to_owned()) // TODO: overhead
+                            }
+                            executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
+                                ref mv,
+                            ) => mv.child_trie().map(|c| c.as_ref().to_owned()), // TODO: overhead
+                            executor::runtime_call::RuntimeCall::NextKey(ref nk) => {
+                                nk.child_trie().map(|c| c.as_ref().to_owned()) // TODO: overhead
+                            }
+                            executor::runtime_call::RuntimeCall::SignatureVerification(r) => {
+                                call = r.verify_and_resume();
+                                continue;
+                            }
+                            executor::runtime_call::RuntimeCall::LogEmit(r) => {
+                                // Logs are ignored.
+                                call = r.resume();
+                                continue;
+                            }
+                            executor::runtime_call::RuntimeCall::Offchain(_) => {
+                                // Forbidden host function called.
+                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
+                                    RuntimeCallExecutionError::ForbiddenHostFunction,
+                                )));
+                                continue 'background_main_loop;
+                            }
+                            executor::runtime_call::RuntimeCall::OffchainStorageSet(r) => {
+                                // Ignore offchain storage writes.
+                                call = r.resume();
+                                continue;
+                            }
+                        };
+
+                        let trie_root = if let Some(child_trie) = child_trie {
+                            // TODO: allocation here, but probably not problematic
+                            const PREFIX: &[u8] = b":child_storage:default:";
+                            let mut key = Vec::with_capacity(PREFIX.len() + child_trie.len());
+                            key.extend_from_slice(PREFIX);
+                            key.extend_from_slice(child_trie.as_ref());
+                            match call_proof
+                                .storage_value(&operation.block_state_trie_root_hash, &key)
+                            {
+                                Err(_) => break RuntimeCallInaccessibleError::MissingProofEntry,
+                                Ok(None) => None,
+                                Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
+                                    Ok(hash) => Some(hash),
+                                    Err(_) => {
+                                        break RuntimeCallInaccessibleError::MissingProofEntry
+                                    }
+                                },
+                            }
+                        } else {
+                            Some(operation.block_state_trie_root_hash)
+                        };
+
+                        match call {
+                            executor::runtime_call::RuntimeCall::StorageGet(get) => {
+                                let storage_value = if let Some(trie_root) = trie_root {
+                                    call_proof.storage_value(&trie_root, get.key().as_ref())
+                                } else {
+                                    Ok(None)
+                                };
+                                let Ok(storage_value) = storage_value else {
+                                    break RuntimeCallInaccessibleError::MissingProofEntry;
+                                };
+                                call = get.inject_value(
+                                    storage_value.map(|(val, vers)| (iter::once(val), vers)),
+                                );
+                            }
+                            executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
+                                mv,
+                            ) => {
+                                let merkle_value = if let Some(trie_root) = trie_root {
+                                    call_proof.closest_descendant_merkle_value(&trie_root, mv.key())
+                                } else {
+                                    Ok(None)
+                                };
+                                let Ok(merkle_value) = merkle_value else {
+                                    break RuntimeCallInaccessibleError::MissingProofEntry;
+                                };
+                                call = mv.inject_merkle_value(merkle_value);
+                            }
+                            executor::runtime_call::RuntimeCall::NextKey(nk) => {
+                                let next_key = if let Some(trie_root) = trie_root {
+                                    call_proof.next_key(
+                                        &trie_root,
+                                        nk.key(),
+                                        nk.or_equal(),
+                                        nk.prefix(),
+                                        nk.branch_nodes(),
+                                    )
+                                } else {
+                                    Ok(None)
+                                };
+                                let Ok(next_key) = next_key else {
+                                    break RuntimeCallInaccessibleError::MissingProofEntry;
+                                };
+                                call = nk.inject_key(next_key);
+                            }
+                            _ => unreachable!(),
+                        }
+                    };
+
+                    // This path is reached only if the call proof was invalid.
+                    operation.inaccessible_errors.push(error);
+                    background
+                        .network_service
+                        .ban_and_disconnect(
+                            call_proof_sender,
+                            network_service::BanSeverity::High,
+                            "invalid-call-proof",
+                        )
+                        .await;
+                }
+
+                // If we have failed to obtain a valid proof several times, abort the runtime
+                // call attempt altogether.
+                if u32::try_from(operation.inaccessible_errors.len()).unwrap_or(u32::MAX)
+                    >= operation.total_attempts
+                {
+                    let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
+                        operation.inaccessible_errors,
+                    )));
+                    continue 'background_main_loop;
+                }
+
+                // This can be reached if the call proof was invalid or absent. We must start a
+                // new call proof request.
+
+                // Choose peer to query.
+                // TODO: better peer selection
+                // TODO: can there be a race condition where the sync service forgets that a peer has knowledge of a block? shouldn't we somehow cache the peers that know this block ahead of time or something?
+                let Some(call_proof_target) = background
+                    .sync_service
+                    .peers_assumed_know_blocks(operation.block_number, &operation.block_hash)
+                    .await
+                    .choose(&mut rand_chacha::ChaCha20Rng::from_seed({
+                        // TODO: hacky
+                        let mut seed = [0; 32];
+                        background.platform.fill_random_bytes(&mut seed);
+                        seed
+                    }))
+                else {
+                    // No peer knows this block. Returning with a failure.
+                    let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
+                        operation.inaccessible_errors,
+                    )));
+                    continue 'background_main_loop;
+                };
+
+                // Start the request.
+                background.progress_runtime_call_requests.push(Box::pin({
+                    let call_proof_request_future =
+                        background.network_service.clone().call_proof_request(
+                            call_proof_target.clone(),
+                            network_service::CallProofRequestConfig {
+                                block_hash: operation.block_hash,
+                                method: Cow::Owned(operation.function_name.clone()), // TODO: overhead
+                                parameter_vectored: iter::once(
+                                    operation.parameters_vectored.clone(),
+                                ), // TODO: overhead
+                            },
+                            operation.timeout_per_request,
+                        );
+
+                    async move {
+                        let result = call_proof_request_future.await;
+                        ProgressRuntimeCallRequest::CallProofRequestDone {
+                            result,
+                            operation,
+                            call_proof_sender: call_proof_target,
+                        }
+                    }
+                }));
             }
 
             WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
@@ -2275,7 +2510,7 @@ async fn run_background<TPlat: PlatformRef>(
                 let runtime = if let Some(existing_runtime) = existing_runtime {
                     existing_runtime
                 } else {
-                    let runtime = SuccessfulRuntime::from_storage(
+                    let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
@@ -2291,7 +2526,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 format!(
                                     "Successfully compiled runtime. Spec version: {}. \
                                     Size of `:code`: {}.",
-                                    runtime.runtime_spec.decode().spec_version,
+                                    runtime.runtime_version().decode().spec_version,
                                     BytesDisplay(
                                         u64::try_from(storage_code.as_ref().map_or(0, |v| v.len()))
                                             .unwrap()
@@ -2417,12 +2652,17 @@ impl RuntimeDownloadError {
 }
 
 struct Background<TPlat: PlatformRef> {
+    /// Target to use for all the logs of this service.
     log_target: String,
 
     /// See [`Config::platform`].
     platform: TPlat,
 
+    /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// See [`Config::network_service`].
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Receiver for messages to the background task.
     to_background: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
@@ -2490,6 +2730,10 @@ struct Background<TPlat: PlatformRef> {
         >,
     >,
 
+    /// List of actions to perform to progress runtime calls requested by the frontend.
+    progress_runtime_call_requests:
+        stream::FuturesUnordered<future::BoxFuture<'static, ProgressRuntimeCallRequest>>,
+
     /// Future that wakes up when a new download to start is potentially ready.
     wake_up_new_necessary_download: future::BoxFuture<'static, ()>,
 }
@@ -2544,10 +2788,40 @@ enum Tree<TPlat: PlatformRef> {
     },
 }
 
+/// See [`Background::progress_runtime_call_requests`].
+enum ProgressRuntimeCallRequest {
+    /// Must start the first call proof request.
+    Initialize(RuntimeCallRequest),
+    /// A call proof request has finished and the runtime call can be advanced.
+    CallProofRequestDone {
+        /// Outcome of the latest call proof request.
+        result: Result<network_service::EncodedMerkleProof, network_service::CallProofRequestError>,
+        /// Identity of the peer the call proof request was made against.
+        call_proof_sender: network_service::PeerId,
+        operation: RuntimeCallRequest,
+    },
+}
+
+/// See [`ProgressRuntimeCallRequest`].
+struct RuntimeCallRequest {
+    block_hash: [u8; 32],
+    block_number: u64,
+    block_state_trie_root_hash: [u8; 32],
+    function_name: String,
+    /// Version of the API that was found. `Some` if and only if an API requirement was passed.
+    api_version: Option<u32>,
+    parameters_vectored: Vec<u8>,
+    runtime: executor::host::HostVmPrototype,
+    total_attempts: u32,
+    timeout_per_request: Duration,
+    inaccessible_errors: Vec<RuntimeCallInaccessibleError>,
+    result_tx: oneshot::Sender<Result<RuntimeCallSuccess, RuntimeCallError>>,
+}
+
 struct Runtime {
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
     /// happened, including a problem when obtaining the runtime specs.
-    runtime: Result<SuccessfulRuntime, RuntimeError>,
+    runtime: Result<executor::host::HostVmPrototype, RuntimeError>,
 
     /// Merkle value of the `:code` trie node.
     ///
@@ -2575,91 +2849,71 @@ struct Runtime {
     heap_pages: Option<Vec<u8>>,
 }
 
-struct SuccessfulRuntime {
-    /// Runtime specs extracted from the runtime.
-    runtime_spec: executor::CoreVersion,
+async fn compile_runtime<TPlat: PlatformRef>(
+    platform: &TPlat,
+    log_target: &str,
+    code: &Option<Vec<u8>>,
+    heap_pages: &Option<Vec<u8>>,
+) -> Result<executor::host::HostVmPrototype, RuntimeError> {
+    // Since compiling the runtime is a CPU-intensive operation, we yield once before.
+    futures_lite::future::yield_now().await;
 
-    /// Virtual machine itself, to perform additional calls.
-    ///
-    /// Always `Some`, except for temporary extractions necessary to execute the VM.
-    virtual_machine: Mutex<Option<executor::host::HostVmPrototype>>,
-}
+    // Parameters for `HostVmPrototype::new`.
+    let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
+    let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
+        .map_err(RuntimeError::InvalidHeapPages)?;
+    let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
 
-impl SuccessfulRuntime {
-    async fn from_storage<TPlat: PlatformRef>(
-        platform: &TPlat,
-        log_target: &str,
-        code: &Option<Vec<u8>>,
-        heap_pages: &Option<Vec<u8>>,
-    ) -> Result<Self, RuntimeError> {
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-        futures_lite::future::yield_now().await;
+    // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
+    // import, we try again but with `allowed_unresolved_imports: true`.
+    // Having unresolved imports might cause errors later on, for example when validating
+    // transactions or getting the parachain heads, but for now we continue the execution
+    // and print a warning.
+    match executor::host::HostVmPrototype::new(executor::host::Config {
+        module,
+        heap_pages,
+        exec_hint,
+        allow_unresolved_imports: false,
+    }) {
+        Ok(vm) => return Ok(vm),
+        Err(executor::host::NewErr::VirtualMachine(
+            executor::vm::NewErr::UnresolvedFunctionImport {
+                function,
+                module_name,
+            },
+        )) => {
+            match executor::host::HostVmPrototype::new(executor::host::Config {
+                module,
+                heap_pages,
+                exec_hint,
+                allow_unresolved_imports: true,
+            }) {
+                Ok(vm) => {
+                    log!(
+                        platform,
+                        Warn,
+                        log_target,
+                        format!(
+                            "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
+                            encounter errors later on. Please report this issue in \
+                            https://github.com/smol-dot/smoldot",
+                            module_name, function
+                        )
+                    );
 
-        // Parameters for `HostVmPrototype::new`.
-        let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
-        let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
-            .map_err(RuntimeError::InvalidHeapPages)?;
-        let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
-
-        // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
-        // import, we try again but with `allowed_unresolved_imports: true`.
-        // Having unresolved imports might cause errors later on, for example when validating
-        // transactions or getting the parachain heads, but for now we continue the execution
-        // and print a warning.
-        match executor::host::HostVmPrototype::new(executor::host::Config {
-            module,
-            heap_pages,
-            exec_hint,
-            allow_unresolved_imports: false,
-        }) {
-            Ok(vm) => {
-                return Ok(SuccessfulRuntime {
-                    runtime_spec: vm.runtime_version().clone(),
-                    virtual_machine: Mutex::new(Some(vm)),
-                })
-            }
-            Err(executor::host::NewErr::VirtualMachine(
-                executor::vm::NewErr::UnresolvedFunctionImport {
-                    function,
-                    module_name,
-                },
-            )) => {
-                match executor::host::HostVmPrototype::new(executor::host::Config {
-                    module,
-                    heap_pages,
-                    exec_hint,
-                    allow_unresolved_imports: true,
-                }) {
-                    Ok(vm) => {
-                        log!(
-                            platform,
-                            Warn,
-                            log_target,
-                            format!(
-                                "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
-                                encounter errors later on. Please report this issue in \
-                                https://github.com/smol-dot/smoldot",
-                                module_name, function
-                            )
-                        );
-
-                        Ok(SuccessfulRuntime {
-                            runtime_spec: vm.runtime_version().clone(),
-                            virtual_machine: Mutex::new(Some(vm)),
-                        })
-                    }
-                    Err(executor::host::NewErr::VirtualMachine(
-                        executor::vm::NewErr::UnresolvedFunctionImport { .. },
-                    )) => unreachable!(),
-                    Err(error) => {
-                        // It's still possible that errors other than an unresolved host
-                        // function happen.
-                        Err(RuntimeError::Build(error))
-                    }
+                    Ok(vm)
+                }
+                Err(executor::host::NewErr::VirtualMachine(
+                    executor::vm::NewErr::UnresolvedFunctionImport { .. },
+                )) => unreachable!(),
+                Err(error) => {
+                    // It's still possible that errors other than an unresolved host
+                    // function happen.
+                    Err(RuntimeError::Build(error))
                 }
             }
-            Err(error) => Err(RuntimeError::Build(error)),
         }
+        Err(error) => Err(RuntimeError::Build(error)),
     }
 }
 

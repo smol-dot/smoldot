@@ -38,7 +38,7 @@ use smoldot::{
 use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 /// Message that can be passed to the task started with [`start_task`].
-pub(super) enum Message<TPlat: PlatformRef> {
+pub(super) enum Message {
     /// JSON-RPC client has sent a subscription request.
     ///
     /// Only the legacy API subscription requests are supported. Any other will trigger a panic.
@@ -53,11 +53,11 @@ pub(super) enum Message<TPlat: PlatformRef> {
 
     /// The task must send back access to the runtime of the given block, or `None` if the block
     /// isn't available in the cache.
-    RecentBlockRuntimeAccess {
+    RecentBlockPinnedRuntime {
         /// Hash of the block to query.
         block_hash: [u8; 32],
         /// How to send back the result.
-        result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
+        result_tx: oneshot::Sender<Option<(runtime_service::PinnedRuntime, [u8; 32], u64)>>,
     },
 
     /// The task must send back the current best block hash.
@@ -138,7 +138,7 @@ pub(super) enum StateTrieRootHashError {
 /// JSON-RPC client starts.
 pub(super) fn start_task<TPlat: PlatformRef>(
     config: Config<TPlat>,
-) -> async_channel::Sender<Message<TPlat>> {
+) -> async_channel::Sender<Message> {
     let (requests_tx, requests_rx) = async_channel::bounded(8);
     let requests_rx = Box::pin(requests_rx);
 
@@ -217,9 +217,9 @@ struct Task<TPlat: PlatformRef> {
     best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
 
     /// Sending side of [`Task::requests_rx`].
-    requests_tx: async_channel::WeakSender<Message<TPlat>>,
+    requests_tx: async_channel::WeakSender<Message>,
     /// How to receive messages from the API user.
-    requests_rx: Pin<Box<async_channel::Receiver<Message<TPlat>>>>,
+    requests_rx: Pin<Box<async_channel::Receiver<Message>>>,
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
     // TODO: shrink_to_fit?
@@ -576,7 +576,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
-            Message(Message<TPlat>),
+            Message(Message),
             ForegroundDead,
         }
 
@@ -999,7 +999,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 // TODO: shrink_to_fit?
             }
 
-            WakeUpReason::Message(Message::RecentBlockRuntimeAccess {
+            WakeUpReason::Message(Message::RecentBlockPinnedRuntime {
                 block_hash,
                 result_tx,
             }) => {
@@ -1021,10 +1021,20 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let access = if let Some(subscription_id) = subscription_id_with_block {
-                    task.runtime_service
-                        .pinned_block_runtime_access(subscription_id, block_hash)
+                    match task
+                        .runtime_service
+                        .pin_pinned_block_runtime(subscription_id, block_hash)
                         .await
-                        .ok()
+                    {
+                        Ok(r) => Some(r),
+                        Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                            debug_assert!(false);
+                            None
+                        }
+                        Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

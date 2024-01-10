@@ -20,7 +20,7 @@ use crate::{log, network_service, platform::PlatformRef, runtime_service, util};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::{
-    iter, mem,
+    mem,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     time::Duration,
@@ -31,7 +31,6 @@ use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
-    executor::{host, runtime_call},
     header,
     informant::HashDisplay,
     libp2p::PeerId,
@@ -46,7 +45,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
     finalized_block_header: Vec<u8>,
     block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
-    relay_chain_block_number_bytes: usize,
     parachain_id: u32,
     from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
@@ -55,7 +53,6 @@ pub(super) async fn start_parachain<TPlat: PlatformRef>(
         log_target,
         from_foreground,
         block_number_bytes,
-        relay_chain_block_number_bytes,
         parachain_id,
         from_network_service: None,
         network_service,
@@ -105,9 +102,6 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
 
     /// Number of bytes to use to encode the parachain block numbers in headers.
     block_number_bytes: usize,
-
-    /// Number of bytes to use to encode the relay chain block numbers in headers.
-    relay_chain_block_number_bytes: usize,
 
     /// Id of the parachain registered within the relay chain. Chosen by the user.
     parachain_id: u32,
@@ -744,15 +738,12 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                     runtime_subscription.relay_chain_subscribe_all.id();
                                 let block_hash = *op.block_user_data;
                                 let async_op_id = op.id;
-                                let relay_chain_block_number_bytes =
-                                    self.relay_chain_block_number_bytes;
                                 let parachain_id = self.parachain_id;
                                 Box::pin(async move {
                                     (
                                         async_op_id,
                                         fetch_parahead(
                                             &relay_chain_sync,
-                                            relay_chain_block_number_bytes,
                                             subscription_id,
                                             parachain_id,
                                             &block_hash,
@@ -931,7 +922,10 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                 (
                     WakeUpReason::ParaheadFetchFinished {
-                        parahead_result: Err(ParaheadError::ObsoleteSubscription),
+                        parahead_result:
+                            Err(ParaheadError::RuntimeCall(
+                                runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
+                            )),
                         ..
                     },
                     _,
@@ -1342,149 +1336,37 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
 async fn fetch_parahead<TPlat: PlatformRef>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
-    relay_chain_block_number_bytes: usize,
     subscription_id: runtime_service::SubscriptionId,
     parachain_id: u32,
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
-    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
-    // order to know where the parachains are.
-    let precall = match relay_chain_sync
-        .pinned_block_runtime_access(subscription_id, *block_hash)
-        .await
-    {
-        Ok(p) => p,
-        Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
-            return Err(ParaheadError::ObsoleteSubscription)
-        }
-    };
-
-    let (runtime_call_lock, virtual_machine) = precall
-        .start(
-            para::PERSISTED_VALIDATION_FUNCTION_NAME,
+    // Call `ParachainHost_persisted_validation_data` in order to know where the parachain is.
+    let success = relay_chain_sync
+        .pinned_block_runtime_call(
+            subscription_id,
+            *block_hash,
+            para::PERSISTED_VALIDATION_FUNCTION_NAME.to_owned(),
+            None, // TODO: /!\
             para::persisted_validation_data_parameters(
                 parachain_id,
                 para::OccupiedCoreAssumption::TimedOut,
-            ),
+            )
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
             6,
             Duration::from_secs(10),
             NonZeroU32::new(2).unwrap(),
         )
         .await
-        .map_err(ParaheadError::Call)?;
-
-    // TODO: move the logic below in the `para` module
-
-    let mut runtime_call = match runtime_call::run(runtime_call::Config {
-        virtual_machine,
-        function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
-        parameter: para::persisted_validation_data_parameters(
-            parachain_id,
-            para::OccupiedCoreAssumption::TimedOut,
-        ),
-        max_log_level: 0,
-        storage_main_trie_changes: Default::default(),
-        calculate_trie_changes: false,
-    }) {
-        Ok(vm) => vm,
-        Err((err, prototype)) => {
-            runtime_call_lock.unlock(prototype);
-            return Err(ParaheadError::StartError(err));
-        }
-    };
-
-    let output = loop {
-        match runtime_call {
-            runtime_call::RuntimeCall::Finished(Ok(success)) => {
-                let output = success.virtual_machine.value().as_ref().to_owned();
-                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                break output;
-            }
-            runtime_call::RuntimeCall::Finished(Err(error)) => {
-                runtime_call_lock.unlock(error.prototype);
-                return Err(ParaheadError::Runtime(error.detail));
-            }
-            runtime_call::RuntimeCall::StorageGet(get) => {
-                let storage_value = {
-                    let child_trie = get.child_trie();
-                    runtime_call_lock
-                        .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
-                };
-                let storage_value = match storage_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(runtime_call::RuntimeCall::StorageGet(get).into_prototype());
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call =
-                    get.inject_value(storage_value.map(|(val, ver)| (iter::once(val), ver)));
-            }
-            runtime_call::RuntimeCall::NextKey(nk) => {
-                let next_key = {
-                    let child_trie = nk.child_trie();
-                    runtime_call_lock.next_key(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        nk.key(),
-                        nk.or_equal(),
-                        nk.prefix(),
-                        nk.branch_nodes(),
-                    )
-                };
-                let next_key = match next_key {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(runtime_call::RuntimeCall::NextKey(nk).into_prototype());
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call = nk.inject_key(next_key);
-            }
-            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv) => {
-                let merkle_value = {
-                    let child_trie = mv.child_trie();
-                    runtime_call_lock.closest_descendant_merkle_value(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        mv.key(),
-                    )
-                };
-                let merkle_value = match merkle_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(mv)
-                                .into_prototype(),
-                        );
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call = mv.inject_merkle_value(merkle_value);
-            }
-            runtime_call::RuntimeCall::SignatureVerification(sig) => {
-                runtime_call = sig.verify_and_resume();
-            }
-            runtime_call::RuntimeCall::OffchainStorageSet(req) => {
-                // Do nothing.
-                runtime_call = req.resume();
-            }
-            runtime_call::RuntimeCall::Offchain(req) => {
-                runtime_call_lock.unlock(runtime_call::RuntimeCall::Offchain(req).into_prototype());
-                return Err(ParaheadError::OffchainWorkerHostFunction);
-            }
-            runtime_call::RuntimeCall::LogEmit(log) => {
-                // Logs are ignored.
-                runtime_call = log.resume();
-            }
-        }
-    };
+        .map_err(ParaheadError::RuntimeCall)?;
 
     // Try decode the result of the runtime call.
     // If this fails, it indicates an incompatibility between smoldot and the relay chain.
     match para::decode_persisted_validation_data_return_value(
-        &output,
-        relay_chain_block_number_bytes,
+        &success.output,
+        relay_chain_sync.block_number_bytes(),
     ) {
         Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
         Ok(None) => Err(ParaheadError::NoCore),
@@ -1497,13 +1379,7 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 enum ParaheadError {
     /// Error while performing call request over the network.
     #[display(fmt = "Error while performing call request over the network: {_0}")]
-    Call(runtime_service::RuntimeCallError),
-    /// Error while starting virtual machine to verify call proof.
-    #[display(fmt = "Error while starting virtual machine to verify call proof: {_0}")]
-    StartError(host::StartErr),
-    /// Error during the execution of the virtual machine to verify call proof.
-    #[display(fmt = "Error during the call proof verification: {_0}")]
-    Runtime(runtime_call::ErrorDetail),
+    RuntimeCall(runtime_service::PinnedBlockRuntimeCallError),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.
@@ -1511,10 +1387,6 @@ enum ParaheadError {
     /// This indicates some kind of incompatibility between smoldot and the relay chain.
     #[display(fmt = "Error while decoding the output of the call: {_0}")]
     InvalidRuntimeOutput(para::Error),
-    /// Runtime has called an offchain worker host function.
-    OffchainWorkerHostFunction,
-    /// Runtime service subscription is no longer valid.
-    ObsoleteSubscription,
 }
 
 impl ParaheadError {
@@ -1522,13 +1394,29 @@ impl ParaheadError {
     /// issue.
     fn is_network_problem(&self) -> bool {
         match self {
-            ParaheadError::Call(err) => err.is_network_problem(),
-            ParaheadError::StartError(_) => false,
-            ParaheadError::Runtime(_) => false,
+            ParaheadError::RuntimeCall(
+                runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError::Inaccessible(_),
+                ),
+            ) => true,
+            ParaheadError::RuntimeCall(
+                runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError::Execution(_),
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError::Crash,
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError::InvalidRuntime(_),
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
+                    runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
+                )
+                | runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
+            ) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::OffchainWorkerHostFunction => false,
-            ParaheadError::ObsoleteSubscription => false,
         }
     }
 }

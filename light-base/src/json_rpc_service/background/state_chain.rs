@@ -21,7 +21,7 @@ use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 
 use crate::{log, sync_service};
 
-use alloc::{format, string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, num::NonZeroU32, time::Duration};
 use futures_channel::oneshot;
 use smoldot::{
@@ -51,10 +51,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "AccountNonceApi",
+                "AccountNonceApi".to_owned(),
                 1..=1,
-                "AccountNonceApi_account_nonce",
-                iter::once(&account.0),
+                "AccountNonceApi_account_nonce".to_owned(),
+                account.0,
                 4,
                 Duration::from_secs(4),
                 NonZeroU32::new(2).unwrap(),
@@ -402,10 +402,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "TransactionPaymentApi",
+                "TransactionPaymentApi".to_owned(),
                 1..=2,
-                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
-                json_rpc::payment_info::payment_info_parameters(&extrinsic.0),
+                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME.to_owned(),
+                json_rpc::payment_info::payment_info_parameters(&extrinsic.0).fold(
+                    Vec::new(),
+                    |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    },
+                ),
                 4,
                 Duration::from_secs(4),
                 NonZeroU32::new(2).unwrap(),
@@ -468,8 +474,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call_no_api_check(
                 &block_hash,
-                &function_to_call,
-                iter::once(call_parameters.0),
+                function_to_call.into_owned(),
+                call_parameters.0,
                 3,
                 Duration::from_secs(10),
                 NonZeroU32::new(3).unwrap(),
@@ -728,10 +734,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "Metadata",
+                "Metadata".to_owned(),
                 1..=2,
-                "Metadata_metadata",
-                iter::empty::<Vec<u8>>(),
+                "Metadata_metadata".to_owned(),
+                Vec::new(),
                 3,
                 Duration::from_secs(8),
                 NonZeroU32::new(1).unwrap(),
@@ -791,12 +797,23 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
+        let (pinned_runtime, _, _) = match self.pinned_runtime_and_block_info(&block_hash).await {
+            Ok(rt) => rt,
+            Err(error) => {
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    &error.to_string(),
+                ));
+                return;
+            }
+        };
+
         match self
-            .runtime_access(&block_hash)
+            .runtime_service
+            .pinned_runtime_specification(pinned_runtime)
             .await
-            .map(|l| l.specification())
         {
-            Ok(Ok(spec)) => {
+            Ok(spec) => {
                 let runtime_spec = spec.decode();
                 request.respond(methods::Response::state_getRuntimeVersion(
                     methods::RuntimeVersion {
@@ -814,10 +831,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     },
                 ))
             }
-            Ok(Err(error)) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
             Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
                 -32000,
                 &error.to_string(),

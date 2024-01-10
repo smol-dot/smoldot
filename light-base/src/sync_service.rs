@@ -44,6 +44,8 @@ use smoldot::{
 mod parachain;
 mod standalone;
 
+pub use network_service::EncodedMerkleProof;
+
 /// Configuration for a [`SyncService`].
 pub struct Config<TPlat: PlatformRef> {
     /// Name of the chain, for logging purposes.
@@ -103,9 +105,6 @@ pub struct ConfigParachain<TPlat: PlatformRef> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Number of bytes used by the block number in the relay chain.
-    pub relay_chain_block_number_bytes: usize,
-
     /// SCALE-encoded header of a known finalized block of the parachain. Used in the situation
     /// where the API user subscribes using [`SyncService::subscribe_all`] before any parachain
     /// block can be gathered.
@@ -152,7 +151,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                 config_parachain.finalized_block_header,
                 config.block_number_bytes,
                 config_parachain.relay_chain_sync.clone(),
-                config_parachain.relay_chain_block_number_bytes,
                 config_parachain.para_id,
                 from_foreground,
                 config.network_service.clone(),
@@ -801,69 +799,6 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             }
         }
     }
-
-    // TODO: documentation
-    // TODO: there's no proof that the call proof is actually correct
-    pub async fn call_proof_query(
-        self: Arc<Self>,
-        block_number: u64,
-        config: codec::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        _max_parallel: NonZeroU32,
-    ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
-        let mut outcome_errors =
-            Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
-
-        // TODO: better peers selection ; don't just take the first
-        // TODO: handle max_parallel
-        for target in self
-            .peers_assumed_know_blocks(block_number, &config.block_hash)
-            .await
-            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
-        {
-            let result = self
-                .network_service
-                .clone()
-                .call_proof_request(target.clone(), config.clone(), timeout_per_request)
-                .await;
-
-            match result {
-                Ok(value) if !value.decode().is_empty() => return Ok(value),
-                // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
-                Ok(_) => {
-                    self.network_service
-                        .ban_and_disconnect(
-                            target,
-                            network_service::BanSeverity::Low,
-                            "call-proof-request-failed",
-                        )
-                        .await;
-                    outcome_errors.push(network_service::CallProofRequestError::Request(
-                    service::CallProofRequestError::Request(
-                        smoldot::network::service::RequestError::Substream(
-                            smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
-                        ),
-                    ),
-                ))
-                }
-                Err(err) => {
-                    self.network_service
-                        .ban_and_disconnect(
-                            target,
-                            network_service::BanSeverity::Low,
-                            "call-proof-request-failed",
-                        )
-                        .await;
-                    outcome_errors.push(err);
-                }
-            }
-        }
-
-        Err(CallProofQueryError {
-            errors: outcome_errors,
-        })
-    }
 }
 
 /// An item requested with [`SyncService::storage_query`].
@@ -1021,36 +956,6 @@ pub enum StorageQueryErrorDetail {
     ProofVerification(proof_decode::Error),
     /// Proof is missing one or more desired storage items.
     MissingProofEntry,
-}
-
-/// Error that can happen when calling [`SyncService::call_proof_query`].
-#[derive(Debug, Clone)]
-pub struct CallProofQueryError {
-    /// Contains one error per peer that has been contacted. If this list is empty, then we
-    /// aren't connected to any node.
-    pub errors: Vec<network_service::CallProofRequestError>,
-}
-
-impl CallProofQueryError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    pub fn is_network_problem(&self) -> bool {
-        self.errors.iter().all(|err| err.is_network_problem())
-    }
-}
-
-impl fmt::Display for CallProofQueryError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.errors.is_empty() {
-            write!(f, "No node available for call proof query")
-        } else {
-            write!(f, "Call proof query errors:")?;
-            for err in &self.errors {
-                write!(f, "\n- {err}")?;
-            }
-            Ok(())
-        }
-    }
 }
 
 /// Return value of [`SyncService::subscribe_all`].

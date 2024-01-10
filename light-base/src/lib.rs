@@ -1228,9 +1228,6 @@ fn start_services<TPlat: platform::PlatformRef>(
                         finalized_block_header,
                         para_id,
                         relay_chain_sync: relay_chain.runtime_service.clone(),
-                        relay_chain_block_number_bytes: relay_chain
-                            .sync_service
-                            .block_number_bytes(),
                     },
                 ),
             }));
@@ -1242,6 +1239,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
+                    network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
                 },
             ));
@@ -1280,6 +1278,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
+                    network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
                 },
             ));
