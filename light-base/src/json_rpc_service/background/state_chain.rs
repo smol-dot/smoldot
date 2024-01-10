@@ -797,12 +797,23 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
+        let (pinned_runtime, _, _) = match self.pinned_runtime_and_block_info(&block_hash).await {
+            Ok(rt) => rt,
+            Err(error) => {
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    &error.to_string(),
+                ));
+                return;
+            }
+        };
+
         match self
-            .pinned_runtime_and_block_info(&block_hash)
+            .runtime_service
+            .pinned_runtime_specification(pinned_runtime)
             .await
-            .map(|l| l.specification())
         {
-            Ok(Ok(spec)) => {
+            Ok(spec) => {
                 let runtime_spec = spec.decode();
                 request.respond(methods::Response::state_getRuntimeVersion(
                     methods::RuntimeVersion {
@@ -820,10 +831,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     },
                 ))
             }
-            Ok(Err(error)) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
             Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
                 -32000,
                 &error.to_string(),

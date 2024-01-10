@@ -422,6 +422,22 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         ))
     }
 
+    /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
+    /// heap pages. If none is found, compiles the runtime and stores it within the
+    /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
+    /// [`RuntimeService::unpin_runtime`].
+    pub async fn pinned_runtime_specification(
+        &self,
+        pinned_runtime: PinnedRuntime,
+    ) -> Result<executor::CoreVersion, PinnedRuntimeSpecificationError> {
+        match &pinned_runtime.0.runtime {
+            Ok(rt) => Ok(rt.runtime_spec.clone()),
+            Err(error) => Err(PinnedRuntimeSpecificationError::InvalidRuntime(
+                error.clone(),
+            )),
+        }
+    }
+
     /// Returns true if it is believed that we are near the head of the chain.
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
@@ -637,6 +653,13 @@ pub enum PinnedBlockStateTrieRootHashNumberError {
 
     /// Requested block isn't pinned by the subscription.
     BlockNotPinned,
+}
+
+/// See [`RuntimeService::pinned_runtime_specification`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum PinnedRuntimeSpecificationError {
+    /// The runtime is invalid.
+    InvalidRuntime(RuntimeError),
 }
 
 /// See [`RuntimeService::runtime_call`].
