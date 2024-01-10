@@ -2095,6 +2095,10 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                         };
 
+                        // Yield once at every iteration. This avoids monopolizing the CPU for
+                        // too long.
+                        futures_lite::future::yield_now().await;
+
                         let child_trie = match call {
                             executor::runtime_call::RuntimeCall::Finished(Ok(finished)) => {
                                 // Execution finished successfully.
