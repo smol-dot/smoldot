@@ -21,7 +21,7 @@ use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 
 use crate::{log, sync_service};
 
-use alloc::{format, string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, num::NonZeroU32, time::Duration};
 use futures_channel::oneshot;
 use smoldot::{
