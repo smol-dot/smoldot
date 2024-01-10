@@ -256,42 +256,13 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         result_rx.await.unwrap_or(None)
     }
 
-    /// Returns the state trie root hash and number of a pinned block.
-    ///
-    /// Returns an error if the subscription is stale, meaning that it has been reset by the
-    /// runtime service.
-    pub async fn pinned_block_state_trie_root_hash_number(
-        &self,
-        subscription_id: SubscriptionId,
-        block_hash: [u8; 32],
-    ) -> Result<([u8; 32], u64), PinnedBlockStateTrieRootHashNumberError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let _ = self
-            .to_background
-            .lock()
-            .await
-            .send(ToBackground::PinnedBlockStateTrieRootHashNumber {
-                result_tx,
-                subscription_id,
-                block_hash,
-            })
-            .await;
-
-        match result_rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                // Background service has crashed. This means that the subscription is obsolete.
-                Err(PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription)
-            }
-        }
-    }
-
     /// Pins the runtime of a pinned block.
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime is to
     /// be pinned. The block must be currently pinned in the context of the provided
     /// [`SubscriptionId`].
+    ///
+    /// Returns the pinned runtime, plus the state trie root hash and height of the block.
     ///
     /// Returns an error if the subscription is stale, meaning that it has been reset by the
     /// runtime service.
@@ -299,7 +270,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         &self,
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
-    ) -> Result<PinnedRuntime, PinPinnedBlockRuntimeError> {
+    ) -> Result<(PinnedRuntime, [u8; 32], u64), PinPinnedBlockRuntimeError> {
         let (result_tx, result_rx) = oneshot::channel();
 
         let _ = self
@@ -314,7 +285,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             .await;
 
         match result_rx.await {
-            Ok(result) => result.map(PinnedRuntime),
+            Ok(result) => result.map(|(r, v, n)| (PinnedRuntime(r), v, n)),
             Err(_) => {
                 // Background service has crashed. This means that the subscription is obsolete.
                 Err(PinPinnedBlockRuntimeError::ObsoleteSubscription)
@@ -392,27 +363,12 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<Vec<u8>, PinnedBlockRuntimeCallError> {
-        let (block_state_trie_root_hash, block_number) = match self
-            .pinned_block_state_trie_root_hash_number(subscription_id, block_hash)
-            .await
-        {
-            Ok(v) => v,
-            Err(PinnedBlockStateTrieRootHashNumberError::BlockNotPinned) => {
-                return Err(PinnedBlockRuntimeCallError::BlockNotPinned);
-            }
-            Err(PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription) => {
-                return Err(PinnedBlockRuntimeCallError::ObsoleteSubscription)
-            }
-        };
-
-        let pinned_runtime = match self
+        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self
             .pin_pinned_block_runtime(subscription_id, block_hash)
             .await
         {
-            Ok(pinned_runtime) => pinned_runtime,
+            Ok(v) => v,
             Err(PinPinnedBlockRuntimeError::BlockNotPinned) => {
-                // Note that this path can only be reached if the API user unpins the block in
-                // parallel, as otherwise the error has already been detected above.
                 return Err(PinnedBlockRuntimeCallError::BlockNotPinned);
             }
             Err(PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
@@ -1159,13 +1115,8 @@ enum ToBackground<TPlat: PlatformRef> {
         block_hash: [u8; 32],
     },
     PinPinnedBlockRuntime {
-        result_tx: oneshot::Sender<Result<Arc<Runtime>, PinPinnedBlockRuntimeError>>,
-        subscription_id: SubscriptionId,
-        block_hash: [u8; 32],
-    },
-    PinnedBlockStateTrieRootHashNumber {
         result_tx:
-            oneshot::Sender<Result<([u8; 32], u64), PinnedBlockStateTrieRootHashNumberError>>,
+            oneshot::Sender<Result<(Arc<Runtime>, [u8; 32], u64), PinPinnedBlockRuntimeError>>,
         subscription_id: SubscriptionId,
         block_hash: [u8; 32],
     },
@@ -2386,50 +2337,8 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 };
 
-                let _ = result_tx.send(Ok(pinned_block.runtime.clone()));
-            }
-
-            WakeUpReason::ToBackground(ToBackground::PinnedBlockStateTrieRootHashNumber {
-                result_tx,
-                subscription_id,
-                block_hash,
-            }) => {
-                // Foreground wants to know the state trie root hash and number of a pinned block.
-
-                let pinned_block = {
-                    if let Tree::FinalizedBlockRuntimeKnown {
-                        all_blocks_subscriptions,
-                        pinned_blocks,
-                        ..
-                    } = &mut background.tree
-                    {
-                        match pinned_blocks.get(&(subscription_id.0, block_hash)) {
-                            Some(v) => v.clone(),
-                            None => {
-                                // Cold path.
-                                if let Some((_, _)) =
-                                    all_blocks_subscriptions.get(&subscription_id.0)
-                                {
-                                    let _ = result_tx.send(Err(
-                                        PinnedBlockStateTrieRootHashNumberError::BlockNotPinned,
-                                    ));
-                                } else {
-                                    let _ = result_tx.send(Err(
-                                        PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription,
-                                    ));
-                                }
-                                continue;
-                            }
-                        }
-                    } else {
-                        let _ = result_tx.send(Err(
-                            PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription,
-                        ));
-                        continue;
-                    }
-                };
-
                 let _ = result_tx.send(Ok((
+                    pinned_block.runtime.clone(),
                     pinned_block.state_trie_root_hash,
                     pinned_block.block_number,
                 )));

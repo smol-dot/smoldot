@@ -1294,7 +1294,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                     return;
                 }
 
-                let pinned_runtime = match self
+                match self
                     .runtime_service
                     .pin_pinned_block_runtime(subscription_id, hash.0)
                     .await
@@ -1310,27 +1310,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         ));
                         return;
                     }
-                };
-
-                let (block_state_trie_root_hash, block_number) = match self
-                    .runtime_service
-                    .pinned_block_state_trie_root_hash_number(subscription_id, hash.0)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(runtime_service::PinnedBlockStateTrieRootHashNumberError::BlockNotPinned) => {
-                        unreachable!()
-                    }
-                    Err(runtime_service::PinnedBlockStateTrieRootHashNumberError::ObsoleteSubscription) => {
-                        // The runtime service subscription is dead.
-                        request.respond(methods::Response::chainHead_unstable_call(
-                            methods::ChainHeadBodyCallReturn::LimitReached {},
-                        ));
-                        return;
-                    }
-                };
-
-                (pinned_runtime, block_state_trie_root_hash, block_number)
+                }
             }
             Subscription::WithoutRuntime(_) => {
                 // It is invalid to call this function for a "without runtime" subscription.
