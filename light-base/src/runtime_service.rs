@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{log, platform::PlatformRef, sync_service};
+use crate::{log, network_service, platform::PlatformRef, sync_service};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
@@ -77,6 +77,8 @@ use futures_channel::oneshot;
 use futures_lite::FutureExt as _;
 use futures_util::{future, stream, Stream, StreamExt as _};
 use itertools::Itertools as _;
+use rand::seq::IteratorRandom as _;
+use rand_chacha::rand_core::SeedableRng as _;
 use smoldot::{
     chain::async_tree,
     executor, header,
@@ -97,6 +99,9 @@ pub struct Config<TPlat: PlatformRef> {
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// Service responsible for accessing the networking of the chain.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Header of the genesis block of the chain, in SCALE encoding.
     pub genesis_block_scale_encoded_header: Vec<u8>,
@@ -127,6 +132,7 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
             log_target: log_target.clone(),
             platform: config.platform.clone(),
             sync_service: config.sync_service,
+            network_service: config.network_service,
             genesis_block_scale_encoded_header: config.genesis_block_scale_encoded_header,
         };
 
@@ -721,7 +727,7 @@ pub enum RuntimeCallExecutionError {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum RuntimeCallInaccessibleError {
     /// Failed to download the call proof from the network.
-    Network(sync_service::CallProofQueryError), // TODO: is it the correct error?
+    Network(network_service::CallProofRequestError),
     /// Call proof downloaded from the network has an invalid format.
     InvalidCallProof(proof_decode::Error),
     /// One or more entries are missing from the downloaded call proof.
@@ -832,6 +838,7 @@ struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     genesis_block_scale_encoded_header: Vec<u8>,
 }
 
@@ -868,6 +875,7 @@ async fn run_background<TPlat: PlatformRef>(
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
             sync_service: config.sync_service.clone(),
+            network_service: config.network_service.clone(),
             to_background: Box::pin(to_background.clone()),
             to_background_tx: to_background_tx.clone(),
             next_subscription_id: 0,
@@ -2022,41 +2030,47 @@ async fn run_background<TPlat: PlatformRef>(
             }
 
             WakeUpReason::ProgressRuntimeCallRequest(progress) => {
-                let (mut operation, call_proof) = match progress {
+                let (mut operation, call_proof_and_sender) = match progress {
                     ProgressRuntimeCallRequest::Initialize(operation) => (operation, None),
                     ProgressRuntimeCallRequest::CallProofRequestDone {
                         result: Ok(proof),
+                        call_proof_sender,
                         operation,
-                    } => (operation, Some(proof)),
+                    } => (operation, Some((proof, call_proof_sender))),
                     ProgressRuntimeCallRequest::CallProofRequestDone {
                         result: Err(error),
                         mut operation,
+                        call_proof_sender,
                     } => {
                         operation
                             .inaccessible_errors
                             .push(RuntimeCallInaccessibleError::Network(error));
+                        background
+                            .network_service
+                            .ban_and_disconnect(
+                                call_proof_sender,
+                                network_service::BanSeverity::Low,
+                                "call-proof-request-failed",
+                            )
+                            .await;
                         (operation, None)
                     }
                 };
 
-                if let Some(call_proof) = call_proof {
+                if let Some((call_proof, call_proof_sender)) = call_proof_and_sender {
                     // Try to decode the proof. Succeed just means that the proof has the correct
                     // encoding, and doesn't guarantee that the proof has all the necessary
                     // entries.
-                    let call_proof = match trie::proof_decode::decode_and_verify_proof(
-                        trie::proof_decode::Config {
+                    let call_proof =
+                        trie::proof_decode::decode_and_verify_proof(trie::proof_decode::Config {
                             proof: call_proof.decode(),
-                        },
-                    ) {
-                        Ok(p) => p,
-                        Err(_) => todo!(), // TODO:
-                    };
+                        });
 
                     // Attempt the runtime call.
                     // If the call succeed, we interrupt the flow and `continue`.
                     let mut call =
                         match executor::runtime_call::run(executor::runtime_call::Config {
-                            virtual_machine: operation.runtime,
+                            virtual_machine: operation.runtime.clone(),
                             function_to_call: &operation.function_name,
                             parameter: iter::once(&operation.parameters_vectored),
                             storage_main_trie_changes: Default::default(),
@@ -2076,7 +2090,16 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                         };
 
-                    loop {
+                    let error = loop {
+                        let call_proof = match &call_proof {
+                            Ok(p) => p,
+                            Err(error) => {
+                                break RuntimeCallInaccessibleError::InvalidCallProof(
+                                    error.clone(),
+                                );
+                            }
+                        };
+
                         let child_trie = match call {
                             executor::runtime_call::RuntimeCall::Finished(Ok(finished)) => {
                                 // Execution finished successfully.
@@ -2136,11 +2159,13 @@ async fn run_background<TPlat: PlatformRef>(
                             match call_proof
                                 .storage_value(&operation.block_state_trie_root_hash, &key)
                             {
-                                Err(_) => break,
+                                Err(_) => break RuntimeCallInaccessibleError::MissingProofEntry,
                                 Ok(None) => None,
                                 Ok(Some((value, _))) => match <[u8; 32]>::try_from(value) {
                                     Ok(hash) => Some(hash),
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        break RuntimeCallInaccessibleError::MissingProofEntry
+                                    }
                                 },
                             }
                         } else {
@@ -2155,7 +2180,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     Ok(None)
                                 };
                                 let Ok(storage_value) = storage_value else {
-                                    break;
+                                    break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
                                 call = get.inject_value(
                                     storage_value.map(|(val, vers)| (iter::once(val), vers)),
@@ -2170,7 +2195,7 @@ async fn run_background<TPlat: PlatformRef>(
                                     Ok(None)
                                 };
                                 let Ok(merkle_value) = merkle_value else {
-                                    break;
+                                    break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
                                 call = mv.inject_merkle_value(merkle_value);
                             }
@@ -2186,19 +2211,25 @@ async fn run_background<TPlat: PlatformRef>(
                                 } else {
                                     Ok(None)
                                 };
-                                let Ok(next_key) = next_key else { break };
+                                let Ok(next_key) = next_key else {
+                                    break RuntimeCallInaccessibleError::MissingProofEntry;
+                                };
                                 call = nk.inject_key(next_key);
                             }
                             _ => unreachable!(),
                         }
-                    }
+                    };
 
                     // This path is reached only if the call proof was invalid.
-                    // TODO: must ban peer
-                    operation
-                        .inaccessible_errors
-                        .push(RuntimeCallInaccessibleError::MissingProofEntry);
-                    todo!()
+                    operation.inaccessible_errors.push(error);
+                    background
+                        .network_service
+                        .ban_and_disconnect(
+                            call_proof_sender,
+                            network_service::BanSeverity::High,
+                            "invalid-call-proof",
+                        )
+                        .await;
                 }
 
                 // If we have failed to obtain a valid proof several times, abort the runtime
@@ -2212,29 +2243,52 @@ async fn run_background<TPlat: PlatformRef>(
                     continue 'background_main_loop;
                 }
 
-                // This can be reached if the call proof was invalid or absent.
-                // Start a new call proof request.
+                // This can be reached if the call proof was invalid or absent. We must start a
+                // new call proof request.
+
+                // Choose peer to query.
+                // TODO: better peer selection
                 // TODO: can there be a race condition where the sync service forgets that a peer has knowledge of a block? shouldn't we somehow cache the peers that know this block ahead of time or something?
+                let Some(call_proof_target) = background
+                    .sync_service
+                    .peers_assumed_know_blocks(operation.block_number, &operation.block_hash)
+                    .await
+                    .choose(&mut rand_chacha::ChaCha20Rng::from_seed({
+                        // TODO: hacky
+                        let mut seed = [0; 32];
+                        background.platform.fill_random_bytes(&mut seed);
+                        seed
+                    }))
+                else {
+                    // No peer knows this block. Returning with a failure.
+                    let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
+                        operation.inaccessible_errors,
+                    )));
+                    continue 'background_main_loop;
+                };
+
+                // Start the request.
                 background.progress_runtime_call_requests.push(Box::pin({
                     let call_proof_request_future =
-                        // TODO: change API of that function
-                        background.sync_service.clone().call_proof_query(
-                            operation.block_number,
-                            sync_service::CallProofRequestConfig {
+                        background.network_service.clone().call_proof_request(
+                            call_proof_target.clone(),
+                            network_service::CallProofRequestConfig {
                                 block_hash: operation.block_hash,
                                 method: Cow::Owned(operation.function_name.clone()), // TODO: overhead
                                 parameter_vectored: iter::once(
                                     operation.parameters_vectored.clone(),
                                 ), // TODO: overhead
                             },
-                            1,
                             operation.timeout_per_request,
-                            NonZeroU32::new(1).unwrap(),
                         );
 
                     async move {
                         let result = call_proof_request_future.await;
-                        ProgressRuntimeCallRequest::CallProofRequestDone { result, operation }
+                        ProgressRuntimeCallRequest::CallProofRequestDone {
+                            result,
+                            operation,
+                            call_proof_sender: call_proof_target,
+                        }
                     }
                 }));
             }
@@ -2599,12 +2653,17 @@ impl RuntimeDownloadError {
 }
 
 struct Background<TPlat: PlatformRef> {
+    /// Target to use for all the logs of this service.
     log_target: String,
 
     /// See [`Config::platform`].
     platform: TPlat,
 
+    /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// See [`Config::network_service`].
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Receiver for messages to the background task.
     to_background: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
@@ -2737,7 +2796,9 @@ enum ProgressRuntimeCallRequest {
     /// A call proof request has finished and the runtime call can be advanced.
     CallProofRequestDone {
         /// Outcome of the latest call proof request.
-        result: Result<sync_service::EncodedMerkleProof, sync_service::CallProofQueryError>,
+        result: Result<network_service::EncodedMerkleProof, network_service::CallProofRequestError>,
+        /// Identity of the peer the call proof request was made against.
+        call_proof_sender: network_service::PeerId,
         operation: RuntimeCallRequest,
     },
 }

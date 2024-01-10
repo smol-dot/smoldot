@@ -1239,6 +1239,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
+                    network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
                 },
             ));
@@ -1277,6 +1278,7 @@ fn start_services<TPlat: platform::PlatformRef>(
                     log_name: log_name.clone(),
                     platform: platform.clone(),
                     sync_service: sync_service.clone(),
+                    network_service: network_service_chain.clone(),
                     genesis_block_scale_encoded_header,
                 },
             ));

@@ -67,13 +67,13 @@ use smoldot::{
     libp2p::{
         connection,
         multiaddr::{self, Multiaddr},
-        peer_id::{self, PeerId},
+        peer_id,
     },
     network::{basic_peering_strategy, codec, service},
 };
 
-pub use codec::Role;
-pub use service::{ChainId, EncodedMerkleProof, QueueNotificationError};
+pub use codec::{CallProofRequestConfig, Role};
+pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
 
 mod tasks;
 
