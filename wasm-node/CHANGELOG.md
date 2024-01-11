@@ -5,6 +5,7 @@
 ### Changed
 
 - Most of the log messages emitted by smoldot have been modified in order to unify their syntax and be easier to parse programatically. ([#1560](https://github.com/smol-dot/smoldot/pull/1560))
+- Added support for the `ext_panic_handler_abort_on_panic_version_1` host function.
 
 ### Fixed
 
