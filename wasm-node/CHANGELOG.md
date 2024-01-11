@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fix the nodes discovery process being slow for chains that are added long after the smoldot client has started. This was caused by the fact that the discovery was started at the same time for all chains, and that this discovery intentionally slows down over time. The discovery is now performed and slowed down for each chain individually. ([#1544](https://github.com/smol-dot/smoldot/pull/1544))
+- Fix panic when a JSON-RPC function call requires executing an old runtime that smoldot considers as invalid. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
 - Runtime calls no longer fail instantly when a peer sends back an invalid Merkle proof. Instead, the call proof is requested again from a different peer. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
 - The `chainHead_unstable_call` JSON-RPC function now produces a `operationInaccessible` event instead of an `operationError` event when peers send back bad or incomplete Merkle proofs. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
 
