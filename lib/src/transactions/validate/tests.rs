@@ -34,7 +34,7 @@ fn validate_from_proof() {
         module: hex::decode(&test.runtime_code).unwrap(),
         heap_pages: executor::DEFAULT_HEAP_PAGES,
         allow_unresolved_imports: true,
-        exec_hint: executor::vm::ExecHint::Oneshot,
+        exec_hint: executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
     })
     .unwrap();
 

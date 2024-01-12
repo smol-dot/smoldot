@@ -157,7 +157,7 @@ impl VirtualMachinePrototype {
                     ),
                     feature = "wasmtime"
                 ))]
-                ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Jit(
+                ExecHint::ValidateAndCompile => VirtualMachinePrototypeInner::Jit(
                     jit::JitPrototype::new(config.module_bytes, config.symbols)?,
                 ),
                 #[cfg(not(all(
@@ -175,13 +175,41 @@ impl VirtualMachinePrototype {
                     ),
                     feature = "wasmtime"
                 )))]
-                ExecHint::CompileAheadOfTime => VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::InterpreterPrototype::new(config.module_bytes, config.symbols)?,
+                ExecHint::ValidateAndCompile => VirtualMachinePrototypeInner::Interpreter(
+                    interpreter::InterpreterPrototype::new(
+                        config.module_bytes,
+                        interpreter::CompilationMode::Eager,
+                        config.symbols,
+                    )?,
                 ),
-                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
+                ExecHint::ValidateAndExecuteOnce | ExecHint::Untrusted => {
                     VirtualMachinePrototypeInner::Interpreter(
                         interpreter::InterpreterPrototype::new(
                             config.module_bytes,
+                            interpreter::CompilationMode::Eager,
+                            config.symbols,
+                        )?,
+                    )
+                }
+                ExecHint::CompileWithNonDeterministicValidation
+                | ExecHint::ExecuteOnceWithNonDeterministicValidation => {
+                    VirtualMachinePrototypeInner::Interpreter(
+                        interpreter::InterpreterPrototype::new(
+                            config.module_bytes,
+                            interpreter::CompilationMode::Lazy,
+                            config.symbols,
+                        )?,
+                    )
+                }
+                ExecHint::ForceWasmi { lazy_validation } => {
+                    VirtualMachinePrototypeInner::Interpreter(
+                        interpreter::InterpreterPrototype::new(
+                            config.module_bytes,
+                            if lazy_validation {
+                                interpreter::CompilationMode::Lazy
+                            } else {
+                                interpreter::CompilationMode::Eager
+                            },
                             config.symbols,
                         )?,
                     )
@@ -829,18 +857,37 @@ impl fmt::Debug for VirtualMachine {
 pub enum ExecHint {
     /// The WebAssembly code will be instantiated once and run many times.
     /// If possible, compile this WebAssembly code ahead of time.
-    CompileAheadOfTime,
+    ValidateAndCompile,
+
+    /// The WebAssembly code will be instantiated once and run many times.
+    /// Contrary to [`ExecHint::ValidateAndCompile`], the WebAssembly code isn't fully validated
+    /// ahead of time, meaning that invalid WebAssembly modules might successfully be compiled,
+    /// which is an indesirable property in some contexts.
+    CompileWithNonDeterministicValidation,
+
     /// The WebAssembly code is expected to be only run once.
     ///
     /// > **Note**: This isn't a hard requirement but a hint.
-    Oneshot,
+    ValidateAndExecuteOnce,
+
+    /// The WebAssembly code will be instantiated once and run many times.
+    /// Contrary to [`ExecHint::ValidateAndExecuteOnce`], the WebAssembly code isn't fully
+    /// validated ahead of time, meaning that invalid WebAssembly modules might successfully be
+    /// compiled, which is an indesirable property in some contexts.
+    ExecuteOnceWithNonDeterministicValidation,
+
     /// The WebAssembly code running through this VM is untrusted.
     Untrusted,
 
     /// Forces using the `wasmi` backend.
     ///
     /// This variant is useful for testing purposes.
-    ForceWasmi,
+    ForceWasmi {
+        /// If `true`, lazy validation is enabled. This leads to a faster initialization time,
+        /// but can also successfully validate invalid modules, which is an indesirable property
+        /// in some contexts.
+        lazy_validation: bool,
+    },
     /// Forces using the `wasmtime` backend.
     ///
     /// This variant is useful for testing purposes.
@@ -885,7 +932,10 @@ impl ExecHint {
     ///
     /// > **Note**: This function is most useful for testing purposes.
     pub fn available_engines() -> impl Iterator<Item = ExecHint> {
-        iter::once(ExecHint::ForceWasmi).chain(Self::force_wasmtime_if_available())
+        iter::once(ExecHint::ForceWasmi {
+            lazy_validation: false,
+        })
+        .chain(Self::force_wasmtime_if_available())
     }
 
     /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.

@@ -4,6 +4,7 @@
 
 ### Changed
 
+- The WebAssembly runtime is now compiled lazily, meaning that only the code that is executed is validated and translated. Thanks to this, compiling a runtime is now four times faster and the time to head of the chain is around 200ms faster. ([#1488](https://github.com/smol-dot/smoldot/pull/1488))
 - Most of the log messages emitted by smoldot have been modified in order to unify their syntax and be easier to parse programatically. ([#1560](https://github.com/smol-dot/smoldot/pull/1560))
 - Added support for the `ext_panic_handler_abort_on_panic_version_1` host function. ([#1573](https://github.com/smol-dot/smoldot/pull/1573))
 

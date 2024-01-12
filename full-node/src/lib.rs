@@ -855,7 +855,7 @@ async fn open_database(
                     genesis_storage.value(b":heappages"),
                 )
                 .unwrap(),
-                exec_hint: executor::vm::ExecHint::Oneshot,
+                exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
                 allow_unresolved_imports: true,
             })
             .unwrap()
