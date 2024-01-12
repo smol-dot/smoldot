@@ -283,7 +283,8 @@ impl SqliteFullDatabase {
                     let Ok(runtime) = host::HostVmPrototype::new(host::Config {
                         module: code,
                         heap_pages,
-                        exec_hint: executor::vm::ExecHint::Oneshot,
+                        exec_hint:
+                            executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
                         allow_unresolved_imports: true,
                     }) else {
                         todo!()

@@ -3165,7 +3165,7 @@ pub async fn execute_block_and_insert(
             let vm = host::HostVmPrototype::new(host::Config {
                 module: &new_code,
                 heap_pages: new_heap_pages,
-                exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
+                exec_hint: executor::vm::ExecHint::ValidateAndCompile,
                 allow_unresolved_imports: false,
             })
             .map_err(ExecuteBlockInvalidBlockError::InvalidNewRuntime)?;
