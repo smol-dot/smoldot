@@ -2720,9 +2720,9 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "0.32.0-beta.3"
+version = "0.32.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f4d96c1ae002e88a83ee8407aaacdce26bfbcd20662aa61e75edeacc80753ec"
+checksum = "38e9d600256f8db9105073e1e8dda7d4da6400e558b7f88401ec17bebcb24d42"
 dependencies = [
  "multi-stash",
  "num-derive",
