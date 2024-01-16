@@ -923,8 +923,8 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 (
                     WakeUpReason::ParaheadFetchFinished {
                         parahead_result:
-                            Err(ParaheadError::RuntimeCall(
-                                runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
+                            Err(ParaheadError::PinRuntimeError(
+                                runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription,
                             )),
                         ..
                     },
@@ -1341,10 +1341,16 @@ async fn fetch_parahead<TPlat: PlatformRef>(
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
     // Call `ParachainHost_persisted_validation_data` in order to know where the parachain is.
+    let (pinned_runtime, block_state_trie_root, block_number) = relay_chain_sync
+        .pin_pinned_block_runtime(subscription_id, *block_hash)
+        .await
+        .map_err(ParaheadError::PinRuntimeError)?;
     let success = relay_chain_sync
-        .pinned_block_runtime_call(
-            subscription_id,
+        .runtime_call(
+            pinned_runtime,
             *block_hash,
+            block_number,
+            block_state_trie_root,
             para::PERSISTED_VALIDATION_FUNCTION_NAME.to_owned(),
             None, // TODO: /!\
             para::persisted_validation_data_parameters(
@@ -1379,7 +1385,9 @@ async fn fetch_parahead<TPlat: PlatformRef>(
 enum ParaheadError {
     /// Error while performing call request over the network.
     #[display(fmt = "Error while performing call request over the network: {_0}")]
-    RuntimeCall(runtime_service::PinnedBlockRuntimeCallError),
+    RuntimeCall(runtime_service::RuntimeCallError),
+    /// Error pinning the runtime of the block.
+    PinRuntimeError(runtime_service::PinPinnedBlockRuntimeError),
     /// Parachain doesn't have a core in the relay chain.
     NoCore,
     /// Error while decoding the output of the call.
@@ -1394,27 +1402,14 @@ impl ParaheadError {
     /// issue.
     fn is_network_problem(&self) -> bool {
         match self {
+            ParaheadError::RuntimeCall(runtime_service::RuntimeCallError::Inaccessible(_)) => true,
             ParaheadError::RuntimeCall(
-                runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError::Inaccessible(_),
-                ),
-            ) => true,
-            ParaheadError::RuntimeCall(
-                runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned
-                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError::Execution(_),
-                )
-                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError::Crash,
-                )
-                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError::InvalidRuntime(_),
-                )
-                | runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-                    runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
-                )
-                | runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription,
+                runtime_service::RuntimeCallError::Execution(_)
+                | runtime_service::RuntimeCallError::Crash
+                | runtime_service::RuntimeCallError::InvalidRuntime(_)
+                | runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
             ) => false,
+            ParaheadError::PinRuntimeError(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
         }

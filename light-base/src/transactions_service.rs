@@ -1418,25 +1418,6 @@ async fn validate_transaction<TPlat: PlatformRef>(
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
 ) -> Result<validate::ValidTransaction, ValidationError> {
-    let runtime_call_future = relay_chain_sync.pinned_block_runtime_call(
-        relay_chain_sync_subscription_id,
-        block_hash,
-        validate::VALIDATION_FUNCTION_NAME.to_owned(),
-        Some(("TaggedTransactionQueue".to_owned(), 3..=3)),
-        validate::validate_transaction_runtime_parameters_v3(
-            iter::once(scale_encoded_transaction.as_ref()),
-            source,
-            &block_hash,
-        )
-        .fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        }),
-        3,
-        Duration::from_secs(8),
-        NonZeroU32::new(1).unwrap(),
-    );
-
     // TODO: move somewhere else?
     log!(
         platform,
@@ -1454,49 +1435,67 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .unwrap_or_else(|| "unknown".to_owned())
     );
 
-    let success = match runtime_call_future.await {
-        Ok(output) => output,
-        Err(runtime_service::PinnedBlockRuntimeCallError::ObsoleteSubscription) => {
+    let (pinned_runtime, block_state_root_hash, block_number) = match relay_chain_sync
+        .pin_pinned_block_runtime(relay_chain_sync_subscription_id, block_hash)
+        .await
+    {
+        Ok(r) => r,
+        Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
             return Err(ValidationError::ObsoleteSubscription)
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError::Execution(error),
-        )) => {
+        Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => unreachable!(),
+    };
+
+    let runtime_call_future = relay_chain_sync.runtime_call(
+        pinned_runtime,
+        block_hash,
+        block_number,
+        block_state_root_hash,
+        validate::VALIDATION_FUNCTION_NAME.to_owned(),
+        Some(("TaggedTransactionQueue".to_owned(), 3..=3)),
+        validate::validate_transaction_runtime_parameters_v3(
+            iter::once(scale_encoded_transaction.as_ref()),
+            source,
+            &block_hash,
+        )
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        }),
+        3,
+        Duration::from_secs(8),
+        NonZeroU32::new(1).unwrap(),
+    );
+
+    let success = match runtime_call_future.await {
+        Ok(output) => output,
+        Err(runtime_service::RuntimeCallError::Execution(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError::Crash,
-        )) => {
+        Err(runtime_service::RuntimeCallError::Crash) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Crash),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError::Inaccessible(errors),
-        )) => {
+        Err(runtime_service::RuntimeCallError::Inaccessible(errors)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError::InvalidRuntime(error),
-        )) => {
+        Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::RuntimeCall(
-            runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled,
-        )) => {
+        Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
             return Err(ValidationError::InvalidOrError(
                 InvalidOrError::ValidateError(
                     ValidateTransactionError::ApiVersionRequirementUnfulfilled,
                 ),
             ))
         }
-        Err(runtime_service::PinnedBlockRuntimeCallError::BlockNotPinned) => unreachable!(),
     };
 
     match validate::decode_validate_transaction_return_value(&success.output) {
