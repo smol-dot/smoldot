@@ -2862,7 +2862,7 @@ async fn compile_runtime<TPlat: PlatformRef>(
     let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
     let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
         .map_err(RuntimeError::InvalidHeapPages)?;
-    let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
+    let exec_hint = executor::vm::ExecHint::CompileWithNonDeterministicValidation;
 
     // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
     // import, we try again but with `allowed_unresolved_imports: true`.

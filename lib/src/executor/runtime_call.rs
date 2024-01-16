@@ -1792,7 +1792,7 @@ impl Inner {
                     let vm_prototype = match host::HostVmPrototype::new(host::Config {
                         module: req.wasm_code(),
                         heap_pages: executor::DEFAULT_HEAP_PAGES,
-                        exec_hint: vm::ExecHint::Oneshot,
+                        exec_hint: vm::ExecHint::ValidateAndExecuteOnce,
                         allow_unresolved_imports: false, // TODO: what is a correct value here?
                     }) {
                         Ok(w) => w,
