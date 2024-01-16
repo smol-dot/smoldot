@@ -345,57 +345,6 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         }
     }
 
-    /// Performs a runtime call against a pinned block.
-    ///
-    /// This function is a shortcut for calling [`RuntimeService::pin_pinned_block_runtime`]
-    /// and [`RuntimeService::runtime_call`].
-    ///
-    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
-    /// to make the call. The block must be currently pinned in the context of the provided
-    /// [`SubscriptionId`].
-    ///
-    /// Returns an error if the subscription is stale, meaning that it has been reset by the
-    /// runtime service.
-    pub async fn pinned_block_runtime_call(
-        &self,
-        subscription_id: SubscriptionId,
-        block_hash: [u8; 32],
-        function_name: String,
-        required_api_version: Option<(String, ops::RangeInclusive<u32>)>,
-        parameters_vectored: Vec<u8>,
-        total_attempts: u32,
-        timeout_per_request: Duration,
-        max_parallel: NonZeroU32,
-    ) -> Result<RuntimeCallSuccess, PinnedBlockRuntimeCallError> {
-        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self
-            .pin_pinned_block_runtime(subscription_id, block_hash)
-            .await
-        {
-            Ok(v) => v,
-            Err(PinPinnedBlockRuntimeError::BlockNotPinned) => {
-                return Err(PinnedBlockRuntimeCallError::BlockNotPinned);
-            }
-            Err(PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
-                return Err(PinnedBlockRuntimeCallError::ObsoleteSubscription)
-            }
-        };
-
-        self.runtime_call(
-            pinned_runtime,
-            block_hash,
-            block_number,
-            block_state_trie_root_hash,
-            function_name,
-            required_api_version,
-            parameters_vectored,
-            total_attempts,
-            timeout_per_request,
-            max_parallel,
-        )
-        .await
-        .map_err(PinnedBlockRuntimeCallError::RuntimeCall)
-    }
-
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
     /// heap pages. If none is found, compiles the runtime and stores it within the
     /// [`RuntimeService`].
@@ -691,20 +640,6 @@ pub enum RuntimeCallError {
     #[display(fmt = "Error trying to access the storage required for the runtime call")]
     // TODO: better display?
     Inaccessible(Vec<RuntimeCallInaccessibleError>),
-}
-
-/// See [`RuntimeService::pinned_block_runtime_call`].
-#[derive(Debug, derive_more::Display, Clone)]
-pub enum PinnedBlockRuntimeCallError {
-    /// Subscription is dead.
-    ObsoleteSubscription,
-
-    /// Requested block isn't pinned by the subscription.
-    BlockNotPinned,
-
-    /// Error during the runtime call.
-    #[display(fmt = "{_0}")]
-    RuntimeCall(RuntimeCallError),
 }
 
 /// See [`RuntimeCallError::Execution`].
