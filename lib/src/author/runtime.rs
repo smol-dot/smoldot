@@ -53,7 +53,7 @@ use crate::{
     verify::inherents,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, mem};
 
 pub use runtime_call::{
@@ -123,8 +123,6 @@ pub struct Success {
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
-    /// Concatenation of all the log messages printed by the runtime.
-    pub logs: String,
 }
 
 /// Error that can happen during the block production.
@@ -204,7 +202,6 @@ pub fn build_block(config: Config) -> BlockBuild {
     let shared = Shared {
         stage: Stage::InitializeBlock,
         block_body: Vec::with_capacity(config.block_body_capacity),
-        logs: String::new(),
         max_log_level: config.max_log_level,
         calculate_trie_changes: config.calculate_trie_changes,
     };
@@ -304,7 +301,6 @@ impl BlockBuild {
                         )));
                     }
 
-                    shared.logs.push_str(&success.logs);
                     shared.stage = Stage::InherentExtrinsics;
 
                     return BlockBuild::InherentExtrinsics(InherentExtrinsics {
@@ -331,7 +327,6 @@ impl BlockBuild {
                     };
 
                     shared.block_body.reserve(extrinsics.len());
-                    shared.logs.push_str(&success.logs);
                     shared.stage = Stage::ApplyInherentExtrinsic { extrinsics };
                     inner = Inner::Transition(success);
                 }
@@ -453,7 +448,6 @@ impl BlockBuild {
                     Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::FinalizeBlock,
                 ) => {
-                    shared.logs.push_str(&success.logs);
                     let scale_encoded_header = success.virtual_machine.value().as_ref().to_owned();
                     return BlockBuild::Finished(Ok(Success {
                         scale_encoded_header,
@@ -461,10 +455,10 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
-                        logs: shared.logs,
                     }));
                 }
 
+                // TODO: what about SignatureVerification and EmitLog? at the time of writing of this comment, it's not worth fixing as this code would get removed by <https://github.com/smol-dot/smoldot/issues/1517>
                 (_, s) => unreachable!("{:?}", s),
             }
         }
@@ -478,8 +472,6 @@ struct Shared {
     stage: Stage,
     /// Body of the block under construction. Items are added as construction progresses.
     block_body: Vec<Vec<u8>>,
-    /// Concatenation of all logs produced by the multiple calls.
-    logs: String,
     /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
     /// Value provided by [`Config::calculate_trie_changes`].

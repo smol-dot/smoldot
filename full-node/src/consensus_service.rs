@@ -2238,7 +2238,7 @@ impl SyncBackground {
         };
 
         // Actual block production now happening.
-        let (new_block_header, new_block_body, authoring_logs) = {
+        let (new_block_header, new_block_body) = {
             let parent_hash = self.sync.best_block_hash();
             let parent_runtime_arc =
                 if self.sync.best_block_number() != self.sync.finalized_block_header().number {
@@ -2304,7 +2304,7 @@ impl SyncBackground {
                             }
                         };
 
-                        break (success.scale_encoded_header, success.body, success.logs);
+                        break (success.scale_encoded_header, success.body);
                     }
 
                     author::build::BuilderAuthoring::Error { error, .. } => {
@@ -2445,14 +2445,14 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
+        // TODO: print logs
         let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
         self.log_callback.log(
             LogLevel::Info,
             format!(
-                "block-generated; hash={}; body_len={}; runtime_logs={:?}",
+                "block-generated; hash={}; body_len={}",
                 HashDisplay(&new_block_hash),
-                new_block_body.len(),
-                authoring_logs
+                new_block_body.len()
             ),
         );
         let _jaeger_span = self
