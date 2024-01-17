@@ -1116,15 +1116,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     self.inner = AllSyncInner::AllForks(sync);
                     ProcessOne::AllSync(self)
                 }
-                all_forks::ProcessOne::BlockVerify(verify) => {
-                    ProcessOne::VerifyBlock(BlockVerify {
-                        inner: BlockVerifyInner::AllForks(verify),
-                        shared: self.shared,
-                    })
-                }
-                all_forks::ProcessOne::FinalityProofVerify(verify) => {
+                all_forks::ProcessOne::BlockVerify(inner) => ProcessOne::VerifyBlock(BlockVerify {
+                    inner,
+                    shared: self.shared,
+                }),
+                all_forks::ProcessOne::FinalityProofVerify(inner) => {
                     ProcessOne::VerifyFinalityProof(FinalityProofVerify {
-                        inner: FinalityProofVerifyInner::AllForks(verify),
+                        inner,
                         shared: self.shared,
                     })
                 }
@@ -1975,22 +1973,16 @@ pub struct BlockFull {
 }
 
 pub struct BlockVerify<TRq, TSrc, TBl> {
-    inner: BlockVerifyInner<TRq, TSrc, TBl>,
-    shared: Shared<TRq>,
-}
-
-enum BlockVerifyInner<TRq, TSrc, TBl> {
-    AllForks(
+    inner:
         all_forks::BlockVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
-    ),
+    shared: Shared<TRq>,
 }
 
 impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// Returns the hash of the block to be verified.
     pub fn hash(&self) -> [u8; 32] {
-        match &self.inner {
-            BlockVerifyInner::AllForks(verify) => *verify.hash(),
-        }
+        // TODO: return by ref
+        *self.inner.hash()
     }
 
     /// Returns the list of SCALE-encoded extrinsics of the block to verify.
@@ -1999,16 +1991,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     pub fn scale_encoded_extrinsics(
         &'_ self,
     ) -> Option<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_> {
-        match &self.inner {
-            BlockVerifyInner::AllForks(verify) => verify.scale_encoded_extrinsics(),
-        }
+        self.inner.scale_encoded_extrinsics()
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
     pub fn scale_encoded_header(&self) -> Vec<u8> {
-        match &self.inner {
-            BlockVerifyInner::AllForks(verify) => verify.scale_encoded_header(),
-        }
+        self.inner.scale_encoded_header()
     }
 
     /// Verify the header of the block.
@@ -2016,43 +2004,37 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         self,
         now_from_unix_epoch: Duration,
     ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
-        match self.inner {
-            BlockVerifyInner::AllForks(verify) => {
-                let verified_block_hash = *verify.hash();
+        let verified_block_hash = *self.inner.hash();
 
-                match verify.verify_header(now_from_unix_epoch) {
-                    all_forks::HeaderVerifyOutcome::Success {
-                        is_new_best,
-                        success,
-                    } => HeaderVerifyOutcome::Success {
-                        is_new_best,
-                        success: HeaderVerifySuccess {
-                            inner: HeaderVerifySuccessInner::AllForks(success),
-                            shared: self.shared,
-                            verified_block_hash,
-                        },
-                    },
-                    all_forks::HeaderVerifyOutcome::Error { sync, error } => {
-                        HeaderVerifyOutcome::Error {
-                            sync: AllSync {
-                                inner: AllSyncInner::AllForks(sync),
-                                shared: self.shared,
-                            },
-                            error: match error {
-                                all_forks::HeaderVerifyError::VerificationFailed(error) => {
-                                    HeaderVerifyError::VerificationFailed(error)
-                                }
-                                all_forks::HeaderVerifyError::UnknownConsensusEngine => {
-                                    HeaderVerifyError::UnknownConsensusEngine
-                                }
-                                all_forks::HeaderVerifyError::ConsensusMismatch => {
-                                    HeaderVerifyError::ConsensusMismatch
-                                }
-                            },
-                        }
+        match self.inner.verify_header(now_from_unix_epoch) {
+            all_forks::HeaderVerifyOutcome::Success {
+                is_new_best,
+                success,
+            } => HeaderVerifyOutcome::Success {
+                is_new_best,
+                success: HeaderVerifySuccess {
+                    inner: HeaderVerifySuccessInner::AllForks(success),
+                    shared: self.shared,
+                    verified_block_hash,
+                },
+            },
+            all_forks::HeaderVerifyOutcome::Error { sync, error } => HeaderVerifyOutcome::Error {
+                sync: AllSync {
+                    inner: AllSyncInner::AllForks(sync),
+                    shared: self.shared,
+                },
+                error: match error {
+                    all_forks::HeaderVerifyError::VerificationFailed(error) => {
+                        HeaderVerifyError::VerificationFailed(error)
                     }
-                }
-            }
+                    all_forks::HeaderVerifyError::UnknownConsensusEngine => {
+                        HeaderVerifyError::UnknownConsensusEngine
+                    }
+                    all_forks::HeaderVerifyError::ConsensusMismatch => {
+                        HeaderVerifyError::ConsensusMismatch
+                    }
+                },
+            },
         }
     }
 }
@@ -2203,29 +2185,19 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
 }
 
 pub struct FinalityProofVerify<TRq, TSrc, TBl> {
-    inner: FinalityProofVerifyInner<TRq, TSrc, TBl>,
+    inner: all_forks::FinalityProofVerify<
+        Option<TBl>,
+        AllForksRequestExtra<TRq>,
+        AllForksSourceExtra<TSrc>,
+    >,
     shared: Shared<TRq>,
-}
-
-enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
-    AllForks(
-        all_forks::FinalityProofVerify<
-            Option<TBl>,
-            AllForksRequestExtra<TRq>,
-            AllForksSourceExtra<TSrc>,
-        >,
-    ),
 }
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     /// Returns the source the justification was obtained from.
     pub fn sender(&self) -> (SourceId, &TSrc) {
-        match &self.inner {
-            FinalityProofVerifyInner::AllForks(inner) => {
-                let sender = inner.sender().1;
-                (sender.outer_source_id, &sender.user_data)
-            }
-        }
+        let sender = self.inner.sender().1;
+        (sender.outer_source_id, &sender.user_data)
     }
 
     /// Perform the verification.
@@ -2236,58 +2208,54 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
         self,
         randomness_seed: [u8; 32],
     ) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
-        match self.inner {
-            FinalityProofVerifyInner::AllForks(verify) => {
-                let (sync, outcome) = match verify.perform(randomness_seed) {
-                    (
-                        sync,
-                        all_forks::FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks_newest_to_oldest,
-                            pruned_blocks,
-                            updates_best_block,
-                        },
-                    ) => (
-                        sync,
-                        FinalityProofVerifyOutcome::NewFinalized {
-                            finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
-                                .into_iter()
-                                .map(|b| Block {
-                                    full: None, // TODO: wrong
-                                    header: b.0,
-                                    justifications: Vec::new(), // TODO: wrong
-                                    user_data: b.1.unwrap(),
-                                })
-                                .collect(),
-                            pruned_blocks: pruned_blocks
-                                .into_iter()
-                                .map(|b| b.0.hash(self.shared.block_number_bytes))
-                                .collect(),
-                            updates_best_block,
-                        },
-                    ),
-                    (sync, all_forks::FinalityProofVerifyOutcome::AlreadyFinalized) => {
-                        (sync, FinalityProofVerifyOutcome::AlreadyFinalized)
-                    }
-                    (sync, all_forks::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
-                        (sync, FinalityProofVerifyOutcome::GrandpaCommitPending)
-                    }
-                    (sync, all_forks::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                        (sync, FinalityProofVerifyOutcome::JustificationError(error))
-                    }
-                    (sync, all_forks::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
-                        (sync, FinalityProofVerifyOutcome::GrandpaCommitError(error))
-                    }
-                };
-
-                (
-                    AllSync {
-                        inner: AllSyncInner::AllForks(sync),
-                        shared: self.shared,
-                    },
-                    outcome,
-                )
+        let (sync, outcome) = match self.inner.perform(randomness_seed) {
+            (
+                sync,
+                all_forks::FinalityProofVerifyOutcome::NewFinalized {
+                    finalized_blocks_newest_to_oldest,
+                    pruned_blocks,
+                    updates_best_block,
+                },
+            ) => (
+                sync,
+                FinalityProofVerifyOutcome::NewFinalized {
+                    finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
+                        .into_iter()
+                        .map(|b| Block {
+                            full: None, // TODO: wrong
+                            header: b.0,
+                            justifications: Vec::new(), // TODO: wrong
+                            user_data: b.1.unwrap(),
+                        })
+                        .collect(),
+                    pruned_blocks: pruned_blocks
+                        .into_iter()
+                        .map(|b| b.0.hash(self.shared.block_number_bytes))
+                        .collect(),
+                    updates_best_block,
+                },
+            ),
+            (sync, all_forks::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                (sync, FinalityProofVerifyOutcome::AlreadyFinalized)
             }
-        }
+            (sync, all_forks::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                (sync, FinalityProofVerifyOutcome::GrandpaCommitPending)
+            }
+            (sync, all_forks::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                (sync, FinalityProofVerifyOutcome::JustificationError(error))
+            }
+            (sync, all_forks::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                (sync, FinalityProofVerifyOutcome::GrandpaCommitError(error))
+            }
+        };
+
+        (
+            AllSync {
+                inner: AllSyncInner::AllForks(sync),
+                shared: self.shared,
+            },
+            outcome,
+        )
     }
 }
 
