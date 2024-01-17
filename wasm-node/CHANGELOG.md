@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.17 - 2024-01-17
+
 ### Changed
 
 - The WebAssembly runtime is now compiled lazily, meaning that only the code that is executed is validated and translated. Thanks to this, compiling a runtime is now four times faster and the time to head of the chain is around 200ms faster. ([#1488](https://github.com/smol-dot/smoldot/pull/1488), [#1577](https://github.com/smol-dot/smoldot/pull/1577))
