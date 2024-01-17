@@ -18,7 +18,7 @@
 use core::{iter, pin::Pin};
 
 use super::{Address, ConnectionType, LogLevel, MultiStreamAddress, PlatformRef};
-use alloc::borrow::Cow;
+use alloc::{borrow::Cow, format, string::String};
 
 /// Implementation of a [`PlatformRef`] that wraps around another platform and adds a prefix
 /// before every log line and task name.
