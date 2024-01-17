@@ -385,7 +385,7 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
     }
 }
 
-impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
+impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
     fn from(address: &'a MultiStreamAddress) -> ConnectionType {
         match address {
             MultiStreamAddress::WebRtc {
@@ -454,7 +454,7 @@ pub enum Address<'a> {
 /// Address passed to [`PlatformRef::connect_multistream`].
 // TODO: we don't differentiate between Dns4 and Dns6
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum MultiStreamAddress {
+pub enum MultiStreamAddress<'a> {
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
@@ -467,8 +467,7 @@ pub enum MultiStreamAddress {
         /// UDP port to connect to.
         port: u16,
         /// SHA-256 hash of the target's WebRTC certificate.
-        // TODO: consider providing a reference here; right now there's some issues with multiaddr preventing that
-        remote_certificate_sha256: [u8; 32],
+        remote_certificate_sha256: &'a [u8; 32],
     },
 }
 
