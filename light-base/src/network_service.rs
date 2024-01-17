@@ -2662,7 +2662,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                             .collect();
                         let remote_tls_certificate_multihash = [18u8, 32]
                             .into_iter()
-                            .chain(remote_certificate_sha256.into_iter())
+                            .chain(remote_certificate_sha256.into_iter().copied())
                             .collect();
 
                         let (connection_id, connection_task) =

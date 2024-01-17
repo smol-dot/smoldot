@@ -59,6 +59,11 @@ impl<T: AsRef<[u8]>> Multihash<T> {
 }
 
 impl<'a> Multihash<&'a [u8]> {
+    /// Returns the data stored in this multihash.
+    pub fn data_ref(&self) -> &'a [u8] {
+        decode(&self.0.as_ref()).unwrap().1
+    }
+
     /// Checks whether `input` is a valid multihash.
     ///
     /// Contrary to [`Multihash::from_bytes`], doesn't return an error if the slice is too long
