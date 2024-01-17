@@ -29,9 +29,13 @@ pub use smoldot::libp2p::with_buffers;
 pub mod address_parse;
 pub mod default;
 
+mod with_prefix;
+
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use default::DefaultPlatform;
+
+pub use with_prefix::WithPrefix;
 
 /// Access to a platform's capabilities.
 ///
