@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "2.0.16"
+version = "2.0.17"
 dependencies = [
  "async-lock 3.3.0",
  "async-task",
