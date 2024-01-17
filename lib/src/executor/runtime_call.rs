@@ -1884,7 +1884,11 @@ fn append_to_storage_value(value: &mut Vec<u8>, to_add: &[u8]) {
             || new_len_encoded_size == curr_len_encoded_size + 1
     );
 
-    for _ in 0..(new_len_encoded_size - curr_len_encoded_size) {
+    value.reserve(to_add.len() + (new_len_encoded_size - curr_len_encoded_size));
+
+    // Since `new_len_encoded_size` is either equal to `curr_len_encoded_size` or equal to
+    // `curr_len_encoded_size + 1`, we simply use `insert(0, _)` in the latter case.
+    if new_len_encoded_size != curr_len_encoded_size {
         value.insert(0, 0);
     }
 
