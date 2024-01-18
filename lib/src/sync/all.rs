@@ -1122,24 +1122,53 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
 
-        if let Some(all_forks_request_id) = request.all_forks {
-            let Some(all_forks) = self.all_forks.take() else {
-                unreachable!()
+        if let Ok(blocks) = blocks {
+            let mut blocks_iter = blocks.into_iter();
+
+            let mut all_forks_blocks_append = if let Some(all_forks_request_id) = request.all_forks
+            {
+                let Some(all_forks) = self.all_forks.take() else {
+                    unreachable!()
+                };
+                let (_, blocks_append) = all_forks.finish_request(all_forks_request_id);
+                Some(blocks_append)
+            } else {
+                None
             };
 
-            let outcome = if let Ok(blocks) = blocks {
-                let (_, mut blocks_append) = all_forks.finish_request(all_forks_request_id);
-                let mut blocks_iter = blocks.into_iter().enumerate();
+            let mut is_first_block = true;
 
-                loop {
-                    let (block_index, block) = match blocks_iter.next() {
-                        Some(v) => v,
-                        None => {
-                            self.all_forks = Some(blocks_append.finish());
-                            break ResponseOutcome::Queued;
+            let outcome = loop {
+                let block = match blocks_iter.next() {
+                    Some(v) => v,
+                    None => {
+                        if let (true, Some(warp_sync_request_id)) =
+                            (is_first_block, request.warp_sync)
+                        {
+                            let Some(warp_sync) = self.warp_sync.as_mut() else {
+                                unreachable!()
+                            };
+                            // TODO: report source misbehaviour
+                            warp_sync.remove_request(warp_sync_request_id);
                         }
-                    };
+                        if let Some(all_forks_blocks_append) = all_forks_blocks_append {
+                            self.all_forks = Some(all_forks_blocks_append.finish());
+                        }
+                        break ResponseOutcome::Queued;
+                    }
+                };
 
+                if let (true, Some(warp_sync_request_id)) = (is_first_block, request.warp_sync) {
+                    let Some(warp_sync) = self.warp_sync.as_mut() else {
+                        unreachable!()
+                    };
+                    warp_sync.body_download_success(
+                        warp_sync_request_id,
+                        block.scale_encoded_extrinsics.clone(), // TODO: clone?
+                    );
+                }
+
+                if let Some(blocks_append) = all_forks_blocks_append {
                     // TODO: many of the errors don't properly translate here, needs some refactoring
                     match blocks_append.add_block(
                         &block.scale_encoded_header,
@@ -1150,13 +1179,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             .map(|j| (j.engine_id, j.justification)),
                     ) {
                         Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
-                            blocks_append = ba.insert(Some(block.user_data))
+                            all_forks_blocks_append = Some(ba.insert(Some(block.user_data)))
                         }
                         Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
                             // TODO: replacing the user data entirely is very opinionated, instead the API of the AllSync should be changed
-                            blocks_append = ba.replace(Some(block.user_data)).0
+                            all_forks_blocks_append = Some(ba.replace(Some(block.user_data)).0)
                         }
-                        Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {
+                        Ok(all_forks::AddBlock::AlreadyInChain(ba)) if is_first_block => {
                             self.all_forks = Some(ba.cancel());
                             break ResponseOutcome::AllAlreadyInChain;
                         }
@@ -1181,37 +1210,29 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         }
                     }
                 }
-            } else {
+
+                is_first_block = false;
+            };
+
+            (request.user_data, outcome)
+        } else {
+            if let Some(all_forks_request_id) = request.all_forks {
+                let Some(all_forks) = self.all_forks.take() else {
+                    unreachable!()
+                };
                 let (_, finish_request) = all_forks.finish_request(all_forks_request_id);
                 self.all_forks = Some(finish_request.finish());
-                // TODO: `Queued`?! doesn't seem right
-                ResponseOutcome::Queued
-            };
+            }
+
+            if let Some(warp_sync_request_id) = request.warp_sync {
+                let Some(warp_sync) = &mut self.warp_sync else {
+                    unreachable!()
+                };
+                warp_sync.remove_request(warp_sync_request_id);
+            }
+
+            (request.user_data, ResponseOutcome::Outdated)
         }
-
-        if let Some(warp_sync_request_id) = request.warp_sync {
-            let Some(warp_sync) = &mut self.warp_sync else {
-                unreachable!()
-            };
-
-            let outcome = match blocks
-                .and_then(|mut b| b.next().ok_or(()))
-                .map(|b| b.scale_encoded_extrinsics)
-            {
-                Ok(body) => {
-                    warp_sync.body_download_success(warp_sync_request_id, body);
-                    ResponseOutcome::Queued
-                }
-                Err(_) => {
-                    // TODO: report source misbehaviour
-                    warp_sync.remove_request(warp_sync_request_id);
-                    ResponseOutcome::Outdated
-                }
-            };
-        }
-
-        // TODO: merge the outcomes
-        (request.user_data, ResponseOutcome::Queued)
     }
 
     /// Inject a successful response to a previously-emitted GrandPa warp sync request.
