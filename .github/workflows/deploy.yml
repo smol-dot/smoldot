@@ -79,11 +79,11 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     - run: docker images   # TODO remove
-    - run: docker images --no-trunc -q ghcr.io/smol-dot/full-node | sed 's/.*/--amend &/'   # TODO: remove
+    - run: docker images --no-trunc -q ghcr.io/smol-dot/full-node | sed 's/.*/ --amend &/'   # TODO: remove
     - run: |
         docker manifest create \
           ghcr.io/smol-dot/full-node:main \
-          $(docker images --no-trunc -q ghcr.io/smol-dot/full-node | sed 's/.*/--amend &/')
+          $(docker images --no-trunc -q ghcr.io/smol-dot/full-node | sed 's/.*/ --amend &/')
     - run: docker images   # TODO remove
     - run: docker manifest push ghcr.io/smol-dot/full-node:main
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
