@@ -362,8 +362,18 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
     /// should only ever be shown to the user and not used for any meaningful logic.
+    // TODO: remove this function as it's too imprecise
     pub fn is_near_head_of_chain_heuristic(&self) -> bool {
-        todo!() // TODO:
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        let local_best_block = all_forks.best_block_number();
+
+        // We return `false` if any source is more than 5 blocks ahead, and `true` otherwise.
+        !self.shared.sources.iter().any(|(_, src)| {
+            all_forks.source_best_block(src.all_forks).0 > local_best_block.saturating_add(5)
+        })
     }
 
     /// Adds a new source to the sync state machine.

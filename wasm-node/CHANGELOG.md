@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The `system_health` JSON-RPC function now returns `isSyncing: true` if any of the peers smoldot is connected to is more than 10 blocks ahead of smoldot, and `false` in any other situation including having no peer.
+
 ## 2.0.17 - 2024-01-17
 
 ### Changed
