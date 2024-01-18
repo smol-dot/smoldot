@@ -412,6 +412,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         outer_source_id_entry.insert(SourceMapping {
             warp_sync: warp_sync_source_id,
             all_forks: all_forks_source_id,
+            num_requests: 0,
         });
 
         outer_source_id
@@ -504,35 +505,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`SourceId`] is invalid.
     ///
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
-        // TODO: restore
-        todo!()
-        /*debug_assert!(self.shared.sources.contains(source_id.0));
-
-        // TODO: O(n) :-/
-        let num_inline = self
-            .shared
-            .requests
-            .iter()
-            .filter(|(_, rq)| matches!(rq, RequestMapping::Inline(id, _, _) if *id == source_id))
-            .count();
-
-        let num_inner = match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
-            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                sync.source_num_ongoing_requests(*src)
-            }
-            (AllSyncInner::WarpSync { inner, .. }, SourceMapping::WarpSync(src)) => {
-                inner.source_num_ongoing_requests(*src)
-            }
-
-            (AllSyncInner::Poisoned, _) => unreachable!(),
-            // Invalid combinations of syncing state machine and source id.
-            // This indicates a internal bug during the switch from one state machine to the
-            // other.
-            (AllSyncInner::WarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::WarpSync(_)) => unreachable!(),
+        let Some(&SourceMapping {
+            num_requests: num_request,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
         };
 
-        num_inline + num_inner*/
+        num_request
     }
 
     /// Returns the current best block of the given source.
@@ -745,38 +726,38 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         detail: RequestDetail,
         user_data: TRq,
     ) -> RequestId {
-        let Some(source_ids) = self.shared.sources.get(source_id.0) else {
+        let Some(source_ids) = self.shared.sources.get_mut(source_id.0) else {
             panic!()
         };
 
         let request_mapping_entry = self.shared.requests.vacant_entry();
         let outer_request_id = RequestId(request_mapping_entry.key());
 
-        let all_forks_request_id = if let RequestDetail::BlocksRequest {
-            first_block_height,
-            first_block_hash: Some(first_block_hash),
-            ascending,
-            num_blocks,
-            request_headers,
-            request_bodies,
-            request_justification,
-        } = detail
-        {
-            let Some(all_forks) = &mut self.all_forks else {
-                unreachable!()
-            };
+        let all_forks_request_id = match detail {
+            RequestDetail::BlocksRequest {
+                first_block_height,
+                first_block_hash: Some(first_block_hash),
+                ascending: true,
+                num_blocks,
+                request_headers: true,
+                request_bodies,
+                request_justification: true,
+            } if request_bodies == self.shared.download_bodies => {
+                let Some(all_forks) = &mut self.all_forks else {
+                    unreachable!()
+                };
 
-            Some(all_forks.add_request(
-                source_ids.all_forks,
-                all_forks::RequestParams {
-                    first_block_hash,
-                    first_block_height,
-                    num_blocks,
-                },
-                AllForksRequestExtra { outer_request_id },
-            ))
-        } else {
-            None
+                Some(all_forks.add_request(
+                    source_ids.all_forks,
+                    all_forks::RequestParams {
+                        first_block_hash,
+                        first_block_height,
+                        num_blocks,
+                    },
+                    AllForksRequestExtra { outer_request_id },
+                ))
+            }
+            _ => None,
         };
 
         let warp_sync_request_id = match (&mut self.warp_sync, source_ids.warp_sync, detail) {
@@ -842,6 +823,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 None
             }
         };
+
+        source_ids.num_requests += 1;
 
         request_mapping_entry.insert(RequestInfo {
             all_forks: all_forks_request_id,
@@ -1122,6 +1105,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
 
+        self.shared.sources[request.source_id.0].num_requests -= 1;
+
         if let Ok(blocks) = blocks {
             let mut blocks_iter = blocks.into_iter();
 
@@ -1274,6 +1259,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
         let request = self.shared.requests.remove(request_id.0);
 
+        self.shared.sources[request.source_id.0].num_requests -= 1;
+
         if let Some(warp_sync_request_id) = request.warp_sync {
             if let Some((fragments, is_finished)) = response {
                 self.warp_sync.as_mut().unwrap().warp_sync_request_success(
@@ -1314,6 +1301,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
         let request = self.shared.requests.remove(request_id.0);
 
+        self.shared.sources[request.source_id.0].num_requests -= 1;
+
         if let Some(warp_sync_request_id) = request.warp_sync {
             if let Ok(response) = response {
                 self.warp_sync
@@ -1352,6 +1341,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         debug_assert!(self.shared.requests.contains(request_id.0));
 
         let request = self.shared.requests.remove(request_id.0);
+
+        self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
             if let Ok(response) = response {
@@ -2229,6 +2220,8 @@ struct RequestInfo<TRq> {
 struct SourceMapping {
     warp_sync: Option<warp_sync::SourceId>,
     all_forks: all_forks::SourceId,
+    // TODO: all_forks also has a requests count tracker, deduplicate
+    num_requests: usize,
 }
 
 fn all_forks_request_convert(
