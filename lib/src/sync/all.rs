@@ -182,8 +182,10 @@ pub struct AllSync<TRq, TSrc, TBl> {
     warp_sync: Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
     // TODO: we store an `Option<TBl>` instead of `TBl` due to API issues; the all.rs doesn't let you insert user datas for pending blocks while the AllForksSync lets you; `None` is stored while a block is pending
-    all_forks:
+    /// Always `Some`, except for temporary extractions.
+    all_forks: Option<
         all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra<TSrc>>,
+    >,
     shared: Shared<TRq>,
 }
 
@@ -208,7 +210,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             })
             .ok(),
             ready_to_transition: None,
-            all_forks: AllForksSync::new(all_forks::Config {
+            all_forks: Some(AllForksSync::new(all_forks::Config {
                 chain_information: config.chain_information,
                 block_number_bytes: config.block_number_bytes,
                 sources_capacity: config.sources_capacity,
@@ -217,7 +219,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
                 max_disjoint_headers: config.max_disjoint_headers,
                 max_requests_per_block: config.max_requests_per_block,
-            }),
+            })),
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
@@ -240,7 +242,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
     pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
-        self.all_forks.as_chain_information()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.as_chain_information()
     }
 
     /// Returns the current status of the syncing.
@@ -282,7 +288,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Returns the header of the finalized block.
     pub fn finalized_block_header(&self) -> header::HeaderRef {
-        self.all_forks.finalized_block_header()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.finalized_block_header()
     }
 
     /// Returns the header of the best block.
@@ -290,7 +300,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_header(&self) -> header::HeaderRef {
-        self.all_forks.best_block_header()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.best_block_header()
     }
 
     /// Returns the number of the best block.
@@ -298,7 +312,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_number(&self) -> u64 {
-        self.all_forks.best_block_number()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.best_block_number()
     }
 
     /// Returns the hash of the best block.
@@ -306,7 +324,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_hash(&self) -> [u8; 32] {
-        self.all_forks.best_block_hash()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.best_block_hash()
     }
 
     /// Returns consensus information about the current best block of the chain.
@@ -317,7 +339,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
-        self.all_forks.non_finalized_blocks_unordered()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.non_finalized_blocks_unordered()
     }
 
     /// Returns the header of all known non-finalized blocks in the chain.
@@ -325,7 +351,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// The returned items are guaranteed to be in an order in which the parents are found before
     /// their children.
     pub fn non_finalized_blocks_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
-        self.all_forks.non_finalized_blocks_ancestry_order()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.non_finalized_blocks_ancestry_order()
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -358,15 +388,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         };
 
         let all_forks_source_id = {
+            let Some(all_forks) = &mut self.all_forks else {
+                unreachable!()
+            };
+
             let source_user_data = AllForksSourceExtra {
                 user_data,
                 outer_source_id,
             };
 
-            match self
-                .all_forks
-                .prepare_add_source(best_block_number, best_block_hash)
-            {
+            match all_forks.prepare_add_source(best_block_number, best_block_hash) {
                 all_forks::AddSource::BestBlockAlreadyVerified(b)
                 | all_forks::AddSource::BestBlockPendingVerification(b) => {
                     b.add_source(source_user_data)
@@ -457,9 +488,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Returns the list of sources in this state machine.
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
-        self.all_forks
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks
             .sources()
-            .map(move |id| self.all_forks[id].outer_source_id)
+            .map(move |id| all_forks[id].outer_source_id)
     }
 
     /// Returns the number of ongoing requests that concern this source.
@@ -510,10 +545,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`SourceId`] is invalid.
     ///
     pub fn source_best_block(&self, source_id: SourceId) -> (u64, &[u8; 32]) {
-        debug_assert!(self.shared.sources.contains(source_id.0));
+        let Some(&SourceMapping {
+            all_forks: inner_source_id,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
+        };
 
-        let inner_source_id = self.shared.sources.get(source_id.0).unwrap().all_forks;
-        self.all_forks.source_best_block(inner_source_id)
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.source_best_block(inner_source_id)
     }
 
     /// Returns true if the source has earlier announced the block passed as parameter or one of
@@ -533,11 +577,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         height: u64,
         hash: &[u8; 32],
     ) -> bool {
-        debug_assert!(self.shared.sources.contains(source_id.0));
+        let Some(&SourceMapping {
+            all_forks: inner_source_id,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
+        };
 
-        let inner_source_id = self.shared.sources.get(source_id.0).unwrap().all_forks;
-        self.all_forks
-            .source_knows_non_finalized_block(inner_source_id, height, hash)
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.source_knows_non_finalized_block(inner_source_id, height, hash)
     }
 
     /// Returns the list of sources for which [`AllSync::source_knows_non_finalized_block`] would
@@ -554,9 +606,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         height: u64,
         hash: &[u8; 32],
     ) -> impl Iterator<Item = SourceId> + '_ {
-        self.all_forks
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks
             .knows_non_finalized_block(height, hash)
-            .map(move |id| self.all_forks[id].outer_source_id)
+            .map(move |id| all_forks[id].outer_source_id)
     }
 
     /// Try register a new block that the source is aware of.
@@ -578,11 +634,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         height: u64,
         hash: [u8; 32],
     ) {
-        debug_assert!(self.shared.sources.contains(source_id.0));
+        let Some(&SourceMapping {
+            all_forks: inner_source_id,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
+        };
 
-        let inner_source_id = self.shared.sources.get(source_id.0).unwrap().all_forks;
-        self.all_forks
-            .add_known_block_to_source(inner_source_id, height, hash);
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.add_known_block_to_source(inner_source_id, height, hash);
     }
 
     /// Returns the details of a request to start towards a source.
@@ -592,15 +656,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
-        let all_forks_requests = self.all_forks.desired_requests().map(
-            move |(inner_source_id, src_user_data, rq_params)| {
-                (
-                    self.all_forks[inner_source_id].outer_source_id,
-                    &src_user_data.user_data,
-                    all_forks_request_convert(rq_params, self.shared.download_bodies),
-                )
-            },
-        );
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        let all_forks_requests =
+            all_forks
+                .desired_requests()
+                .map(move |(inner_source_id, src_user_data, rq_params)| {
+                    (
+                        all_forks[inner_source_id].outer_source_id,
+                        &src_user_data.user_data,
+                        all_forks_request_convert(rq_params, self.shared.download_bodies),
+                    )
+                });
 
         let warp_sync_requests =
             if let Some(warp_sync) = &self.warp_sync {
@@ -647,7 +716,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                         (
                             src_user_data.outer_source_id,
-                            &self.all_forks
+                            &all_forks
                                 [self.shared.sources[src_user_data.outer_source_id.0].all_forks]
                                 .user_data,
                             detail,
@@ -676,11 +745,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         detail: RequestDetail,
         user_data: TRq,
     ) -> RequestId {
-        let request_mapping_entry = self.shared.requests.vacant_entry();
-        let outer_request_id = RequestId(request_mapping_entry.key());
         let Some(source_ids) = self.shared.sources.get(source_id.0) else {
             panic!()
         };
+
+        let request_mapping_entry = self.shared.requests.vacant_entry();
+        let outer_request_id = RequestId(request_mapping_entry.key());
 
         let all_forks_request_id = if let RequestDetail::BlocksRequest {
             first_block_height,
@@ -692,7 +762,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request_justification,
         } = detail
         {
-            Some(self.all_forks.add_request(
+            let Some(all_forks) = &mut self.all_forks else {
+                unreachable!()
+            };
+
+            Some(all_forks.add_request(
                 source_ids.all_forks,
                 all_forks::RequestParams {
                     first_block_hash,
@@ -789,7 +863,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// >           requests that are returned.
     pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
         // TODO: not implemented properly
-        self.all_forks
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks
             .obsolete_requests()
             .map(move |(_, rq)| rq.outer_request_id)
             .chain(
@@ -826,29 +904,38 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     self.warp_sync = Some(inner);
                 }
                 warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => {
+                    let Some(all_forks) = self.all_forks.take() else {
+                        unreachable!()
+                    };
                     return ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify {
                         inner,
                         ready_to_transition: None,
-                        all_forks: self.all_forks,
+                        all_forks,
                         shared: self.shared,
-                    })
+                    });
                 }
                 warp_sync::ProcessOne::BuildRuntime(inner) => {
+                    let Some(all_forks) = self.all_forks.take() else {
+                        unreachable!()
+                    };
                     return ProcessOne::WarpSyncBuildRuntime(WarpSyncBuildRuntime {
                         inner,
                         ready_to_transition: None,
-                        all_forks: self.all_forks,
+                        all_forks,
                         shared: self.shared,
-                    })
+                    });
                 }
                 warp_sync::ProcessOne::BuildChainInformation(inner) => {
+                    let Some(all_forks) = self.all_forks.take() else {
+                        unreachable!()
+                    };
                     return ProcessOne::WarpSyncBuildChainInformation(
                         WarpSyncBuildChainInformation {
                             inner,
-                            all_forks: self.all_forks,
+                            all_forks,
                             shared: self.shared,
                         },
-                    )
+                    );
                 }
             }
         }
@@ -879,9 +966,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             };*/
         }
 
-        match self.all_forks.process_one() {
+        let Some(all_forks) = self.all_forks.take() else {
+            unreachable!()
+        };
+        match all_forks.process_one() {
             all_forks::ProcessOne::AllSync { sync } => {
-                self.all_forks = sync;
+                self.all_forks = Some(sync);
             }
             all_forks::ProcessOne::BlockVerify(inner) => {
                 return ProcessOne::VerifyBlock(BlockVerify {
@@ -911,13 +1001,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome {
-        let inner_source_id = self.shared.sources.get(source_id.0).unwrap().all_forks;
+        let Some(&SourceMapping {
+            all_forks: inner_source_id,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
+        };
 
-        match self.all_forks.block_announce(
-            inner_source_id,
-            announced_scale_encoded_header,
-            is_best,
-        ) {
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+
+        match all_forks.block_announce(inner_source_id, announced_scale_encoded_header, is_best) {
             all_forks::BlockAnnounceOutcome::TooOld {
                 announce_block_height,
                 finalized_block_height,
@@ -964,8 +1060,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
         }
 
-        self.all_forks
-            .update_source_finality_state(source_id.all_forks, finalized_block_height);
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+        all_forks.update_source_finality_state(source_id.all_forks, finalized_block_height);
     }
 
     /// Update the state machine with a Grandpa commit message received from the network.
@@ -998,10 +1096,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
         }
 
-        match self
-            .all_forks
-            .grandpa_commit_message(source_id.all_forks, scale_encoded_message)
-        {
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+        match all_forks.grandpa_commit_message(source_id.all_forks, scale_encoded_message) {
             all_forks::GrandpaCommitMessageOutcome::ParseError => {
                 GrandpaCommitMessageOutcome::Discarded
             }
@@ -1025,15 +1123,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         let request = self.shared.requests.remove(request_id.0);
 
         if let Some(all_forks_request_id) = request.all_forks {
+            let Some(all_forks) = self.all_forks.take() else {
+                unreachable!()
+            };
+
             let outcome = if let Ok(blocks) = blocks {
-                let (_, mut blocks_append) = self.all_forks.finish_request(all_forks_request_id);
+                let (_, mut blocks_append) = all_forks.finish_request(all_forks_request_id);
                 let mut blocks_iter = blocks.into_iter().enumerate();
 
                 loop {
                     let (block_index, block) = match blocks_iter.next() {
                         Some(v) => v,
                         None => {
-                            self.all_forks = blocks_append.finish();
+                            self.all_forks = Some(blocks_append.finish());
                             break ResponseOutcome::Queued;
                         }
                     };
@@ -1055,11 +1157,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             blocks_append = ba.replace(Some(block.user_data)).0
                         }
                         Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {
-                            self.all_forks = ba.cancel();
+                            self.all_forks = Some(ba.cancel());
                             break ResponseOutcome::AllAlreadyInChain;
                         }
                         Ok(all_forks::AddBlock::AlreadyInChain(ba)) => {
-                            self.all_forks = ba.cancel();
+                            self.all_forks = Some(ba.cancel());
                             break ResponseOutcome::Queued;
                         }
                         Err((
@@ -1068,20 +1170,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             },
                             sync,
                         )) => {
-                            self.all_forks = sync;
+                            self.all_forks = Some(sync);
                             break ResponseOutcome::NotFinalizedChain {
                                 discarded_unverified_block_headers,
                             };
                         }
                         Err((_, sync)) => {
-                            self.all_forks = sync;
+                            self.all_forks = Some(sync);
                             break ResponseOutcome::Queued;
                         }
                     }
                 }
             } else {
-                let (_, finish_request) = self.all_forks.finish_request(all_forks_request_id);
-                self.all_forks = finish_request.finish();
+                let (_, finish_request) = all_forks.finish_request(all_forks_request_id);
+                self.all_forks = Some(finish_request.finish());
                 // TODO: `Queued`?! doesn't seem right
                 ResponseOutcome::Queued
             };
@@ -1256,16 +1358,38 @@ impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
 
     #[track_caller]
     fn index(&self, source_id: SourceId) -> &TSrc {
-        debug_assert!(self.shared.sources.contains(source_id.0));
-        &self.all_forks[self.shared.sources.get(source_id.0).unwrap().all_forks].user_data
+        let Some(&SourceMapping {
+            all_forks: inner_source_id,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
+        };
+
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        &all_forks[inner_source_id].user_data
     }
 }
 
 impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.shared.sources.contains(source_id.0));
-        &mut self.all_forks[self.shared.sources.get(source_id.0).unwrap().all_forks].user_data
+        let Some(&SourceMapping {
+            all_forks: inner_source_id,
+            ..
+        }) = self.shared.sources.get(source_id.0)
+        else {
+            panic!()
+        };
+
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+
+        &mut all_forks[inner_source_id].user_data
     }
 }
 
@@ -1274,14 +1398,22 @@ impl<'a, TRq, TSrc, TBl> ops::Index<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, 
 
     #[track_caller]
     fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
-        self.all_forks[(block_height, block_hash)].as_ref().unwrap()
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks[(block_height, block_hash)].as_ref().unwrap()
     }
 }
 
 impl<'a, TRq, TSrc, TBl> ops::IndexMut<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, TBl> {
     #[track_caller]
     fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
-        self.all_forks[(block_height, block_hash)].as_mut().unwrap()
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks[(block_height, block_hash)].as_mut().unwrap()
     }
 }
 
@@ -1658,7 +1790,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
             },
             all_forks::HeaderVerifyOutcome::Error { sync, error } => HeaderVerifyOutcome::Error {
                 sync: AllSync {
-                    all_forks: sync,
+                    all_forks: Some(sync),
                     warp_sync: self.warp_sync,
                     ready_to_transition: self.ready_to_transition,
                     shared: self.shared,
@@ -1767,7 +1899,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn cancel(self) -> AllSync<TRq, TSrc, TBl> {
         let all_forks = self.inner.cancel();
         AllSync {
-            all_forks,
+            all_forks: Some(all_forks),
             warp_sync: self.warp_sync,
             ready_to_transition: self.ready_to_transition,
             shared: self.shared,
@@ -1778,7 +1910,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn reject_bad_block(self) -> AllSync<TRq, TSrc, TBl> {
         let all_forks = self.inner.reject_bad_block();
         AllSync {
-            all_forks,
+            all_forks: Some(all_forks),
             warp_sync: self.warp_sync,
             ready_to_transition: self.ready_to_transition,
             shared: self.shared,
@@ -1791,7 +1923,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
         let mut all_forks = self.inner.finish();
         *all_forks.block_user_data_mut(height, &self.verified_block_hash) = Some(user_data);
         AllSync {
-            all_forks,
+            all_forks: Some(all_forks),
             warp_sync: self.warp_sync,
             ready_to_transition: self.ready_to_transition,
             shared: self.shared,
@@ -1868,7 +2000,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
 
         (
             AllSync {
-                all_forks,
+                all_forks: Some(all_forks),
                 warp_sync: self.warp_sync,
                 ready_to_transition: self.ready_to_transition,
                 shared: self.shared,
@@ -1944,7 +2076,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
             AllSync {
                 warp_sync: Some(warp_sync),
                 ready_to_transition: self.ready_to_transition,
-                all_forks: self.all_forks,
+                all_forks: Some(self.all_forks),
                 shared: self.shared,
             },
             result,
@@ -1982,7 +2114,7 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
             AllSync {
                 warp_sync: Some(warp_sync),
                 ready_to_transition: self.ready_to_transition,
-                all_forks: self.all_forks,
+                all_forks: Some(self.all_forks),
                 shared: self.shared,
             },
             outcome,
@@ -2018,7 +2150,7 @@ impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
             AllSync {
                 warp_sync: Some(warp_sync),
                 ready_to_transition,
-                all_forks: self.all_forks,
+                all_forks: Some(self.all_forks),
                 shared: self.shared,
             },
             outcome,
