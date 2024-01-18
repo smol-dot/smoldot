@@ -80,6 +80,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     - run: docker images   # TODO remove
     - run: docker images --no-trunc -q ghcr.io/smol-dot/full-node | tr "\n" " "   # TODO: remove
+    - run: docker manifest inspect -v ghcr.io/smol-dot/full-node:amd64  # TODO: remove
+    - run: docker manifest inspect -v ghcr.io/smol-dot/full-node:arm64  # TODO: remove
     - run: |
         docker manifest create \
           ghcr.io/smol-dot/full-node:main \
