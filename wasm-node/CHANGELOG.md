@@ -4,7 +4,12 @@
 
 ### Changed
 
+- The warp syncing and regular syncing algorithms now run in parallel, meaning that smoldot will now try to perform a warp sync against peers whose finalized block is (or pretends to be) far ahead from the local finalized block, while at the same time continuing to sync normally from other peers. Additionally, smoldot will no longer try to warp sync to peers whose finalized block is too close to the local finalized block, and will instead sync normally.
 - The `system_health` JSON-RPC function now returns `isSyncing: true` if any of the peers smoldot is connected to is more than 10 blocks ahead of smoldot, and `false` in any other situation including having no peer.
+
+### Fixed
+
+- The syncing no longer gets stuck when connecting to a chain whose head is at the same block height as the checkpoint in the chain specification.
 
 ## 2.0.17 - 2024-01-17
 
