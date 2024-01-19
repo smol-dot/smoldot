@@ -203,8 +203,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 code_trie_node_hint: config.code_trie_node_hint,
                 num_download_ahead_fragments: 128, // TODO: make configurable?
                 // TODO: make configurable?
-                // TODO: temporarily 0 before https://github.com/smol-dot/smoldot/issues/1109, as otherwise the warp syncing would take a long time if the starting point is too recent
-                warp_sync_minimum_gap: 0,
+                warp_sync_minimum_gap: 32,
                 download_block_body: config.download_bodies,
             })
             .ok(),
@@ -685,7 +684,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 either::Right(iter::empty())
             };
 
-        all_forks_requests.chain(warp_sync_requests)
+        // We always prioritize warp sync requests over all fork requests.
+        // The warp sync algorithm will only ever try to emit requests concerning sources that are
+        // (or pretend to be) far ahead of the local node. Given a source that is (or pretends to
+        // be) far ahead of the local node, it is more desirable to try to warp sync from it
+        // rather than download blocks that are close.
+        warp_sync_requests.chain(all_forks_requests)
     }
 
     /// Inserts a new request in the data structure.
@@ -714,7 +718,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             RequestDetail::BlocksRequest {
                 first_block_height,
                 first_block_hash: Some(first_block_hash),
-                ascending: true,
+                // TODO: remove ascending field altogether?
+                ascending: false,
                 num_blocks,
                 request_headers: true,
                 request_bodies,
@@ -958,19 +963,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
             self.all_forks = Some(new_all_forks);
 
-            // TODO: restore
-            /*let (
-                new_inner,
-                finalized_block_runtime,
-                finalized_body,
-                finalized_storage_code,
-                finalized_storage_heap_pages,
-                finalized_storage_code_merkle_value,
-                finalized_storage_code_closest_ancestor_excluding,
-            ) = self
-                .shared
-                .transition_warp_sync_all_forks(inner, ready_to_transition);
-            self.inner = AllSyncInner::AllForks(new_inner);*/
             return ProcessOne::WarpSyncFinished {
                 sync: self,
                 finalized_block_runtime,
