@@ -54,7 +54,7 @@ pub use warp_sync::{
     WarpSyncFragment,
 };
 
-use super::all_forks::AllForksSync;
+use super::{all_forks::AllForksSync, warp_sync::RuntimeInformation};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -183,10 +183,9 @@ pub struct AllSync<TRq, TSrc, TBl> {
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
     // TODO: we store an `Option<TBl>` instead of `TBl` due to API issues; the all.rs doesn't let you insert user datas for pending blocks while the AllForksSync lets you; `None` is stored while a block is pending
     /// Always `Some`, except for temporary extractions.
-    all_forks: Option<
-        all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra<TSrc>>,
-    >,
-    shared: Shared<TRq>,
+    all_forks:
+        Option<all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>>,
+    shared: Shared<TRq, TSrc>,
 }
 
 impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
@@ -215,7 +214,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 block_number_bytes: config.block_number_bytes,
                 sources_capacity: config.sources_capacity,
                 blocks_capacity: config.blocks_capacity,
-                download_bodies: false,
+                download_bodies: config.download_bodies,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
                 max_disjoint_headers: config.max_disjoint_headers,
                 max_requests_per_block: config.max_requests_per_block,
@@ -402,19 +401,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 unreachable!()
             };
 
-            let source_user_data = AllForksSourceExtra {
-                user_data,
-                outer_source_id,
-            };
-
             match all_forks.prepare_add_source(best_block_number, best_block_hash) {
                 all_forks::AddSource::BestBlockAlreadyVerified(b)
                 | all_forks::AddSource::BestBlockPendingVerification(b) => {
-                    b.add_source(source_user_data)
+                    b.add_source(AllForksSourceExtra { outer_source_id })
                 }
-                all_forks::AddSource::OldBestBlock(b) => b.add_source(source_user_data),
+                all_forks::AddSource::OldBestBlock(b) => {
+                    b.add_source(AllForksSourceExtra { outer_source_id })
+                }
                 all_forks::AddSource::UnknownBestBlock(b) => {
-                    b.add_source_and_insert_block(source_user_data, None)
+                    b.add_source_and_insert_block(AllForksSourceExtra { outer_source_id }, None)
                 }
             }
         };
@@ -422,6 +418,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         outer_source_id_entry.insert(SourceMapping {
             warp_sync: warp_sync_source_id,
             all_forks: all_forks_source_id,
+            user_data,
             num_requests: 0,
         });
 
@@ -657,7 +654,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 .map(move |(inner_source_id, src_user_data, rq_params)| {
                     (
                         all_forks[inner_source_id].outer_source_id,
-                        &src_user_data.user_data,
+                        &self.shared.sources[all_forks[inner_source_id].outer_source_id.0]
+                            .user_data,
                         all_forks_request_convert(rq_params, self.shared.download_bodies),
                     )
                 });
@@ -707,9 +705,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                         (
                             src_user_data.outer_source_id,
-                            &all_forks
-                                [self.shared.sources[src_user_data.outer_source_id.0].all_forks]
-                                .user_data,
+                            &self.shared.sources[src_user_data.outer_source_id.0].user_data,
                             detail,
                         )
                     },
@@ -933,9 +929,65 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
         }
 
-        if let Some(ready_to_transition) = self.ready_to_transition.take() {
+        if let Some(RuntimeInformation {
+            finalized_runtime: finalized_block_runtime,
+            finalized_body,
+            finalized_storage_code,
+            finalized_storage_heap_pages,
+            finalized_storage_code_merkle_value,
+            finalized_storage_code_closest_ancestor_excluding,
+        }) = self.ready_to_transition.take()
+        {
+            let (Some(all_forks), Some(warp_sync)) =
+                (self.all_forks.as_ref(), self.warp_sync.as_mut())
+            else {
+                unreachable!()
+            };
+
+            let mut new_all_forks = AllForksSync::new(all_forks::Config {
+                chain_information: warp_sync.as_chain_information().into(),
+                block_number_bytes: self.shared.block_number_bytes,
+                sources_capacity: self.shared.sources_capacity,
+                blocks_capacity: self.shared.blocks_capacity,
+                download_bodies: self.shared.download_bodies,
+                allow_unknown_consensus_engines: self.shared.allow_unknown_consensus_engines,
+                max_disjoint_headers: self.shared.max_disjoint_headers,
+                max_requests_per_block: self.shared.max_requests_per_block,
+            });
+
+            for warp_sync_source_id in warp_sync.sources() {
+                let outer_source_id = warp_sync[warp_sync_source_id].outer_source_id;
+
+                let (best_block_number, best_block_hash) =
+                    all_forks.source_best_block(self.shared.sources[outer_source_id.0].all_forks);
+
+                let new_inner_source_id = match new_all_forks
+                    .prepare_add_source(best_block_number, *best_block_hash)
+                {
+                    all_forks::AddSource::BestBlockAlreadyVerified(b)
+                    | all_forks::AddSource::BestBlockPendingVerification(b) => {
+                        b.add_source(AllForksSourceExtra { outer_source_id })
+                    }
+                    all_forks::AddSource::OldBestBlock(b) => {
+                        b.add_source(AllForksSourceExtra { outer_source_id })
+                    }
+                    all_forks::AddSource::UnknownBestBlock(b) => {
+                        b.add_source_and_insert_block(AllForksSourceExtra { outer_source_id }, None)
+                    }
+                };
+
+                // TODO: also provide finality information
+
+                self.shared.sources[outer_source_id.0].all_forks = new_inner_source_id;
+            }
+
+            for (_, request) in self.shared.requests.iter_mut() {
+                request.all_forks = None;
+            }
+
+            self.all_forks = Some(new_all_forks);
+
             // TODO: restore
-            todo!()
             /*let (
                 new_inner,
                 finalized_block_runtime,
@@ -947,7 +999,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             ) = self
                 .shared
                 .transition_warp_sync_all_forks(inner, ready_to_transition);
-            self.inner = AllSyncInner::AllForks(new_inner);
+            self.inner = AllSyncInner::AllForks(new_inner);*/
             return ProcessOne::WarpSyncFinished {
                 sync: self,
                 finalized_block_runtime,
@@ -956,7 +1008,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 finalized_storage_heap_pages,
                 finalized_storage_code_merkle_value,
                 finalized_storage_code_closest_ancestor_excluding,
-            };*/
+            };
         }
 
         let Some(all_forks) = self.all_forks.take() else {
@@ -1380,38 +1432,22 @@ impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
 
     #[track_caller]
     fn index(&self, source_id: SourceId) -> &TSrc {
-        let Some(&SourceMapping {
-            all_forks: inner_source_id,
-            ..
-        }) = self.shared.sources.get(source_id.0)
-        else {
+        let Some(SourceMapping { user_data, .. }) = self.shared.sources.get(source_id.0) else {
             panic!()
         };
 
-        let Some(all_forks) = &self.all_forks else {
-            unreachable!()
-        };
-
-        &all_forks[inner_source_id].user_data
+        user_data
     }
 }
 
 impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        let Some(&SourceMapping {
-            all_forks: inner_source_id,
-            ..
-        }) = self.shared.sources.get(source_id.0)
-        else {
+        let Some(SourceMapping { user_data, .. }) = self.shared.sources.get_mut(source_id.0) else {
             panic!()
         };
 
-        let Some(all_forks) = &mut self.all_forks else {
-            unreachable!()
-        };
-
-        &mut all_forks[inner_source_id].user_data
+        user_data
     }
 }
 
@@ -1762,10 +1798,10 @@ pub struct BlockFull {
 }
 
 pub struct BlockVerify<TRq, TSrc, TBl> {
-    inner: all_forks::BlockVerify<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra<TSrc>>,
+    inner: all_forks::BlockVerify<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
     warp_sync: Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
-    shared: Shared<TRq>,
+    shared: Shared<TRq, TSrc>,
 }
 
 impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
@@ -1864,14 +1900,10 @@ pub enum HeaderVerifyError {
 }
 
 pub struct HeaderVerifySuccess<TRq, TSrc, TBl> {
-    inner: all_forks::HeaderVerifySuccess<
-        Option<TBl>,
-        AllForksRequestExtra,
-        AllForksSourceExtra<TSrc>,
-    >,
+    inner: all_forks::HeaderVerifySuccess<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
     warp_sync: Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
-    shared: Shared<TRq>,
+    shared: Shared<TRq, TSrc>,
     verified_block_hash: [u8; 32],
 }
 
@@ -1954,21 +1986,20 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
 }
 
 pub struct FinalityProofVerify<TRq, TSrc, TBl> {
-    inner: all_forks::FinalityProofVerify<
-        Option<TBl>,
-        AllForksRequestExtra,
-        AllForksSourceExtra<TSrc>,
-    >,
+    inner: all_forks::FinalityProofVerify<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
     warp_sync: Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
-    shared: Shared<TRq>,
+    shared: Shared<TRq, TSrc>,
 }
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     /// Returns the source the justification was obtained from.
     pub fn sender(&self) -> (SourceId, &TSrc) {
         let sender = self.inner.sender().1;
-        (sender.outer_source_id, &sender.user_data)
+        (
+            sender.outer_source_id,
+            &self.shared.sources[sender.outer_source_id.0].user_data,
+        )
     }
 
     /// Perform the verification.
@@ -2060,9 +2091,8 @@ pub enum FinalityProofVerifyOutcome<TBl> {
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     inner: warp_sync::VerifyWarpSyncFragment<WarpSyncSourceExtra, WarpSyncRequestExtra>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
-    shared: Shared<TRq>,
-    all_forks:
-        all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra<TSrc>>,
+    shared: Shared<TRq, TSrc>,
+    all_forks: all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
 }
 
 impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
@@ -2074,7 +2104,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
         let (_, ud) = self.inner.proof_sender()?;
         Some((
             ud.outer_source_id,
-            &self.all_forks[self.shared.sources[ud.outer_source_id.0].all_forks].user_data,
+            &self.shared.sources[ud.outer_source_id.0].user_data,
         ))
     }
 
@@ -2111,9 +2141,8 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
 pub struct WarpSyncBuildRuntime<TRq, TSrc, TBl> {
     inner: warp_sync::BuildRuntime<WarpSyncSourceExtra, WarpSyncRequestExtra>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
-    shared: Shared<TRq>,
-    all_forks:
-        all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra<TSrc>>,
+    shared: Shared<TRq, TSrc>,
+    all_forks: all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
 }
 
 impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
@@ -2148,9 +2177,8 @@ impl<TRq, TSrc, TBl> WarpSyncBuildRuntime<TRq, TSrc, TBl> {
 #[must_use]
 pub struct WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
     inner: warp_sync::BuildChainInformation<WarpSyncSourceExtra, WarpSyncRequestExtra>,
-    shared: Shared<TRq>,
-    all_forks:
-        all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra<TSrc>>,
+    shared: Shared<TRq, TSrc>,
+    all_forks: all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
 }
 
 impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
@@ -2180,9 +2208,8 @@ impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
     }
 }
 
-struct AllForksSourceExtra<TSrc> {
+struct AllForksSourceExtra {
     outer_source_id: SourceId,
-    user_data: TSrc,
 }
 
 struct AllForksRequestExtra {
@@ -2197,8 +2224,8 @@ struct WarpSyncRequestExtra {
     outer_request_id: RequestId,
 }
 
-struct Shared<TRq> {
-    sources: slab::Slab<SourceMapping>,
+struct Shared<TRq, TSrc> {
+    sources: slab::Slab<SourceMapping<TSrc>>,
     requests: slab::Slab<RequestInfo<TRq>>,
 
     /// See [`Config::download_bodies`].
@@ -2227,11 +2254,12 @@ struct RequestInfo<TRq> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SourceMapping {
+struct SourceMapping<TSrc> {
     warp_sync: Option<warp_sync::SourceId>,
     all_forks: all_forks::SourceId,
     // TODO: all_forks also has a requests count tracker, deduplicate
     num_requests: usize,
+    user_data: TSrc,
 }
 
 fn all_forks_request_convert(
