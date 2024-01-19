@@ -436,62 +436,33 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         &mut self,
         source_id: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)>) {
-        // TODO:
-        (todo!(), Vec::new().into_iter())
-        /*let source_ids = self.shared.sources.remove(source_id.0);
+        let source_info = self.shared.sources.remove(source_id.0);
 
-        let (all_forks, all_forks_requests) = self.all_forks.remove_source(source_ids.all_forks);
-
-        let all_forks_requests = all_forks_requests
-            .map(
-                |(_inner_request_id, _request_params, request_inner_user_data)| {
-                    debug_assert!(self
-                        .shared
-                        .requests
-                        .contains(request_inner_user_data.outer_request_id.0));
-                    let _removed = self
-                        .shared
-                        .requests
-                        .remove(request_inner_user_data.outer_request_id.0);
-                    debug_assert!(matches!(_removed, RequestInfo::AllForks(_inner_request_id)));
-
-                    (
-                        request_inner_user_data.outer_request_id,
-                        request_inner_user_data.user_data.unwrap(),
-                    )
-                },
-            )
-            .collect::<Vec<_>>()
-            .into_iter();
-
-        let warp_sync_requests = if let Some(warp_sync) = &mut self.warp_sync {
-            let (_, requests) = warp_sync.remove_source(source_ids.warp_sync.unwrap());
-
-            requests
-                .map(|(_inner_request_id, request_inner_user_data)| {
-                    debug_assert!(self
-                        .shared
-                        .requests
-                        .contains(request_inner_user_data.outer_request_id.0));
-                    let _removed = self
-                        .shared
-                        .requests
-                        .remove(request_inner_user_data.outer_request_id.0);
-                    debug_assert!(matches!(_removed, RequestInfo::WarpSync(_inner_request_id)));
-
-                    (
-                        request_inner_user_data.outer_request_id,
-                        request_inner_user_data.user_data,
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-        } else {
-            Vec::new().into_iter()
+        let Some(all_forks) = &mut self.all_forks else {
+            unreachable!()
         };
 
-        // TODO: no actually, since some requests are shared
-        all_forks_requests.chain(warp_sync_requests)*/
+        let _ = all_forks.remove_source(source_info.all_forks);
+        if let Some(warp_sync) = &mut self.warp_sync {
+            let _ = warp_sync.remove_source(source_info.warp_sync.unwrap());
+        }
+
+        // TODO: optimize
+        let request_ids = self
+            .shared
+            .requests
+            .iter()
+            .filter(|(_, rq)| rq.source_id == source_id)
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+
+        let mut requests = Vec::with_capacity(request_ids.len());
+        for request_id in request_ids.into_iter().rev() {
+            let rq = self.shared.requests.remove(request_id);
+            requests.push((RequestId(request_id), rq.user_data));
+        }
+
+        (source_info.user_data, requests.into_iter())
     }
 
     /// Returns the list of sources in this state machine.
@@ -651,7 +622,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         let all_forks_requests =
             all_forks
                 .desired_requests()
-                .map(move |(inner_source_id, src_user_data, rq_params)| {
+                .map(move |(inner_source_id, _, rq_params)| {
                     (
                         all_forks[inner_source_id].outer_source_id,
                         &self.shared.sources[all_forks[inner_source_id].outer_source_id.0]
