@@ -751,7 +751,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
             ) => Some(warp_sync.add_request(
                 inner_source_id,
-                WarpSyncRequestExtra { outer_request_id },
+                WarpSyncRequestExtra {},
                 warp_sync::RequestDetail::WarpSyncRequest {
                     block_hash: sync_start_block_hash,
                 },
@@ -767,7 +767,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
             ) => Some(warp_sync.add_request(
                 inner_source_id,
-                WarpSyncRequestExtra { outer_request_id },
+                WarpSyncRequestExtra {},
                 warp_sync::RequestDetail::BlockBodyDownload {
                     block_hash: first_block_hash,
                     block_number: first_block_height,
@@ -779,7 +779,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 RequestDetail::StorageGet { block_hash, keys },
             ) => Some(warp_sync.add_request(
                 inner_source_id,
-                WarpSyncRequestExtra { outer_request_id },
+                WarpSyncRequestExtra {},
                 warp_sync::RequestDetail::StorageGetMerkleProof { block_hash, keys },
             )),
             (
@@ -792,7 +792,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
             ) => Some(warp_sync.add_request(
                 inner_source_id,
-                WarpSyncRequestExtra { outer_request_id },
+                WarpSyncRequestExtra {},
                 warp_sync::RequestDetail::RuntimeCallMerkleProof {
                     block_hash,
                     function_name,
@@ -2171,6 +2171,7 @@ impl<TRq, TSrc, TBl> WarpSyncBuildChainInformation<TRq, TSrc, TBl> {
     }
 }
 
+// TODO: are these structs useful?
 struct AllForksSourceExtra {
     outer_source_id: SourceId,
 }
@@ -2183,9 +2184,8 @@ struct WarpSyncSourceExtra {
     outer_source_id: SourceId,
 }
 
-struct WarpSyncRequestExtra {
-    outer_request_id: RequestId,
-}
+// TODO: consider removing struct altogether
+struct WarpSyncRequestExtra {}
 
 struct Shared<TRq, TSrc> {
     sources: slab::Slab<SourceMapping<TSrc>>,
