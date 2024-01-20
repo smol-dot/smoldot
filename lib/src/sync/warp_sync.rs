@@ -288,22 +288,6 @@ impl SourceId {
     }
 }
 
-/// A [`WarpSync`] that has been deconstructed.
-// TODO: consider removing this entirely
-pub struct Deconstructed<TSrc, TRq> {
-    /// The synced chain information.
-    pub chain_information: ValidChainInformation,
-
-    /// The list of sources that were added to the state machine, with their finalized block
-    /// height and user data.
-    /// The list is ordered by [`SourceId`].
-    // TODO: use a struct?
-    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
-
-    /// The list of requests that were added to the state machine.
-    pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
-}
-
 // TODO: consider removing this entirely
 pub struct RuntimeInformation {
     /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
@@ -597,26 +581,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 finalized_block_hash: self.warped_header_hash,
                 finalized_block_number: self.warped_header_number,
             },
-        }
-    }
-
-    pub fn deconstruct(mut self) -> Deconstructed<TSrc, TRq> {
-        Deconstructed {
-            chain_information: self.verified_chain_information,
-            sources_ordered: mem::take(&mut self.sources)
-                .into_iter()
-                .map(|(id, source)| {
-                    (
-                        SourceId(id),
-                        source.finalized_block_height,
-                        source.user_data,
-                    )
-                })
-                .collect(),
-            in_progress_requests: mem::take(&mut self.in_progress_requests)
-                .into_iter()
-                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
-                .collect(),
         }
     }
 
