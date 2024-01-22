@@ -358,8 +358,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::sudo_unstable_version { .. }
             | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
             | methods::MethodCall::transaction_unstable_unwatch { .. }
-            | methods::MethodCall::network_unstable_subscribeEvents { .. }
-            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::sudo_network_unstable_watch { .. }
+            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
             | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
         }
 
@@ -629,8 +629,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::sudo_unstable_version { .. }
             | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
             | methods::MethodCall::transaction_unstable_unwatch { .. }
-            | methods::MethodCall::network_unstable_subscribeEvents { .. }
-            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::sudo_network_unstable_watch { .. }
+            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
             | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
         }
 
@@ -654,7 +654,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 self.submit_and_watch_transaction(request).await
             }
 
-            _method @ methods::MethodCall::network_unstable_subscribeEvents { .. } => {
+            _method @ methods::MethodCall::sudo_network_unstable_watch { .. } => {
                 // TODO: implement the ones that make sense to implement ^
                 log!(
                     &self.platform,

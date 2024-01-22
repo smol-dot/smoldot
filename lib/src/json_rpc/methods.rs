@@ -504,8 +504,8 @@ define_methods! {
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
     // <https://github.com/paritytech/smoldot/issues/2456>.
-    network_unstable_subscribeEvents() -> Cow<'a, str>,
-    network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
+    sudo_network_unstable_watch() -> Cow<'a, str>,
+    sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
@@ -525,7 +525,7 @@ define_methods! {
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
-    network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
+    sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -849,88 +849,49 @@ pub struct TransactionWatchEventBlock {
 /// See <https://github.com/paritytech/smoldot/issues/2245>.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
-pub enum NetworkEvent<'a> {
-    #[serde(rename = "startConnect")]
-    StartConnect {
-        when: u64,
+pub enum NetworkEvent {
+    #[serde(rename = "connectionState")]
+    ConnectionState {
         #[serde(rename = "connectionId")]
         connection_id: u32,
-        multiaddr: Cow<'a, str>,
-    },
-    #[serde(rename = "connected")]
-    Connected {
+        #[serde(rename = "targetPeerId", skip_serializing_if = "Option::is_none")]
+        target_peer_id: Option<String>,
+        #[serde(rename = "targetMultiaddr")]
+        target_multiaddr: String,
+        status: NetworkEventStatus,
+        direction: NetworkEventDirection,
         when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
     },
-    #[serde(rename = "handshakeFinished")]
-    HandshakeFinished {
-        when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "stop")]
-    Stop {
-        when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
-        reason: Cow<'a, str>,
-    },
-    #[serde(rename = "out-slot-assign")]
-    OutSlotAssign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "out-slot-unassign")]
-    OutSlotUnassign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-assign")]
-    InSlotAssign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-unassign")]
-    InSlotUnassign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-to-out-slot")]
-    InSlotToOutSlot {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "substream-out-open")]
-    SubstreamOutOpen {
-        when: u64,
+    #[serde(rename = "substreamState")]
+    SubstreamState {
         #[serde(rename = "connectionId")]
         connection_id: u32,
         #[serde(rename = "substreamId")]
         substream_id: u32,
+        status: NetworkEventStatus,
         #[serde(rename = "protocolName")]
-        protocol_name: Cow<'a, str>,
-    },
-    #[serde(rename = "substream-out-accept")]
-    SubstreamOutAccept {
+        protocol_name: String,
+        direction: NetworkEventDirection,
         when: u64,
-        #[serde(rename = "substreamId")]
-        substream_id: u32,
     },
-    #[serde(rename = "substream-out-stop")]
-    SubstreamOutStop {
-        when: u64,
-        #[serde(rename = "substreamId")]
-        substream_id: u32,
-        reason: Cow<'a, str>,
-    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NetworkEventStatus {
+    #[serde(rename = "connecting")]
+    Connecting,
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "closed")]
+    Close,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NetworkEventDirection {
+    #[serde(rename = "in")]
+    In,
+    #[serde(rename = "out")]
+    Out,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
