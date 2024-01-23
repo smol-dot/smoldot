@@ -73,7 +73,9 @@ use smoldot::{
 };
 
 pub use codec::{CallProofRequestConfig, Role};
-pub use service::{ChainId, EncodedMerkleProof, PeerId, QueueNotificationError};
+pub use service::{
+    ChainId, ConnectionId, EncodedMerkleProof, PeerId, QueueNotificationError, SubstreamId,
+};
 
 mod tasks;
 
@@ -582,6 +584,40 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
 /// Event that can happen on the network service.
 #[derive(Debug, Clone)]
+pub enum LowLevelEvent {
+    TransportConnecting {
+        connection_id: ConnectionId,
+        expected_peer_id: PeerId,
+    },
+    TransportConnectingAbort {
+        connection_id: ConnectionId,
+        expected_peer_id: PeerId,
+    },
+    TransportConnected {
+        connection_id: ConnectionId,
+        peer_id: PeerId,
+    },
+    TransportDisconnected {
+        connection_id: ConnectionId,
+        peer_id: PeerId,
+    },
+    BlockAnnounce {
+        peer_id: PeerId,
+        announce: service::EncodedBlockAnnounce,
+    },
+    GrandpaNeighborPacket {
+        peer_id: PeerId,
+        finalized_block_height: u64,
+    },
+    /// Received a GrandPa commit message from the network.
+    GrandpaCommitMessage {
+        peer_id: PeerId,
+        message: service::EncodedGrandpaCommitMessage,
+    },
+}
+
+/// Event that can happen on the network service.
+#[derive(Debug, Clone)]
 pub enum HighLevelEvent {
     Connected {
         peer_id: PeerId,
@@ -605,6 +641,31 @@ pub enum HighLevelEvent {
         peer_id: PeerId,
         message: service::EncodedGrandpaCommitMessage,
     },
+}
+
+impl From<LowLevelEvent> for Option<HighLevelEvent> {
+    fn from(event: LowLevelEvent) -> Self {
+        // TODO:
+        match event {
+            LowLevelEvent::BlockAnnounce { peer_id, announce } => {
+                Some(HighLevelEvent::BlockAnnounce { peer_id, announce })
+            }
+            LowLevelEvent::GrandpaCommitMessage { peer_id, message } => {
+                Some(HighLevelEvent::GrandpaCommitMessage { peer_id, message })
+            }
+            LowLevelEvent::GrandpaNeighborPacket {
+                peer_id,
+                finalized_block_height,
+            } => Some(HighLevelEvent::GrandpaNeighborPacket {
+                peer_id,
+                finalized_block_height,
+            }),
+            LowLevelEvent::TransportConnecting { .. }
+            | LowLevelEvent::TransportConnectingAbort { .. }
+            | LowLevelEvent::TransportConnected { .. }
+            | LowLevelEvent::TransportDisconnected { .. } => None,
+        }
+    }
 }
 
 /// Error returned by [`NetworkServiceChain::blocks_request`].
