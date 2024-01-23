@@ -48,7 +48,7 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -191,7 +191,7 @@ impl<TPlat: PlatformRef> NetworkService<TPlat> {
             next_recent_connection_restore: None,
             platform: config.platform.clone(),
             open_gossip_links: BTreeMap::new(),
-            event_pending_send: None,
+            events_pending_send: VecDeque::new(), // TODO: capacity?
             event_senders: either::Left(Vec::new()),
             pending_new_subscriptions: Vec::new(),
             important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
@@ -941,8 +941,8 @@ struct BackgroundTask<TPlat: PlatformRef> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
 
-    /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
-    event_pending_send: Option<(ChainId, LowLevelEvent)>,
+    /// Events about to be sent on the senders of [`BackgroundTask::event_senders`].
+    events_pending_send: VecDeque<(ChainId, LowLevelEvent)>,
 
     /// Sending events through the public API.
     ///
@@ -1074,7 +1074,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
             };
             let service_event = async {
-                if let Some(event) = (task.event_pending_send.is_none()
+                if let Some(event) = (task.events_pending_send.is_empty()
                     && task.pending_new_subscriptions.is_empty())
                 .then(|| task.network.next_event())
                 .flatten()
@@ -1172,7 +1172,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let event_senders = event_sending_future.await;
                     task.event_senders = either::Left(event_senders);
                     WakeUpReason::EventSendersReady
-                } else if task.event_pending_send.is_some()
+                } else if !task.events_pending_send.is_empty()
                     || !task.pending_new_subscriptions.is_empty()
                 {
                     WakeUpReason::EventSendersReady
@@ -1256,7 +1256,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 };
 
                 if let Some((event_to_dispatch_chain_id, event_to_dispatch)) =
-                    task.event_pending_send.take()
+                    task.events_pending_send.pop_front()
                 {
                     let mut event_senders = mem::take(event_senders);
                     task.event_senders = either::Right(Box::pin(async move {
@@ -1429,9 +1429,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     let _was_in = task.open_gossip_links.remove(&(chain_id, peer_id.clone()));
                     debug_assert!(_was_in.is_some());
 
-                    debug_assert!(task.event_pending_send.is_none());
-                    task.event_pending_send =
-                        Some((chain_id, LowLevelEvent::GossipDisconnected { peer_id }));
+                    debug_assert!(task.events_pending_send.is_empty());
+                    task.events_pending_send
+                        .push_back((chain_id, LowLevelEvent::GossipDisconnected { peer_id }));
                 }
             }
             WakeUpReason::MessageForChain(
@@ -2014,9 +2014,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     }
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, LowLevelEvent::BlockAnnounce { peer_id, announce }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, LowLevelEvent::BlockAnnounce { peer_id, announce }));
             }
             WakeUpReason::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
@@ -2048,8 +2048,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
                 debug_assert!(_prev_value.is_none());
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     LowLevelEvent::GossipConnected {
                         peer_id,
@@ -2158,9 +2158,9 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     );
                 }
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, LowLevelEvent::GossipDisconnected { peer_id }));
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send
+                    .push_back((chain_id, LowLevelEvent::GossipDisconnected { peer_id }));
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -2599,8 +2599,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     .unwrap()
                     .finalized_block_height = Some(state.commit_finalized_height);
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     LowLevelEvent::GrandpaNeighborPacket {
                         peer_id,
@@ -2623,8 +2623,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     target_block_hash = HashDisplay(message.decode().target_hash),
                 );
 
-                debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((
+                debug_assert!(task.events_pending_send.is_empty());
+                task.events_pending_send.push_back((
                     chain_id,
                     LowLevelEvent::GrandpaCommitMessage { peer_id, message },
                 ));
