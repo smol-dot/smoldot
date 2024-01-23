@@ -327,6 +327,23 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         }
     }
 
+    /// Similar to [`NetworkServiceChain::subscribe`], but returns [`LowLevelEvent`]s instead of
+    /// [`HighLevelEvent`]s.
+    pub async fn subscribe_low_level(&self) -> LowLevelEventsReceiver<TPlat> {
+        let (tx, rx) = async_channel::bounded(128);
+
+        let _ = self
+            .messages_tx
+            .send(ToBackgroundChain::Subscribe { sender: tx })
+            .await
+            .unwrap();
+
+        LowLevelEventsReceiver {
+            inner: rx,
+            _keep_alive_messages_tx: self._keep_alive_messages_tx.clone(),
+        }
+    }
+
     /// Starts asynchronously disconnecting the given peer. A [`HighLevelEvent::Disconnected`]
     /// will later be generated. Prevents a new gossip link with the same peer from being reopened
     /// for a little while.
@@ -627,6 +644,26 @@ pub enum LowLevelEvent {
         peer_id: PeerId,
         message: service::EncodedGrandpaCommitMessage,
     },
+}
+
+/// Channel returned by [`NetworkServiceChain::subscribe_low_level`]
+#[pin_project::pin_project]
+pub struct LowLevelEventsReceiver<TPlat: PlatformRef> {
+    #[pin]
+    inner: async_channel::Receiver<LowLevelEvent>,
+
+    /// Dummy channel used to keep the chain alive.
+    _keep_alive_messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+}
+
+impl<TPlat: PlatformRef> LowLevelEventsReceiver<TPlat> {
+    /// Returns the next event.
+    ///
+    /// Returns `None` if the network service has crashed.
+    pub async fn next(self: Pin<&mut Self>) -> Option<LowLevelEvent> {
+        let mut this = self.project();
+        this.inner.next().await
+    }
 }
 
 /// Event that can happen on the network service.
