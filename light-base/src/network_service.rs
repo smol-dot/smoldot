@@ -294,25 +294,25 @@ pub enum BanSeverity {
 impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// Subscribes to the networking events that happen on the given chain.
     ///
-    /// Calling this function returns a `Receiver` that receives events about the chain.
-    /// The new channel will immediately receive events about all the existing connections, so
-    /// that it is able to maintain a coherent view of the network.
+    /// Calling this function returns a [`HighLevelEventsReceiver`] that receives events about
+    /// the chain. The new channel will immediately receive events about all the existing
+    /// connections, so that it is able to maintain a coherent view of the network.
     ///
     /// Note that this function is `async`, but it should return very quickly.
     ///
-    /// The `Receiver` **must** be polled continuously. When the channel is full, the networking
-    /// connections will be back-pressured until the channel isn't full anymore.
+    /// The [`HighLevelEventsReceiver`] **must** be polled continuously. When the channel is
+    /// full, the networking connections will be back-pressured until the channel isn't full
+    /// anymore.
     ///
-    /// The `Receiver` never yields `None` unless the [`NetworkService`] crashes or is destroyed.
+    /// The [`HighLevelEventsReceiver`] never yields `None` unless the [`NetworkService`] crashes.
     /// If `None` is yielded and the [`NetworkService`] is still alive, you should call
-    /// [`NetworkServiceChain::subscribe`] again to obtain a new `Receiver`.
+    /// [`NetworkServiceChain::subscribe`] again to obtain a new [`HighLevelEventsReceiver`].
     ///
     /// # Panic
     ///
     /// Panics if the given [`ChainId`] is invalid.
     ///
-    // TODO: consider not killing the background until the channel is destroyed, as that would be a more sensical behaviour
-    pub async fn subscribe(&self) -> async_channel::Receiver<HighLevelEvent> {
+    pub async fn subscribe(&self) -> HighLevelEventsReceiver<TPlat> {
         let (tx, rx) = async_channel::bounded(128);
 
         let _ = self
@@ -321,7 +321,10 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
             .await
             .unwrap();
 
-        rx
+        HighLevelEventsReceiver {
+            inner: rx,
+            _keep_alive_messages_tx: self._keep_alive_messages_tx.clone(),
+        }
     }
 
     /// Starts asynchronously disconnecting the given peer. A [`HighLevelEvent::Disconnected`]
@@ -665,6 +668,26 @@ impl From<LowLevelEvent> for Option<HighLevelEvent> {
             | LowLevelEvent::TransportConnected { .. }
             | LowLevelEvent::TransportDisconnected { .. } => None,
         }
+    }
+}
+
+/// Channel returned by [`NetworkServiceChain::subscribe`]
+#[pin_project::pin_project]
+pub struct HighLevelEventsReceiver<TPlat: PlatformRef> {
+    #[pin]
+    inner: async_channel::Receiver<HighLevelEvent>,
+
+    /// Dummy channel used to keep the chain alive.
+    _keep_alive_messages_tx: async_channel::Sender<ToBackground<TPlat>>,
+}
+
+impl<TPlat: PlatformRef> HighLevelEventsReceiver<TPlat> {
+    /// Returns the next event.
+    ///
+    /// Returns `None` if the network service has crashed.
+    pub async fn next(self: Pin<&mut Self>) -> Option<HighLevelEvent> {
+        let mut this = self.project();
+        this.inner.next().await
     }
 }
 

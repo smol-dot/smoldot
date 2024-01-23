@@ -175,7 +175,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         let wake_up_reason = {
             async {
                 if let Some(from_network_service) = task.from_network_service.as_mut() {
-                    match from_network_service.next().await {
+                    match from_network_service.as_mut().next().await {
                         Some(ev) => WakeUpReason::NetworkEvent(ev),
                         None => {
                             task.from_network_service = None;
@@ -913,8 +913,7 @@ struct Task<TPlat: PlatformRef> {
     /// Chain of the network service. Used to send out requests to peers.
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// Events coming from the networking service. `None` if not subscribed yet.
-    from_network_service:
-        Option<Pin<Box<async_channel::Receiver<network_service::HighLevelEvent>>>>,
+    from_network_service: Option<Pin<Box<network_service::HighLevelEventsReceiver<TPlat>>>>,
 
     /// List of requests currently in progress.
     pending_requests: stream::FuturesUnordered<
