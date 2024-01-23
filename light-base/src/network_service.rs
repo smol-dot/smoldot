@@ -36,9 +36,9 @@
 //! If all references to a [`NetworkServiceChain`] are destroyed, the chain is automatically
 //! purged.
 //!
-//! An important part of the API is the list of channel receivers of [`Event`] returned by
-//! [`NetworkServiceChain::subscribe`]. These channels inform the foreground about updates to the
-//! network connectivity.
+//! An important part of the API is the list of channel receivers of [`HighLevelEvent`] returned
+//! by [`NetworkServiceChain::subscribe`]. These channels inform the foreground about updates to
+//! the network connectivity.
 
 use crate::{
     log,
@@ -310,7 +310,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
     /// Panics if the given [`ChainId`] is invalid.
     ///
     // TODO: consider not killing the background until the channel is destroyed, as that would be a more sensical behaviour
-    pub async fn subscribe(&self) -> async_channel::Receiver<Event> {
+    pub async fn subscribe(&self) -> async_channel::Receiver<HighLevelEvent> {
         let (tx, rx) = async_channel::bounded(128);
 
         let _ = self
@@ -322,17 +322,17 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
         rx
     }
 
-    /// Starts asynchronously disconnecting the given peer. A [`Event::Disconnected`] will later be
-    /// generated. Prevents a new gossip link with the same peer from being reopened for a
-    /// little while.
+    /// Starts asynchronously disconnecting the given peer. A [`HighLevelEvent::Disconnected`]
+    /// will later be generated. Prevents a new gossip link with the same peer from being reopened
+    /// for a little while.
     ///
     /// `reason` is a human-readable string printed in the logs.
     ///
     /// Due to race conditions, it is possible to reconnect to the peer soon after, in case the
     /// reconnection was already happening as the call to this function is still being processed.
-    /// If that happens another [`Event::Disconnected`] will be delivered afterwards. In other
-    /// words, this function guarantees that we will be disconnected in the future rather than
-    /// guarantees that we will disconnect.
+    /// If that happens another [`HighLevelEvent::Disconnected`] will be delivered afterwards.
+    /// In other words, this function guarantees that we will be disconnected in the future rather
+    /// than guarantees that we will disconnect.
     pub async fn ban_and_disconnect(
         &self,
         peer_id: PeerId,
@@ -582,7 +582,7 @@ impl<TPlat: PlatformRef> NetworkServiceChain<TPlat> {
 
 /// Event that can happen on the network service.
 #[derive(Debug, Clone)]
-pub enum Event {
+pub enum HighLevelEvent {
     Connected {
         peer_id: PeerId,
         role: Role,
@@ -673,7 +673,7 @@ enum ToBackground<TPlat: PlatformRef> {
 enum ToBackgroundChain {
     RemoveChain,
     Subscribe {
-        sender: async_channel::Sender<Event>,
+        sender: async_channel::Sender<HighLevelEvent>,
     },
     DisconnectAndBan {
         peer_id: PeerId,
@@ -790,7 +790,7 @@ struct BackgroundTask<TPlat: PlatformRef> {
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
 
     /// Event about to be sent on the senders of [`BackgroundTask::event_senders`].
-    event_pending_send: Option<(ChainId, Event)>,
+    event_pending_send: Option<(ChainId, HighLevelEvent)>,
 
     /// Sending events through the public API.
     ///
@@ -798,13 +798,18 @@ struct BackgroundTask<TPlat: PlatformRef> {
     /// the senders back once it is finished.
     // TODO: sort by ChainId instead of using a Vec?
     event_senders: either::Either<
-        Vec<(ChainId, async_channel::Sender<Event>)>,
-        Pin<Box<dyn future::Future<Output = Vec<(ChainId, async_channel::Sender<Event>)>> + Send>>,
+        Vec<(ChainId, async_channel::Sender<HighLevelEvent>)>,
+        Pin<
+            Box<
+                dyn future::Future<Output = Vec<(ChainId, async_channel::Sender<HighLevelEvent>)>>
+                    + Send,
+            >,
+        >,
     >,
 
     /// Whenever [`NetworkServiceChain::subscribe`] is called, the new sender is added to this list.
     /// Once [`BackgroundTask::event_senders`] is ready, we properly initialize these senders.
-    pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<Event>)>,
+    pending_new_subscriptions: Vec<(ChainId, async_channel::Sender<HighLevelEvent>)>,
 
     main_messages_rx: Pin<Box<async_channel::Receiver<ToBackground<TPlat>>>>,
 
@@ -1131,7 +1136,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 }
 
                                 let _ = new_subscription
-                                    .send(Event::Connected {
+                                    .send(HighLevelEvent::Connected {
                                         peer_id: peer_id.clone(),
                                         role: state.role,
                                         best_block_number: state.best_block_number,
@@ -1141,7 +1146,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
 
                                 if let Some(finalized_block_height) = state.finalized_block_height {
                                     let _ = new_subscription
-                                        .send(Event::GrandpaNeighborPacket {
+                                        .send(HighLevelEvent::GrandpaNeighborPacket {
                                             peer_id: peer_id.clone(),
                                             finalized_block_height,
                                         })
@@ -1273,7 +1278,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     debug_assert!(_was_in.is_some());
 
                     debug_assert!(task.event_pending_send.is_none());
-                    task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                    task.event_pending_send =
+                        Some((chain_id, HighLevelEvent::Disconnected { peer_id }));
                 }
             }
             WakeUpReason::MessageForChain(
@@ -1857,8 +1863,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
 
                 debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, Event::BlockAnnounce { peer_id, announce }));
+                task.event_pending_send = Some((
+                    chain_id,
+                    HighLevelEvent::BlockAnnounce { peer_id, announce },
+                ));
             }
             WakeUpReason::NetworkEvent(service::Event::GossipConnected {
                 peer_id,
@@ -1893,7 +1901,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
                     chain_id,
-                    Event::Connected {
+                    HighLevelEvent::Connected {
                         peer_id,
                         role,
                         best_block_number: best_number,
@@ -2001,7 +2009,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 }
 
                 debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send = Some((chain_id, Event::Disconnected { peer_id }));
+                task.event_pending_send =
+                    Some((chain_id, HighLevelEvent::Disconnected { peer_id }));
             }
             WakeUpReason::NetworkEvent(service::Event::RequestResult {
                 substream_id,
@@ -2443,7 +2452,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 debug_assert!(task.event_pending_send.is_none());
                 task.event_pending_send = Some((
                     chain_id,
-                    Event::GrandpaNeighborPacket {
+                    HighLevelEvent::GrandpaNeighborPacket {
                         peer_id,
                         finalized_block_height: state.commit_finalized_height,
                     },
@@ -2465,8 +2474,10 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                 );
 
                 debug_assert!(task.event_pending_send.is_none());
-                task.event_pending_send =
-                    Some((chain_id, Event::GrandpaCommitMessage { peer_id, message }));
+                task.event_pending_send = Some((
+                    chain_id,
+                    HighLevelEvent::GrandpaCommitMessage { peer_id, message },
+                ));
             }
             WakeUpReason::NetworkEvent(service::Event::ProtocolError { peer_id, error }) => {
                 // TODO: handle properly?

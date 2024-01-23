@@ -163,7 +163,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             MustUpdateNetworkWithBestBlock,
             MustUpdateNetworkWithFinalizedBlock,
             MustSubscribeNetworkEvents,
-            NetworkEvent(network_service::Event),
+            NetworkEvent(network_service::HighLevelEvent),
             ForegroundMessage(ToBackground),
             ForegroundClosed,
             StartRequest(all::SourceId, all::DesiredRequest),
@@ -255,7 +255,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         };
 
         match wake_up_reason {
-            WakeUpReason::NetworkEvent(network_service::Event::Connected {
+            WakeUpReason::NetworkEvent(network_service::HighLevelEvent::Connected {
                 peer_id,
                 role,
                 best_block_number,
@@ -268,7 +268,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 );
             }
 
-            WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }) => {
+            WakeUpReason::NetworkEvent(network_service::HighLevelEvent::Disconnected {
+                peer_id,
+            }) => {
                 let sync_source_id = task.peers_source_id_map.remove(&peer_id).unwrap();
                 let (_, requests) = task.sync.remove_source(sync_source_id);
 
@@ -281,7 +283,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 }
             }
 
-            WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+            WakeUpReason::NetworkEvent(network_service::HighLevelEvent::BlockAnnounce {
                 peer_id,
                 announce,
             }) => {
@@ -319,16 +321,18 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 }
             }
 
-            WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {
-                peer_id,
-                finalized_block_height,
-            }) => {
+            WakeUpReason::NetworkEvent(
+                network_service::HighLevelEvent::GrandpaNeighborPacket {
+                    peer_id,
+                    finalized_block_height,
+                },
+            ) => {
                 let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
                 task.sync
                     .update_source_finality_state(sync_source_id, finalized_block_height);
             }
 
-            WakeUpReason::NetworkEvent(network_service::Event::GrandpaCommitMessage {
+            WakeUpReason::NetworkEvent(network_service::HighLevelEvent::GrandpaCommitMessage {
                 peer_id,
                 message,
             }) => {
@@ -909,7 +913,8 @@ struct Task<TPlat: PlatformRef> {
     /// Chain of the network service. Used to send out requests to peers.
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     /// Events coming from the networking service. `None` if not subscribed yet.
-    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
+    from_network_service:
+        Option<Pin<Box<async_channel::Receiver<network_service::HighLevelEvent>>>>,
 
     /// List of requests currently in progress.
     pending_requests: stream::FuturesUnordered<
