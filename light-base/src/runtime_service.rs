@@ -926,7 +926,7 @@ async fn run_background<TPlat: PlatformRef>(
                 }
 
                 // Grab what to download. If there's nothing more to download, continue looping.
-                let download_params = {
+                let (download_id, block) = {
                     let async_op = match &mut background.tree {
                         Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                             tree.next_necessary_async_op(&background.platform.now())
@@ -937,7 +937,18 @@ async fn run_background<TPlat: PlatformRef>(
                     };
 
                     match async_op {
-                        async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
+                        async_tree::NextNecessaryAsyncOp::Ready(dl) => {
+                            let block = match &mut background.tree {
+                                Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                                    &tree[dl.block_index]
+                                }
+                                Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                    &tree[dl.block_index]
+                                }
+                            };
+
+                            (dl.id, block)
+                        }
                         async_tree::NextNecessaryAsyncOp::NotReady { when } => {
                             if let Some(when) = when {
                                 background.wake_up_new_necessary_download =
@@ -953,24 +964,22 @@ async fn run_background<TPlat: PlatformRef>(
                     Debug,
                     &background.log_target,
                     "block-runtime-download-started",
-                    block_hash = HashDisplay(&download_params.block_user_data.hash)
+                    block_hash = HashDisplay(&block.hash)
                 );
 
                 // Dispatches a runtime download task to `runtime_downloads`.
                 background.runtime_downloads.push({
-                    let download_id = download_params.id;
-
                     // In order to perform the download, we need to known the state root hash of the
                     // block in question, which requires decoding the block. If the decoding fails,
                     // we report that the asynchronous operation has failed with the hope that this
                     // block gets pruned in the future.
                     match header::decode(
-                        &download_params.block_user_data.scale_encoded_header,
+                        &block.scale_encoded_header,
                         background.sync_service.block_number_bytes(),
                     ) {
                         Ok(decoded_header) => {
                             let sync_service = background.sync_service.clone();
-                            let block_hash = download_params.block_user_data.hash;
+                            let block_hash = block.hash;
                             let state_root = *decoded_header.state_root;
                             let block_number = decoded_header.number;
 

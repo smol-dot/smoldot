@@ -739,14 +739,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 Debug,
                                 &self.log_target,
                                 "parahead-fetch-operation-started",
-                                relay_block_hash = HashDisplay(op.block_user_data),
+                                relay_block_hash =
+                                    HashDisplay(&runtime_subscription.async_tree[op.block_index]),
                             );
 
                             runtime_subscription.in_progress_paraheads.push({
                                 let relay_chain_sync = self.relay_chain_sync.clone();
                                 let subscription_id =
                                     runtime_subscription.relay_chain_subscribe_all.id();
-                                let block_hash = *op.block_user_data;
+                                let block_hash = runtime_subscription.async_tree[op.block_index];
                                 let async_op_id = op.id;
                                 let parachain_id = self.parachain_id;
                                 Box::pin(async move {

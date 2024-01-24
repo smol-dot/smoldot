@@ -120,23 +120,20 @@ pub use fork_tree::NodeIndex;
 pub struct AsyncOpId(u64);
 
 #[derive(Debug)]
-pub enum NextNecessaryAsyncOp<'a, TNow, TBl> {
-    Ready(AsyncOpParams<'a, TBl>),
+pub enum NextNecessaryAsyncOp<TNow> {
+    Ready(AsyncOpParams),
     NotReady { when: Option<TNow> },
 }
 
 /// Information about an operation that must be started.
 #[derive(Debug)]
-pub struct AsyncOpParams<'a, TBl> {
+pub struct AsyncOpParams {
     /// Identifier to later provide when calling [`AsyncTree::async_op_finished`] or
     /// [`AsyncTree::async_op_failure`].
     pub id: AsyncOpId,
 
     /// Index of the block to perform the operation against.
     pub block_index: NodeIndex,
-
-    /// User data of the block to perform the operation against.
-    pub block_user_data: &'a TBl,
 }
 
 /// Configuration for [`AsyncTree::new`].
@@ -551,7 +548,7 @@ where
     /// - The input best block.
     /// - Any other block.
     ///
-    pub fn next_necessary_async_op(&mut self, now: &TNow) -> NextNecessaryAsyncOp<TNow, TBl> {
+    pub fn next_necessary_async_op(&mut self, now: &TNow) -> NextNecessaryAsyncOp<TNow> {
         let mut when_not_ready = None;
 
         // Finalized block according to the blocks input.
@@ -561,11 +558,6 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                        block_user_data: &self
-                            .non_finalized_blocks
-                            .get(block_index)
-                            .unwrap()
-                            .user_data,
                     })
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
@@ -590,11 +582,6 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                        block_user_data: &self
-                            .non_finalized_blocks
-                            .get(block_index)
-                            .unwrap()
-                            .user_data,
                     })
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
@@ -620,11 +607,6 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                        block_user_data: &self
-                            .non_finalized_blocks
-                            .get(block_index)
-                            .unwrap()
-                            .user_data,
                     })
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
