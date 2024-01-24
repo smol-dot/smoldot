@@ -811,7 +811,6 @@ async fn run_background<TPlat: PlatformRef>(
             next_subscription_id: 0,
             best_near_head_of_chain: config.sync_service.is_near_head_of_chain_heuristic().await,
             tree,
-            must_update_tree_and_notify_subscribers: true,
             runtimes: slab::Slab::with_capacity(2),
             pending_subscriptions: Vec::with_capacity(8),
             blocks_stream: None,
@@ -1154,9 +1153,6 @@ async fn run_background<TPlat: PlatformRef>(
                         pinned_blocks.remove(&(to_remove, block));
                     }
                 }
-
-                // There might be other updates.
-                background.must_update_tree_and_notify_subscribers = true;
             }
             WakeUpReason::MustAdvanceTreeFinalizedKnown(async_tree::OutputUpdate::Block(block)) => {
                 let Tree::FinalizedBlockRuntimeKnown {
@@ -1245,9 +1241,6 @@ async fn run_background<TPlat: PlatformRef>(
                         pinned_blocks.remove(&(to_remove, block));
                     }
                 }
-
-                // There might be other updates.
-                background.must_update_tree_and_notify_subscribers = true;
             }
             WakeUpReason::MustAdvanceTreeFinalizedKnown(
                 async_tree::OutputUpdate::BestBlockChanged { best_block_index },
@@ -1292,19 +1285,15 @@ async fn run_background<TPlat: PlatformRef>(
                         pinned_blocks.remove(&(to_remove, block));
                     }
                 }
-
-                // There might be other updates.
-                background.must_update_tree_and_notify_subscribers = true;
             }
 
             WakeUpReason::MustAdvanceTreeFinalizedUnknown(async_tree::OutputUpdate::Block(_))
             | WakeUpReason::MustAdvanceTreeFinalizedUnknown(
                 async_tree::OutputUpdate::BestBlockChanged { .. },
             ) => {
-                // There might be other updates.
-                background.must_update_tree_and_notify_subscribers = true;
                 continue;
             }
+
             WakeUpReason::MustAdvanceTreeFinalizedUnknown(
                 async_tree::OutputUpdate::Finalized {
                     user_data: new_finalized,
@@ -1357,9 +1346,6 @@ async fn run_background<TPlat: PlatformRef>(
                     tree: new_tree,
                     finalized_block: new_finalized,
                 };
-
-                // There might be other updates.
-                background.must_update_tree_and_notify_subscribers = true;
             }
 
             WakeUpReason::MustSubscribe => {
@@ -2324,7 +2310,6 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
@@ -2378,8 +2363,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_finalize(node_to_finalize, new_best_block);
                     }
                 }
-
-                background.must_update_tree_and_notify_subscribers = true;
             }
 
             WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
@@ -2429,7 +2412,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_set_best_block(Some(idx));
                     }
                 }
-                background.must_update_tree_and_notify_subscribers = true;
 
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
@@ -2527,7 +2509,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_finished(async_op_id, Some(runtime));
                     }
                 }
-                background.must_update_tree_and_notify_subscribers = true;
 
                 // Because runtime downloads are clamped to a maximum, when a download is finished
                 // we should try to start new downloads.
@@ -2647,9 +2628,6 @@ struct Background<TPlat: PlatformRef> {
     /// Tree of blocks received from the sync service. Keeps track of which block has been
     /// reported to the outer API.
     tree: Tree<TPlat>,
-
-    /// If `true`, the `AsyncTree`s potentially need being advanced.
-    must_update_tree_and_notify_subscribers: bool,
 
     /// List of subscription attempts started with
     /// [`Tree::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
