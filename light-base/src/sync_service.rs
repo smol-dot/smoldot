@@ -454,6 +454,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
                     RequestImpl::ClosestDescendantMerkleValue { key: request.key }
                 }
             })
+            .enumerate()
             .collect::<Vec<_>>();
 
         StorageQuery {
@@ -977,12 +978,12 @@ pub struct StorageQuery<TPlat: PlatformRef> {
     block_number: u64,
     block_hash: [u8; 32],
     main_trie_root_hash: [u8; 32],
-    requests_remaining: Vec<RequestImpl>,
+    requests_remaining: Vec<(usize, RequestImpl)>,
     total_attempts: usize,
     timeout_per_request: Duration,
     max_parallel: NonZeroU32,
     outcome_errors: Vec<StorageQueryErrorDetail>,
-    final_results: VecDeque<StorageResultItem>,
+    final_results: VecDeque<(usize, StorageResultItem)>,
     /// Number of nodes that are possible in a response before exceeding the response size
     /// limit. Because the size of a trie node is unknown, this can only ever be a gross
     /// estimate.
@@ -1008,8 +1009,12 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
     /// Wait until some progress is made.
     pub async fn advance(mut self) -> StorageQueryProgress<TPlat> {
         loop {
-            if let Some(item) = self.final_results.pop_front() {
-                return StorageQueryProgress::Progress { item, query: self };
+            if let Some((request_index, item)) = self.final_results.pop_front() {
+                return StorageQueryProgress::Progress {
+                    request_index,
+                    item,
+                    query: self,
+                };
             }
 
             // Check if we're done.
@@ -1048,7 +1053,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                     fnv::FnvBuildHasher::default(),
                 );
 
-                for request in &self.requests_remaining {
+                for (_, request) in &self.requests_remaining {
                     if max_reponse_nodes >= self.response_nodes_cap {
                         break;
                     }
@@ -1162,7 +1167,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
 
             let mut proof_has_advanced_verification = false;
 
-            for request in mem::take(&mut self.requests_remaining) {
+            for (request_index, request) in mem::take(&mut self.requests_remaining) {
                 match request {
                     RequestImpl::PrefixScan {
                         scan,
@@ -1172,10 +1177,13 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                         match scan.resume_partial(proof.decode()) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 proof_has_advanced_verification = true;
-                                self.requests_remaining.push(RequestImpl::PrefixScan {
-                                    scan,
-                                    requested_key,
-                                });
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::PrefixScan {
+                                        scan,
+                                        requested_key,
+                                    },
+                                ));
                             }
                             Ok(prefix_proof::ResumeOutcome::Success {
                                 entries,
@@ -1188,29 +1196,32 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                     match value {
                                         prefix_proof::StorageValue::Hash(hash) => {
                                             debug_assert!(!full_storage_values_required);
-                                            self.final_results.push_back(
+                                            self.final_results.push_back((
+                                                request_index,
                                                 StorageResultItem::DescendantHash {
                                                     key,
                                                     hash,
                                                     requested_key: requested_key.clone(),
                                                 },
-                                            );
+                                            ));
                                         }
                                         prefix_proof::StorageValue::Value(value)
                                             if full_storage_values_required =>
                                         {
-                                            self.final_results.push_back(
+                                            self.final_results.push_back((
+                                                request_index,
                                                 StorageResultItem::DescendantValue {
                                                     requested_key: requested_key.clone(),
                                                     key,
                                                     value,
                                                 },
-                                            );
+                                            ));
                                         }
                                         prefix_proof::StorageValue::Value(value) => {
                                             let hashed_value =
                                                 blake2_rfc::blake2b::blake2b(32, &[], &value);
-                                            self.final_results.push_back(
+                                            self.final_results.push_back((
+                                                request_index,
                                                 StorageResultItem::DescendantHash {
                                                     key,
                                                     hash: *<&[u8; 32]>::try_from(
@@ -1219,7 +1230,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                                     .unwrap(),
                                                     requested_key: requested_key.clone(),
                                                 },
-                                            );
+                                            ));
                                         }
                                     }
                                 }
@@ -1230,10 +1241,13 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 unreachable!()
                             }
                             Err((scan, prefix_proof::Error::MissingProofEntry)) => {
-                                self.requests_remaining.push(RequestImpl::PrefixScan {
-                                    requested_key,
-                                    scan,
-                                });
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::PrefixScan {
+                                        requested_key,
+                                        scan,
+                                    },
+                                ));
                             }
                         }
                     }
@@ -1245,50 +1259,63 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
                                     proof_has_advanced_verification = true;
-                                    self.final_results.push_back(StorageResultItem::Hash {
-                                        key,
-                                        hash: Some(*h),
-                                    });
+                                    self.final_results.push_back((
+                                        request_index,
+                                        StorageResultItem::Hash {
+                                            key,
+                                            hash: Some(*h),
+                                        },
+                                    ));
                                 }
                                 proof_decode::StorageValue::HashKnownValueMissing(_) => {
-                                    self.requests_remaining
-                                        .push(RequestImpl::ValueOrHash { key, hash });
+                                    self.requests_remaining.push((
+                                        request_index,
+                                        RequestImpl::ValueOrHash { key, hash },
+                                    ));
                                 }
                                 proof_decode::StorageValue::Known { value, .. } => {
                                     proof_has_advanced_verification = true;
                                     if hash {
                                         let hashed_value =
                                             blake2_rfc::blake2b::blake2b(32, &[], value);
-                                        self.final_results.push_back(StorageResultItem::Hash {
-                                            key,
-                                            hash: Some(
-                                                *<&[u8; 32]>::try_from(hashed_value.as_bytes())
-                                                    .unwrap(),
-                                            ),
-                                        });
+                                        self.final_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Hash {
+                                                key,
+                                                hash: Some(
+                                                    *<&[u8; 32]>::try_from(hashed_value.as_bytes())
+                                                        .unwrap(),
+                                                ),
+                                            },
+                                        ));
                                     } else {
-                                        self.final_results.push_back(StorageResultItem::Value {
-                                            key,
-                                            value: Some(value.to_vec()),
-                                        });
+                                        self.final_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Value {
+                                                key,
+                                                value: Some(value.to_vec()),
+                                            },
+                                        ));
                                     }
                                 }
                                 proof_decode::StorageValue::None => {
                                     proof_has_advanced_verification = true;
                                     if hash {
-                                        self.final_results
-                                            .push_back(StorageResultItem::Hash { key, hash: None });
+                                        self.final_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Hash { key, hash: None },
+                                        ));
                                     } else {
-                                        self.final_results.push_back(StorageResultItem::Value {
-                                            key,
-                                            value: None,
-                                        });
+                                        self.final_results.push_back((
+                                            request_index,
+                                            StorageResultItem::Value { key, value: None },
+                                        ));
                                     }
                                 }
                             },
                             Err(proof_decode::IncompleteProofError { .. }) => {
                                 self.requests_remaining
-                                    .push(RequestImpl::ValueOrHash { key, hash });
+                                    .push((request_index, RequestImpl::ValueOrHash { key, hash }));
                             }
                         }
                     }
@@ -1303,8 +1330,10 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             Ok(Some(merkle_value)) => Some(merkle_value.to_vec()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                self.requests_remaining
-                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::ClosestDescendantMerkleValue { key },
+                                ));
                                 continue;
                             }
                         };
@@ -1315,21 +1344,24 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             Ok(Some(ancestor)) => Some(ancestor.collect::<Vec<_>>()),
                             Ok(None) => None,
                             Err(proof_decode::IncompleteProofError { .. }) => {
-                                self.requests_remaining
-                                    .push(RequestImpl::ClosestDescendantMerkleValue { key });
+                                self.requests_remaining.push((
+                                    request_index,
+                                    RequestImpl::ClosestDescendantMerkleValue { key },
+                                ));
                                 continue;
                             }
                         };
 
                         proof_has_advanced_verification = true;
 
-                        self.final_results.push_back(
+                        self.final_results.push_back((
+                            request_index,
                             StorageResultItem::ClosestDescendantMerkleValue {
                                 requested_key: key,
                                 closest_descendant_merkle_value,
                                 found_closest_ancestor_excluding,
                             },
-                        )
+                        ))
                     }
                 }
             }
@@ -1347,6 +1379,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
 pub enum StorageQueryProgress<TPlat: PlatformRef> {
     Finished,
     Progress {
+        request_index: usize,
         item: StorageResultItem,
         /// Query to use to continue advancing.
         query: StorageQuery<TPlat>,
