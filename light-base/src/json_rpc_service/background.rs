@@ -738,13 +738,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let result = self
+        // TODO: weird that keys is an iterator; revisit
+        let mut results = vec![None; keys.clone().count()];
+
+        let mut query = self
             .sync_service
             .clone()
-            .storage_query2(
+            .storage_query(
                 block_number,
-                hash,
-                &state_trie_root_hash,
+                *hash,
+                state_trie_root_hash,
                 keys.clone().map(|key| sync_service::StorageRequestItem {
                     key: key.as_ref().to_vec(), // TODO: overhead
                     ty: sync_service::StorageRequestItemTy::Value,
@@ -753,26 +756,27 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 timeout_per_request,
                 max_parallel,
             )
-            .await
-            .map_err(StorageQueryError::StorageRetrieval)?;
+            .advance()
+            .await;
 
-        let result = keys
-            .map(|key| {
-                result
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::Value { key: k, value }
-                            if k == key.as_ref() =>
-                        {
-                            Some(value.clone()) // TODO: overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap()
-            })
-            .collect();
-
-        Ok(result)
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Progress {
+                    query: next,
+                    request_index,
+                    item: sync_service::StorageResultItem::Value { value, .. },
+                    ..
+                } => {
+                    results[request_index] = value.clone();
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    return Err(StorageQueryError::StorageRetrieval(error))
+                }
+                sync_service::StorageQueryProgress::Finished => return Ok(results),
+            }
+        }
     }
 
     /// Obtain a pin of the runtime of the given block against the runtime service, plus the
