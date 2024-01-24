@@ -630,6 +630,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
     /// Wait until some progress is made.
     pub async fn advance(mut self) -> StorageQueryProgress<TPlat> {
         loop {
+            // TODO: instead of buffering everything here, progressively decode the proof
             if let Some((request_index, item)) = self.available_results.pop_front() {
                 return StorageQueryProgress::Progress {
                     request_index,
