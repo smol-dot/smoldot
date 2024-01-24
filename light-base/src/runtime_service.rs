@@ -825,7 +825,7 @@ async fn run_background<TPlat: PlatformRef>(
     'background_main_loop: loop {
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
-            NewNecessaryDownload,
+            StartDownload(async_tree::AsyncOpId, async_tree::NodeIndex),
             TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
             TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
             StartPendingSubscribeAll,
@@ -851,6 +851,7 @@ async fn run_background<TPlat: PlatformRef>(
         let wake_up_reason: WakeUpReason<_> = {
             let finalized_block_known =
                 matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. });
+            let num_runtime_downloads = background.runtime_downloads.len();
             async {
                 if !background.pending_subscriptions.is_empty() && finalized_block_known {
                     WakeUpReason::StartPendingSubscribeAll
@@ -893,22 +894,52 @@ async fn run_background<TPlat: PlatformRef>(
                 }
             })
             .or(async {
-                (&mut background.wake_up_new_necessary_download).await;
-                background.wake_up_new_necessary_download = Box::pin(future::pending());
-                WakeUpReason::NewNecessaryDownload
-            })
-            .or(async {
-                match &mut background.tree {
-                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                        match tree.try_advance_output() {
-                            Some(update) => WakeUpReason::TreeAdvanceFinalizedKnown(update),
-                            None => future::pending().await,
+                loop {
+                    // There might be a new runtime download to start.
+                    // Don't download more than 2 runtimes at a time.
+                    let wait = if num_runtime_downloads < 2 {
+                        // Grab what to download. If there's nothing more to download, do nothing.
+                        let async_op = match &mut background.tree {
+                            Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                                tree.next_necessary_async_op(&background.platform.now())
+                            }
+                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                tree.next_necessary_async_op(&background.platform.now())
+                            }
+                        };
+
+                        match async_op {
+                            async_tree::NextNecessaryAsyncOp::Ready(dl) => {
+                                break WakeUpReason::StartDownload(dl.id, dl.block_index)
+                            }
+                            async_tree::NextNecessaryAsyncOp::NotReady { when } => {
+                                if let Some(when) = when {
+                                    either::Left(background.platform.sleep_until(when))
+                                } else {
+                                    either::Right(future::pending())
+                                }
+                            }
                         }
-                    }
-                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                        match tree.try_advance_output() {
-                            Some(update) => WakeUpReason::TreeAdvanceFinalizedUnknown(update),
-                            None => future::pending().await,
+                    } else {
+                        either::Right(future::pending())
+                    };
+
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            match tree.try_advance_output() {
+                                Some(update) => {
+                                    break WakeUpReason::TreeAdvanceFinalizedKnown(update)
+                                }
+                                None => wait.await,
+                            }
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            match tree.try_advance_output() {
+                                Some(update) => {
+                                    break WakeUpReason::TreeAdvanceFinalizedUnknown(update)
+                                }
+                                None => wait.await,
+                            }
                         }
                     }
                 }
@@ -917,46 +948,10 @@ async fn run_background<TPlat: PlatformRef>(
         };
 
         match wake_up_reason {
-            WakeUpReason::NewNecessaryDownload => {
-                // There might be a new runtime download to start.
-
-                // Don't download more than 2 runtimes at a time.
-                if background.runtime_downloads.len() >= 2 {
-                    continue;
-                }
-
-                // Grab what to download. If there's nothing more to download, continue looping.
-                let (download_id, block) = {
-                    let async_op = match &mut background.tree {
-                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                            tree.next_necessary_async_op(&background.platform.now())
-                        }
-                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                            tree.next_necessary_async_op(&background.platform.now())
-                        }
-                    };
-
-                    match async_op {
-                        async_tree::NextNecessaryAsyncOp::Ready(dl) => {
-                            let block = match &mut background.tree {
-                                Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                                    &tree[dl.block_index]
-                                }
-                                Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                                    &tree[dl.block_index]
-                                }
-                            };
-
-                            (dl.id, block)
-                        }
-                        async_tree::NextNecessaryAsyncOp::NotReady { when } => {
-                            if let Some(when) = when {
-                                background.wake_up_new_necessary_download =
-                                    Box::pin(background.platform.sleep_until(when)) as Pin<Box<_>>;
-                            }
-                            continue;
-                        }
-                    }
+            WakeUpReason::StartDownload(download_id, block_index) => {
+                let block = match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => &tree[block_index],
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => &tree[block_index],
                 };
 
                 log!(
