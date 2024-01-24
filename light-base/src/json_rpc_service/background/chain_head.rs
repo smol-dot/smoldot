@@ -27,7 +27,6 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::Arc,
-    vec,
     vec::Vec,
 };
 use core::{
