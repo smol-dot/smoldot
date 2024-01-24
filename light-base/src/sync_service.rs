@@ -463,9 +463,9 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
             main_trie_root_hash,
             total_attempts,
             timeout_per_request,
-            max_parallel,
+            _max_parallel: max_parallel,
             outcome_errors: Vec::with_capacity(total_attempts),
-            final_results: VecDeque::with_capacity(requests.len() * 4),
+            available_results: VecDeque::with_capacity(requests.len() * 4),
             requests_remaining: requests,
             response_nodes_cap: (16 * 1024 * 1024) / 164,
             randomness: rand_chacha::ChaCha20Rng::from_seed({
@@ -574,21 +574,34 @@ pub enum StorageResultItem {
     },
 }
 
+/// Returned by [`SyncService::storage_query`]. Represents a storage query in progress.
 pub struct StorageQuery<TPlat: PlatformRef> {
     sync_service: Arc<SyncService<TPlat>>,
     block_number: u64,
     block_hash: [u8; 32],
     main_trie_root_hash: [u8; 32],
+    /// Requests that haven't been fulfilled yet.
+    /// The `usize` is the index of the request in the original list of requests that the API user
+    /// provided.
     requests_remaining: Vec<(usize, RequestImpl)>,
+    /// Total number of network requests to try before giving up.
     total_attempts: usize,
+    /// How long to wait for a response to the request.
     timeout_per_request: Duration,
-    max_parallel: NonZeroU32,
+    // TODO: value presently ignored
+    _max_parallel: NonZeroU32,
+    /// Non-fatal errors that have happened in the network requests.
     outcome_errors: Vec<StorageQueryErrorDetail>,
-    final_results: VecDeque<(usize, StorageResultItem)>,
+    /// List of responses that are available to yield.
+    /// The `usize` is the index of the request in the original list of requests that the API user
+    /// provided.
+    available_results: VecDeque<(usize, StorageResultItem)>,
     /// Number of nodes that are possible in a response before exceeding the response size
     /// limit. Because the size of a trie node is unknown, this can only ever be a gross
     /// estimate.
+    /// If a request fails due to the limit being exceeded, this cap is dynamically reduced.
     response_nodes_cap: usize,
+    /// Source of randomness.
     randomness: rand_chacha::ChaCha20Rng,
 }
 
@@ -610,7 +623,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
     /// Wait until some progress is made.
     pub async fn advance(mut self) -> StorageQueryProgress<TPlat> {
         loop {
-            if let Some((request_index, item)) = self.final_results.pop_front() {
+            if let Some((request_index, item)) = self.available_results.pop_front() {
                 return StorageQueryProgress::Progress {
                     request_index,
                     item,
@@ -797,7 +810,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                     match value {
                                         prefix_proof::StorageValue::Hash(hash) => {
                                             debug_assert!(!full_storage_values_required);
-                                            self.final_results.push_back((
+                                            self.available_results.push_back((
                                                 request_index,
                                                 StorageResultItem::DescendantHash {
                                                     key,
@@ -809,7 +822,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                         prefix_proof::StorageValue::Value(value)
                                             if full_storage_values_required =>
                                         {
-                                            self.final_results.push_back((
+                                            self.available_results.push_back((
                                                 request_index,
                                                 StorageResultItem::DescendantValue {
                                                     requested_key: requested_key.clone(),
@@ -821,7 +834,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                         prefix_proof::StorageValue::Value(value) => {
                                             let hashed_value =
                                                 blake2_rfc::blake2b::blake2b(32, &[], &value);
-                                            self.final_results.push_back((
+                                            self.available_results.push_back((
                                                 request_index,
                                                 StorageResultItem::DescendantHash {
                                                     key,
@@ -860,7 +873,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                             Ok(node_info) => match node_info.storage_value {
                                 proof_decode::StorageValue::HashKnownValueMissing(h) if hash => {
                                     proof_has_advanced_verification = true;
-                                    self.final_results.push_back((
+                                    self.available_results.push_back((
                                         request_index,
                                         StorageResultItem::Hash {
                                             key,
@@ -879,7 +892,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                     if hash {
                                         let hashed_value =
                                             blake2_rfc::blake2b::blake2b(32, &[], value);
-                                        self.final_results.push_back((
+                                        self.available_results.push_back((
                                             request_index,
                                             StorageResultItem::Hash {
                                                 key,
@@ -890,7 +903,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                             },
                                         ));
                                     } else {
-                                        self.final_results.push_back((
+                                        self.available_results.push_back((
                                             request_index,
                                             StorageResultItem::Value {
                                                 key,
@@ -902,12 +915,12 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
                                 proof_decode::StorageValue::None => {
                                     proof_has_advanced_verification = true;
                                     if hash {
-                                        self.final_results.push_back((
+                                        self.available_results.push_back((
                                             request_index,
                                             StorageResultItem::Hash { key, hash: None },
                                         ));
                                     } else {
-                                        self.final_results.push_back((
+                                        self.available_results.push_back((
                                             request_index,
                                             StorageResultItem::Value { key, value: None },
                                         ));
@@ -955,7 +968,7 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
 
                         proof_has_advanced_verification = true;
 
-                        self.final_results.push_back((
+                        self.available_results.push_back((
                             request_index,
                             StorageResultItem::ClosestDescendantMerkleValue {
                                 requested_key: key,
@@ -977,14 +990,22 @@ impl<TPlat: PlatformRef> StorageQuery<TPlat> {
     }
 }
 
+/// Progress in a storage query. Returned by [`StorageQuery::advance`].
 pub enum StorageQueryProgress<TPlat: PlatformRef> {
+    /// The query has successfully finished. All the items have been yielded through
+    /// [`StorageQueryProgress::Progress`].
     Finished,
+    /// The query has yielded an item.
     Progress {
+        /// Index within the original list of requests passed to [`SyncService::storage_query`]
+        /// the item corresponds to.
         request_index: usize,
+        /// The item in question.
         item: StorageResultItem,
         /// Query to use to continue advancing.
         query: StorageQuery<TPlat>,
     },
+    /// The query has failed due to having reached the maximum number of errors.
     Error(StorageQueryError),
 }
 
