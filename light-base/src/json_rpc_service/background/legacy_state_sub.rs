@@ -535,12 +535,13 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         let sync_service = task.sync_service.clone();
                         let requests_tx = task.requests_tx.clone();
                         async move {
-                            let result = sync_service
+                            let mut out = Vec::with_capacity(keys.len());
+                            let mut query = sync_service
                                 .clone()
-                                .storage_query2(
+                                .storage_query(
                                     block_number,
-                                    &block_hash,
-                                    &state_trie_root,
+                                    block_hash,
+                                    state_trie_root,
                                     keys.into_iter()
                                         .map(|key| sync_service::StorageRequestItem {
                                             key,
@@ -550,11 +551,41 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                     Duration::from_secs(12),
                                     NonZeroU32::new(2).unwrap(),
                                 )
+                                .advance()
                                 .await;
-                            if let Some(requests_tx) = requests_tx.upgrade() {
-                                let _ = requests_tx
-                                    .send(Message::StorageFetch { block_hash, result })
-                                    .await;
+                            loop {
+                                match query {
+                                    sync_service::StorageQueryProgress::Progress {
+                                        item,
+                                        query: next,
+                                        ..
+                                    } => {
+                                        out.push(item);
+                                        query = next.advance().await;
+                                    }
+                                    sync_service::StorageQueryProgress::Finished => {
+                                        if let Some(requests_tx) = requests_tx.upgrade() {
+                                            let _ = requests_tx
+                                                .send(Message::StorageFetch {
+                                                    block_hash,
+                                                    result: Ok(out),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                    sync_service::StorageQueryProgress::Error(error) => {
+                                        if let Some(requests_tx) = requests_tx.upgrade() {
+                                            let _ = requests_tx
+                                                .send(Message::StorageFetch {
+                                                    block_hash,
+                                                    result: Err(error),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                }
                             }
                         }
                     },
