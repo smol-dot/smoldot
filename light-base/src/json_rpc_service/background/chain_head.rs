@@ -1153,7 +1153,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         })
                         .collect::<Vec<_>>();
 
-                    let future = sync_service.clone().storage_query(
+                    let future = sync_service.clone().storage_query2(
                         decoded_header.number,
                         &hash.0,
                         decoded_header.state_root,

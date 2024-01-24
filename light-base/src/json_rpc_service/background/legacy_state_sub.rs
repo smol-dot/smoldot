@@ -537,7 +537,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         async move {
                             let result = sync_service
                                 .clone()
-                                .storage_query(
+                                .storage_query2(
                                     block_number,
                                     &block_hash,
                                     &state_trie_root,

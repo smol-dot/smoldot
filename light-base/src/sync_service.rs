@@ -414,7 +414,7 @@ impl<TPlat: PlatformRef> SyncService<TPlat> {
     /// See the documentation of [`StorageRequestItem`] and [`StorageResultItem`] for more
     /// information.
     // TODO: should return the items in a streaming way, so that we don't need to wait for all the queries to have finished
-    pub async fn storage_query(
+    pub async fn storage_query2(
         self: Arc<Self>,
         block_number: u64,
         block_hash: &[u8; 32],

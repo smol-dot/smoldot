@@ -741,7 +741,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .sync_service
             .clone()
-            .storage_query(
+            .storage_query2(
                 block_number,
                 hash,
                 &state_trie_root_hash,
@@ -833,7 +833,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             let entries = self
                 .sync_service
                 .clone()
-                .storage_query(
+                .storage_query2(
                     block_number,
                     block_hash,
                     &state_trie_root_hash,

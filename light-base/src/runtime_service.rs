@@ -980,7 +980,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                             Box::pin(async move {
                                 let result = sync_service
-                                    .storage_query(
+                                    .storage_query2(
                                         block_number,
                                         &block_hash,
                                         &state_root,
