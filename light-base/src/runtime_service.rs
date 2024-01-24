@@ -826,8 +826,8 @@ async fn run_background<TPlat: PlatformRef>(
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
             NewNecessaryDownload,
-            MustAdvanceTreeFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
-            MustAdvanceTreeFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
+            TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
+            TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
             StartPendingSubscribeAll,
             Notification(Option<sync_service::Notification>),
             ToBackground(ToBackground<TPlat>),
@@ -901,13 +901,13 @@ async fn run_background<TPlat: PlatformRef>(
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
                         match tree.try_advance_output() {
-                            Some(update) => WakeUpReason::MustAdvanceTreeFinalizedKnown(update),
+                            Some(update) => WakeUpReason::TreeAdvanceFinalizedKnown(update),
                             None => future::pending().await,
                         }
                     }
                     Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
                         match tree.try_advance_output() {
-                            Some(update) => WakeUpReason::MustAdvanceTreeFinalizedUnknown(update),
+                            Some(update) => WakeUpReason::TreeAdvanceFinalizedUnknown(update),
                             None => future::pending().await,
                         }
                     }
@@ -1072,7 +1072,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
-            WakeUpReason::MustAdvanceTreeFinalizedKnown(async_tree::OutputUpdate::Finalized {
+            WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Finalized {
                 user_data: new_finalized,
                 best_block_index,
                 pruned_blocks,
@@ -1154,7 +1154,8 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
             }
-            WakeUpReason::MustAdvanceTreeFinalizedKnown(async_tree::OutputUpdate::Block(block)) => {
+
+            WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Block(block)) => {
                 let Tree::FinalizedBlockRuntimeKnown {
                     tree,
                     finalized_block,
@@ -1242,7 +1243,8 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
             }
-            WakeUpReason::MustAdvanceTreeFinalizedKnown(
+
+            WakeUpReason::TreeAdvanceFinalizedKnown(
                 async_tree::OutputUpdate::BestBlockChanged { best_block_index },
             ) => {
                 let Tree::FinalizedBlockRuntimeKnown {
@@ -1287,21 +1289,20 @@ async fn run_background<TPlat: PlatformRef>(
                 }
             }
 
-            WakeUpReason::MustAdvanceTreeFinalizedUnknown(async_tree::OutputUpdate::Block(_))
-            | WakeUpReason::MustAdvanceTreeFinalizedUnknown(
+            WakeUpReason::TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate::Block(_))
+            | WakeUpReason::TreeAdvanceFinalizedUnknown(
                 async_tree::OutputUpdate::BestBlockChanged { .. },
             ) => {
+                // Nothing to do.
                 continue;
             }
 
-            WakeUpReason::MustAdvanceTreeFinalizedUnknown(
-                async_tree::OutputUpdate::Finalized {
-                    user_data: new_finalized,
-                    former_finalized_async_op_user_data,
-                    best_block_index,
-                    ..
-                },
-            ) => {
+            WakeUpReason::TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate::Finalized {
+                user_data: new_finalized,
+                former_finalized_async_op_user_data,
+                best_block_index,
+                ..
+            }) => {
                 let Tree::FinalizedBlockRuntimeUnknown { tree, .. } = &mut background.tree else {
                     unreachable!()
                 };
