@@ -811,7 +811,6 @@ async fn run_background<TPlat: PlatformRef>(
             next_subscription_id: 0,
             best_near_head_of_chain: config.sync_service.is_near_head_of_chain_heuristic().await,
             tree,
-            must_update_tree_and_notify_subscribers: true,
             runtimes: slab::Slab::with_capacity(2),
             pending_subscriptions: Vec::with_capacity(8),
             blocks_stream: None,
@@ -826,8 +825,9 @@ async fn run_background<TPlat: PlatformRef>(
     'background_main_loop: loop {
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
-            NewNecessaryDownload,
-            MustAdvanceTree,
+            StartDownload(async_tree::AsyncOpId, async_tree::NodeIndex),
+            TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
+            TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
             StartPendingSubscribeAll,
             Notification(Option<sync_service::Notification>),
             ToBackground(ToBackground<TPlat>),
@@ -849,10 +849,11 @@ async fn run_background<TPlat: PlatformRef>(
 
         // Wait for something to happen or for some processing to be necessary.
         let wake_up_reason: WakeUpReason<_> = {
+            let finalized_block_known =
+                matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. });
+            let num_runtime_downloads = background.runtime_downloads.len();
             async {
-                if !background.pending_subscriptions.is_empty()
-                    && matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. })
-                {
+                if !background.pending_subscriptions.is_empty() && finalized_block_known {
                     WakeUpReason::StartPendingSubscribeAll
                 } else {
                     future::pending().await
@@ -893,51 +894,64 @@ async fn run_background<TPlat: PlatformRef>(
                 }
             })
             .or(async {
-                (&mut background.wake_up_new_necessary_download).await;
-                background.wake_up_new_necessary_download = Box::pin(future::pending());
-                WakeUpReason::NewNecessaryDownload
-            })
-            .or(async {
-                if background.must_update_tree_and_notify_subscribers {
-                    background.must_update_tree_and_notify_subscribers = false;
-                    WakeUpReason::MustAdvanceTree
-                } else {
-                    future::pending().await
+                loop {
+                    // There might be a new runtime download to start.
+                    // Don't download more than 2 runtimes at a time.
+                    let wait = if num_runtime_downloads < 2 {
+                        // Grab what to download. If there's nothing more to download, do nothing.
+                        let async_op = match &mut background.tree {
+                            Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                                tree.next_necessary_async_op(&background.platform.now())
+                            }
+                            Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                tree.next_necessary_async_op(&background.platform.now())
+                            }
+                        };
+
+                        match async_op {
+                            async_tree::NextNecessaryAsyncOp::Ready(dl) => {
+                                break WakeUpReason::StartDownload(dl.id, dl.block_index)
+                            }
+                            async_tree::NextNecessaryAsyncOp::NotReady { when } => {
+                                if let Some(when) = when {
+                                    either::Left(background.platform.sleep_until(when))
+                                } else {
+                                    either::Right(future::pending())
+                                }
+                            }
+                        }
+                    } else {
+                        either::Right(future::pending())
+                    };
+
+                    match &mut background.tree {
+                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                            match tree.try_advance_output() {
+                                Some(update) => {
+                                    break WakeUpReason::TreeAdvanceFinalizedKnown(update)
+                                }
+                                None => wait.await,
+                            }
+                        }
+                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                            match tree.try_advance_output() {
+                                Some(update) => {
+                                    break WakeUpReason::TreeAdvanceFinalizedUnknown(update)
+                                }
+                                None => wait.await,
+                            }
+                        }
+                    }
                 }
             })
             .await
         };
 
         match wake_up_reason {
-            WakeUpReason::NewNecessaryDownload => {
-                // There might be a new runtime download to start.
-
-                // Don't download more than 2 runtimes at a time.
-                if background.runtime_downloads.len() >= 2 {
-                    continue;
-                }
-
-                // Grab what to download. If there's nothing more to download, continue looping.
-                let download_params = {
-                    let async_op = match &mut background.tree {
-                        Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
-                            tree.next_necessary_async_op(&background.platform.now())
-                        }
-                        Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
-                            tree.next_necessary_async_op(&background.platform.now())
-                        }
-                    };
-
-                    match async_op {
-                        async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
-                        async_tree::NextNecessaryAsyncOp::NotReady { when } => {
-                            if let Some(when) = when {
-                                background.wake_up_new_necessary_download =
-                                    Box::pin(background.platform.sleep_until(when)) as Pin<Box<_>>;
-                            }
-                            continue;
-                        }
-                    }
+            WakeUpReason::StartDownload(download_id, block_index) => {
+                let block = match &mut background.tree {
+                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => &tree[block_index],
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => &tree[block_index],
                 };
 
                 log!(
@@ -945,24 +959,22 @@ async fn run_background<TPlat: PlatformRef>(
                     Debug,
                     &background.log_target,
                     "block-runtime-download-started",
-                    block_hash = HashDisplay(&download_params.block_user_data.hash)
+                    block_hash = HashDisplay(&block.hash)
                 );
 
                 // Dispatches a runtime download task to `runtime_downloads`.
                 background.runtime_downloads.push({
-                    let download_id = download_params.id;
-
                     // In order to perform the download, we need to known the state root hash of the
                     // block in question, which requires decoding the block. If the decoding fails,
                     // we report that the asynchronous operation has failed with the hope that this
                     // block gets pruned in the future.
                     match header::decode(
-                        &download_params.block_user_data.scale_encoded_header,
+                        &block.scale_encoded_header,
                         background.sync_service.block_number_bytes(),
                     ) {
                         Ok(decoded_header) => {
                             let sync_service = background.sync_service.clone();
-                            let block_hash = download_params.block_user_data.hash;
+                            let block_hash = block.hash;
                             let state_root = *decoded_header.state_root;
                             let block_number = decoded_header.number;
 
@@ -1064,284 +1076,281 @@ async fn run_background<TPlat: PlatformRef>(
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
-            WakeUpReason::MustAdvanceTree => {
-                // The tree of blocks might need to be advanced.
-                match &mut background.tree {
-                    Tree::FinalizedBlockRuntimeKnown {
-                        tree,
-                        finalized_block,
-                        all_blocks_subscriptions,
-                        pinned_blocks,
-                    } => match tree.try_advance_output() {
-                        None => continue,
-                        Some(async_tree::OutputUpdate::Finalized {
-                            user_data: new_finalized,
-                            best_block_index,
-                            pruned_blocks,
-                            former_finalized_async_op_user_data: former_finalized_runtime,
-                            ..
-                        }) => {
-                            *finalized_block = new_finalized;
-                            let best_block_hash = best_block_index
-                                .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
+            WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Finalized {
+                user_data: new_finalized,
+                best_block_index,
+                pruned_blocks,
+                former_finalized_async_op_user_data: former_finalized_runtime,
+                ..
+            }) => {
+                let Tree::FinalizedBlockRuntimeKnown {
+                    tree,
+                    finalized_block,
+                    all_blocks_subscriptions,
+                    pinned_blocks,
+                } = &mut background.tree
+                else {
+                    unreachable!()
+                };
 
-                            log!(
-                                &background.platform,
-                                Debug,
-                                &background.log_target,
-                                "output-chain-finalized",
-                                block_hash = HashDisplay(&finalized_block.hash),
-                                best_block_hash = HashDisplay(&best_block_hash)
-                            );
+                *finalized_block = new_finalized;
+                let best_block_hash =
+                    best_block_index.map_or(finalized_block.hash, |idx| tree[idx].hash);
 
-                            // The finalization might cause some runtimes in the list of runtimes
-                            // to have become unused. Clean them up.
-                            drop(former_finalized_runtime);
-                            background
-                                .runtimes
-                                .retain(|_, runtime| runtime.strong_count() > 0);
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "output-chain-finalized",
+                    block_hash = HashDisplay(&finalized_block.hash),
+                    best_block_hash = HashDisplay(&best_block_hash)
+                );
 
-                            let all_blocks_notif = Notification::Finalized {
-                                best_block_hash,
-                                hash: finalized_block.hash,
-                                pruned_blocks: pruned_blocks
-                                    .iter()
-                                    .map(|(_, b, _)| b.hash)
-                                    .collect(),
-                            };
+                // The finalization might cause some runtimes in the list of runtimes
+                // to have become unused. Clean them up.
+                drop(former_finalized_runtime);
+                background
+                    .runtimes
+                    .retain(|_, runtime| runtime.strong_count() > 0);
 
-                            let mut to_remove = Vec::new();
-                            for (subscription_id, (sender, finalized_pinned_remaining)) in
-                                all_blocks_subscriptions.iter_mut()
-                            {
-                                let count_limit = pruned_blocks.len() + 1;
+                let all_blocks_notif = Notification::Finalized {
+                    best_block_hash,
+                    hash: finalized_block.hash,
+                    pruned_blocks: pruned_blocks.iter().map(|(_, b, _)| b.hash).collect(),
+                };
 
-                                if *finalized_pinned_remaining < count_limit {
-                                    to_remove.push(*subscription_id);
-                                    continue;
-                                }
+                let mut to_remove = Vec::new();
+                for (subscription_id, (sender, finalized_pinned_remaining)) in
+                    all_blocks_subscriptions.iter_mut()
+                {
+                    let count_limit = pruned_blocks.len() + 1;
 
-                                if sender.try_send(all_blocks_notif.clone()).is_err() {
-                                    to_remove.push(*subscription_id);
-                                    continue;
-                                }
+                    if *finalized_pinned_remaining < count_limit {
+                        to_remove.push(*subscription_id);
+                        continue;
+                    }
 
-                                *finalized_pinned_remaining -= count_limit;
+                    if sender.try_send(all_blocks_notif.clone()).is_err() {
+                        to_remove.push(*subscription_id);
+                        continue;
+                    }
 
-                                // Mark the finalized and pruned blocks as finalized or non-canonical.
-                                for block in iter::once(&finalized_block.hash)
-                                    .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
-                                {
-                                    if let Some(pin) =
-                                        pinned_blocks.get_mut(&(*subscription_id, *block))
-                                    {
-                                        debug_assert!(pin.block_ignores_limit);
-                                        pin.block_ignores_limit = false;
-                                    }
-                                }
-                            }
-                            for to_remove in to_remove {
-                                all_blocks_subscriptions.remove(&to_remove);
-                                let pinned_blocks_to_remove = pinned_blocks
-                                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
-                                    .map(|((_, h), _)| *h)
-                                    .collect::<Vec<_>>();
-                                for block in pinned_blocks_to_remove {
-                                    pinned_blocks.remove(&(to_remove, block));
-                                }
-                            }
+                    *finalized_pinned_remaining -= count_limit;
 
-                            // There might be other updates.
-                            background.must_update_tree_and_notify_subscribers = true;
-                        }
-                        Some(async_tree::OutputUpdate::Block(block)) => {
-                            let block_index = block.index;
-                            let block_runtime = block.async_op_user_data.clone();
-                            let block_hash = block.user_data.hash;
-                            let scale_encoded_header = block.user_data.scale_encoded_header.clone();
-                            let is_new_best = block.is_new_best;
-
-                            let (block_number, state_trie_root_hash) = {
-                                let decoded = header::decode(
-                                    &scale_encoded_header,
-                                    background.sync_service.block_number_bytes(),
-                                )
-                                .unwrap();
-                                (decoded.number, *decoded.state_root)
-                            };
-
-                            let parent_runtime = tree
-                                .parent(block_index)
-                                .map_or(tree.output_finalized_async_user_data().clone(), |idx| {
-                                    tree.block_async_user_data(idx).unwrap().clone()
-                                });
-
-                            log!(
-                                &background.platform,
-                                Debug,
-                                &background.log_target,
-                                "output-chain-new-block",
-                                block_hash = HashDisplay(&tree.block_user_data(block_index).hash),
-                                is_new_best
-                            );
-
-                            let notif = Notification::Block(BlockNotification {
-                                parent_hash: tree
-                                    .parent(block_index)
-                                    .map_or(finalized_block.hash, |idx| {
-                                        tree.block_user_data(idx).hash
-                                    }),
-                                is_new_best,
-                                scale_encoded_header,
-                                new_runtime: if !Arc::ptr_eq(&parent_runtime, &block_runtime) {
-                                    Some(
-                                        block_runtime
-                                            .runtime
-                                            .as_ref()
-                                            .map(|rt| rt.runtime_version().clone())
-                                            .map_err(|err| err.clone()),
-                                    )
-                                } else {
-                                    None
-                                },
-                            });
-
-                            let mut to_remove = Vec::new();
-                            for (subscription_id, (sender, _)) in
-                                all_blocks_subscriptions.iter_mut()
-                            {
-                                if sender.try_send(notif.clone()).is_ok() {
-                                    let _prev_value = pinned_blocks.insert(
-                                        (*subscription_id, block_hash),
-                                        PinnedBlock {
-                                            runtime: block_runtime.clone(),
-                                            state_trie_root_hash,
-                                            block_number,
-                                            block_ignores_limit: true,
-                                        },
-                                    );
-                                    debug_assert!(_prev_value.is_none());
-                                } else {
-                                    to_remove.push(*subscription_id);
-                                }
-                            }
-                            for to_remove in to_remove {
-                                all_blocks_subscriptions.remove(&to_remove);
-                                let pinned_blocks_to_remove = pinned_blocks
-                                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
-                                    .map(|((_, h), _)| *h)
-                                    .collect::<Vec<_>>();
-                                for block in pinned_blocks_to_remove {
-                                    pinned_blocks.remove(&(to_remove, block));
-                                }
-                            }
-
-                            // There might be other updates.
-                            background.must_update_tree_and_notify_subscribers = true;
-                        }
-                        Some(async_tree::OutputUpdate::BestBlockChanged { best_block_index }) => {
-                            let hash = best_block_index
-                                .map_or(&*finalized_block, |idx| tree.block_user_data(idx))
-                                .hash;
-
-                            log!(
-                                &background.platform,
-                                Debug,
-                                &background.log_target,
-                                "output-chain-best-block-update",
-                                block_hash = HashDisplay(&hash),
-                            );
-
-                            let notif = Notification::BestBlockChanged { hash };
-
-                            let mut to_remove = Vec::new();
-                            for (subscription_id, (sender, _)) in
-                                all_blocks_subscriptions.iter_mut()
-                            {
-                                if sender.try_send(notif.clone()).is_err() {
-                                    to_remove.push(*subscription_id);
-                                }
-                            }
-                            for to_remove in to_remove {
-                                all_blocks_subscriptions.remove(&to_remove);
-                                let pinned_blocks_to_remove = pinned_blocks
-                                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
-                                    .map(|((_, h), _)| *h)
-                                    .collect::<Vec<_>>();
-                                for block in pinned_blocks_to_remove {
-                                    pinned_blocks.remove(&(to_remove, block));
-                                }
-                            }
-
-                            // There might be other updates.
-                            background.must_update_tree_and_notify_subscribers = true;
-                        }
-                    },
-                    Tree::FinalizedBlockRuntimeUnknown { tree } => {
-                        match tree.try_advance_output() {
-                            None => continue,
-                            Some(async_tree::OutputUpdate::Block(_))
-                            | Some(async_tree::OutputUpdate::BestBlockChanged { .. }) => {
-                                // There might be other updates.
-                                background.must_update_tree_and_notify_subscribers = true;
-                                continue;
-                            }
-                            Some(async_tree::OutputUpdate::Finalized {
-                                user_data: new_finalized,
-                                former_finalized_async_op_user_data,
-                                best_block_index,
-                                ..
-                            }) => {
-                                // Make sure that this is the first finalized block whose runtime is
-                                // known, otherwise there's a pretty big bug somewhere.
-                                debug_assert!(former_finalized_async_op_user_data.is_none());
-
-                                let best_block_hash = best_block_index
-                                    .map_or(new_finalized.hash, |idx| {
-                                        tree.block_user_data(idx).hash
-                                    });
-                                log!(
-                                    &background.platform,
-                                    Debug,
-                                    &background.log_target,
-                                    "output-chain-initialized",
-                                    finalized_block_hash = HashDisplay(&new_finalized.hash),
-                                    best_block_hash = HashDisplay(&best_block_hash)
-                                );
-
-                                // Substitute `tree` with a dummy empty tree just in order to extract
-                                // the value. The `tree` only contains "async op user datas" equal
-                                // to `Some` (they're inserted manually when a download finishes)
-                                // except for the finalized block which has now just been extracted.
-                                // We can safely unwrap() all these user datas.
-                                let new_tree = mem::replace(
-                                    tree,
-                                    async_tree::AsyncTree::new(async_tree::Config {
-                                        finalized_async_user_data: None,
-                                        retry_after_failed: Duration::new(0, 0),
-                                        blocks_capacity: 0,
-                                    }),
-                                )
-                                .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
-
-                                // Change the state of `Background` to the "finalized runtime known" state.
-                                background.tree = Tree::FinalizedBlockRuntimeKnown {
-                                    all_blocks_subscriptions:
-                                        hashbrown::HashMap::with_capacity_and_hasher(
-                                            32,
-                                            Default::default(),
-                                        ), // TODO: capacity?
-                                    pinned_blocks: BTreeMap::new(),
-                                    tree: new_tree,
-                                    finalized_block: new_finalized,
-                                };
-
-                                // There might be other updates.
-                                background.must_update_tree_and_notify_subscribers = true;
-                            }
+                    // Mark the finalized and pruned blocks as finalized or non-canonical.
+                    for block in iter::once(&finalized_block.hash)
+                        .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
+                    {
+                        if let Some(pin) = pinned_blocks.get_mut(&(*subscription_id, *block)) {
+                            debug_assert!(pin.block_ignores_limit);
+                            pin.block_ignores_limit = false;
                         }
                     }
                 }
+                for to_remove in to_remove {
+                    all_blocks_subscriptions.remove(&to_remove);
+                    let pinned_blocks_to_remove = pinned_blocks
+                        .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                        .map(|((_, h), _)| *h)
+                        .collect::<Vec<_>>();
+                    for block in pinned_blocks_to_remove {
+                        pinned_blocks.remove(&(to_remove, block));
+                    }
+                }
+            }
+
+            WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Block(block)) => {
+                let Tree::FinalizedBlockRuntimeKnown {
+                    tree,
+                    finalized_block,
+                    all_blocks_subscriptions,
+                    pinned_blocks,
+                } = &mut background.tree
+                else {
+                    unreachable!()
+                };
+
+                let block_index = block.index;
+                let block_runtime = tree.block_async_user_data(block_index).unwrap().clone();
+                let block_hash = tree[block_index].hash;
+                let scale_encoded_header = tree[block_index].scale_encoded_header.clone();
+                let is_new_best = block.is_new_best;
+
+                let (block_number, state_trie_root_hash) = {
+                    let decoded = header::decode(
+                        &scale_encoded_header,
+                        background.sync_service.block_number_bytes(),
+                    )
+                    .unwrap();
+                    (decoded.number, *decoded.state_root)
+                };
+
+                let parent_runtime = tree
+                    .parent(block_index)
+                    .map_or(tree.output_finalized_async_user_data().clone(), |idx| {
+                        tree.block_async_user_data(idx).unwrap().clone()
+                    });
+
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "output-chain-new-block",
+                    block_hash = HashDisplay(&tree[block_index].hash),
+                    is_new_best
+                );
+
+                let notif = Notification::Block(BlockNotification {
+                    parent_hash: tree
+                        .parent(block_index)
+                        .map_or(finalized_block.hash, |idx| tree[idx].hash),
+                    is_new_best,
+                    scale_encoded_header,
+                    new_runtime: if !Arc::ptr_eq(&parent_runtime, &block_runtime) {
+                        Some(
+                            block_runtime
+                                .runtime
+                                .as_ref()
+                                .map(|rt| rt.runtime_version().clone())
+                                .map_err(|err| err.clone()),
+                        )
+                    } else {
+                        None
+                    },
+                });
+
+                let mut to_remove = Vec::new();
+                for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
+                    if sender.try_send(notif.clone()).is_ok() {
+                        let _prev_value = pinned_blocks.insert(
+                            (*subscription_id, block_hash),
+                            PinnedBlock {
+                                runtime: block_runtime.clone(),
+                                state_trie_root_hash,
+                                block_number,
+                                block_ignores_limit: true,
+                            },
+                        );
+                        debug_assert!(_prev_value.is_none());
+                    } else {
+                        to_remove.push(*subscription_id);
+                    }
+                }
+                for to_remove in to_remove {
+                    all_blocks_subscriptions.remove(&to_remove);
+                    let pinned_blocks_to_remove = pinned_blocks
+                        .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                        .map(|((_, h), _)| *h)
+                        .collect::<Vec<_>>();
+                    for block in pinned_blocks_to_remove {
+                        pinned_blocks.remove(&(to_remove, block));
+                    }
+                }
+            }
+
+            WakeUpReason::TreeAdvanceFinalizedKnown(
+                async_tree::OutputUpdate::BestBlockChanged { best_block_index },
+            ) => {
+                let Tree::FinalizedBlockRuntimeKnown {
+                    tree,
+                    finalized_block,
+                    all_blocks_subscriptions,
+                    pinned_blocks,
+                } = &mut background.tree
+                else {
+                    unreachable!()
+                };
+
+                let hash = best_block_index
+                    .map_or(&*finalized_block, |idx| &tree[idx])
+                    .hash;
+
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "output-chain-best-block-update",
+                    block_hash = HashDisplay(&hash),
+                );
+
+                let notif = Notification::BestBlockChanged { hash };
+
+                let mut to_remove = Vec::new();
+                for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
+                    if sender.try_send(notif.clone()).is_err() {
+                        to_remove.push(*subscription_id);
+                    }
+                }
+                for to_remove in to_remove {
+                    all_blocks_subscriptions.remove(&to_remove);
+                    let pinned_blocks_to_remove = pinned_blocks
+                        .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                        .map(|((_, h), _)| *h)
+                        .collect::<Vec<_>>();
+                    for block in pinned_blocks_to_remove {
+                        pinned_blocks.remove(&(to_remove, block));
+                    }
+                }
+            }
+
+            WakeUpReason::TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate::Block(_))
+            | WakeUpReason::TreeAdvanceFinalizedUnknown(
+                async_tree::OutputUpdate::BestBlockChanged { .. },
+            ) => {
+                // Nothing to do.
+                continue;
+            }
+
+            WakeUpReason::TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate::Finalized {
+                user_data: new_finalized,
+                former_finalized_async_op_user_data,
+                best_block_index,
+                ..
+            }) => {
+                let Tree::FinalizedBlockRuntimeUnknown { tree, .. } = &mut background.tree else {
+                    unreachable!()
+                };
+
+                // Make sure that this is the first finalized block whose runtime is
+                // known, otherwise there's a pretty big bug somewhere.
+                debug_assert!(former_finalized_async_op_user_data.is_none());
+
+                let best_block_hash =
+                    best_block_index.map_or(new_finalized.hash, |idx| tree[idx].hash);
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "output-chain-initialized",
+                    finalized_block_hash = HashDisplay(&new_finalized.hash),
+                    best_block_hash = HashDisplay(&best_block_hash)
+                );
+
+                // Substitute `tree` with a dummy empty tree just in order to extract
+                // the value. The `tree` only contains "async op user datas" equal
+                // to `Some` (they're inserted manually when a download finishes)
+                // except for the finalized block which has now just been extracted.
+                // We can safely unwrap() all these user datas.
+                let new_tree = mem::replace(
+                    tree,
+                    async_tree::AsyncTree::new(async_tree::Config {
+                        finalized_async_user_data: None,
+                        retry_after_failed: Duration::new(0, 0),
+                        blocks_capacity: 0,
+                    }),
+                )
+                .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
+
+                // Change the state of `Background` to the "finalized runtime known" state.
+                background.tree = Tree::FinalizedBlockRuntimeKnown {
+                    all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                        32,
+                        Default::default(),
+                    ), // TODO: capacity?
+                    pinned_blocks: BTreeMap::new(),
+                    tree: new_tree,
+                    finalized_block: new_finalized,
+                };
             }
 
             WakeUpReason::MustSubscribe => {
@@ -2306,7 +2315,6 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 }
 
-                background.must_update_tree_and_notify_subscribers = true;
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
@@ -2360,8 +2368,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_finalize(node_to_finalize, new_best_block);
                     }
                 }
-
-                background.must_update_tree_and_notify_subscribers = true;
             }
 
             WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
@@ -2411,7 +2417,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_set_best_block(Some(idx));
                     }
                 }
-                background.must_update_tree_and_notify_subscribers = true;
 
                 background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
@@ -2509,7 +2514,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_finished(async_op_id, Some(runtime));
                     }
                 }
-                background.must_update_tree_and_notify_subscribers = true;
 
                 // Because runtime downloads are clamped to a maximum, when a download is finished
                 // we should try to start new downloads.
@@ -2629,9 +2633,6 @@ struct Background<TPlat: PlatformRef> {
     /// Tree of blocks received from the sync service. Keeps track of which block has been
     /// reported to the outer API.
     tree: Tree<TPlat>,
-
-    /// If `true`, the `AsyncTree`s potentially need being advanced.
-    must_update_tree_and_notify_subscribers: bool,
 
     /// List of subscription attempts started with
     /// [`Tree::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].

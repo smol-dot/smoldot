@@ -411,11 +411,17 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                         match update {
                             async_tree::OutputUpdate::Finalized {
-                                async_op_user_data: new_finalized_parahead,
                                 former_finalized_async_op_user_data: former_finalized_parahead,
                                 pruned_blocks,
                                 ..
-                            } if *new_finalized_parahead != former_finalized_parahead => {
+                            } if *runtime_subscription
+                                .async_tree
+                                .output_finalized_async_user_data()
+                                != former_finalized_parahead =>
+                            {
+                                let new_finalized_parahead = runtime_subscription
+                                    .async_tree
+                                    .output_finalized_async_user_data();
                                 debug_assert!(new_finalized_parahead.is_some());
 
                                 // If this is the first time a finalized parahead is known, any
@@ -565,11 +571,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 // `block` borrows `async_tree`. We need to mutably access `async_tree`
                                 // below, so deconstruct `block` beforehand.
                                 let is_new_best = block.is_new_best;
-                                let scale_encoded_header: Vec<u8> =
-                                    block.async_op_user_data.clone().unwrap();
+                                let block_index = block.index;
+                                let scale_encoded_header: Vec<u8> = runtime_subscription
+                                    .async_tree
+                                    .block_async_user_data(block.index)
+                                    .unwrap()
+                                    .clone()
+                                    .unwrap();
                                 let parahash =
                                     header::hash_from_scale_encoded_header(&scale_encoded_header);
-                                let block_index = block.index;
 
                                 // Do not report anything to subscriptions if no finalized parahead is
                                 // known yet.
@@ -729,14 +739,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 Debug,
                                 &self.log_target,
                                 "parahead-fetch-operation-started",
-                                relay_block_hash = HashDisplay(op.block_user_data),
+                                relay_block_hash =
+                                    HashDisplay(&runtime_subscription.async_tree[op.block_index]),
                             );
 
                             runtime_subscription.in_progress_paraheads.push({
                                 let relay_chain_sync = self.relay_chain_sync.clone();
                                 let subscription_id =
                                     runtime_subscription.relay_chain_subscribe_all.id();
-                                let block_hash = *op.block_user_data;
+                                let block_hash = runtime_subscription.async_tree[op.block_index];
                                 let async_op_id = op.id;
                                 let parachain_id = self.parachain_id;
                                 Box::pin(async move {
@@ -908,7 +919,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .async_tree
                         .async_op_finished(async_op_id, Some(parahead))
                     {
-                        let hash = runtime_subscription.async_tree.block_user_data(block);
+                        let hash = &runtime_subscription.async_tree[block];
                         runtime_subscription
                             .relay_chain_subscribe_all
                             .unpin_block(*hash)
