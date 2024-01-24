@@ -1081,16 +1081,6 @@ where
             // Report the new block.
             return Some(OutputUpdate::Block(OutputUpdateBlock {
                 index: node_index,
-                user_data: &self.non_finalized_blocks.get(node_index).unwrap().user_data,
-                async_op_user_data: match &self
-                    .non_finalized_blocks
-                    .get(node_index)
-                    .unwrap()
-                    .async_op
-                {
-                    AsyncOpState::Finished { user_data, .. } => user_data,
-                    _ => unreachable!(),
-                },
                 is_new_best,
             }));
         }
@@ -1230,7 +1220,7 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
     },
 
     /// A new block has been added to the list of output unfinalized blocks.
-    Block(OutputUpdateBlock<'a, TBl, TAsync>),
+    Block(OutputUpdateBlock),
 
     /// The output best block has been modified.
     BestBlockChanged {
@@ -1242,15 +1232,9 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
 
 /// See [`OutputUpdate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputUpdateBlock<'a, TBl, TAsync> {
+pub struct OutputUpdateBlock {
     /// Index of the node within the data structure.
     pub index: NodeIndex,
-
-    /// User data associated to this block.
-    pub user_data: &'a TBl,
-
-    /// User data associated to the `async` operation of this block.
-    pub async_op_user_data: &'a TAsync,
 
     /// True if this block is considered as the best block of the chain.
     pub is_new_best: bool,

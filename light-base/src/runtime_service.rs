@@ -1156,9 +1156,11 @@ async fn run_background<TPlat: PlatformRef>(
                         }
                         Some(async_tree::OutputUpdate::Block(block)) => {
                             let block_index = block.index;
-                            let block_runtime = block.async_op_user_data.clone();
-                            let block_hash = block.user_data.hash;
-                            let scale_encoded_header = block.user_data.scale_encoded_header.clone();
+                            let block_runtime =
+                                tree.block_async_user_data(block_index).unwrap().clone();
+                            let block_hash = tree[block_index].hash;
+                            let scale_encoded_header =
+                                tree[block_index].scale_encoded_header.clone();
                             let is_new_best = block.is_new_best;
 
                             let (block_number, state_trie_root_hash) = {

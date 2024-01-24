@@ -565,11 +565,15 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                                 // `block` borrows `async_tree`. We need to mutably access `async_tree`
                                 // below, so deconstruct `block` beforehand.
                                 let is_new_best = block.is_new_best;
-                                let scale_encoded_header: Vec<u8> =
-                                    block.async_op_user_data.clone().unwrap();
+                                let block_index = block.index;
+                                let scale_encoded_header: Vec<u8> = runtime_subscription
+                                    .async_tree
+                                    .block_async_user_data(block.index)
+                                    .unwrap()
+                                    .clone()
+                                    .unwrap();
                                 let parahash =
                                     header::hash_from_scale_encoded_header(&scale_encoded_header);
-                                let block_index = block.index;
 
                                 // Do not report anything to subscriptions if no finalized parahead is
                                 // known yet.
