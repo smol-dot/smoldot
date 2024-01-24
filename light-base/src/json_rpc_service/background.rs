@@ -356,8 +356,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::rpc_methods { .. }
             | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
             | methods::MethodCall::sudo_unstable_version { .. }
-            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
-            | methods::MethodCall::transaction_unstable_unwatch { .. }
+            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
             | methods::MethodCall::sudo_network_unstable_watch { .. }
             | methods::MethodCall::sudo_network_unstable_unwatch { .. }
             | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
@@ -627,8 +627,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::rpc_methods { .. }
             | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
             | methods::MethodCall::sudo_unstable_version { .. }
-            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
-            | methods::MethodCall::transaction_unstable_unwatch { .. }
+            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
             | methods::MethodCall::sudo_network_unstable_watch { .. }
             | methods::MethodCall::sudo_network_unstable_unwatch { .. }
             | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
@@ -650,7 +650,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::chainHead_unstable_follow { .. } => {
                 self.chain_head_follow(request).await;
             }
-            methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
+            methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
                 self.submit_and_watch_transaction(request).await
             }
 
