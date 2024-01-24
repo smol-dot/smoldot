@@ -979,78 +979,86 @@ async fn run_background<TPlat: PlatformRef>(
                             let block_number = decoded_header.number;
 
                             Box::pin(async move {
-                                let result = sync_service
-                                    .storage_query(
-                                        block_number,
-                                        &block_hash,
-                                        &state_root,
-                                        [
-                                            sync_service::StorageRequestItem {
-                                                key: b":code".to_vec(),
-                                                ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-                                            },
-                                            sync_service::StorageRequestItem {
-                                                key: b":code".to_vec(),
-                                                ty: sync_service::StorageRequestItemTy::Value,
-                                            },
-                                            sync_service::StorageRequestItem {
-                                                key: b":heappages".to_vec(),
-                                                ty: sync_service::StorageRequestItemTy::Value,
-                                            },
-                                        ]
-                                        .into_iter(),
-                                        3,
-                                        Duration::from_secs(20),
-                                        NonZeroU32::new(3).unwrap(),
-                                    )
-                                    .await;
+                                let result = {
+                                    let mut storage_code = None;
+                                    let mut storage_heap_pages = None;
+                                    let mut code_merkle_value = None;
+                                    let mut code_closest_ancestor_excluding = None;
 
-                                let result = match result {
-                                    Ok(entries) => {
-                                        let heap_pages = entries
-                                            .iter()
-                                            .find_map(|entry| match entry {
-                                                sync_service::StorageResultItem::Value {
-                                                    key,
-                                                    value,
-                                                } if key == b":heappages" => {
-                                                    Some(value.clone()) // TODO: overhead
-                                                }
-                                                _ => None,
-                                            })
-                                            .unwrap();
-                                        let code = entries
-                                            .iter()
-                                            .find_map(|entry| match entry {
-                                                sync_service::StorageResultItem::Value {
-                                                    key,
-                                                    value,
-                                                } if key == b":code" => {
-                                                    Some(value.clone()) // TODO: overhead
-                                                }
-                                                _ => None,
-                                            })
-                                            .unwrap();
-                                        let (code_merkle_value, code_closest_ancestor) = if code.is_some() {
-                                            entries
-                                                .iter()
-                                                .find_map(|entry| match entry {
+                                    let mut query = sync_service
+                                        .clone()
+                                        .storage_query(
+                                            block_number,
+                                            block_hash,
+                                            state_root,
+                                            [
+                                                sync_service::StorageRequestItem {
+                                                    key: b":code".to_vec(),
+                                                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                                                },
+                                                sync_service::StorageRequestItem {
+                                                    key: b":code".to_vec(),
+                                                    ty: sync_service::StorageRequestItemTy::Value,
+                                                },
+                                                sync_service::StorageRequestItem {
+                                                    key: b":heappages".to_vec(),
+                                                    ty: sync_service::StorageRequestItemTy::Value,
+                                                },
+                                            ]
+                                            .into_iter(),
+                                            3,
+                                            Duration::from_secs(20),
+                                            NonZeroU32::new(3).unwrap(),
+                                        )
+                                        .advance()
+                                        .await;
+
+                                    loop {
+                                        match query {
+                                            sync_service::StorageQueryProgress::Finished => {
+                                                break Ok((
+                                                    storage_code,
+                                                    storage_heap_pages,
+                                                    code_merkle_value,
+                                                    code_closest_ancestor_excluding,
+                                                ))
+                                            }
+                                            sync_service::StorageQueryProgress::Progress {
+                                                request_index: 0,
+                                                item:
                                                     sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                                                        requested_key,
-                                                        found_closest_ancestor_excluding,
                                                         closest_descendant_merkle_value,
-                                                    } if requested_key == b":code" => {
-                                                        Some((closest_descendant_merkle_value.clone(), found_closest_ancestor_excluding.clone())) // TODO overhead
-                                                    }
-                                                    _ => None
-                                                })
-                                                .unwrap()
-                                        } else {
-                                            (None, None)
-                                        };
-                                        Ok((code, heap_pages, code_merkle_value, code_closest_ancestor))
+                                                        found_closest_ancestor_excluding,
+                                                        ..
+                                                    },
+                                                query: next,
+                                            } => {
+                                                code_merkle_value = closest_descendant_merkle_value;
+                                                code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                                                query = next.advance().await;
+                                            }
+                                            sync_service::StorageQueryProgress::Progress {
+                                                request_index: 1,
+                                                item: sync_service::StorageResultItem::Value { value, .. },
+                                                query: next,
+                                            } => {
+                                                storage_code = value;
+                                                query = next.advance().await;
+                                            }
+                                            sync_service::StorageQueryProgress::Progress {
+                                                request_index: 2,
+                                                item: sync_service::StorageResultItem::Value { value, .. },
+                                                query: next,
+                                            } => {
+                                                storage_heap_pages = value;
+                                                query = next.advance().await;
+                                            }
+                                            sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                                            sync_service::StorageQueryProgress::Error(error) => {
+                                                break  Err(RuntimeDownloadError::StorageQuery(error))
+                                            }
+                                        }
                                     }
-                                    Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
                                 };
 
                                 (download_id, result)

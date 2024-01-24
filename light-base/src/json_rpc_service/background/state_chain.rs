@@ -540,13 +540,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let outcome = self
+        let mut final_results = Vec::with_capacity(128);
+
+        let mut query = self
             .sync_service
             .clone()
             .storage_query(
                 block_number,
-                &hash,
-                &state_root,
+                hash,
+                state_root,
                 iter::once(sync_service::StorageRequestItem {
                     key: prefix.0,
                     ty: sync_service::StorageRequestItemTy::DescendantsHashes,
@@ -555,25 +557,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
             )
+            .advance()
             .await;
 
-        match outcome {
-            Ok(entries) => {
-                let out = entries
-                    .into_iter()
-                    .map(|item| match item {
-                        sync_service::StorageResultItem::DescendantHash { key, .. } => {
-                            methods::HexString(key)
-                        }
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>();
-                request.respond(methods::Response::state_getKeys(out))
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    request.respond(methods::Response::state_getKeys(final_results));
+                    break;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                    query: next,
+                    ..
+                } => {
+                    final_results.push(methods::HexString(key));
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &error.to_string(),
+                    ));
+                    break;
+                }
             }
-            Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
         }
     }
 
@@ -657,13 +666,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let outcome = self
+        let mut final_results = Vec::with_capacity(128);
+
+        let mut query = self
             .sync_service
             .clone()
             .storage_query(
                 block_number,
-                &hash,
-                &state_root,
+                hash,
+                state_root,
                 iter::once(sync_service::StorageRequestItem {
                     key: prefix.clone(),
                     ty: sync_service::StorageRequestItemTy::DescendantsHashes,
@@ -672,44 +683,52 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
             )
+            .advance()
             .await;
 
-        match outcome {
-            Ok(entries) => {
-                // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                let keys = entries
-                    .into_iter()
-                    .map(|item| match item {
-                        sync_service::StorageResultItem::DescendantHash { key, .. } => key,
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>();
-
-                let out = keys
-                    .iter()
-                    .cloned()
-                    .filter(|k| start_key.as_ref().map_or(true, |start| *k >= start.0)) // TODO: not sure if start should be in the set or not?
-                    .map(methods::HexString)
-                    .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                    .collect::<Vec<_>>();
-
-                // If the returned response is somehow truncated, it is very likely that the
-                // JSON-RPC client will call the function again with the exact same parameters.
-                // Thus, store the results in a cache.
-                if out.len() != keys.len() {
-                    self.state_get_keys_paged_cache
-                        .lock()
-                        .await
-                        .push(GetKeysPagedCacheKey { hash, prefix }, keys);
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    break;
                 }
-
-                request.respond(methods::Response::state_getKeysPaged(out));
+                sync_service::StorageQueryProgress::Progress {
+                    item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                    query: next,
+                    ..
+                } => {
+                    final_results.push(key);
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &error.to_string(),
+                    ));
+                    return;
+                }
             }
-            Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
         }
+
+        let out = final_results
+            .iter()
+            .cloned()
+            .filter(|k| start_key.as_ref().map_or(true, |start| *k >= start.0)) // TODO: not sure if start should be in the set or not?
+            .map(methods::HexString)
+            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+            .collect::<Vec<_>>();
+
+        // If the returned response is somehow truncated, it is very likely that the
+        // JSON-RPC client will call the function again with the exact same parameters.
+        // Thus, store the results in a cache.
+        if out.len() != final_results.len() {
+            self.state_get_keys_paged_cache
+                .lock()
+                .await
+                .push(GetKeysPagedCacheKey { hash, prefix }, final_results);
+        }
+
+        request.respond(methods::Response::state_getKeysPaged(out));
     }
 
     /// Handles a call to [`methods::MethodCall::state_getMetadata`].
