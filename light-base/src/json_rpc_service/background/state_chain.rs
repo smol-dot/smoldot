@@ -540,13 +540,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let outcome = self
+        let mut final_results = Vec::with_capacity(128);
+
+        let mut query = self
             .sync_service
             .clone()
-            .storage_query2(
+            .storage_query(
                 block_number,
-                &hash,
-                &state_root,
+                hash,
+                state_root,
                 iter::once(sync_service::StorageRequestItem {
                     key: prefix.0,
                     ty: sync_service::StorageRequestItemTy::DescendantsHashes,
@@ -555,25 +557,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
             )
+            .advance()
             .await;
 
-        match outcome {
-            Ok(entries) => {
-                let out = entries
-                    .into_iter()
-                    .map(|item| match item {
-                        sync_service::StorageResultItem::DescendantHash { key, .. } => {
-                            methods::HexString(key)
-                        }
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>();
-                request.respond(methods::Response::state_getKeys(out))
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    request.respond(methods::Response::state_getKeys(final_results));
+                    break;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                    query: next,
+                    ..
+                } => {
+                    final_results.push(methods::HexString(key));
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &error.to_string(),
+                    ));
+                    break;
+                }
             }
-            Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
         }
     }
 
