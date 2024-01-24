@@ -979,7 +979,7 @@ async fn run_background<TPlat: PlatformRef>(
                             let block_number = decoded_header.number;
 
                             Box::pin(async move {
-                                let result = { 
+                                let result = {
                                     let mut storage_code = None;
                                     let mut storage_heap_pages = None;
                                     let mut code_merkle_value = None;
@@ -1012,7 +1012,7 @@ async fn run_background<TPlat: PlatformRef>(
                                         )
                                         .advance()
                                         .await;
-                        
+
                                     loop {
                                         match query {
                                             sync_service::StorageQueryProgress::Finished => {

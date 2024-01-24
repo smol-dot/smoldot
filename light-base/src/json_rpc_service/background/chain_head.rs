@@ -1234,7 +1234,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                     }
                                 }
 
-                                if !items_chunk.is_empty(){ 
+                                if !items_chunk.is_empty() {
                                     let _ = to_main_task.send(OperationEvent {
                                         operation_id: operation_id.clone(),
                                         is_done: false,
