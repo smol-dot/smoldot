@@ -894,6 +894,7 @@ where
     ///
     /// Returns `None` if the state machine doesn't have any update. This method should be called
     /// repeatedly until it returns `None`. Each call can perform an additional update.
+    // TODO: should cache the information about whether an update is ready, so that calling this method becomes cheap
     pub fn try_advance_output(&mut self) -> Option<OutputUpdate<TBl, TAsync>> {
         // Try to advance the output finalized block.
         // `input_finalized_index` is `Some` if the input finalized is not already equal to the
