@@ -1089,7 +1089,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         };
 
         let interrupt = event_listener::Event::new();
-        let on_interrupt = interrupt.listen();
+        let mut on_interrupt = interrupt.listen();
 
         let _was_in = self.operations_in_progress.insert(
             operation_id.clone(),
@@ -1128,73 +1128,75 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
                     };
 
-                    // Perform some API conversions.
-                    let queries = items
-                        .into_iter()
-                        .map(|item| sync_service::StorageRequestItem {
-                            key: item.key.0,
-                            ty: match item.ty {
-                                methods::ChainHeadStorageType::Value => {
-                                    sync_service::StorageRequestItemTy::Value
-                                }
-                                methods::ChainHeadStorageType::Hash => {
-                                    sync_service::StorageRequestItemTy::Hash
-                                }
-                                methods::ChainHeadStorageType::ClosestDescendantMerkleValue => {
-                                    sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue
-                                }
-                                methods::ChainHeadStorageType::DescendantsValues => {
-                                    sync_service::StorageRequestItemTy::DescendantsValues
-                                }
-                                methods::ChainHeadStorageType::DescendantsHashes => {
-                                    sync_service::StorageRequestItemTy::DescendantsHashes
-                                }
-                            },
-                        })
-                        .collect::<Vec<_>>();
-
-                    let future = sync_service.clone().storage_query2(
+                    let mut next_step = sync_service.clone().storage_query(
                         decoded_header.number,
-                        &hash.0,
-                        decoded_header.state_root,
-                        queries.into_iter(),
+                        hash.0,
+                        *decoded_header.state_root,
+                        items
+                            .into_iter()
+                            .map(|item| sync_service::StorageRequestItem {
+                                key: item.key.0,
+                                ty: match item.ty {
+                                    methods::ChainHeadStorageType::Value => {
+                                        sync_service::StorageRequestItemTy::Value
+                                    }
+                                    methods::ChainHeadStorageType::Hash => {
+                                        sync_service::StorageRequestItemTy::Hash
+                                    }
+                                    methods::ChainHeadStorageType::ClosestDescendantMerkleValue => {
+                                        sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue
+                                    }
+                                    methods::ChainHeadStorageType::DescendantsValues => {
+                                        sync_service::StorageRequestItemTy::DescendantsValues
+                                    }
+                                    methods::ChainHeadStorageType::DescendantsHashes => {
+                                        sync_service::StorageRequestItemTy::DescendantsHashes
+                                    }
+                                },
+                            }),
                         3,
                         Duration::from_secs(20),
                         NonZeroU32::new(2).unwrap(),
-                    );
+                    ).advance();
 
-                    // Drive the future, but cancel execution if the JSON-RPC client
-                    // unsubscribes.
-                    let outcome = match future
-                        .map(Some)
-                        .or(on_interrupt.map(|()| None))
-                        .await
-                    {
-                        Some(v) => v,
-                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
-                    };
+                    loop {
+                        // Drive the future, but cancel execution if the JSON-RPC client
+                        // unsubscribes.
+                        let outcome = match next_step
+                            .map(Some)
+                            .or((&mut on_interrupt).map(|()| None))
+                            .await
+                        {
+                            Some(v) => v,
+                            None => return, // JSON-RPC client has unsubscribed in the meanwhile.
+                        };
 
-                    match outcome {
-                        Ok(entries) => {
-                            // Perform some API conversions.
-                            let items = entries
-                                .into_iter()
-                                .filter_map(|item| match item {
-                                    sync_service::StorageResultItem::Value { key, value } => {
+                        // TODO: generate a waitingForContinue from time to time; requires the help of the sync service
+                        match outcome {
+                            sync_service::StorageQueryProgress::Progress { item, query, .. } => {
+                                // Perform some API conversion.
+                                let item = match item {
+                                    sync_service::StorageResultItem::Value { key, value: Some(value) } => {
                                         Some(methods::ChainHeadStorageResponseItem {
                                             key: methods::HexString(key),
-                                            value: Some(methods::HexString(value?)),
+                                            value: Some(methods::HexString(value)),
                                             hash: None,
                                             closest_descendant_merkle_value: None,
                                         })
                                     }
-                                    sync_service::StorageResultItem::Hash { key, hash } => {
+                                    sync_service::StorageResultItem::Value { value: None, .. } => {
+                                        None
+                                    }
+                                    sync_service::StorageResultItem::Hash { key, hash: Some(hash) } => {
                                         Some(methods::ChainHeadStorageResponseItem {
                                             key: methods::HexString(key),
                                             value: None,
-                                            hash: Some(methods::HexString(hash?.to_vec())),
+                                            hash: Some(methods::HexString(hash.to_vec())),
                                             closest_descendant_merkle_value: None,
                                         })
+                                    }
+                                    sync_service::StorageResultItem::Hash { hash: None, .. } => {
+                                        None
                                     }
                                     sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
                                         Some(methods::ChainHeadStorageResponseItem {
@@ -1212,44 +1214,53 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                                             closest_descendant_merkle_value: None,
                                         })
                                     }
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: merkle_value, .. } => {
+                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: Some(merkle_value), .. } => {
                                         Some(methods::ChainHeadStorageResponseItem {
                                             key: methods::HexString(requested_key),
                                             value: None,
                                             hash: None,
-                                            closest_descendant_merkle_value: Some(methods::HexString(merkle_value?)),
+                                            closest_descendant_merkle_value: Some(methods::HexString(merkle_value)),
                                         })
                                     }
-                                })
-                                .collect::<Vec<_>>();
+                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { closest_descendant_merkle_value: None, .. } => {
+                                        None
+                                    }
+                                };
 
-                            if !items.is_empty() {
+                                // TODO: buffer multiple items
+                                if let Some(item) = item {
+                                    let _ = to_main_task.send(OperationEvent {
+                                        operation_id: operation_id.clone(),
+                                        is_done: false,
+                                        notification: methods::FollowEvent::OperationStorageItems {
+                                            operation_id: operation_id.clone().into(),
+                                            items: vec![item]
+                                        }
+                                    }).await;
+                                }
+
+                                next_step = query.advance();
+                            }
+                            sync_service::StorageQueryProgress::Finished => {
                                 let _ = to_main_task.send(OperationEvent {
                                     operation_id: operation_id.clone(),
-                                    is_done: false,
-                                    notification: methods::FollowEvent::OperationStorageItems {
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationStorageDone {
                                         operation_id: operation_id.clone().into(),
-                                        items
                                     }
                                 }).await;
+                                break;
                             }
-
-                            let _ = to_main_task.send(OperationEvent {
-                                operation_id: operation_id.clone(),
-                                is_done: true,
-                                notification: methods::FollowEvent::OperationStorageDone {
-                                    operation_id: operation_id.clone().into(),
-                                }
-                            }).await;
-                        }
-                        Err(_) => {
-                            let _ = to_main_task.send(OperationEvent {
-                                operation_id: operation_id.clone(),
-                                is_done: true,
-                                notification: methods::FollowEvent::OperationInaccessible {
-                                    operation_id: operation_id.clone().into(),
-                                }
-                            }).await;
+                            sync_service::StorageQueryProgress::Error(_) => {
+                                let _ = to_main_task.send(OperationEvent {
+                                    operation_id: operation_id.clone(),
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationInaccessible {
+                                        operation_id: operation_id.clone().into(),
+                                    }
+                                }).await;
+                                break;
+                            }
                         }
                     }
                 }
