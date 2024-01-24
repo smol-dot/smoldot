@@ -1172,73 +1172,81 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                             None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                         };
 
-                        // TODO: generate a waitingForContinue from time to time; requires the help of the sync service
                         match outcome {
-                            sync_service::StorageQueryProgress::Progress { item, query, .. } => {
-                                // Perform some API conversion.
-                                let item = match item {
-                                    sync_service::StorageResultItem::Value { key, value: Some(value) } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: Some(methods::HexString(value)),
-                                            hash: None,
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::Value { value: None, .. } => {
-                                        None
-                                    }
-                                    sync_service::StorageResultItem::Hash { key, hash: Some(hash) } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: None,
-                                            hash: Some(methods::HexString(hash.to_vec())),
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::Hash { hash: None, .. } => {
-                                        None
-                                    }
-                                    sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: Some(methods::HexString(value)),
-                                            hash: None,
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: None,
-                                            hash: Some(methods::HexString(hash.to_vec())),
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: Some(merkle_value), .. } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(requested_key),
-                                            value: None,
-                                            hash: None,
-                                            closest_descendant_merkle_value: Some(methods::HexString(merkle_value)),
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { closest_descendant_merkle_value: None, .. } => {
-                                        None
-                                    }
-                                };
+                            sync_service::StorageQueryProgress::Progress { request_index, item, mut query } => {
+                                let mut items_chunk = Vec::with_capacity(16);
 
-                                // TODO: buffer multiple items
-                                if let Some(item) = item {
+                                for (_, item) in iter::once((request_index, item)).chain(iter::from_fn(|| query.try_advance())) {
+                                    // Perform some API conversion.
+                                    let item = match item {
+                                        sync_service::StorageResultItem::Value { key, value: Some(value) } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: Some(methods::HexString(value)),
+                                                hash: None,
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::Value { value: None, .. } => {
+                                            None
+                                        }
+                                        sync_service::StorageResultItem::Hash { key, hash: Some(hash) } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: None,
+                                                hash: Some(methods::HexString(hash.to_vec())),
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::Hash { hash: None, .. } => {
+                                            None
+                                        }
+                                        sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: Some(methods::HexString(value)),
+                                                hash: None,
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: None,
+                                                hash: Some(methods::HexString(hash.to_vec())),
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: Some(merkle_value), .. } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(requested_key),
+                                                value: None,
+                                                hash: None,
+                                                closest_descendant_merkle_value: Some(methods::HexString(merkle_value)),
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::ClosestDescendantMerkleValue { closest_descendant_merkle_value: None, .. } => {
+                                            None
+                                        }
+                                    };
+
+                                    if let Some(item) = item {
+                                        items_chunk.push(item);
+                                    }
+                                }
+
+                                if !items_chunk.is_empty(){ 
                                     let _ = to_main_task.send(OperationEvent {
                                         operation_id: operation_id.clone(),
                                         is_done: false,
                                         notification: methods::FollowEvent::OperationStorageItems {
                                             operation_id: operation_id.clone().into(),
-                                            items: vec![item]
+                                            items: items_chunk
                                         }
                                     }).await;
                                 }
+
+                                // TODO: generate a waitingForContinue here and wait for user to continue
 
                                 next_step = query.advance();
                             }

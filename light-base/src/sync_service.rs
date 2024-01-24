@@ -620,6 +620,13 @@ enum RequestImpl {
 }
 
 impl<TPlat: PlatformRef> StorageQuery<TPlat> {
+    /// Drain any other item that might be immediately available.
+    ///
+    /// The `usize` corresponds to [`StorageQueryProgress::Progress::request_index`].
+    pub fn try_advance(&mut self) -> Option<(usize, StorageResultItem)> {
+        self.available_results.pop_front()
+    }
+
     /// Wait until some progress is made.
     pub async fn advance(mut self) -> StorageQueryProgress<TPlat> {
         loop {
