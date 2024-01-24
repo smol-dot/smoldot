@@ -908,7 +908,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                         .async_tree
                         .async_op_finished(async_op_id, Some(parahead))
                     {
-                        let hash = runtime_subscription.async_tree.block_user_data(block);
+                        let hash = &runtime_subscription.async_tree[block];
                         runtime_subscription
                             .relay_chain_subscribe_all
                             .unpin_block(*hash)

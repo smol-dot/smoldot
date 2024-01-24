@@ -290,30 +290,6 @@ where
         })
     }
 
-    /// Returns the user data associated to the given block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`NodeIndex`] is invalid.
-    ///
-    pub fn block_user_data(&self, node_index: NodeIndex) -> &TBl {
-        &self.non_finalized_blocks.get(node_index).unwrap().user_data
-    }
-
-    /// Returns the user data associated to the given block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`NodeIndex`] is invalid.
-    ///
-    pub fn block_user_data_mut(&mut self, node_index: NodeIndex) -> &mut TBl {
-        &mut self
-            .non_finalized_blocks
-            .get_mut(node_index)
-            .unwrap()
-            .user_data
-    }
-
     /// Returns the outcome of the asynchronous operation for the output finalized block.
     ///
     /// This is the value that was passed at initialization, or is updated after
@@ -1173,6 +1149,24 @@ where
 
         // Nothing to do.
         None
+    }
+}
+
+impl<TNow, TBl, TAsync> ops::Index<NodeIndex> for AsyncTree<TNow, TBl, TAsync> {
+    type Output = TBl;
+
+    fn index(&self, node_index: NodeIndex) -> &Self::Output {
+        &self.non_finalized_blocks.get(node_index).unwrap().user_data
+    }
+}
+
+impl<TNow, TBl, TAsync> ops::IndexMut<NodeIndex> for AsyncTree<TNow, TBl, TAsync> {
+    fn index_mut(&mut self, node_index: NodeIndex) -> &mut Self::Output {
+        &mut self
+            .non_finalized_blocks
+            .get_mut(node_index)
+            .unwrap()
+            .user_data
     }
 }
 

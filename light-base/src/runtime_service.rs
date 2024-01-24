@@ -1082,8 +1082,8 @@ async fn run_background<TPlat: PlatformRef>(
                             ..
                         }) => {
                             *finalized_block = new_finalized;
-                            let best_block_hash = best_block_index
-                                .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
+                            let best_block_hash =
+                                best_block_index.map_or(finalized_block.hash, |idx| tree[idx].hash);
 
                             log!(
                                 &background.platform,
@@ -1181,16 +1181,14 @@ async fn run_background<TPlat: PlatformRef>(
                                 Debug,
                                 &background.log_target,
                                 "output-chain-new-block",
-                                block_hash = HashDisplay(&tree.block_user_data(block_index).hash),
+                                block_hash = HashDisplay(&tree[block_index].hash),
                                 is_new_best
                             );
 
                             let notif = Notification::Block(BlockNotification {
                                 parent_hash: tree
                                     .parent(block_index)
-                                    .map_or(finalized_block.hash, |idx| {
-                                        tree.block_user_data(idx).hash
-                                    }),
+                                    .map_or(finalized_block.hash, |idx| tree[idx].hash),
                                 is_new_best,
                                 scale_encoded_header,
                                 new_runtime: if !Arc::ptr_eq(&parent_runtime, &block_runtime) {
@@ -1241,7 +1239,7 @@ async fn run_background<TPlat: PlatformRef>(
                         }
                         Some(async_tree::OutputUpdate::BestBlockChanged { best_block_index }) => {
                             let hash = best_block_index
-                                .map_or(&*finalized_block, |idx| tree.block_user_data(idx))
+                                .map_or(&*finalized_block, |idx| &tree[idx])
                                 .hash;
 
                             log!(
@@ -1297,9 +1295,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 debug_assert!(former_finalized_async_op_user_data.is_none());
 
                                 let best_block_hash = best_block_index
-                                    .map_or(new_finalized.hash, |idx| {
-                                        tree.block_user_data(idx).hash
-                                    });
+                                    .map_or(new_finalized.hash, |idx| tree[idx].hash);
                                 log!(
                                     &background.platform,
                                     Debug,
