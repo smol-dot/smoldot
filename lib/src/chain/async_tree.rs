@@ -79,7 +79,7 @@
 //! let async_op_id = match tree.next_necessary_async_op(&Instant::now()) {
 //!     async_tree::NextNecessaryAsyncOp::Ready(params) => {
 //!         assert_eq!(params.block_index, _my_block_index);
-//!         assert_eq!(*params.block_user_data, "my block");
+//!         assert_eq!(tree[params.block_index], "my block");
 //!         params.id
 //!     }
 //!     async_tree::NextNecessaryAsyncOp::NotReady { when: _ } => {
@@ -101,8 +101,6 @@
 //! match tree.try_advance_output() {
 //!     Some(async_tree::OutputUpdate::Block(block)) => {
 //!         assert_eq!(block.index, _my_block_index);
-//!         assert_eq!(*block.user_data, "my block");
-//!         assert_eq!(*block.async_op_user_data, "world");
 //!         assert!(block.is_new_best);
 //!     }
 //!     _ => unreachable!() // Unreachable in this example.
