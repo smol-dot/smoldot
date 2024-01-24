@@ -1020,7 +1020,6 @@ where
                 return Some(OutputUpdate::Finalized {
                     former_index: new_finalized,
                     user_data: pruned_finalized.user_data.user_data,
-                    async_op_user_data: &self.output_finalized_async_user_data,
                     former_finalized_async_op_user_data,
                     pruned_blocks,
                     best_block_index: self.output_best_block_index,
@@ -1184,7 +1183,7 @@ pub struct InputIterItem<'a, TBl, TAsync> {
 
 /// See [`AsyncTree::try_advance_output`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputUpdate<'a, TBl, TAsync> {
+pub enum OutputUpdate<TBl, TAsync> {
     /// A non-finalized block has been finalized in the output.
     ///
     /// This block is no longer part of the data structure.
@@ -1197,12 +1196,6 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
 
         /// User data associated to this block.
         user_data: TBl,
-
-        /// User data associated to the `async` operation of this block.
-        ///
-        /// This is the same value as is now returned by
-        /// [`AsyncTree::output_finalized_async_user_data`], and is provided here for convenience.
-        async_op_user_data: &'a TAsync,
 
         /// User data associated to the `async` operation of the previous finalized block.
         former_finalized_async_op_user_data: TAsync,

@@ -411,11 +411,17 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
 
                         match update {
                             async_tree::OutputUpdate::Finalized {
-                                async_op_user_data: new_finalized_parahead,
                                 former_finalized_async_op_user_data: former_finalized_parahead,
                                 pruned_blocks,
                                 ..
-                            } if *new_finalized_parahead != former_finalized_parahead => {
+                            } if *runtime_subscription
+                                .async_tree
+                                .output_finalized_async_user_data()
+                                != former_finalized_parahead =>
+                            {
+                                let new_finalized_parahead = runtime_subscription
+                                    .async_tree
+                                    .output_finalized_async_user_data();
                                 debug_assert!(new_finalized_parahead.is_some());
 
                                 // If this is the first time a finalized parahead is known, any
