@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.18 - 2024-01-24
+
 ### Changed
 
 - The `transaction_unstable_submitAndWatch` and `transaction_unstable_unwatch` JSON-RPC functions have been renamed to respectively `transactionWatch_unstable_submitAndWatch` and `transactionWatch_unstable_unwatch`, and the corresponding event has been renamed from `transaction_unstable_watchEvent` to `transactionWatch_unstable_watchEvent`, in accordance with the latest changes in the JSON-RPC API specification. ([#1604](https://github.com/smol-dot/smoldot/pull/1604))
