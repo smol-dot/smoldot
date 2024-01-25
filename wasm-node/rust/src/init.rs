@@ -37,9 +37,9 @@ pub(crate) enum Chain {
 
         /// JSON-RPC responses that is at the front of the queue according to the API. If `Some`,
         /// a pointer to the string is referenced to within
-        /// [`Chain::Healthy::json_rpc_response_info`].
+        /// [`Chain::Created::json_rpc_response_info`].
         json_rpc_response: Option<String>,
-        /// Information about [`Chain::Healthy::json_rpc_response`]. A pointer to this struct is
+        /// Information about [`Chain::Created::json_rpc_response`]. A pointer to this struct is
         /// sent over the FFI layer to the JavaScript. As such, the pointer must never be
         /// invalidated.
         json_rpc_response_info: Box<bindings::JsonRpcResponseInfo>,
