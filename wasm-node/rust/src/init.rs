@@ -68,6 +68,7 @@ pub(crate) fn init(max_log_level: u32) {
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
     platform::PLATFORM_REF.spawn_task("memory-printer".into(), async move {
+        let interval = 60;
         let mut previous_read_bytes = 0;
         let mut previous_sent_bytes = 0;
         let mut previous_cpu_usage_us = 0;
@@ -93,6 +94,11 @@ pub(crate) fn init(max_log_level: u32) {
             let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
             let avg_up = bytes_tx.wrapping_sub(previous_sent_bytes) / interval;
             previous_sent_bytes = bytes_tx;
+
+            let cpu_us = platform::TOTAL_CPU_USAGE_US.load(Ordering::Relaxed);
+            let avg_cpu_percent =
+                (cpu_us.wrapping_sub(previous_cpu_usage_us) / interval) as f64 / 1_000_000.;
+            previous_cpu_usage_us = cpu_us;
 
             // Note that we also print the version at every interval, in order to increase
             // the chance of being able to know the version in case of truncated logs.
