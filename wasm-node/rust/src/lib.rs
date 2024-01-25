@@ -25,6 +25,7 @@ extern crate alloc;
 
 use alloc::{
     boxed::Box,
+    format,
     string::{String, ToString as _},
     sync::Arc,
     vec::Vec,
@@ -59,37 +60,15 @@ fn add_chain(
 ) -> u32 {
     let mut client_lock = CLIENT.try_lock().unwrap();
 
-    // Fail any new chain initialization if we're running low on memory space, which can
-    // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
-    // OOM errors. The threshold is completely empirical and should probably be updated
-    // regularly to account for changes in the implementation.
-    if allocator::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
-        let outer_chain_id = client_lock.chains.insert(init::Chain::Erroneous);
-        let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
-
-        // TODO: entry is never cleared from list of chains
-        platform::PLATFORM_REF.spawn_task("client-status-report".into(), async move {
-            unsafe {
-                let error = "Wasm node is running low on memory and will prevent any new chain from being added";
-                bindings::chain_initialized(
-                    outer_chain_id_u32,
-                    u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
-                    u32::try_from(error.as_bytes().len()).unwrap(),
-                );
-            }
-        });
-
-        return outer_chain_id_u32;
-    }
-
     // Retrieve the potential relay chains parameter passed through the FFI layer.
+    // TODO: this is kind of racy, as the API user could remove the relay chain while adding a parachain; it would be stupid to do that so this issue is low priority, and this code will likely change again in the future so it's not worth solving immediately
     let potential_relay_chains: Vec<_> = {
         assert_eq!(potential_relay_chains.len() % 4, 0);
         potential_relay_chains
             .chunks(4)
             .map(|c| u32::from_le_bytes(<[u8; 4]>::try_from(c).unwrap()))
             .filter_map(|c| {
-                if let Some(init::Chain::Healthy {
+                if let Some(init::Chain::Created {
                     smoldot_chain_id, ..
                 }) = client_lock.chains.get(usize::try_from(c).ok()?)
                 {
@@ -101,86 +80,112 @@ fn add_chain(
             .collect()
     };
 
-    // Insert the chain in the client.
-    let smoldot_light::AddChainSuccess {
-        chain_id: smoldot_chain_id,
-        json_rpc_responses,
-    } = match client_lock
-        .smoldot
-        .add_chain(smoldot_light::AddChainConfig {
-            user_data: (),
-            specification: str::from_utf8(&chain_spec)
-                .unwrap_or_else(|_| panic!("non-utf8 chain spec")),
-            database_content: str::from_utf8(&database_content)
-                .unwrap_or_else(|_| panic!("non-utf8 database content")),
-            json_rpc: if let Some(json_rpc_max_pending_requests) =
-                NonZeroU32::new(json_rpc_max_pending_requests)
-            {
-                smoldot_light::AddChainConfigJsonRpc::Enabled {
-                    max_pending_requests: json_rpc_max_pending_requests,
-                    // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
-                    max_subscriptions: json_rpc_max_subscriptions,
-                }
-            } else {
-                smoldot_light::AddChainConfigJsonRpc::Disabled
-            },
-            potential_relay_chains: potential_relay_chains.into_iter(),
-        }) {
-        Ok(c) => c,
-        Err(error) => {
-            let outer_chain_id = client_lock.chains.insert(init::Chain::Erroneous);
-            let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
+    // This function only allocates a "chain id", then spawns a task that performs the actual
+    // chain creation in the background.
+    // This makes it possible to measure the CPU usage of chain creation the same way as the CPU
+    // is measured for all other background tasks.
+    // It also makes it possible in the future to make chain creation asynchronous in the
+    // `light-base` crate, which will make it possible to periodically yield and avoid using too
+    // much CPU at once.
+    // TODO: act on that last sentence ^
+    let outer_chain_id = client_lock.chains.insert(init::Chain::Initializing);
+    let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
 
-            // TODO: entry is never cleared from list of chains
-            platform::PLATFORM_REF.spawn_task("client-status-report".into(), async move {
+    platform::PLATFORM_REF.spawn_task(
+        format!("add-chain-{outer_chain_id_u32}").into(),
+        async move {
+            let mut client_lock = CLIENT.try_lock().unwrap();
+
+            // Fail any new chain initialization if we're running low on memory space, which can
+            // realistically happen as Wasm is a 32 bits platform. This avoids potentially running
+            // into OOM errors. The threshold is completely empirical and should probably be
+            // updated regularly to account for changes in the implementation.
+            if allocator::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+                client_lock.chains.remove(outer_chain_id);
                 unsafe {
-                    let error = error.to_string();
+                    let error = "Wasm node is running low on memory and will prevent any new chain from being added";
                     bindings::chain_initialized(
                         outer_chain_id_u32,
                         u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
                         u32::try_from(error.as_bytes().len()).unwrap(),
                     );
                 }
+                return;
+            }
+
+            // Insert the chain in the client.
+            let smoldot_light::AddChainSuccess {
+                chain_id: smoldot_chain_id,
+                json_rpc_responses,
+            } = match client_lock
+                .smoldot
+                .add_chain(smoldot_light::AddChainConfig {
+                    user_data: (),
+                    specification: str::from_utf8(&chain_spec)
+                        .unwrap_or_else(|_| panic!("non-utf8 chain spec")),
+                    database_content: str::from_utf8(&database_content)
+                        .unwrap_or_else(|_| panic!("non-utf8 database content")),
+                    json_rpc: if let Some(json_rpc_max_pending_requests) =
+                        NonZeroU32::new(json_rpc_max_pending_requests)
+                    {
+                        smoldot_light::AddChainConfigJsonRpc::Enabled {
+                            max_pending_requests: json_rpc_max_pending_requests,
+                            // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+                            max_subscriptions: json_rpc_max_subscriptions,
+                        }
+                    } else {
+                        smoldot_light::AddChainConfigJsonRpc::Disabled
+                    },
+                    potential_relay_chains: potential_relay_chains.into_iter(),
+                }) {
+                Ok(c) => c,
+                Err(error) => {
+                    client_lock.chains.remove(outer_chain_id);
+                    unsafe {
+                        let error = error.to_string();
+                        bindings::chain_initialized(
+                            outer_chain_id_u32,
+                            u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                            u32::try_from(error.as_bytes().len()).unwrap(),
+                        );
+                    }
+                    return;
+                }
+            };
+
+            client_lock.chains[outer_chain_id] = init::Chain::Created {
+                smoldot_chain_id,
+                json_rpc_response: None,
+                json_rpc_response_info: Box::new(bindings::JsonRpcResponseInfo { ptr: 0, len: 0 }),
+                json_rpc_responses_rx: None,
+            };
+
+            // We wrap the JSON-RPC responses stream into a proper stream in order to be able to
+            // guarantee that `poll_next()` always operates on the same future.
+            let json_rpc_responses = json_rpc_responses.map(|json_rpc_responses| {
+                stream::unfold(json_rpc_responses, |mut json_rpc_responses| async {
+                    // The stream ends when we remove the chain. Once the chain is removed, the user
+                    // cannot poll the stream anymore. Therefore it is safe to unwrap the result here.
+                    let msg = json_rpc_responses.next().await.unwrap();
+                    Some((msg, json_rpc_responses))
+                })
+                .boxed()
             });
 
-            return outer_chain_id_u32;
-        }
-    };
+            if let init::Chain::Created {
+                json_rpc_responses_rx,
+                ..
+            } = client_lock.chains.get_mut(outer_chain_id).unwrap()
+            {
+                *json_rpc_responses_rx = json_rpc_responses;
+            }
 
-    let outer_chain_id = client_lock.chains.insert(init::Chain::Healthy {
-        smoldot_chain_id,
-        json_rpc_response: None,
-        json_rpc_response_info: Box::new(bindings::JsonRpcResponseInfo { ptr: 0, len: 0 }),
-        json_rpc_responses_rx: None,
-    });
+            unsafe {
+                bindings::chain_initialized(outer_chain_id_u32, 0, 0);
+            }
 
-    let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
-
-    platform::PLATFORM_REF.spawn_task("client-status-report".into(), async move {
-        unsafe {
-            bindings::chain_initialized(outer_chain_id_u32, 0, 0);
-        }
-    });
-
-    // We wrap the JSON-RPC responses stream into a proper stream in order to be able to guarantee
-    // that `poll_next()` always operates on the same future.
-    let json_rpc_responses = json_rpc_responses.map(|json_rpc_responses| {
-        stream::unfold(json_rpc_responses, |mut json_rpc_responses| async {
-            // The stream ends when we remove the chain. Once the chain is removed, the user
-            // cannot poll the stream anymore. Therefore it is safe to unwrap the result here.
-            let msg = json_rpc_responses.next().await.unwrap();
-            Some((msg, json_rpc_responses))
-        })
-        .boxed()
-    });
-
-    if let init::Chain::Healthy {
-        json_rpc_responses_rx,
-        ..
-    } = client_lock.chains.get_mut(outer_chain_id).unwrap()
-    {
-        *json_rpc_responses_rx = json_rpc_responses;
-    }
+        },
+    );
 
     outer_chain_id_u32
 }
@@ -192,7 +197,7 @@ fn remove_chain(chain_id: u32) {
         .chains
         .remove(usize::try_from(chain_id).unwrap())
     {
-        init::Chain::Healthy {
+        init::Chain::Created {
             smoldot_chain_id,
             json_rpc_responses_rx,
             ..
@@ -210,7 +215,7 @@ fn remove_chain(chain_id: u32) {
 
             let () = client_lock.smoldot.remove_chain(smoldot_chain_id);
         }
-        init::Chain::Erroneous { .. } => {}
+        init::Chain::Initializing => {} // TODO: /!\
     }
 }
 
@@ -225,10 +230,10 @@ fn json_rpc_send(json_rpc_request: Vec<u8>, chain_id: u32) -> u32 {
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
     {
-        init::Chain::Healthy {
+        init::Chain::Created {
             smoldot_chain_id, ..
         } => *smoldot_chain_id,
-        init::Chain::Erroneous { .. } => panic!(),
+        init::Chain::Initializing => panic!(), // Forbidden.
     };
 
     match client_lock
@@ -247,7 +252,7 @@ fn json_rpc_responses_peek(chain_id: u32) -> u32 {
         .get_mut(usize::try_from(chain_id).unwrap())
         .unwrap()
     {
-        init::Chain::Healthy {
+        init::Chain::Created {
             json_rpc_response,
             json_rpc_responses_rx,
             json_rpc_response_info,
@@ -313,10 +318,10 @@ fn json_rpc_responses_pop(chain_id: u32) {
         .get_mut(usize::try_from(chain_id).unwrap())
         .unwrap()
     {
-        init::Chain::Healthy {
+        init::Chain::Created {
             json_rpc_response, ..
         } => *json_rpc_response = None,
-        _ => panic!(),
+        init::Chain::Initializing => panic!(), // Forbidden.
     }
 }
 

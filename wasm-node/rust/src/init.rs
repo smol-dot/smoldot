@@ -31,7 +31,8 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::PlatformRef, TChain> {
 }
 
 pub(crate) enum Chain {
-    Healthy {
+    Initializing,
+    Created {
         smoldot_chain_id: smoldot_light::ChainId,
 
         /// JSON-RPC responses that is at the front of the queue according to the API. If `Some`,
@@ -49,7 +50,6 @@ pub(crate) enum Chain {
         /// register doesn't get cleaned up.
         json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
     },
-    Erroneous,
 }
 
 pub(crate) fn init(max_log_level: u32) {
