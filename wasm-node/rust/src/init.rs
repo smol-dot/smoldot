@@ -49,9 +49,7 @@ pub(crate) enum Chain {
         /// register doesn't get cleaned up.
         json_rpc_responses_rx: Option<stream::BoxStream<'static, String>>,
     },
-    Erroneous {
-        error: String,
-    },
+    Erroneous,
 }
 
 pub(crate) fn init(max_log_level: u32) {

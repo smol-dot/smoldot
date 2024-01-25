@@ -156,6 +156,21 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             throw new Error();
         },
 
+        chain_initialized: (chainId: number, errorMsgPtr: number, errorMsgLen: number) => {
+            const instance = state.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+
+            errorMsgPtr >>>= 0;
+            errorMsgLen >>>= 0;
+
+            if (errorMsgPtr === 0) {
+                eventCallback({ ty: "add-chain-result", chainId, success: true });
+            } else {
+                const errorMsg = buffer.utf8BytesToString(mem, errorMsgPtr, errorMsgLen);
+                eventCallback({ ty: "add-chain-result", chainId, success: false, error: errorMsg });
+            }
+        },
+
         random_get: (ptr: number, len: number) => {
             const instance = state.instance!;
 
@@ -540,16 +555,6 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             delete state.bufferIndices[2]
 
             eventCallback({ ty: "add-chain-id-allocated", chainId });
-
-            if (state.instance.exports.chain_is_ok(chainId) != 0) {
-                eventCallback({ ty: "add-chain-result", chainId, success: true });
-            } else {
-                const errorMsgLen = state.instance.exports.chain_error_len(chainId) >>> 0;
-                const errorMsgPtr = state.instance.exports.chain_error_ptr(chainId) >>> 0;
-                const errorMsg = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
-                state.instance.exports.remove_chain(chainId);
-                eventCallback({ ty: "add-chain-result", chainId, success: false, error: errorMsg });
-            }
         },
 
         removeChain: (chainId: number): void => {

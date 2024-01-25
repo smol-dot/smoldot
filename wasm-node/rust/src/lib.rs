@@ -32,7 +32,7 @@ use alloc::{
 use async_lock::Mutex;
 use core::{num::NonZeroU32, pin::Pin, str, task};
 use futures_util::{stream, Stream as _, StreamExt as _};
-use smoldot_light::HandleRpcError;
+use smoldot_light::{platform::PlatformRef, HandleRpcError};
 
 pub mod bindings;
 
@@ -64,13 +64,22 @@ fn add_chain(
     // OOM errors. The threshold is completely empirical and should probably be updated
     // regularly to account for changes in the implementation.
     if allocator::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
-        let chain_id = client_lock.chains.insert(init::Chain::Erroneous {
-            error:
-                "Wasm node is running low on memory and will prevent any new chain from being added"
-                    .into(),
+        let outer_chain_id = client_lock.chains.insert(init::Chain::Erroneous);
+        let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
+
+        // TODO: entry is never cleared from list of chains
+        platform::PLATFORM_REF.spawn_task("client-status-report".into(), async move {
+            unsafe {
+                let error = "Wasm node is running low on memory and will prevent any new chain from being added";
+                bindings::chain_initialized(
+                    outer_chain_id_u32,
+                    u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(error.as_bytes().len()).unwrap(),
+                );
+            }
         });
 
-        return u32::try_from(chain_id).unwrap();
+        return outer_chain_id_u32;
     }
 
     // Retrieve the potential relay chains parameter passed through the FFI layer.
@@ -119,11 +128,22 @@ fn add_chain(
         }) {
         Ok(c) => c,
         Err(error) => {
-            let chain_id = client_lock.chains.insert(init::Chain::Erroneous {
-                error: error.to_string(),
+            let outer_chain_id = client_lock.chains.insert(init::Chain::Erroneous);
+            let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
+
+            // TODO: entry is never cleared from list of chains
+            platform::PLATFORM_REF.spawn_task("client-status-report".into(), async move {
+                unsafe {
+                    let error = error.to_string();
+                    bindings::chain_initialized(
+                        outer_chain_id_u32,
+                        u32::try_from(error.as_bytes().as_ptr() as usize).unwrap(),
+                        u32::try_from(error.as_bytes().len()).unwrap(),
+                    );
+                }
             });
 
-            return u32::try_from(chain_id).unwrap();
+            return outer_chain_id_u32;
         }
     };
 
@@ -135,6 +155,12 @@ fn add_chain(
     });
 
     let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
+
+    platform::PLATFORM_REF.spawn_task("client-status-report".into(), async move {
+        unsafe {
+            bindings::chain_initialized(outer_chain_id_u32, 0, 0);
+        }
+    });
 
     // We wrap the JSON-RPC responses stream into a proper stream in order to be able to guarantee
     // that `poll_next()` always operates on the same future.
@@ -185,47 +211,6 @@ fn remove_chain(chain_id: u32) {
             let () = client_lock.smoldot.remove_chain(smoldot_chain_id);
         }
         init::Chain::Erroneous { .. } => {}
-    }
-}
-
-fn chain_is_ok(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.try_lock().unwrap();
-    if matches!(
-        client_lock
-            .chains
-            .get(usize::try_from(chain_id).unwrap())
-            .unwrap(),
-        init::Chain::Healthy { .. }
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-fn chain_error_len(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.try_lock().unwrap();
-    match client_lock
-        .chains
-        .get(usize::try_from(chain_id).unwrap())
-        .unwrap()
-    {
-        init::Chain::Healthy { .. } => 0,
-        init::Chain::Erroneous { error } => u32::try_from(error.as_bytes().len()).unwrap(),
-    }
-}
-
-fn chain_error_ptr(chain_id: u32) -> u32 {
-    let client_lock = CLIENT.try_lock().unwrap();
-    match client_lock
-        .chains
-        .get(usize::try_from(chain_id).unwrap())
-        .unwrap()
-    {
-        init::Chain::Healthy { .. } => 0,
-        init::Chain::Erroneous { error } => {
-            u32::try_from(error.as_bytes().as_ptr() as usize).unwrap()
-        }
     }
 }
 
