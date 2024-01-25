@@ -18,9 +18,9 @@
 //! Extension module containing the API and implementation of everything related to finality.
 
 use super::*;
-use crate::finality::{grandpa, justification};
+use crate::finality::{decode, verify};
 
-use core::{cmp, iter};
+use core::cmp;
 
 impl<T> NonFinalizedTree<T> {
     /// Returns a list of blocks (by their height and hash) that need to be finalized before any
@@ -31,38 +31,30 @@ impl<T> NonFinalizedTree<T> {
     /// [`NonFinalizedTree::verify_grandpa_commit_message`], unless they descend from any of the
     /// blocks returned by this function, in which case that block must be finalized beforehand.
     pub fn finality_checkpoints(&self) -> impl Iterator<Item = (u64, &[u8; 32])> {
-        match &self.finality {
-            Finality::Outsourced => {
-                // No checkpoint means all blocks allowed.
-                either::Left(iter::empty())
-            }
-            Finality::Grandpa { .. } => {
-                // TODO: O(n), could add a cache to make it O(1)
-                let iter = self
-                    .blocks
-                    .iter_unordered()
-                    .filter(move |(_, block)| {
-                        if let BlockFinality::Grandpa {
-                            triggers_change, ..
-                        } = &block.finality
-                        {
-                            *triggers_change
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                    .map(|(_, block)| {
-                        (
-                            header::decode(&block.header, self.block_number_bytes)
-                                .unwrap()
-                                .number,
-                            &block.hash,
-                        )
-                    });
+        // Note that the code below assumes that GrandPa is the only finality algorithm currently
+        // supported.
+        debug_assert!(
+            self.blocks_trigger_gp_change.is_empty()
+                || !matches!(self.finality, Finality::Outsourced)
+        );
 
-                either::Right(iter)
-            }
-        }
+        self.blocks_trigger_gp_change
+            .range((
+                ops::Bound::Excluded((
+                    Some(self.finalized_block_number),
+                    fork_tree::NodeIndex::max_value(),
+                )),
+                ops::Bound::Unbounded,
+            ))
+            .map(|(_prev_auth_change_trigger_number, block_index)| {
+                debug_assert!(_prev_auth_change_trigger_number
+                    .map_or(false, |n| n > self.finalized_block_number));
+                let block = self
+                    .blocks
+                    .get(*block_index)
+                    .unwrap_or_else(|| unreachable!());
+                (block.number, &block.hash)
+            })
     }
 
     /// Verifies the given justification.
@@ -85,7 +77,7 @@ impl<T> NonFinalizedTree<T> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(
+                let decoded = decode::decode_grandpa_justification(
                     scale_encoded_justification,
                     self.block_number_bytes,
                 )
@@ -96,8 +88,8 @@ impl<T> NonFinalizedTree<T> {
                     .verify_grandpa_finality_inner(decoded.target_hash, decoded.target_number)
                     .map_err(JustificationVerifyError::FinalityVerify)?;
 
-                justification::verify::verify(justification::verify::Config {
-                    justification: decoded,
+                verify::verify_justification(verify::JustificationVerifyConfig {
+                    justification: scale_encoded_justification,
                     block_number_bytes: self.block_number_bytes,
                     authorities_set_id,
                     authorities_list,
@@ -136,21 +128,16 @@ impl<T> NonFinalizedTree<T> {
             return Err(CommitVerifyError::NotGrandpa);
         }
 
-        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
-            scale_encoded_commit,
-            self.block_number_bytes,
-        )
-        .map_err(|_| CommitVerifyError::InvalidCommit)?;
+        let decoded_commit =
+            decode::decode_grandpa_commit(scale_encoded_commit, self.block_number_bytes)
+                .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
-            .verify_grandpa_finality_inner(
-                decoded_commit.message.target_hash,
-                decoded_commit.message.target_number,
-            )
+            .verify_grandpa_finality_inner(decoded_commit.target_hash, decoded_commit.target_number)
             .map_err(CommitVerifyError::FinalityVerify)?;
 
-        let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
+        let mut verification = verify::verify_commit(verify::CommitVerifyConfig {
             commit: scale_encoded_commit,
             block_number_bytes: self.block_number_bytes,
             expected_authorities_set_id,
@@ -160,27 +147,27 @@ impl<T> NonFinalizedTree<T> {
 
         loop {
             match verification {
-                grandpa::commit::verify::InProgress::Finished(Ok(())) => {
+                verify::CommitVerify::Finished(Ok(())) => {
                     drop(authorities_list);
                     return Ok(FinalityApply {
                         chain: self,
                         to_finalize: block_index,
                     });
                 }
-                grandpa::commit::verify::InProgress::FinishedUnknown => {
+                verify::CommitVerify::FinishedUnknown => {
                     return Err(CommitVerifyError::NotEnoughKnownBlocks {
-                        target_block_number: decoded_commit.message.target_number,
+                        target_block_number: decoded_commit.target_number,
                     })
                 }
-                grandpa::commit::verify::InProgress::Finished(Err(error)) => {
+                verify::CommitVerify::Finished(Err(error)) => {
                     return Err(CommitVerifyError::VerificationFailed(error))
                 }
-                grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
+                verify::CommitVerify::IsAuthority(is_authority) => {
                     let to_find = is_authority.authority_public_key();
-                    let result = authorities_list.clone().any(|a| a.as_ref() == to_find);
+                    let result = authorities_list.clone().any(|a| a == to_find);
                     verification = is_authority.resume(result);
                 }
-                grandpa::commit::verify::InProgress::IsParent(is_parent) => {
+                verify::CommitVerify::IsParent(is_parent) => {
                     // Find in the list of non-finalized blocks the target of the check.
                     match self.blocks_by_hash.get(is_parent.block_hash()) {
                         Some(idx) => {
@@ -201,20 +188,17 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// The block must have been passed to [`NonFinalizedTree::verify_header`].
     ///
-    /// Returns an iterator containing the now-finalized blocks in decreasing block numbers. In
-    /// other words, the first element of the iterator is always the block whose hash is the
-    /// `block_hash` passed as parameter.
+    /// Returns an iterator containing the now-finalized blocks and the pruned blocks in "reverse
+    /// hierarchical order". Each block is yielded by the iterator before its parent.
     ///
-    /// > **Note**: This function returns blocks in decreasing block number, because any other
-    /// >           ordering would incur a performance cost. While returning blocks in increasing
-    /// >           block number would often be more convenient, the overhead of doing so is
-    /// >           moved to the user.
+    /// > **Note**: This function returns blocks in this order, because any other ordering would
+    /// >           incur a performance cost. While returning blocks in hierarchical order would
+    /// >           often be more convenient, the overhead of doing so is moved to the user.
     ///
     /// The pruning is completely performed, even if the iterator is dropped eagerly.
     ///
     /// If necessary, the current best block will be updated to be a descendant of the
     /// newly-finalized block.
-    // TODO: should return the pruned blocks as well
     pub fn set_finalized_block(
         &mut self,
         block_hash: &[u8; 32],
@@ -244,7 +228,7 @@ impl<T> NonFinalizedTree<T> {
         (
             fork_tree::NodeIndex,
             u64,
-            impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_,
+            impl Iterator<Item = &'_ [u8]> + Clone + '_,
         ),
         FinalityVerifyError,
     > {
@@ -255,12 +239,7 @@ impl<T> NonFinalizedTree<T> {
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
-                let finalized_block_number =
-                    header::decode(&self.finalized_block_header, self.block_number_bytes)
-                        .unwrap()
-                        .number;
-
-                match target_number.cmp(&finalized_block_number) {
+                match target_number.cmp(&self.finalized_block_number) {
                     cmp::Ordering::Equal if *target_hash == self.finalized_block_hash => {
                         return Err(FinalityVerifyError::EqualToFinalized)
                     }
@@ -291,7 +270,7 @@ impl<T> NonFinalizedTree<T> {
                 } = self.blocks.get(block_index).unwrap().finality
                 {
                     if let Some(prev_auth_change_trigger_number) = prev_auth_change_trigger_number {
-                        if *prev_auth_change_trigger_number > finalized_block_number {
+                        if *prev_auth_change_trigger_number > self.finalized_block_number {
                             return Err(FinalityVerifyError::TooFarAhead {
                                 justification_block_number: target_number,
                                 justification_block_hash: *target_hash,
@@ -317,7 +296,7 @@ impl<T> NonFinalizedTree<T> {
                 Ok((
                     block_index,
                     *after_finalized_block_authorities_set_id,
-                    authorities_list.iter().map(|a| a.public_key),
+                    authorities_list.iter().map(|a| &a.public_key[..]),
                 ))
             }
         }
@@ -357,11 +336,7 @@ impl<T> NonFinalizedTree<T> {
                 );
                 debug_assert!(scheduled_change
                     .as_ref()
-                    .map(|(n, _)| *n
-                        > header::decode(&new_finalized_block.header, self.block_number_bytes)
-                            .unwrap()
-                            .number)
-                    .unwrap_or(true));
+                    .map_or(true, |(n, _)| *n > new_finalized_block.number));
 
                 *after_finalized_block_authorities_set_id = *after_block_authorities_set_id;
                 *finalized_triggered_authorities = triggered_authorities.clone();
@@ -425,22 +400,24 @@ impl<T> NonFinalizedTree<T> {
             _ => unreachable!(),
         }
 
-        // Update `self.finalized_block_header`, `self.finalized_block_hash`, and
-        // `self.finalized_best_score`.
+        // Update `self.finalized_block_header`, `self.finalized_block_hash`,
+        // `self.finalized_block_number`, and `self.finalized_best_score`.
         mem::swap(
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self.finalized_block_hash =
-            header::hash_from_scale_encoded_header(&self.finalized_block_header);
+        self.finalized_block_hash = new_finalized_block.hash;
+        self.finalized_block_number = new_finalized_block.number;
         self.finalized_best_score = new_finalized_block.best_score;
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
         debug_assert_eq!(self.blocks.len(), self.blocks_by_best_score.len());
+        debug_assert!(self.blocks.len() >= self.blocks_trigger_gp_change.len());
         SetFinalizedBlockIter {
             iter: self.blocks.prune_ancestors(block_index_to_finalize),
             blocks_by_hash: &mut self.blocks_by_hash,
             blocks_by_best_score: &mut self.blocks_by_best_score,
+            blocks_trigger_gp_change: &mut self.blocks_trigger_gp_change,
             updates_best_block,
         }
     }
@@ -503,11 +480,11 @@ pub enum JustificationVerifyError {
     JustificationEngineMismatch,
     /// Error while decoding the justification.
     #[display(fmt = "Error while decoding the justification: {_0}")]
-    InvalidJustification(justification::decode::Error),
+    InvalidJustification(decode::JustificationDecodeError),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
     #[display(fmt = "{_0}")]
-    VerificationFailed(justification::verify::Error),
+    VerificationFailed(verify::JustificationVerifyError),
     /// Error while verifying the finality in the context of the chain.
     #[display(fmt = "{_0}")]
     FinalityVerify(FinalityVerifyError),
@@ -534,7 +511,7 @@ pub enum CommitVerifyError {
     },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
     #[display(fmt = "{_0}")]
-    VerificationFailed(grandpa::commit::verify::Error),
+    VerificationFailed(verify::CommitVerifyError),
 }
 
 /// Error that can happen when verifying a proof of finality.
@@ -578,6 +555,7 @@ pub struct SetFinalizedBlockIter<'a, T> {
     iter: fork_tree::PruneAncestorsIter<'a, Block<T>>,
     blocks_by_hash: &'a mut HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
     blocks_by_best_score: &'a mut BTreeMap<BestScore, fork_tree::NodeIndex>,
+    blocks_trigger_gp_change: &'a mut BTreeSet<(Option<u64>, fork_tree::NodeIndex)>,
     updates_best_block: bool,
 }
 
@@ -589,22 +567,38 @@ impl<'a, T> SetFinalizedBlockIter<'a, T> {
 }
 
 impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
-    type Item = T;
+    type Item = RemovedBlock<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let pruned = self.iter.next()?;
-            let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
-            debug_assert_eq!(_removed, Some(pruned.index));
+        let pruned = self.iter.next()?;
+        let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
+        debug_assert_eq!(_removed, Some(pruned.index));
+        let _removed = self
+            .blocks_by_best_score
+            .remove(&pruned.user_data.best_score);
+        debug_assert_eq!(_removed, Some(pruned.index));
+        if let BlockFinality::Grandpa {
+            prev_auth_change_trigger_number,
+            triggers_change: true,
+            ..
+        } = pruned.user_data.finality
+        {
             let _removed = self
-                .blocks_by_best_score
-                .remove(&pruned.user_data.best_score);
-            debug_assert_eq!(_removed, Some(pruned.index));
-            if !pruned.is_prune_target_ancestor {
-                continue;
-            }
-            break Some(pruned.user_data.user_data);
+                .blocks_trigger_gp_change
+                .remove(&(prev_auth_change_trigger_number, pruned.index));
+            debug_assert!(_removed);
         }
+
+        Some(RemovedBlock {
+            block_hash: pruned.user_data.hash,
+            scale_encoded_header: pruned.user_data.header,
+            user_data: pruned.user_data.user_data,
+            ty: if pruned.is_prune_target_ancestor {
+                RemovedBlockType::Finalized
+            } else {
+                RemovedBlockType::Pruned
+            },
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -624,4 +618,26 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
 pub enum SetFinalizedError {
     /// Block must have been passed to [`NonFinalizedTree::insert_verified_header`] in the past.
     UnknownBlock,
+}
+
+/// Block removed from the [`NonFinalizedTree`] by a [`SetFinalizedBlockIter`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RemovedBlock<T> {
+    /// Hash of the block.
+    pub block_hash: [u8; 32],
+    /// User data that was associated with that block in the [`NonFinalizedTree`].
+    pub user_data: T,
+    /// Reason why the block was removed.
+    pub ty: RemovedBlockType,
+    /// SCALE-encoded header of the block.
+    pub scale_encoded_header: Vec<u8>,
+}
+
+/// Reason why a block was removed from the [`NonFinalizedTree`] by a [`SetFinalizedBlockIter`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum RemovedBlockType {
+    /// Block is now part of the finalized chain.
+    Finalized,
+    /// Block is not a descendant of the new finalized block.
+    Pruned,
 }

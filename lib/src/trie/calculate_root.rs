@@ -143,10 +143,7 @@ impl CalcInner {
                 Some(Nibble::try_from(u8::try_from(node.children.len()).unwrap()).unwrap())
             };
 
-            node.partial_key
-                .iter()
-                .copied()
-                .chain(child_nibble.into_iter())
+            node.partial_key.iter().copied().chain(child_nibble)
         })
     }
 

@@ -17,18 +17,25 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot_light::platform::{ConnectError, SubstreamDirection};
+use futures_lite::future::FutureExt as _;
 
-use core::{future, mem, pin, str, task, time::Duration};
-use std::{
-    borrow::Cow,
+use smoldot_light::platform::{read_write, SubstreamDirection};
+
+use alloc::{
+    borrow::{Cow, ToOwned as _},
+    boxed::Box,
     collections::{BTreeMap, VecDeque},
-    iter,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    format,
+    string::{String, ToString as _},
+    vec::Vec,
+};
+use async_lock::Mutex;
+use core::{
+    fmt::{self, Write as _},
+    future, iter, mem, ops, pin, str,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    task,
+    time::Duration,
 };
 
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have
@@ -43,23 +50,26 @@ pub static TOTAL_CPU_USAGE_US: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
 
+/// Log level above which log entries aren't emitted.
+pub static MAX_LOG_LEVEL: AtomicU32 = AtomicU32::new(0);
+
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct PlatformRef {}
 
 // TODO: this trait implementation was written before GATs were stable in Rust; now that the associated types have lifetimes, it should be possible to considerably simplify this code
 impl smoldot_light::platform::PlatformRef for PlatformRef {
     type Delay = Delay;
-    type Instant = Instant;
+    type Instant = Duration;
     type MultiStream = MultiStreamWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
-    type StreamConnectFuture =
-        pin::Pin<Box<dyn future::Future<Output = Result<Self::Stream, ConnectError>> + Send>>;
+    type StreamConnectFuture = future::Ready<Self::Stream>;
+    type ReadWriteAccess<'a> = ReadWriteAccess<'a>;
+    type StreamErrorRef<'a> = StreamError;
     type MultiStreamConnectFuture = pin::Pin<
         Box<
             dyn future::Future<
-                    Output = Result<
-                        smoldot_light::platform::MultiStreamWebRtcConnection<Self::MultiStream>,
-                        ConnectError,
+                    Output = smoldot_light::platform::MultiStreamWebRtcConnection<
+                        Self::MultiStream,
                     >,
                 > + Send,
         >,
@@ -75,20 +85,22 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     >;
 
     fn now_from_unix_epoch(&self) -> Duration {
-        // The documentation of `now_from_unix_epoch()` mentions that it's ok to panic if we're
-        // before the UNIX epoch.
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| panic!())
+        let microseconds = unsafe { bindings::unix_timestamp_us() };
+        Duration::from_micros(microseconds)
     }
 
     fn now(&self) -> Self::Instant {
-        Instant::now()
+        let microseconds = unsafe { bindings::monotonic_clock_us() };
+        Duration::from_micros(microseconds)
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
-        use rand::RngCore as _;
-        rand::thread_rng().fill_bytes(buffer);
+        unsafe {
+            bindings::random_get(
+                u32::try_from(buffer.as_mut_ptr() as usize).unwrap(),
+                u32::try_from(buffer.len()).unwrap(),
+            )
+        }
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
@@ -96,7 +108,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
-        Delay::new_at(when)
+        Delay::new_at_monotonic_clock(when)
     }
 
     fn spawn_task(
@@ -123,9 +135,11 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                     )
                 }
 
-                let before_polling = Instant::now();
+                let before_polling = unsafe { bindings::monotonic_clock_us() };
                 let out = this.future.poll(cx);
-                let poll_duration = Instant::now() - before_polling;
+                let poll_duration = Duration::from_micros(
+                    unsafe { bindings::monotonic_clock_us() } - before_polling,
+                );
                 TOTAL_CPU_USAGE_US.fetch_add(
                     u64::try_from(poll_duration.as_micros()).unwrap_or(u64::max_value()),
                     Ordering::Relaxed,
@@ -134,6 +148,45 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 unsafe {
                     bindings::current_task_exit();
                 }
+
+                // Print a warning if polling the task takes a long time.
+                // It has been noticed that sometimes in Firefox polling a task takes a 16ms + a
+                // small amount. This most likely indicates that Firefox does something like
+                // freezing the JS/Wasm execution before resuming it at the next frame, thus adding
+                // 16ms to the execution time.
+                // For this reason, the threshold above which a task takes too long must be
+                // above 16ms no matter what.
+                if poll_duration.as_millis() >= 20 {
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Debug,
+                        "smoldot",
+                        "task-too-long-time",
+                        [
+                            ("name", this.name as &dyn fmt::Display),
+                            (
+                                "poll_duration_ms",
+                                &poll_duration.as_millis() as &dyn fmt::Display,
+                            ),
+                        ]
+                        .into_iter(),
+                    );
+                }
+                if poll_duration.as_millis() >= 150 {
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Warn,
+                        "smoldot",
+                        &format!(
+                            "The task named `{}` has occupied the CPU for an \
+                            unreasonable amount of time ({}ms).",
+                            this.name,
+                            poll_duration.as_millis(),
+                        ),
+                        iter::empty(),
+                    );
+                }
+
                 out
             }
         }
@@ -143,7 +196,72 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             future: task,
         };
 
-        super::EXECUTOR.spawn(task).detach();
+        let (runnable, task) = async_task::spawn(task, |runnable| {
+            super::TASKS_QUEUE.push(runnable);
+            unsafe {
+                bindings::advance_execution_ready();
+            }
+        });
+
+        task.detach();
+        runnable.schedule();
+    }
+
+    fn log<'a>(
+        &self,
+        log_level: smoldot_light::platform::LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        let log_level = match log_level {
+            smoldot_light::platform::LogLevel::Error => 1,
+            smoldot_light::platform::LogLevel::Warn => 2,
+            smoldot_light::platform::LogLevel::Info => 3,
+            smoldot_light::platform::LogLevel::Debug => 4,
+            smoldot_light::platform::LogLevel::Trace => 5,
+        };
+
+        if log_level > MAX_LOG_LEVEL.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut key_values = key_values.peekable();
+
+        if key_values.peek().is_none() {
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message.as_bytes().len()).unwrap(),
+                )
+            }
+        } else {
+            let mut message_build = String::with_capacity(128);
+            message_build.push_str(message);
+            let mut first = true;
+            for (key, value) in key_values {
+                if first {
+                    let _ = write!(message_build, "; ");
+                    first = false;
+                } else {
+                    let _ = write!(message_build, ", ");
+                }
+                let _ = write!(message_build, "{}={}", key, value);
+            }
+
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message_build.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message_build.as_bytes().len()).unwrap(),
+                )
+            }
+        }
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -263,67 +381,34 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let _prev_value = lock.connections.insert(
             connection_id,
             Connection {
-                inner: ConnectionInner::NotOpen,
+                inner: ConnectionInner::SingleStreamMsNoiseYamux,
                 something_happened: event_listener::Event::new(),
             },
         );
         debug_assert!(_prev_value.is_none());
 
-        Box::pin(async move {
-            // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
-            let mut lock = loop {
-                let something_happened = {
-                    let mut lock = STATE.try_lock().unwrap();
-                    let connection = lock.connections.get_mut(&connection_id).unwrap();
+        let _prev_value = lock.streams.insert(
+            (connection_id, None),
+            Stream {
+                reset: None,
+                messages_queue: VecDeque::with_capacity(8),
+                messages_queue_total_size: 0,
+                something_happened: event_listener::Event::new(),
+                writable_bytes_extra: 0,
+            },
+        );
+        debug_assert!(_prev_value.is_none());
 
-                    if !matches!(connection.inner, ConnectionInner::NotOpen) {
-                        break lock;
-                    }
-
-                    connection.something_happened.listen()
-                };
-
-                something_happened.await
-            };
-            let lock = &mut *lock;
-
-            let connection = lock.connections.get_mut(&connection_id).unwrap();
-
-            match &mut connection.inner {
-                ConnectionInner::NotOpen | ConnectionInner::MultiStreamWebRtc { .. } => {
-                    unreachable!()
-                }
-                ConnectionInner::SingleStreamMsNoiseYamux => {
-                    debug_assert!(lock.streams.contains_key(&(connection_id, None)));
-
-                    let read_buffer = ReadBuffer {
-                        buffer: Vec::new().into(),
-                        buffer_first_offset: 0,
-                    };
-
-                    Ok(StreamWrapper {
-                        connection_id,
-                        stream_id: None,
-                        read_buffer,
-                        is_reset: false,
-                        writable_bytes: 0,
-                        write_closable,
-                        write_closed: false,
-                    })
-                }
-                ConnectionInner::Reset {
-                    message,
-                    connection_handles_alive,
-                } => {
-                    // Note that it is possible for the state to have transitionned to (for
-                    // example) `ConnectionInner::SingleStreamMsNoiseYamux` and then immediately
-                    // to `Reset`, but we don't really care about that corner case.
-                    debug_assert_eq!(*connection_handles_alive, 0);
-                    let message = mem::take(message);
-                    lock.connections.remove(&connection_id).unwrap();
-                    Err(ConnectError { message })
-                }
-            }
+        future::ready(StreamWrapper {
+            connection_id,
+            stream_id: None,
+            read_buffer: Vec::new(),
+            inner_expected_incoming_bytes: Some(1),
+            is_reset: None,
+            writable_bytes: 0,
+            write_closable,
+            write_closed: false,
+            when_wake_up: None,
         })
     }
 
@@ -368,20 +453,26 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let _prev_value = lock.connections.insert(
             connection_id,
             Connection {
-                inner: ConnectionInner::NotOpen,
+                inner: ConnectionInner::MultiStreamUnknownHandshake {
+                    opened_substreams_to_pick_up: VecDeque::with_capacity(0),
+                    connection_handles_alive: 1,
+                },
                 something_happened: event_listener::Event::new(),
             },
         );
         debug_assert!(_prev_value.is_none());
 
         Box::pin(async move {
-            // Wait until the connection state is no longer `ConnectionInner::NotOpen`.
+            // Wait until the connection state is no longer "unknown handshake".
             let mut lock = loop {
                 let something_happened = {
                     let mut lock = STATE.try_lock().unwrap();
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
-                    if !matches!(connection.inner, ConnectionInner::NotOpen) {
+                    if matches!(
+                        connection.inner,
+                        ConnectionInner::Reset { .. } | ConnectionInner::MultiStreamWebRtc { .. }
+                    ) {
                         break lock;
                     }
 
@@ -395,33 +486,24 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             let connection = lock.connections.get_mut(&connection_id).unwrap();
 
             match &mut connection.inner {
-                ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+                ConnectionInner::SingleStreamMsNoiseYamux { .. }
+                | ConnectionInner::MultiStreamUnknownHandshake { .. } => {
                     unreachable!()
                 }
                 ConnectionInner::MultiStreamWebRtc {
-                    connection_handles_alive,
                     local_tls_certificate_sha256,
-                    remote_tls_certificate_sha256,
                     ..
-                } => {
-                    *connection_handles_alive += 1;
-                    Ok(smoldot_light::platform::MultiStreamWebRtcConnection {
+                } => smoldot_light::platform::MultiStreamWebRtcConnection {
+                    connection: MultiStreamWrapper(connection_id),
+                    local_tls_certificate_sha256: *local_tls_certificate_sha256,
+                },
+                ConnectionInner::Reset { .. } => {
+                    // If the connection was already reset, we proceed anyway but provide a fake
+                    // certificate hash. This has absolutely no consequence.
+                    smoldot_light::platform::MultiStreamWebRtcConnection {
                         connection: MultiStreamWrapper(connection_id),
-                        local_tls_certificate_sha256: *local_tls_certificate_sha256,
-                        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
-                    })
-                }
-                ConnectionInner::Reset {
-                    message,
-                    connection_handles_alive,
-                } => {
-                    // Note that it is possible for the state to have transitionned to (for
-                    // example) `ConnectionInner::SingleStreamMsNoiseYamux` and then immediately
-                    // to `Reset`, but we don't really care about that corner case.
-                    debug_assert_eq!(*connection_handles_alive, 0);
-                    let message = mem::take(message);
-                    lock.connections.remove(&connection_id).unwrap();
-                    Err(ConnectError { message })
+                        local_tls_certificate_sha256: [0; 32],
+                    }
                 }
             }
         })
@@ -434,7 +516,7 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
         let connection_id = *connection_id;
 
         Box::pin(async move {
-            let (stream_id, direction, initial_writable_bytes) = loop {
+            let (stream_id, direction) = loop {
                 let something_happened = {
                     let mut lock = STATE.try_lock().unwrap();
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
@@ -445,16 +527,20 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                             opened_substreams_to_pick_up,
                             connection_handles_alive,
                             ..
+                        }
+                        | ConnectionInner::MultiStreamUnknownHandshake {
+                            opened_substreams_to_pick_up,
+                            connection_handles_alive,
+                            ..
                         } => {
-                            if let Some((substream, direction, initial_writable_bytes)) =
+                            if let Some((substream, direction)) =
                                 opened_substreams_to_pick_up.pop_front()
                             {
                                 *connection_handles_alive += 1;
-                                break (substream, direction, initial_writable_bytes);
+                                break (substream, direction);
                             }
                         }
-                        ConnectionInner::NotOpen
-                        | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+                        ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                             unreachable!()
                         }
                     }
@@ -469,14 +555,13 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 StreamWrapper {
                     connection_id,
                     stream_id: Some(stream_id),
-                    read_buffer: ReadBuffer {
-                        buffer: Vec::<u8>::new().into(),
-                        buffer_first_offset: 0,
-                    },
-                    is_reset: false,
-                    writable_bytes: usize::try_from(initial_writable_bytes).unwrap(),
+                    read_buffer: Vec::new(),
+                    inner_expected_incoming_bytes: Some(1),
+                    is_reset: None,
+                    writable_bytes: 0,
                     write_closable: false, // Note: this is currently hardcoded for WebRTC.
                     write_closed: false,
+                    when_wake_up: None,
                 },
                 direction,
             ))
@@ -492,60 +577,69 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
             .unwrap()
             .inner
         {
-            ConnectionInner::MultiStreamWebRtc { .. } => unsafe {
+            ConnectionInner::MultiStreamWebRtc { .. }
+            | ConnectionInner::MultiStreamUnknownHandshake { .. } => unsafe {
                 bindings::connection_stream_open(*connection_id)
             },
             ConnectionInner::Reset { .. } => {}
-            ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+            ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                 unreachable!()
             }
         }
     }
 
-    fn update_stream<'a>(
+    fn wait_read_write_again<'a>(
         &self,
-        StreamWrapper {
-            connection_id,
-            stream_id,
-            read_buffer,
-            is_reset,
-            writable_bytes,
-            ..
-        }: &'a mut Self::Stream,
+        stream: pin::Pin<&'a mut Self::Stream>,
     ) -> Self::StreamUpdateFuture<'a> {
         Box::pin(async move {
-            loop {
-                if *is_reset {
-                    future::pending::<()>().await;
-                }
+            let stream = stream.get_mut();
 
+            if stream.is_reset.is_some() {
+                future::pending::<()>().await;
+            }
+
+            loop {
                 let listener = {
                     let mut lock = STATE.try_lock().unwrap();
-                    let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
+                    let stream_inner = lock
+                        .streams
+                        .get_mut(&(stream.connection_id, stream.stream_id))
+                        .unwrap();
 
-                    if stream.reset {
-                        *is_reset = true;
+                    if let Some(msg) = &stream_inner.reset {
+                        stream.is_reset = Some(msg.clone());
                         return;
                     }
 
                     let mut shall_return = false;
 
-                    // Move the next buffer from `STATE` into `read_buffer`.
-                    if read_buffer.buffer_first_offset == read_buffer.buffer.len() {
-                        if let Some(msg) = stream.messages_queue.pop_front() {
-                            stream.messages_queue_total_size -= msg.len();
-                            read_buffer.buffer = msg;
-                            read_buffer.buffer_first_offset = 0;
-                            shall_return = true;
+                    // Move the buffers from `STATE` into `read_buffer`.
+                    if !stream_inner.messages_queue.is_empty() {
+                        stream
+                            .read_buffer
+                            .reserve(stream_inner.messages_queue_total_size);
+
+                        while let Some(msg) = stream_inner.messages_queue.pop_front() {
+                            stream_inner.messages_queue_total_size -= msg.len();
+                            // TODO: could be optimized by reworking the bindings
+                            stream.read_buffer.extend_from_slice(&msg);
+                            if stream
+                                .inner_expected_incoming_bytes
+                                .map_or(false, |expected| expected <= stream.read_buffer.len())
+                            {
+                                shall_return = true;
+                                break;
+                            }
                         }
                     }
 
-                    if stream.writable_bytes_extra != 0 {
-                        // As documented, the number of writable bytes must never exceed the
-                        // initial writable bytes value. As such, this can't overflow unless there
-                        // is a bug on the JavaScript side.
-                        *writable_bytes += stream.writable_bytes_extra;
-                        stream.writable_bytes_extra = 0;
+                    if stream_inner.writable_bytes_extra != 0 {
+                        // As documented, the number of writable bytes must never become
+                        // exceedingly large (a few megabytes). As such, this can't overflow
+                        // unless there is a bug on the JavaScript side.
+                        stream.writable_bytes += stream_inner.writable_bytes_extra;
+                        stream_inner.writable_bytes_extra = 0;
                         shall_return = true;
                     }
 
@@ -553,138 +647,171 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         return;
                     }
 
-                    stream.something_happened.listen()
+                    stream_inner.something_happened.listen()
                 };
 
-                listener.await
+                let timer_stop = async move {
+                    listener.await;
+                    false
+                }
+                .or(async {
+                    if let Some(when_wake_up) = stream.when_wake_up.as_mut() {
+                        when_wake_up.await;
+                        stream.when_wake_up = None;
+                        true
+                    } else {
+                        future::pending().await
+                    }
+                })
+                .await;
+
+                if timer_stop {
+                    return;
+                }
             }
         })
     }
 
-    fn read_buffer<'a>(
+    fn read_write_access<'a>(
         &self,
-        StreamWrapper {
-            read_buffer,
-            is_reset,
-            ..
-        }: &'a mut Self::Stream,
-    ) -> smoldot_light::platform::ReadBuffer<'a> {
-        if *is_reset {
-            return smoldot_light::platform::ReadBuffer::Reset;
+        stream: pin::Pin<&'a mut Self::Stream>,
+    ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>> {
+        let stream = stream.get_mut();
+
+        if let Some(message) = &stream.is_reset {
+            return Err(StreamError {
+                message: message.clone(),
+            });
         }
 
-        // TODO: doesn't detect closed
-
-        smoldot_light::platform::ReadBuffer::Open(
-            &read_buffer.buffer[read_buffer.buffer_first_offset..],
-        )
+        Ok(ReadWriteAccess {
+            read_write: read_write::ReadWrite {
+                now: unsafe { Duration::from_micros(bindings::monotonic_clock_us()) },
+                incoming_buffer: mem::take(&mut stream.read_buffer),
+                expected_incoming_bytes: Some(0),
+                read_bytes: 0,
+                write_buffers: Vec::new(),
+                write_bytes_queued: 0,
+                write_bytes_queueable: if !stream.write_closed {
+                    Some(stream.writable_bytes)
+                } else {
+                    None
+                },
+                wake_up_after: None,
+            },
+            stream,
+        })
     }
+}
 
-    fn advance_read_cursor(
-        &self,
-        StreamWrapper {
-            read_buffer,
-            is_reset,
-            ..
-        }: &mut Self::Stream,
-        bytes: usize,
-    ) {
-        assert!(!*is_reset);
-        assert!(bytes <= read_buffer.buffer.len() - read_buffer.buffer_first_offset);
-        read_buffer.buffer_first_offset += bytes;
-        debug_assert!(read_buffer.buffer_first_offset <= read_buffer.buffer.len());
+pub(crate) struct ReadWriteAccess<'a> {
+    read_write: read_write::ReadWrite<Duration>,
+    stream: &'a mut StreamWrapper,
+}
+
+impl<'a> ops::Deref for ReadWriteAccess<'a> {
+    type Target = read_write::ReadWrite<Duration>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.read_write
     }
+}
 
-    fn writable_bytes(
-        &self,
-        StreamWrapper {
-            is_reset,
-            writable_bytes,
-            write_closed,
-            ..
-        }: &mut Self::Stream,
-    ) -> usize {
-        if *is_reset || *write_closed {
-            return 0;
-        }
-
-        *writable_bytes
+impl<'a> ops::DerefMut for ReadWriteAccess<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.read_write
     }
+}
 
-    fn send(
-        &self,
-        StreamWrapper {
-            connection_id,
-            stream_id,
-            write_closed,
-            writable_bytes,
-            ..
-        }: &mut Self::Stream,
-        data: &[u8],
-    ) {
-        assert!(!*write_closed);
-
+impl<'a> Drop for ReadWriteAccess<'a> {
+    fn drop(&mut self) {
         let mut lock = STATE.try_lock().unwrap();
-        let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
-        if stream.reset {
-            return;
+        let stream_inner = lock
+            .streams
+            .get_mut(&(self.stream.connection_id, self.stream.stream_id))
+            .unwrap();
+
+        if (self.read_write.read_bytes != 0
+            && self
+                .read_write
+                .expected_incoming_bytes
+                .map_or(false, |expected| {
+                    expected >= self.read_write.incoming_buffer.len()
+                }))
+            || (self.read_write.write_bytes_queued != 0
+                && self.read_write.write_bytes_queueable.is_some())
+        {
+            self.read_write.wake_up_asap();
         }
 
-        assert!(data.len() <= *writable_bytes);
-        *writable_bytes -= data.len();
+        self.stream.when_wake_up = self
+            .read_write
+            .wake_up_after
+            .map(Delay::new_at_monotonic_clock);
 
-        // `unwrap()` is ok as there's no way that `data.len()` doesn't fit in a `u64`.
-        TOTAL_BYTES_SENT.fetch_add(u64::try_from(data.len()).unwrap(), Ordering::Relaxed);
+        self.stream.read_buffer = mem::take(&mut self.read_write.incoming_buffer);
 
-        unsafe {
-            bindings::stream_send(
-                *connection_id,
-                stream_id.unwrap_or(0),
-                u32::try_from(data.as_ptr() as usize).unwrap(),
-                u32::try_from(data.len()).unwrap(),
-            );
-        }
-    }
+        self.stream.inner_expected_incoming_bytes = self.read_write.expected_incoming_bytes;
 
-    fn close_send(
-        &self,
-        StreamWrapper {
-            connection_id,
-            stream_id,
-            write_closable,
-            write_closed,
-            ..
-        }: &mut Self::Stream,
-    ) {
-        assert!(!*write_closed);
+        if !self.read_write.write_buffers.is_empty() && stream_inner.reset.is_none() {
+            let mut io_vectors = Vec::with_capacity(self.read_write.write_buffers.len());
+            let mut total_length = 0;
 
-        let mut lock = STATE.try_lock().unwrap();
-        let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
-
-        if stream.reset {
-            return;
-        }
-
-        if *write_closable {
-            unsafe {
-                bindings::stream_send_close(*connection_id, stream_id.unwrap_or(0));
+            for buffer in &self.read_write.write_buffers {
+                io_vectors.push(bindings::StreamSendIoVector {
+                    ptr: u32::try_from(buffer.as_ptr() as usize).unwrap(),
+                    len: u32::try_from(buffer.len()).unwrap(),
+                });
+                total_length += buffer.len();
             }
+
+            assert!(total_length <= self.stream.writable_bytes);
+            self.stream.writable_bytes -= total_length;
+
+            // `unwrap()` is ok as there's no way that `buffer.len()` doesn't fit in a `u64`.
+            TOTAL_BYTES_SENT.fetch_add(u64::try_from(total_length).unwrap(), Ordering::Relaxed);
+
+            unsafe {
+                bindings::stream_send(
+                    self.stream.connection_id,
+                    self.stream.stream_id.unwrap_or(0),
+                    u32::try_from(io_vectors.as_ptr() as usize).unwrap(),
+                    u32::try_from(io_vectors.len()).unwrap(),
+                );
+            }
+
+            self.read_write.write_buffers.clear();
         }
 
-        *write_closed = true;
+        if self.read_write.write_bytes_queueable.is_none() && !self.stream.write_closed {
+            if stream_inner.reset.is_none() && self.stream.write_closable {
+                unsafe {
+                    bindings::stream_send_close(
+                        self.stream.connection_id,
+                        self.stream.stream_id.unwrap_or(0),
+                    );
+                }
+            }
+
+            self.stream.write_closed = true;
+        }
     }
 }
 
 pub(crate) struct StreamWrapper {
     connection_id: u32,
     stream_id: Option<u32>,
-    read_buffer: ReadBuffer,
-    /// `true` if the remote has reset the stream and `update_stream` has since then been called.
-    is_reset: bool,
+    read_buffer: Vec<u8>,
+    inner_expected_incoming_bytes: Option<usize>,
+    /// `Some` if the remote has reset the stream and `update_stream` has since then been called.
+    /// Contains the error message.
+    is_reset: Option<String>,
     writable_bytes: usize,
     write_closable: bool,
     write_closed: bool,
+    /// The stream should wake up after this delay.
+    when_wake_up: Option<Delay>,
 }
 
 impl Drop for StreamWrapper {
@@ -699,9 +826,8 @@ impl Drop for StreamWrapper {
             .unwrap();
 
         let remove_connection = match &mut connection.inner {
-            ConnectionInner::NotOpen => unreachable!(),
             ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
-                if !removed_stream.reset {
+                if removed_stream.reset.is_none() {
                     unsafe {
                         bindings::reset_connection(self.connection_id);
                     }
@@ -713,8 +839,12 @@ impl Drop for StreamWrapper {
             ConnectionInner::MultiStreamWebRtc {
                 connection_handles_alive,
                 ..
+            }
+            | ConnectionInner::MultiStreamUnknownHandshake {
+                connection_handles_alive,
+                ..
             } => {
-                if !removed_stream.reset {
+                if removed_stream.reset.is_none() {
                     unsafe {
                         bindings::connection_stream_reset(
                             self.connection_id,
@@ -754,10 +884,14 @@ impl Drop for MultiStreamWrapper {
 
         let connection = lock.connections.get_mut(&self.0).unwrap();
         let (remove_connection, reset_connection) = match &mut connection.inner {
-            ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
+            ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                 unreachable!()
             }
             ConnectionInner::MultiStreamWebRtc {
+                connection_handles_alive,
+                ..
+            }
+            | ConnectionInner::MultiStreamUnknownHandshake {
                 connection_handles_alive,
                 ..
             } => {
@@ -777,6 +911,12 @@ impl Drop for MultiStreamWrapper {
             }
         }
     }
+}
+
+#[derive(Debug, derive_more::Display, Clone)]
+#[display(fmt = "{message}")]
+pub(crate) struct StreamError {
+    message: String,
 }
 
 static STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
@@ -813,25 +953,32 @@ struct Connection {
 }
 
 enum ConnectionInner {
-    NotOpen,
     SingleStreamMsNoiseYamux,
+    MultiStreamUnknownHandshake {
+        /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
+        /// but that haven't been reported through
+        /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
+        opened_substreams_to_pick_up: VecDeque<(u32, SubstreamDirection)>,
+        /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
+        /// this connection. If it switches from 1 to 0, the connection must be removed.
+        connection_handles_alive: u32,
+    },
     MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
         /// [`smoldot_light::platform::PlatformRef::next_substream`] yet.
-        opened_substreams_to_pick_up: VecDeque<(u32, SubstreamDirection, u32)>,
+        opened_substreams_to_pick_up: VecDeque<(u32, SubstreamDirection)>,
         /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
         /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
         local_tls_certificate_sha256: [u8; 32],
-        /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
-        remote_tls_certificate_sha256: [u8; 32],
     },
     /// [`bindings::connection_reset`] has been called
     Reset {
         /// Message given by the bindings to justify the closure.
-        message: String,
+        // TODO: why is this unused? shouldn't it be not unused?
+        _message: String,
         /// Number of objects (connections and streams) in the [`PlatformRef`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
@@ -839,11 +986,10 @@ enum ConnectionInner {
 }
 
 struct Stream {
-    /// `true` if [`bindings::stream_reset`] has been called.
-    reset: bool,
-    /// Sum of the writable bytes reported through [`bindings::stream_writable_bytes`] or
-    /// `initial_writable_bytes` that haven't been processed yet in a call to
-    /// `update_stream`.
+    /// `Some` if [`bindings::stream_reset`] has been called. Contains the error message.
+    reset: Option<String>,
+    /// Sum of the writable bytes reported through [`bindings::stream_writable_bytes`] that
+    /// haven't been processed yet in a call to `update_stream`.
     writable_bytes_extra: usize,
     /// List of messages received through [`bindings::stream_message`]. Must never contain
     /// empty messages.
@@ -855,64 +1001,36 @@ struct Stream {
     something_happened: event_listener::Event,
 }
 
-struct ReadBuffer {
-    /// Buffer containing incoming data.
-    buffer: Box<[u8]>,
-
-    /// The first bytes of [`ReadBuffer::buffer`] have already been processed are not considered
-    /// not part of the read buffer anymore.
-    buffer_first_offset: usize,
-}
-
-pub(crate) fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
-    let mut lock = STATE.try_lock().unwrap();
-    let lock = &mut *lock;
-
-    let connection = lock.connections.get_mut(&connection_id).unwrap();
-
-    debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
-    connection.inner = ConnectionInner::SingleStreamMsNoiseYamux;
-
-    let _prev_value = lock.streams.insert(
-        (connection_id, None),
-        Stream {
-            reset: false,
-            messages_queue: VecDeque::with_capacity(8),
-            messages_queue_total_size: 0,
-            something_happened: event_listener::Event::new(),
-            writable_bytes_extra: usize::try_from(initial_writable_bytes).unwrap(),
-        },
-    );
-    debug_assert!(_prev_value.is_none());
-
-    connection.something_happened.notify(usize::max_value());
-}
-
-pub(crate) fn connection_open_multi_stream(connection_id: u32, handshake_ty: Vec<u8>) {
-    let (_, (local_tls_certificate_sha256, remote_tls_certificate_sha256)) =
-        nom::sequence::preceded(
-            nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
-            nom::sequence::tuple((
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
-                    <&[u8; 32]>::try_from(b).unwrap()
-                }),
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
-                    <&[u8; 32]>::try_from(b).unwrap()
-                }),
-            )),
-        )(&handshake_ty[..])
-        .expect("invalid handshake type provided to connection_open_multi_stream");
+pub(crate) fn connection_multi_stream_set_handshake_info(
+    connection_id: u32,
+    handshake_ty: Vec<u8>,
+) {
+    let (_, local_tls_certificate_sha256) = nom::sequence::preceded(
+        nom::bytes::streaming::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
+        nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
+            <&[u8; 32]>::try_from(b).unwrap()
+        }),
+    )(&handshake_ty[..])
+    .expect("invalid handshake type provided to connection_multi_stream_set_handshake_info");
 
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
-    debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
+    let (opened_substreams_to_pick_up, connection_handles_alive) = match &mut connection.inner {
+        ConnectionInner::MultiStreamUnknownHandshake {
+            opened_substreams_to_pick_up,
+            connection_handles_alive,
+        } => (
+            mem::take(opened_substreams_to_pick_up),
+            *connection_handles_alive,
+        ),
+        _ => unreachable!(),
+    };
 
     connection.inner = ConnectionInner::MultiStreamWebRtc {
-        opened_substreams_to_pick_up: VecDeque::with_capacity(8),
-        connection_handles_alive: 0,
+        opened_substreams_to_pick_up,
+        connection_handles_alive,
         local_tls_certificate_sha256: *local_tls_certificate_sha256,
-        remote_tls_certificate_sha256: *remote_tls_certificate_sha256,
     };
     connection.something_happened.notify(usize::max_value());
 }
@@ -925,19 +1043,20 @@ pub(crate) fn stream_writable_bytes(connection_id: u32, stream_id: u32, bytes: u
     // For single stream connections, the docs of this function mentions that `stream_id` can be
     // any value.
     let actual_stream_id = match connection.inner {
-        ConnectionInner::MultiStreamWebRtc { .. } => Some(stream_id),
+        ConnectionInner::MultiStreamWebRtc { .. }
+        | ConnectionInner::MultiStreamUnknownHandshake { .. } => Some(stream_id),
         ConnectionInner::SingleStreamMsNoiseYamux { .. } => None,
-        ConnectionInner::Reset { .. } | ConnectionInner::NotOpen => unreachable!(),
+        ConnectionInner::Reset { .. } => unreachable!(),
     };
 
     let stream = lock
         .streams
         .get_mut(&(connection_id, actual_stream_id))
         .unwrap();
-    debug_assert!(!stream.reset);
+    debug_assert!(stream.reset.is_none());
 
-    // As documented, the number of writable bytes must never exceed the initial writable bytes
-    // value. As such, this can't overflow unless there is a bug on the JavaScript side.
+    // As documented, the number of writable bytes must never become exceedingly large (a few
+    // megabytes). As such, this can't overflow unless there is a bug on the JavaScript side.
     stream.writable_bytes_extra += usize::try_from(bytes).unwrap();
     stream.something_happened.notify(usize::max_value());
 }
@@ -950,16 +1069,17 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
     // For single stream connections, the docs of this function mentions that `stream_id` can be
     // any value.
     let actual_stream_id = match connection.inner {
-        ConnectionInner::MultiStreamWebRtc { .. } => Some(stream_id),
+        ConnectionInner::MultiStreamWebRtc { .. }
+        | ConnectionInner::MultiStreamUnknownHandshake { .. } => Some(stream_id),
         ConnectionInner::SingleStreamMsNoiseYamux { .. } => None,
-        ConnectionInner::Reset { .. } | ConnectionInner::NotOpen => unreachable!(),
+        ConnectionInner::Reset { .. } => unreachable!(),
     };
 
     let stream = lock
         .streams
         .get_mut(&(connection_id, actual_stream_id))
         .unwrap();
-    debug_assert!(!stream.reset);
+    debug_assert!(stream.reset.is_none());
 
     TOTAL_BYTES_RECEIVED.fetch_add(u64::try_from(message.len()).unwrap(), Ordering::Relaxed);
 
@@ -970,20 +1090,27 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
 
     // There is unfortunately no way to instruct the browser to back-pressure connections to
     // remotes.
+    //
     // In order to avoid DoS attacks, we refuse to buffer more than a certain amount of data per
     // connection. This limit is completely arbitrary, and this is in no way a robust solution
     // because this limit isn't in sync with any other part of the code. In other words, it could
     // be legitimate for the remote to buffer a large amount of data.
+    //
     // This corner case is handled by discarding the messages that would go over the limit. While
     // this is not a great solution, going over that limit can be considered as a fault from the
     // remote, the same way as it would be a fault from the remote to forget to send some bytes,
     // and thus should be handled in a similar way by the higher level code.
+    //
     // A better way to handle this would be to kill the connection abruptly. However, this would
     // add a lot of complex code in this module, and the effort is clearly not worth it for this
     // niche situation.
+    //
+    // While this problem is specific to browsers (Deno and NodeJS have ways to back-pressure
+    // connections), we add this hack for all platforms, for consistency. If this limit is ever
+    // reached, we want to be sure to detect it, even when testing on NodeJS or Deno.
+    //
     // See <https://github.com/smol-dot/smoldot/issues/109>.
     // TODO: do this properly eventually ^
-    // TODO: move this limit check in the browser-specific code so that NodeJS and Deno don't suffer from it?
     if stream.messages_queue_total_size >= 25 * 1024 * 1024 {
         return;
     }
@@ -993,12 +1120,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, message: Vec<u8
     stream.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_stream_opened(
-    connection_id: u32,
-    stream_id: u32,
-    outbound: u32,
-    initial_writable_bytes: u32,
-) {
+pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let lock = &mut *lock;
 
@@ -1011,11 +1133,11 @@ pub(crate) fn connection_stream_opened(
         let _prev_value = lock.streams.insert(
             (connection_id, Some(stream_id)),
             Stream {
-                reset: false,
+                reset: None,
                 messages_queue: VecDeque::with_capacity(8),
                 messages_queue_total_size: 0,
                 something_happened: event_listener::Event::new(),
-                writable_bytes_extra: usize::try_from(initial_writable_bytes).unwrap(),
+                writable_bytes_extra: 0,
             },
         );
 
@@ -1030,23 +1152,29 @@ pub(crate) fn connection_stream_opened(
             } else {
                 SubstreamDirection::Inbound
             },
-            initial_writable_bytes,
         ));
 
-        connection.something_happened.notify(usize::max_value())
+        connection.something_happened.notify(usize::max_value());
     } else {
         panic!()
     }
 }
 
 pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
+    let message = str::from_utf8(&message)
+        .unwrap_or_else(|_| panic!("non-UTF-8 message"))
+        .to_owned();
+
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
     let connection_handles_alive = match &connection.inner {
-        ConnectionInner::NotOpen => 0,
         ConnectionInner::SingleStreamMsNoiseYamux { .. } => 1, // TODO: I believe that this is correct but a bit confusing; might be helpful to refactor with an enum or something
         ConnectionInner::MultiStreamWebRtc {
+            connection_handles_alive,
+            ..
+        }
+        | ConnectionInner::MultiStreamUnknownHandshake {
             connection_handles_alive,
             ..
         } => *connection_handles_alive,
@@ -1055,9 +1183,7 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
 
     connection.inner = ConnectionInner::Reset {
         connection_handles_alive,
-        message: str::from_utf8(&message)
-            .unwrap_or_else(|_| panic!("non-UTF-8 message"))
-            .to_owned(),
+        _message: message.clone(),
     };
 
     connection.something_happened.notify(usize::max_value());
@@ -1065,16 +1191,20 @@ pub(crate) fn connection_reset(connection_id: u32, message: Vec<u8>) {
     for ((_, _), stream) in lock.streams.range_mut(
         (connection_id, Some(u32::min_value()))..=(connection_id, Some(u32::max_value())),
     ) {
-        stream.reset = true;
+        stream.reset = Some(message.clone());
         stream.something_happened.notify(usize::max_value());
     }
     if let Some(stream) = lock.streams.get_mut(&(connection_id, None)) {
-        stream.reset = true;
+        stream.reset = Some(message);
         stream.something_happened.notify(usize::max_value());
     }
 }
 
-pub(crate) fn stream_reset(connection_id: u32, stream_id: u32) {
+pub(crate) fn stream_reset(connection_id: u32, stream_id: u32, message: Vec<u8>) {
+    let message: String = str::from_utf8(&message)
+        .unwrap_or_else(|_| panic!("non-UTF-8 message"))
+        .to_owned();
+
     // Note that, as documented, it is illegal to call this function on single-stream substreams.
     // We can thus assume that the `stream_id` is valid.
     let mut lock = STATE.try_lock().unwrap();
@@ -1082,6 +1212,6 @@ pub(crate) fn stream_reset(connection_id: u32, stream_id: u32) {
         .streams
         .get_mut(&(connection_id, Some(stream_id)))
         .unwrap();
-    stream.reset = true;
+    stream.reset = Some(message);
     stream.something_happened.notify(usize::max_value());
 }

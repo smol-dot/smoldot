@@ -67,7 +67,7 @@
 //! transaction.
 //!
 
-use crate::{network_service, platform::PlatformRef, runtime_service, sync_service};
+use crate::{log, network_service, platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
@@ -77,22 +77,22 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use async_lock::Mutex;
 use core::{
     cmp, iter,
-    marker::PhantomData,
     num::{NonZeroU32, NonZeroUsize},
+    pin,
     time::Duration,
 };
-use futures_channel::mpsc;
+use futures_channel::oneshot;
+use futures_lite::FutureExt as _;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures_util::{future, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
-    network::protocol,
+    network::codec,
     transactions::{light_pool, validate},
 };
 
@@ -113,9 +113,9 @@ pub struct Config<TPlat: PlatformRef> {
     /// Service responsible for synchronizing the chain.
     pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
-    /// Access to the network, and index of the chain to use to gossip transactions from the point
-    /// of view of the network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    /// Access to the network, and identifier of the chain to use to gossip transactions from the
+    /// point of view of the network service.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Maximum number of pending transactions allowed in the service.
     ///
@@ -133,43 +133,50 @@ pub struct Config<TPlat: PlatformRef> {
 }
 
 /// See [the module-level documentation](..).
-pub struct TransactionsService<TPlat> {
+pub struct TransactionsService<TPlat: PlatformRef> {
     /// Sending messages to the background task.
-    to_background: Mutex<mpsc::Sender<ToBackground>>,
+    to_background: async_lock::Mutex<async_channel::Sender<ToBackground>>,
 
-    platform: PhantomData<fn() -> TPlat>,
+    /// Configuration of the background task. Used in order to restart it if necessary.
+    background_task_config: BackgroundTaskConfig<TPlat>,
 }
 
 impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     /// Builds a new service.
-    pub async fn new(config: Config<TPlat>) -> Self {
+    pub fn new(config: Config<TPlat>) -> Self {
         let log_target = format!("tx-service-{}", config.log_name);
-        let (to_background, from_foreground) = mpsc::channel(8);
+        let (to_background, from_foreground) = async_channel::bounded(8);
 
-        config.platform.spawn_task(
-            log_target.clone().into(),
-            Box::pin(background_task::<TPlat>(BackgroundTaskConfig {
-                log_target,
-                platform: config.platform.clone(),
-                sync_service: config.sync_service,
-                runtime_service: config.runtime_service,
-                network_service: config.network_service.0,
-                network_chain_index: config.network_service.1,
-                from_foreground,
-                max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
-                    .unwrap_or(usize::max_value()),
-                max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
-                    .unwrap_or(usize::max_value()),
-                max_concurrent_validations: usize::try_from(
-                    config.max_concurrent_validations.get(),
-                )
+        let background_task_config = BackgroundTaskConfig {
+            log_target: log_target.clone(),
+            platform: config.platform.clone(),
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
+            network_service: config.network_service,
+            max_concurrent_downloads: usize::try_from(config.max_concurrent_downloads.get())
                 .unwrap_or(usize::max_value()),
-            })),
-        );
+            max_pending_transactions: usize::try_from(config.max_pending_transactions.get())
+                .unwrap_or(usize::max_value()),
+            max_concurrent_validations: usize::try_from(config.max_concurrent_validations.get())
+                .unwrap_or(usize::max_value()),
+        };
+
+        let task = Box::pin(background_task::<TPlat>(
+            background_task_config.clone(),
+            from_foreground,
+        ));
+
+        config.platform.spawn_task(log_target.clone().into(), {
+            let platform = config.platform.clone();
+            async move {
+                task.await;
+                log!(&platform, Debug, &log_target, "shutdown");
+            }
+        });
 
         TransactionsService {
-            to_background: Mutex::new(to_background),
-            platform: PhantomData,
+            to_background: async_lock::Mutex::new(to_background),
+            background_task_config,
         }
     }
 
@@ -178,9 +185,8 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
     ///
     /// Must pass as parameter the SCALE-encoded transaction.
     ///
-    /// The return value of this method is a channel which will receive updates on the state
-    /// of the transaction. The channel is closed when no new update is expected or if it becomes
-    /// full.
+    /// The return value of this method is an object receives updates on the state of the
+    /// transaction.
     ///
     /// > **Note**: Dropping the value returned does not cancel sending out the transaction.
     ///
@@ -191,34 +197,98 @@ impl<TPlat: PlatformRef> TransactionsService<TPlat> {
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
-    ) -> mpsc::Receiver<TransactionStatus> {
-        let (updates_report, rx) = mpsc::channel(channel_size);
+    ) -> TransactionWatcher {
+        let (updates_report, rx) = async_channel::bounded(channel_size);
 
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::SubmitTransaction {
-                transaction_bytes,
-                updates_report: Some(updates_report),
-            })
-            .await
-            .unwrap();
+        self.send_to_background(ToBackground::SubmitTransaction {
+            transaction_bytes,
+            updates_report: Some(updates_report),
+        })
+        .await;
 
-        rx
+        TransactionWatcher {
+            rx,
+            has_yielded_drop_reason: false,
+            _dummy_keep_alive: self.to_background.lock().await.clone(),
+        }
     }
 
     /// Similar to [`TransactionsService::submit_and_watch_transaction`], but doesn't return any
     /// channel.
     pub async fn submit_transaction(&self, transaction_bytes: Vec<u8>) {
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::SubmitTransaction {
-                transaction_bytes,
-                updates_report: None,
-            })
-            .await
-            .unwrap();
+        self.send_to_background(ToBackground::SubmitTransaction {
+            transaction_bytes,
+            updates_report: None,
+        })
+        .await;
+    }
+
+    async fn send_to_background(&self, message: ToBackground) {
+        let mut lock = self.to_background.lock().await;
+
+        if lock.is_closed() {
+            let log_target = self.background_task_config.log_target.clone();
+            let (tx, rx) = async_channel::bounded(8);
+            let platform = self.background_task_config.platform.clone();
+            let task = background_task(self.background_task_config.clone(), rx);
+            self.background_task_config.platform.spawn_task(
+                log_target.clone().into(),
+                async move {
+                    // Sleep for a bit in order to avoid potential infinite loops
+                    // of repeated crashing.
+                    platform.sleep(Duration::from_secs(2)).await;
+                    log!(&platform, Debug, &log_target, "restart");
+                    task.await;
+                    log!(&platform, Debug, &log_target, "shutdown");
+                },
+            );
+            *lock = tx;
+        }
+
+        // Note that the background task might have crashed already at this point, so errors can
+        // be expected.
+        let _ = lock.send(message).await;
+    }
+}
+
+/// Returned by [`TransactionsService::submit_and_watch_transaction`].
+#[pin_project::pin_project]
+pub struct TransactionWatcher {
+    /// Channel connected to the background task.
+    #[pin]
+    rx: async_channel::Receiver<TransactionStatus>,
+    /// `true` if a [`TransactionStatus::Dropped`] has already been yielded.
+    has_yielded_drop_reason: bool,
+    /// Dummy copy of [`TransactionsService::to_background`] that guarantees that the background
+    /// stays alive.
+    _dummy_keep_alive: async_channel::Sender<ToBackground>,
+}
+
+impl TransactionWatcher {
+    /// Returns the next status update of the transaction.
+    ///
+    /// The last event is always a [`TransactionStatus::Dropped`], and then `None` is yielded
+    /// repeatedly forever.
+    pub async fn next(self: pin::Pin<&mut Self>) -> Option<TransactionStatus> {
+        let mut this = self.project();
+        if *this.has_yielded_drop_reason {
+            debug_assert!(this.rx.is_closed() || this.rx.next().await.is_none());
+            return None;
+        }
+
+        match this.rx.next().await {
+            Some(update) => {
+                if matches!(update, TransactionStatus::Dropped(_)) {
+                    debug_assert!(!*this.has_yielded_drop_reason);
+                    *this.has_yielded_drop_reason = true;
+                }
+                Some(update)
+            }
+            None => {
+                *this.has_yielded_drop_reason = true;
+                Some(TransactionStatus::Dropped(DropReason::Crashed))
+            }
+        }
     }
 }
 
@@ -273,17 +343,42 @@ pub enum DropReason {
 
     /// Transaction has been dropped because we have failed to validate it.
     ValidateError(ValidateTransactionError),
+
+    /// Transaction service background task has crashed.
+    Crashed,
 }
 
 /// Failed to check the validity of a transaction.
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ValidateTransactionError {
-    /// Error during the network request.
-    #[display(fmt = "{_0}")]
-    Call(runtime_service::RuntimeCallError),
-    /// Error during the validation runtime call.
-    #[display(fmt = "{_0}")]
-    Validation(validate::Error),
+    /// The runtime of the requested block is invalid.
+    InvalidRuntime(runtime_service::RuntimeError),
+
+    /// The runtime doesn't implement the API required to validate transactions.
+    ApiVersionRequirementUnfulfilled,
+
+    /// Runtime service has crashed while the call was in progress.
+    Crash,
+
+    /// Error during the execution of the runtime.
+    ///
+    /// There is no point in trying to validate the transaction call again, as it would result
+    /// in the same error.
+    #[display(fmt = "Error during the execution of the runtime: {_0}")]
+    Execution(runtime_service::RuntimeCallExecutionError),
+
+    /// Error trying to access the storage required for the runtime call.
+    ///
+    /// Because these errors are non-fatal, the operation is attempted multiple times, and as such
+    /// there can be multiple errors.
+    ///
+    /// Trying the same transaction again might succeed.
+    #[display(fmt = "Error trying to access the storage required for the runtime call")]
+    // TODO: better display?
+    Inaccessible(Vec<runtime_service::RuntimeCallInaccessibleError>),
+
+    /// Error while decoding the output of the runtime.
+    OutputDecodeError(validate::DecodeError),
 }
 
 #[derive(Debug, Clone)]
@@ -302,35 +397,37 @@ enum ValidationError {
 enum ToBackground {
     SubmitTransaction {
         transaction_bytes: Vec<u8>,
-        updates_report: Option<mpsc::Sender<TransactionStatus>>,
+        updates_report: Option<async_channel::Sender<TransactionStatus>>,
     },
 }
 
-/// Configuration for [`background_task`̀].
+/// Configuration for [`background_task`].
+#[derive(Clone)]
 struct BackgroundTaskConfig<TPlat: PlatformRef> {
     log_target: String,
     platform: TPlat,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_index: usize,
-    from_foreground: mpsc::Receiver<ToBackground>,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
     max_concurrent_validations: usize,
 }
 
 /// Background task running in parallel of the front service.
-async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TPlat>) {
+async fn background_task<TPlat: PlatformRef>(
+    config: BackgroundTaskConfig<TPlat>,
+    from_foreground: async_channel::Receiver<ToBackground>,
+) {
     let transactions_capacity = cmp::min(8, config.max_pending_transactions);
     let blocks_capacity = 32;
+    let mut from_foreground = pin::pin!(from_foreground);
 
     let mut worker = Worker {
         platform: config.platform,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         network_service: config.network_service,
-        network_chain_index: config.network_chain_index,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity,
             blocks_capacity,
@@ -350,19 +447,47 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
         // service. This happens when there is a gap in the blocks, either intentionally (e.g.
         // after a Grandpa warp sync) or because the transactions service was too busy to process
         // the new blocks.
+        let mut subscribe_all = {
+            let sub_future = async {
+                Some(
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of the transactions service resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
+                    worker
+                        .runtime_service
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+                        .await,
+                )
+            };
 
-        // The buffer size should be large enough so that, if the CPU is busy, it doesn't
-        // become full before the execution of the transactions service resumes.
-        // The maximum number of pinned block is ignored, as this maximum is a way to avoid
-        // malicious behaviors. This code is by definition not considered malicious.
-        let mut subscribe_all = worker
-            .runtime_service
-            .subscribe_all(
-                "transactions-service",
-                32,
-                NonZeroUsize::new(usize::max_value()).unwrap(),
-            )
-            .await;
+            // Because `runtime_service.subscribe_all()` might take a long time (potentially
+            // forever), we need to process messages coming from the foreground in parallel.
+            let from_foreground = &mut from_foreground;
+            let messages_process = async move {
+                loop {
+                    match from_foreground.next().await {
+                        Some(ToBackground::SubmitTransaction {
+                            updates_report: Some(updates_report),
+                            ..
+                        }) => {
+                            let _ = updates_report
+                                .send(TransactionStatus::Dropped(DropReason::GapInChain))
+                                .await;
+                        }
+                        Some(ToBackground::SubmitTransaction { .. }) => {}
+                        None => break None,
+                    }
+                }
+            };
+
+            match sub_future.or(messages_process).await {
+                Some(s) => s,
+                None => return,
+            }
+        };
+
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
         );
@@ -408,10 +533,12 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
         worker.validations_in_progress.clear();
         worker.next_reannounce.clear();
 
-        log::debug!(
-            target: &config.log_target,
-            "Reset(new_finalized={}. dropped-transactions={{{}}})",
-            HashDisplay(&initial_finalized_block_hash),
+        log!(
+            &worker.platform,
+            Debug,
+            &config.log_target,
+            "reset",
+            new_finalized = HashDisplay(&initial_finalized_block_hash),
             dropped_transactions
         );
 
@@ -460,6 +587,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
                     // Make copies of everything in order to move the values into the future.
                     let runtime_service = worker.runtime_service.clone();
+                    let platform = worker.platform.clone();
                     let log_target = config.log_target.clone();
                     let relay_chain_sync_subscription_id = subscribe_all.new_blocks.id();
                     let scale_encoded_transaction = worker
@@ -470,6 +598,7 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     // TODO: race condition /!\ the block could be pruned and unpinned before this future starts executing
                     async move {
                         let result = validate_transaction(
+                            &platform,
                             &log_target,
                             &runtime_service,
                             relay_chain_sync_subscription_id,
@@ -483,13 +612,16 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     }
                 };
 
-                // The future that will yield the validation result is stored in the
+                // The future that will receive the validation result is stored in the
                 // `PendingTransaction`, while the future that executes the validation (and
                 // yields `()`) is stored in `validations_in_progress`.
-                let (to_execute, result_rx) = validation_future.remote_handle();
+                let (result_tx, result_rx) = oneshot::channel();
                 worker
                     .validations_in_progress
-                    .push(to_execute.map(move |()| to_start_validate).boxed());
+                    .push(Box::pin(validation_future.map(move |result| {
+                        let _ = result_tx.send(result);
+                        to_start_validate
+                    })));
                 let tx = worker
                     .pending_transactions
                     .transaction_user_data_mut(to_start_validate)
@@ -517,11 +649,13 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 let (tx_body, mut transaction) =
                     worker.pending_transactions.remove_transaction(tx_id);
 
-                log::debug!(
-                    target: &config.log_target,
-                    "Discarded(tx_hash={}, error={:?})",
-                    HashDisplay(&blake2_hash(&tx_body)),
-                    error,
+                log!(
+                    &worker.platform,
+                    Debug,
+                    &config.log_target,
+                    "discarded",
+                    tx_hash = HashDisplay(&blake2_hash(&tx_body)),
+                    ?error
                 );
 
                 transaction.update_status(TransactionStatus::Dropped(match error {
@@ -570,9 +704,9 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     let download_future = worker.sync_service.clone().block_query(
                         block_number,
                         block_hash,
-                        protocol::BlocksRequestFields {
+                        codec::BlocksRequestFields {
                             body: true,
-                            header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
+                            header: true, // TODO: must be true in order to avoid an error being generated, fix this in sync service
                             justifications: false,
                         },
                         3,
@@ -580,8 +714,12 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                         NonZeroU32::new(3).unwrap(),
                     );
 
-                    async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) }
-                        .boxed()
+                    Box::pin(async move {
+                        (
+                            block_hash,
+                            download_future.await.and_then(|b| b.body.ok_or(())),
+                        )
+                    })
                 });
 
                 worker
@@ -590,10 +728,12 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     .unwrap()
                     .downloading = true;
 
-                log::debug!(
-                    target: &config.log_target,
-                    "BlockDownloads <= Start(block={})",
-                    HashDisplay(&block_hash)
+                log!(
+                    &worker.platform,
+                    Debug,
+                    &config.log_target,
+                    "blocks-download-started",
+                    block = HashDisplay(&block_hash)
                 );
             }
 
@@ -601,16 +741,15 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
             for block in worker.pending_transactions.prune_finalized_with_body() {
                 // All blocks in `pending_transactions` are pinned within the runtime service.
                 // Unpin them when they're removed.
-                subscribe_all
-                    .new_blocks
-                    .unpin_block(&block.block_hash)
-                    .await;
+                subscribe_all.new_blocks.unpin_block(block.block_hash).await;
 
-                log::debug!(
-                    target: &config.log_target,
-                    "Finalized(block={}, body-transactions={{{}}})",
-                    HashDisplay(&block.block_hash),
-                    block
+                log!(
+                    &worker.platform,
+                    Debug,
+                    &config.log_target,
+                    "finalized",
+                    block = HashDisplay(&block.block_hash),
+                    body_transactions = block
                         .included_transactions
                         .iter()
                         .map(|tx| HashDisplay(&blake2_hash(&tx.scale_encoding)).to_string())
@@ -630,62 +769,116 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                 }
             }
 
-            futures_util::select! {
-                notification = subscribe_all.new_blocks.next().fuse() => {
-                    match notification {
-                        Some(runtime_service::Notification::Block(new_block)) => {
-                            let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
-                            worker.pending_transactions.add_block(
-                                header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
-                                &new_block.parent_hash,
-                                Block {
-                                    scale_encoded_header: new_block.scale_encoded_header,
-                                    failed_downloads: 0,
-                                    downloading: false,
-                                },
-                            );
-                            if new_block.is_new_best {
-                                worker.set_best_block(&config.log_target, &hash);
-                            }
-                        },
-                        Some(runtime_service::Notification::Finalized { hash, best_block_hash, .. }) => {
-                            worker.set_best_block(&config.log_target, &best_block_hash);
-                            for pruned in worker
-                                .pending_transactions
-                                .set_finalized_block(&hash)
-                            {
-                                // All blocks in `pending_transactions` are pinned within the
-                                // runtime service. Unpin them when they're removed.
-                                subscribe_all.new_blocks.unpin_block(&pruned.0).await;
+            enum WakeUpReason {
+                Notification(Option<runtime_service::Notification>),
+                BlockDownloadFinished([u8; 32], Result<Vec<Vec<u8>>, ()>),
+                MustMaybeReannounce(light_pool::TransactionId),
+                MaybeValidated(light_pool::TransactionId),
+                ForegroundMessage(Option<ToBackground>),
+            }
 
-                                // Note that we could in principle interrupt any on-going
-                                // download of that block, but it is not worth the effort.
-                            }
+            let wake_up_reason: WakeUpReason = {
+                async { WakeUpReason::Notification(subscribe_all.new_blocks.next().await) }
+                    .or(async {
+                        if !worker.block_downloads.is_empty() {
+                            let (block_hash, result) =
+                                worker.block_downloads.select_next_some().await;
+                            WakeUpReason::BlockDownloadFinished(block_hash, result)
+                        } else {
+                            future::pending().await
+                        }
+                    })
+                    .or(async {
+                        if !worker.next_reannounce.is_empty() {
+                            WakeUpReason::MustMaybeReannounce(
+                                worker.next_reannounce.select_next_some().await,
+                            )
+                        } else {
+                            future::pending().await
+                        }
+                    })
+                    .or(async {
+                        if !worker.validations_in_progress.is_empty() {
+                            WakeUpReason::MaybeValidated(
+                                worker.validations_in_progress.select_next_some().await,
+                            )
+                        } else {
+                            future::pending().await
+                        }
+                    })
+                    .or(async { WakeUpReason::ForegroundMessage(from_foreground.next().await) })
+                    .await
+            };
+
+            match wake_up_reason {
+                WakeUpReason::Notification(Some(runtime_service::Notification::Block(
+                    new_block,
+                ))) => {
+                    let hash =
+                        header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
+                    worker.pending_transactions.add_block(
+                        header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                        &new_block.parent_hash,
+                        Block {
+                            scale_encoded_header: new_block.scale_encoded_header,
+                            failed_downloads: 0,
+                            downloading: false,
                         },
-                        Some(runtime_service::Notification::BestBlockChanged { hash }) => {
-                            worker.set_best_block(&config.log_target, &hash);
-                        },
-                        None => continue 'channels_rebuild
+                    );
+                    if new_block.is_new_best {
+                        worker.set_best_block(&config.log_target, &hash);
                     }
-                },
+                }
+                WakeUpReason::Notification(Some(runtime_service::Notification::Finalized {
+                    hash,
+                    best_block_hash,
+                    ..
+                })) => {
+                    worker.set_best_block(&config.log_target, &best_block_hash);
+                    for pruned in worker.pending_transactions.set_finalized_block(&hash) {
+                        // All blocks in `pending_transactions` are pinned within the
+                        // runtime service. Unpin them when they're removed.
+                        subscribe_all.new_blocks.unpin_block(pruned.0).await;
 
-                download = worker.block_downloads.select_next_some() => {
+                        // Note that we could in principle interrupt any on-going
+                        // download of that block, but it is not worth the effort.
+                    }
+                }
+                WakeUpReason::Notification(Some(
+                    runtime_service::Notification::BestBlockChanged { hash },
+                )) => {
+                    worker.set_best_block(&config.log_target, &hash);
+                }
+                WakeUpReason::Notification(None) => continue 'channels_rebuild,
+
+                WakeUpReason::BlockDownloadFinished(block_hash, mut block_body) => {
                     // A block body download has finished, successfully or not.
-                    let (block_hash, block_body) = download;
-
-                    let mut block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
+                    let block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
                         None => {
                             // It is possible that this block has been discarded because a sibling
                             // or uncle has been finalized. This is a normal situation.
-                            continue
-                        },
+                            continue;
+                        }
                     };
 
                     debug_assert!(block.downloading);
                     block.downloading = false;
-                    if block_body.is_err() {
-                        block.failed_downloads = block.failed_downloads.saturating_add(1);
+
+                    // Make sure that the downloaded body is the one of this block, otherwise
+                    // we consider the download as failed.
+                    if let Ok(body) = &block_body {
+                        // TODO: unwrap the decoding?! is that correct?
+                        if header::extrinsics_root(body)
+                            != *header::decode(
+                                &block.scale_encoded_header,
+                                worker.sync_service.block_number_bytes(),
+                            )
+                            .unwrap()
+                            .extrinsics_root
+                        {
+                            block_body = Err(());
+                        }
                     }
 
                     if let Ok(block_body) = block_body {
@@ -695,40 +888,57 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                             .set_block_body(&block_hash, block_body.into_iter())
                             .collect::<Vec<_>>();
 
-                        log::debug!(
-                            target: &config.log_target,
-                            "BlockDownloads => Success(block={}, included-transactions={{{}}})",
-                            HashDisplay(&block_hash),
-                            included_transactions.iter()
-                                .map(|(id, _)| HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "blocks-download-success",
+                            block = HashDisplay(&block_hash),
+                            included_transactions = included_transactions
+                                .iter()
+                                .map(|(id, _)| HashDisplay(&blake2_hash(
+                                    worker.pending_transactions.scale_encoding(*id).unwrap()
+                                ))
+                                .to_string())
                                 .join(", ")
                         );
 
                         for (tx_id, body_index) in included_transactions {
                             debug_assert!(body_index < block_body_size);
-                            let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+                            let tx = worker
+                                .pending_transactions
+                                .transaction_user_data_mut(tx_id)
+                                .unwrap();
                             // We assume that there's no more than 2<<32 transactions per block.
                             let body_index = u32::try_from(body_index).unwrap();
-                            tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
+                            tx.update_status(TransactionStatus::IncludedBlockUpdate {
+                                block_hash: Some((block_hash, body_index)),
+                            });
                         }
-
                     } else {
-                        log::debug!(
-                            target: &config.log_target,
-                            "BlockDownloads => Failed(block={})",
-                            HashDisplay(&block_hash)
+                        block.failed_downloads = block.failed_downloads.saturating_add(1);
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "blocks-download-failure",
+                            block = HashDisplay(&block_hash)
                         );
                     }
-                },
+                }
 
-                maybe_reannounce_tx_id = worker.next_reannounce.select_next_some() => {
+                WakeUpReason::MustMaybeReannounce(maybe_reannounce_tx_id) => {
                     // A transaction reannounce future has finished. This doesn't necessarily mean
                     // that a validation actually needs to be reannounced. The provided
                     // `maybe_reannounce_tx_id` is a hint as to which transaction might need to be
                     // reannounced, but without a strong guarantee.
 
                     // `continue` if transaction doesn't exist. False positive.
-                    if worker.pending_transactions.transaction_user_data(maybe_reannounce_tx_id).is_none() {
+                    if worker
+                        .pending_transactions
+                        .transaction_user_data(maybe_reannounce_tx_id)
+                        .is_none()
+                    {
                         continue;
                     }
 
@@ -736,14 +946,21 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     // included.
                     // TODO: if best block changes, we would need to reset all the re-announce period of all transactions, awkward!
                     // TODO: also, if this is false, then the transaction might never be re-announced ever again
-                    if worker.pending_transactions.is_included_best_chain(maybe_reannounce_tx_id) ||
-                        !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id)
+                    if worker
+                        .pending_transactions
+                        .is_included_best_chain(maybe_reannounce_tx_id)
+                        || !worker
+                            .pending_transactions
+                            .is_valid_against_best_block(maybe_reannounce_tx_id)
                     {
                         continue;
                     }
 
                     let now = worker.platform.now();
-                    let tx = worker.pending_transactions.transaction_user_data_mut(maybe_reannounce_tx_id).unwrap();
+                    let tx = worker
+                        .pending_transactions
+                        .transaction_user_data_mut(maybe_reannounce_tx_id)
+                        .unwrap();
                     if tx.when_reannounce > now {
                         continue;
                     }
@@ -754,36 +971,48 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     tx.when_reannounce = now + Duration::from_secs(5);
                     worker.next_reannounce.push({
                         let platform = worker.platform.clone();
-                        async move {
+                        Box::pin(async move {
                             platform.sleep(Duration::from_secs(5)).await;
                             maybe_reannounce_tx_id
-                        }.boxed()
+                        })
                     });
 
                     // Perform the announce.
-                    let peers_sent = worker.network_service
+                    let peers_sent = worker
+                        .network_service
                         .clone()
                         .announce_transaction(
-                            worker.network_chain_index,
-                            worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
+                            worker
+                                .pending_transactions
+                                .scale_encoding(maybe_reannounce_tx_id)
+                                .unwrap(),
                         )
                         .await;
-                    log::debug!(
-                        target: &config.log_target,
-                        "NetworkService <= Announced(tx={}, peers={{{}}})",
-                        HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap())),
-                        peers_sent.iter().join(", ")
+                    log!(
+                        &worker.platform,
+                        Debug,
+                        &config.log_target,
+                        "announced-to-network",
+                        transaction = HashDisplay(&blake2_hash(
+                            worker
+                                .pending_transactions
+                                .scale_encoding(maybe_reannounce_tx_id)
+                                .unwrap()
+                        )),
+                        peers = peers_sent.iter().join(", ")
                     );
 
                     // TODO: is this correct? and what should we do if announcing the same transaction multiple times? is it cumulative? `Broadcast` isn't super well documented
                     if !peers_sent.is_empty() {
-                        worker.pending_transactions
-                            .transaction_user_data_mut(maybe_reannounce_tx_id).unwrap()
+                        worker
+                            .pending_transactions
+                            .transaction_user_data_mut(maybe_reannounce_tx_id)
+                            .unwrap()
                             .update_status(TransactionStatus::Broadcast(peers_sent));
                     }
-                },
+                }
 
-                maybe_validated_tx_id = worker.validations_in_progress.select_next_some() => {
+                WakeUpReason::MaybeValidated(maybe_validated_tx_id) => {
                     // A transaction validation future has finished. This doesn't necessarily mean
                     // that a validation has actually finished. The provided
                     // `maybe_validated_tx_id` is a hint as to which transaction might have
@@ -791,101 +1020,137 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
 
                     // Try extract the validation result of this transaction, or `continue` if it
                     // is a false positive.
-                    let (block_hash, validation_result) = match worker.pending_transactions.transaction_user_data_mut(maybe_validated_tx_id) {
-                        None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
-                        Some(tx) => match tx.validation_in_progress.as_mut().and_then(|f| f.now_or_never()) {
-                            None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
-                            Some(result) => {
+                    let (block_hash, validation_result) = match worker
+                        .pending_transactions
+                        .transaction_user_data_mut(maybe_validated_tx_id)
+                    {
+                        None => continue, // Normal. `maybe_validated_tx_id` is just a hint.
+                        Some(tx) => match tx
+                            .validation_in_progress
+                            .as_mut()
+                            .and_then(|f| f.now_or_never())
+                        {
+                            None => continue,               // Normal. `maybe_validated_tx_id` is just a hint.
+                            Some(Err(_)) => unreachable!(), // Validations are never interrupted.
+                            Some(Ok(result)) => {
                                 tx.validation_in_progress = None;
                                 result
-                            },
+                            }
                         },
                     };
 
-                    let tx_hash = blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap());
+                    let tx_hash = blake2_hash(
+                        worker
+                            .pending_transactions
+                            .scale_encoding(maybe_validated_tx_id)
+                            .unwrap(),
+                    );
 
                     // The validation is made using the runtime service, while the state
                     // of the chain is tracked using the sync service. As such, it is
                     // possible for the validation to have been performed against a block
                     // that has already been finalized and removed from the pool.
                     if !worker.pending_transactions.has_block(&block_hash) {
-                        log::debug!(
-                            target: &config.log_target,
-                            "TxValidations => ObsoleteBlock(tx={}, block={})",
-                            HashDisplay(&tx_hash),
-                            HashDisplay(&block_hash)
+                        log!(
+                            &worker.platform,
+                            Debug,
+                            &config.log_target,
+                            "transaction-validation-obsolete-block",
+                            transaction = HashDisplay(&tx_hash),
+                            block = HashDisplay(&block_hash)
                         );
                         continue;
                     }
 
                     let validation_result = match validation_result {
                         Ok(result) => {
-                            log::debug!(
-                                target: &config.log_target,
-                                "TxValidations => Success(tx={}, block={}, priority={}, longevity={}, propagate={:?})",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                result.priority,
-                                result.longevity,
-                                result.propagate,
+                            log!(
+                                &worker.platform,
+                                Debug,
+                                &config.log_target,
+                                "transaction-validation-success",
+                                transaction = HashDisplay(&tx_hash),
+                                block = HashDisplay(&block_hash),
+                                priority = result.priority,
+                                longevity = result.longevity,
+                                propagate = ?result.propagate,
                             );
 
-                            log::info!(
-                                target: &config.log_target,
-                                "Successfully validated transaction {}",
-                                HashDisplay(&tx_hash)
+                            log!(
+                                &worker.platform,
+                                Info,
+                                &config.log_target,
+                                format!(
+                                    "Successfully validated transaction {}",
+                                    HashDisplay(&tx_hash)
+                                )
                             );
 
                             worker
                                 .pending_transactions
-                                .transaction_user_data_mut(maybe_validated_tx_id).unwrap_or_else(|| unreachable!())
+                                .transaction_user_data_mut(maybe_validated_tx_id)
+                                .unwrap_or_else(|| unreachable!())
                                 .update_status(TransactionStatus::Validated);
 
                             // Schedule this transaction for announcement.
-                            worker.next_reannounce.push(async move {
-                                maybe_validated_tx_id
-                            }.boxed());
+                            worker
+                                .next_reannounce
+                                .push(Box::pin(async move { maybe_validated_tx_id }));
 
                             Ok(result)
                         }
                         Err(ValidationError::ObsoleteSubscription) => {
                             // Runtime service subscription is obsolete. Throw away everything and
                             // rebuild it.
-                            continue 'channels_rebuild
+                            continue 'channels_rebuild;
                         }
                         Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(error))) => {
-                            log::debug!(
-                                target: &config.log_target,
-                                "TxValidations => Invalid(tx={}, block={}, error={:?})",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                error,
+                            log!(
+                                &worker.platform,
+                                Debug,
+                                &config.log_target,
+                                "transaction-validation-invalid-tx",
+                                transaction = HashDisplay(&tx_hash),
+                                block = HashDisplay(&block_hash),
+                                ?error,
                             );
 
-                            log::warn!(
-                                target: &config.log_target,
-                                "Transaction {} invalid against block {}: {}",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                error,
+                            log!(
+                                &worker.platform,
+                                Warn,
+                                &config.log_target,
+                                format!(
+                                    "Transaction {} invalid against block {}: {}",
+                                    HashDisplay(&tx_hash),
+                                    HashDisplay(&block_hash),
+                                    error,
+                                )
                             );
 
                             Err(InvalidOrError::Invalid(error))
                         }
-                        Err(ValidationError::InvalidOrError(InvalidOrError::ValidateError(error))) => {
-                            log::debug!(
-                                target: &config.log_target,
-                                "TxValidations => Error(tx={}, block={}, error={:?})",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                error,
+                        Err(ValidationError::InvalidOrError(InvalidOrError::ValidateError(
+                            error,
+                        ))) => {
+                            log!(
+                                &worker.platform,
+                                Debug,
+                                &config.log_target,
+                                "transaction-validation-error",
+                                transaction = HashDisplay(&tx_hash),
+                                block = HashDisplay(&block_hash),
+                                ?error,
                             );
 
-                            log::warn!(
-                                target: &config.log_target,
-                                "Failed to validate transaction {}: {}",
-                                HashDisplay(&tx_hash),
-                                error
+                            log!(
+                                &worker.platform,
+                                Warn,
+                                &config.log_target,
+                                format!(
+                                    "Failed to validate transaction {}: {}",
+                                    HashDisplay(&tx_hash),
+                                    error
+                                )
                             );
 
                             Err(InvalidOrError::ValidateError(error))
@@ -895,62 +1160,66 @@ async fn background_task<TPlat: PlatformRef>(mut config: BackgroundTaskConfig<TP
                     // No matter whether the validation is successful, we store the result in
                     // the transactions pool. This will later be picked up by the code that removes
                     // invalid transactions from the pool.
-                    worker.pending_transactions
-                        .set_validation_result(maybe_validated_tx_id, &block_hash, validation_result);
-                },
+                    // TODO: shouldn't mark a transaction as invalid if it failed due to network errors
+                    worker.pending_transactions.set_validation_result(
+                        maybe_validated_tx_id,
+                        &block_hash,
+                        validation_result,
+                    );
+                }
 
-                message = config.from_foreground.next().fuse() => {
-                    let message = match message {
-                        Some(msg) => msg,
-                        None => return,
-                    };
+                WakeUpReason::ForegroundMessage(None) => return,
 
-                    match message {
-                        ToBackground::SubmitTransaction {
-                            transaction_bytes,
-                            updates_report,
-                        } => {
-                            // Handle the situation where the same transaction has already been
-                            // submitted in the pool before.
-                            let existing_tx_id = worker.pending_transactions
-                                .find_transaction(&transaction_bytes)
-                                .next();
-                            if let Some(existing_tx_id) = existing_tx_id {
-                                let existing_tx = worker.pending_transactions
-                                    .transaction_user_data_mut(existing_tx_id)
-                                    .unwrap();
-                                if let Some(updates_report) = updates_report {
-                                    existing_tx.add_status_update(updates_report);
-                                }
-                                continue;
-                            }
-
-                            // We intentionally limit the number of transactions in the pool,
-                            // and immediately drop new transactions of this limit is reached.
-                            if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
-                                if let Some(mut updates_report) = updates_report {
-                                    let _ = updates_report.try_send(TransactionStatus::Dropped(DropReason::MaxPendingTransactionsReached));
-                                }
-                                continue;
-                            }
-
-                            // Success path. Inserting in pool.
-                            worker
-                                .pending_transactions
-                                .add_unvalidated(transaction_bytes, PendingTransaction {
-                                    when_reannounce: worker.platform.now(),
-                                    status_update: {
-                                        let mut vec = Vec::with_capacity(1);
-                                        if let Some(updates_report) = updates_report {
-                                            vec.push(updates_report);
-                                        }
-                                        vec
-                                    },
-                                    latest_status: None,
-                                    validation_in_progress: None,
-                                });
+                WakeUpReason::ForegroundMessage(Some(ToBackground::SubmitTransaction {
+                    transaction_bytes,
+                    updates_report,
+                })) => {
+                    // Handle the situation where the same transaction has already been
+                    // submitted in the pool before.
+                    let existing_tx_id = worker
+                        .pending_transactions
+                        .find_transaction(&transaction_bytes)
+                        .next();
+                    if let Some(existing_tx_id) = existing_tx_id {
+                        let existing_tx = worker
+                            .pending_transactions
+                            .transaction_user_data_mut(existing_tx_id)
+                            .unwrap();
+                        if let Some(updates_report) = updates_report {
+                            existing_tx.add_status_update(updates_report);
                         }
+                        continue;
                     }
+
+                    // We intentionally limit the number of transactions in the pool,
+                    // and immediately drop new transactions of this limit is reached.
+                    if worker.pending_transactions.num_transactions()
+                        >= worker.max_pending_transactions
+                    {
+                        if let Some(updates_report) = updates_report {
+                            let _ = updates_report.try_send(TransactionStatus::Dropped(
+                                DropReason::MaxPendingTransactionsReached,
+                            ));
+                        }
+                        continue;
+                    }
+
+                    // Success path. Inserting in pool.
+                    worker.pending_transactions.add_unvalidated(
+                        transaction_bytes,
+                        PendingTransaction {
+                            when_reannounce: worker.platform.now(),
+                            status_update: {
+                                let mut vec = Vec::with_capacity(1);
+                                if let Some(updates_report) = updates_report {
+                                    vec.push(updates_report);
+                                }
+                                vec
+                            },
+                            latest_status: None,
+                            validation_in_progress: None,
+                        },
+                    );
                 }
             }
         }
@@ -969,10 +1238,7 @@ struct Worker<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// How to gossip transactions.
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-
-    /// Which chain to use in combination with the [`Worker::network_service`].
-    network_chain_index: usize,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// List of pending transactions.
     ///
@@ -1032,15 +1298,27 @@ impl<TPlat: PlatformRef> Worker<TPlat> {
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
 
-        log::debug!(
-            target: log_target,
-            "BestChainUpdate(new-best-block={}, included-transactions={{{}}}, retracted-transactions={{{}}})",
-            HashDisplay(new_best_block_hash),
-            updates.included_transactions.iter()
-                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+        log!(
+            &self.platform,
+            Debug,
+            &log_target,
+            "best-chain-update",
+            new_best_block = HashDisplay(new_best_block_hash),
+            included_transactions = updates
+                .included_transactions
+                .iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(
+                    self.pending_transactions.scale_encoding(*id).unwrap()
+                ))
+                .to_string())
                 .join(", "),
-            updates.retracted_transactions.iter()
-                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+            retracted_transactions = updates
+                .retracted_transactions
+                .iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(
+                    self.pending_transactions.scale_encoding(*id).unwrap()
+                ))
+                .to_string())
                 .join(", ")
         );
 
@@ -1088,7 +1366,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
     when_reannounce: TPlat::Instant,
 
     /// List of channels that should receive changes to the transaction status.
-    status_update: Vec<mpsc::Sender<TransactionStatus>>,
+    status_update: Vec<async_channel::Sender<TransactionStatus>>,
 
     /// Latest known status of the transaction. Used when a new sender is added to
     /// [`PendingTransaction::status_update`].
@@ -1096,7 +1374,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
 
     /// If `Some`, will receive the result of the validation of the transaction.
     validation_in_progress: Option<
-        future::RemoteHandle<(
+        oneshot::Receiver<(
             [u8; 32],
             Result<validate::ValidTransaction, ValidationError>,
         )>,
@@ -1104,7 +1382,7 @@ struct PendingTransaction<TPlat: PlatformRef> {
 }
 
 impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
-    fn add_status_update(&mut self, mut channel: mpsc::Sender<TransactionStatus>) {
+    fn add_status_update(&mut self, channel: async_channel::Sender<TransactionStatus>) {
         if let Some(latest_status) = &self.latest_status {
             if channel.try_send(latest_status.clone()).is_err() {
                 return;
@@ -1116,7 +1394,7 @@ impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
 
     fn update_status(&mut self, status: TransactionStatus) {
         for n in 0..self.status_update.len() {
-            let mut channel = self.status_update.swap_remove(n);
+            let channel = self.status_update.swap_remove(n);
             if channel.try_send(status.clone()).is_ok() {
                 self.status_update.push(channel);
             }
@@ -1131,6 +1409,7 @@ impl<TPlat: PlatformRef> PendingTransaction<TPlat> {
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
 async fn validate_transaction<TPlat: PlatformRef>(
+    platform: &TPlat,
     log_target: &str,
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_sync_subscription_id: runtime_service::SubscriptionId,
@@ -1139,22 +1418,15 @@ async fn validate_transaction<TPlat: PlatformRef>(
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
 ) -> Result<validate::ValidTransaction, ValidationError> {
-    let runtime_lock = match relay_chain_sync
-        .pinned_block_runtime_access(relay_chain_sync_subscription_id, &block_hash)
-        .await
-    {
-        Ok(l) => l,
-        Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
-            return Err(ValidationError::ObsoleteSubscription)
-        }
-    };
-
-    log::debug!(
-        target: log_target,
-        "TxValidations <= Start(tx={}, block={}, block_height={})",
-        HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
-        HashDisplay(runtime_lock.block_hash()),
-        header::decode(
+    // TODO: move somewhere else?
+    log!(
+        platform,
+        Debug,
+        &log_target,
+        "transaction-validation-started",
+        transaction = HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
+        block = HashDisplay(&block_hash),
+        block_height = header::decode(
             block_scale_encoded_header,
             relay_chain_sync.block_number_bytes()
         )
@@ -1163,123 +1435,77 @@ async fn validate_transaction<TPlat: PlatformRef>(
         .unwrap_or_else(|| "unknown".to_owned())
     );
 
-    let block_hash = *runtime_lock.block_hash();
-    let (runtime_call_lock, runtime) = runtime_lock
-        .start(
-            validate::VALIDATION_FUNCTION_NAME,
-            // TODO: don't hardcode v3 but determine parameters dynamically from the runtime
-            validate::validate_transaction_runtime_parameters_v3(
-                iter::once(scale_encoded_transaction.as_ref()),
-                source,
-                &block_hash,
-            ),
-            1,
-            Duration::from_secs(8),
-            NonZeroU32::new(1).unwrap(),
-        )
+    let (pinned_runtime, block_state_root_hash, block_number) = match relay_chain_sync
+        .pin_pinned_block_runtime(relay_chain_sync_subscription_id, block_hash)
         .await
-        .map_err(ValidateTransactionError::Call)
-        .map_err(InvalidOrError::ValidateError)
-        .map_err(ValidationError::InvalidOrError)?;
-
-    let mut validation_in_progress = validate::validate_transaction(validate::Config {
-        runtime,
-        scale_encoded_header: block_scale_encoded_header,
-        block_number_bytes: relay_chain_sync.block_number_bytes(),
-        scale_encoded_transaction: iter::once(scale_encoded_transaction),
-        source,
-        max_log_level: 0,
-    });
-
-    loop {
-        match validation_in_progress {
-            validate::Query::Finished {
-                result: Ok(Ok(success)),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Ok(success);
-            }
-            validate::Query::Finished {
-                result: Ok(Err(invalid)),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
-                    invalid,
-                )));
-            }
-            validate::Query::Finished {
-                result: Err(error),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Err(ValidationError::InvalidOrError(
-                    InvalidOrError::ValidateError(ValidateTransactionError::Validation(error)),
-                ));
-            }
-            validate::Query::StorageGet(get) => {
-                let storage_value = {
-                    let child_trie = get.child_trie();
-                    runtime_call_lock
-                        .storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
-                };
-                let storage_value = match storage_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                };
-                validation_in_progress =
-                    get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
-            }
-            validate::Query::ClosestDescendantMerkleValue(mv) => {
-                let merkle_value = {
-                    let child_trie = mv.child_trie();
-                    runtime_call_lock.closest_descendant_merkle_value(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        &mv.key().collect::<Vec<_>>(),
-                    )
-                };
-                let merkle_value = match merkle_value {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            validate::Query::ClosestDescendantMerkleValue(mv).into_prototype(),
-                        );
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                };
-                validation_in_progress = mv.inject_merkle_value(merkle_value);
-            }
-            validate::Query::NextKey(nk) => {
-                let next_key = {
-                    let child_trie = nk.child_trie();
-                    runtime_call_lock.next_key(
-                        child_trie.as_ref().map(|c| c.as_ref()),
-                        &nk.key().collect::<Vec<_>>(),
-                        nk.or_equal(),
-                        &nk.prefix().collect::<Vec<_>>(),
-                        nk.branch_nodes(),
-                    )
-                };
-                let next_key = match next_key {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                        return Err(ValidationError::InvalidOrError(
-                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
-                        ));
-                    }
-                };
-                validation_in_progress = nk.inject_key(next_key.map(|k| k.iter().copied()));
-            }
+    {
+        Ok(r) => r,
+        Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+            return Err(ValidationError::ObsoleteSubscription)
         }
+        Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => unreachable!(),
+    };
+
+    let runtime_call_future = relay_chain_sync.runtime_call(
+        pinned_runtime,
+        block_hash,
+        block_number,
+        block_state_root_hash,
+        validate::VALIDATION_FUNCTION_NAME.to_owned(),
+        Some(("TaggedTransactionQueue".to_owned(), 3..=3)),
+        validate::validate_transaction_runtime_parameters_v3(
+            iter::once(scale_encoded_transaction.as_ref()),
+            source,
+            &block_hash,
+        )
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        }),
+        3,
+        Duration::from_secs(8),
+        NonZeroU32::new(1).unwrap(),
+    );
+
+    let success = match runtime_call_future.await {
+        Ok(output) => output,
+        Err(runtime_service::RuntimeCallError::Execution(error)) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::Execution(error)),
+            ))
+        }
+        Err(runtime_service::RuntimeCallError::Crash) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::Crash),
+            ))
+        }
+        Err(runtime_service::RuntimeCallError::Inaccessible(errors)) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::Inaccessible(errors)),
+            ))
+        }
+        Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(ValidateTransactionError::InvalidRuntime(error)),
+            ))
+        }
+        Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+            return Err(ValidationError::InvalidOrError(
+                InvalidOrError::ValidateError(
+                    ValidateTransactionError::ApiVersionRequirementUnfulfilled,
+                ),
+            ))
+        }
+    };
+
+    match validate::decode_validate_transaction_return_value(&success.output) {
+        Ok(Ok(decoded)) => Ok(decoded),
+        Ok(Err(err)) => Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
+            err,
+        ))),
+        Err(err) => Err(ValidationError::InvalidOrError(
+            InvalidOrError::ValidateError(ValidateTransactionError::OutputDecodeError(err)),
+        )),
     }
 }
 

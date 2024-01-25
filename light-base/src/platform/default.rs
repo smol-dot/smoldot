@@ -18,66 +18,130 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
+//! Implementation of the [`PlatformRef`] trait that leverages the operating system.
+//!
+//! This module contains the [`DefaultPlatform`] struct, which implements [`PlatformRef`].
+//!
+//! The [`DefaultPlatform`] delegates the logging to the `log` crate. In order to see log
+//! messages, you should register as "logger" as documented by the `log` crate.
+//! See <https://docs.rs/log>.
+//!
+//! # Example
+//!
+//! ```rust
+//! use smoldot_light::{Client, platform::DefaultPlatform};
+//! env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+//! let client = Client::new(DefaultPlatform::new(env!("CARGO_PKG_NAME").into(), env!("CARGO_PKG_VERSION").into()));
+//! # let _: Client<_, ()> = client;  // Used in this example to infer the generic parameters of the Client
+//! ```
+//!
+
 use super::{
-    Address, ConnectError, ConnectionType, IpAddr, MultiStreamAddress, MultiStreamWebRtcConnection,
-    PlatformRef, ReadBuffer, SubstreamDirection,
+    with_buffers, Address, ConnectionType, IpAddr, LogLevel, MultiStreamAddress,
+    MultiStreamWebRtcConnection, PlatformRef, SubstreamDirection,
 };
 
-use alloc::{borrow::Cow, collections::VecDeque, sync::Arc};
-use core::{ops, pin::Pin, str, task::Poll, time::Duration};
-use futures_util::{future, AsyncRead, AsyncWrite, FutureExt as _};
+use alloc::{borrow::Cow, sync::Arc};
+use core::{
+    fmt::{self, Write as _},
+    panic,
+    pin::Pin,
+    str,
+    time::Duration,
+};
+use futures_util::{future, FutureExt as _};
 use smoldot::libp2p::websocket;
-use std::{io::IoSlice, net::SocketAddr};
+use std::{
+    io,
+    net::SocketAddr,
+    thread,
+    time::{Instant, UNIX_EPOCH},
+};
 
 /// Implementation of the [`PlatformRef`] trait that leverages the operating system.
 pub struct DefaultPlatform {
     client_name: String,
     client_version: String,
+    tasks_executor: Arc<smol::Executor<'static>>,
+    shutdown_notify: event_listener::Event,
 }
 
 impl DefaultPlatform {
+    /// Creates a new [`DefaultPlatform`].
+    ///
+    /// This function spawns threads in order to execute the background tasks that will later be
+    /// spawned.
+    ///
+    /// Must be passed as "client name" and "client version" that are used in various places
+    /// such as to answer some JSON-RPC requests. Passing `env!("CARGO_PKG_NAME")` and
+    /// `env!("CARGO_PKG_VERSION")` is typically very reasonable.
+    ///
+    /// # Panic
+    ///
+    /// Panics if it wasn't possible to spawn background threads.
+    ///
     pub fn new(client_name: String, client_version: String) -> Arc<Self> {
+        let tasks_executor = Arc::new(smol::Executor::new());
+        let shutdown_notify = event_listener::Event::new();
+
+        for n in 0..thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+        {
+            // Note that `listen()` must be called here (and not in the thread being spawned), as
+            // it might be notified as soon as `DefaultPlatform::new` returns.
+            let on_shutdown = shutdown_notify.listen();
+            let tasks_executor = tasks_executor.clone();
+
+            let spawn_result = thread::Builder::new()
+                .name(format!("smoldot-light-{}", n))
+                .spawn(move || smol::block_on(tasks_executor.run(on_shutdown)));
+
+            if let Err(err) = spawn_result {
+                panic!("Failed to spawn execution thread: {err}");
+            }
+        }
+
         Arc::new(DefaultPlatform {
             client_name,
             client_version,
+            tasks_executor,
+            shutdown_notify,
         })
     }
 }
 
 impl PlatformRef for Arc<DefaultPlatform> {
-    type Delay = future::BoxFuture<'static, ()>;
-    type Instant = std::time::Instant;
-    type MultiStream = std::convert::Infallible;
+    type Delay = futures_util::future::Map<smol::Timer, fn(Instant) -> ()>;
+    type Instant = Instant;
+    type MultiStream = std::convert::Infallible; // TODO: replace with `!` once stable: https://github.com/rust-lang/rust/issues/35121
     type Stream = Stream;
-    type StreamConnectFuture = future::BoxFuture<'static, Result<Self::Stream, ConnectError>>;
-    type MultiStreamConnectFuture = future::BoxFuture<
-        'static,
-        Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>,
-    >;
+    type StreamConnectFuture = future::Ready<Self::Stream>;
+    type MultiStreamConnectFuture = future::Pending<MultiStreamWebRtcConnection<Self::MultiStream>>;
+    type ReadWriteAccess<'a> = with_buffers::ReadWriteAccess<'a, Instant>;
     type StreamUpdateFuture<'a> = future::BoxFuture<'a, ()>;
+    type StreamErrorRef<'a> = &'a io::Error;
     type NextSubstreamFuture<'a> = future::Pending<Option<(Self::Stream, SubstreamDirection)>>;
 
     fn now_from_unix_epoch(&self) -> Duration {
         // Intentionally panic if the time is configured earlier than the UNIX EPOCH.
-        std::time::UNIX_EPOCH.elapsed().unwrap()
+        UNIX_EPOCH.elapsed().unwrap()
     }
 
     fn now(&self) -> Self::Instant {
-        std::time::Instant::now()
+        Instant::now()
     }
 
     fn fill_random_bytes(&self, buffer: &mut [u8]) {
-        use rand::RngCore as _;
-        rand::thread_rng().fill_bytes(buffer);
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), buffer);
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
-        smol::Timer::after(duration).map(|_| ()).boxed()
+        smol::Timer::after(duration).map(|_| ())
     }
 
     fn sleep_until(&self, when: Self::Instant) -> Self::Delay {
-        let duration = when.saturating_duration_since(std::time::Instant::now());
-        self.sleep(duration)
+        smol::Timer::at(when).map(|_| ())
     }
 
     fn spawn_task(
@@ -85,7 +149,58 @@ impl PlatformRef for Arc<DefaultPlatform> {
         _task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
     ) {
-        smol::spawn(task).detach();
+        // In order to make sure that the execution threads don't stop if there are still
+        // tasks to execute, we hold a copy of the `Arc<DefaultPlatform>` inside of the task until
+        // it is finished.
+        let _dummy_keep_alive = self.clone();
+        self.tasks_executor
+            .spawn(
+                panic::AssertUnwindSafe(async move {
+                    task.await;
+                    drop(_dummy_keep_alive);
+                })
+                .catch_unwind(),
+            )
+            .detach();
+    }
+
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        // Note that this conversion is most likely completely optimized out by the compiler due
+        // to log levels having the same numerical values.
+        let log_level = match log_level {
+            LogLevel::Error => log::Level::Error,
+            LogLevel::Warn => log::Level::Warn,
+            LogLevel::Info => log::Level::Info,
+            LogLevel::Debug => log::Level::Debug,
+            LogLevel::Trace => log::Level::Trace,
+        };
+
+        let mut message_build = String::with_capacity(128);
+        message_build.push_str(message);
+        let mut first = true;
+        for (key, value) in key_values {
+            if first {
+                let _ = write!(message_build, "; ");
+                first = false;
+            } else {
+                let _ = write!(message_build, ", ");
+            }
+            let _ = write!(message_build, "{}={}", key, value);
+        }
+
+        log::logger().log(
+            &log::RecordBuilder::new()
+                .level(log_level)
+                .target(log_target)
+                .args(format_args!("{}", message_build))
+                .build(),
+        )
     }
 
     fn client_name(&self) -> Cow<str> {
@@ -153,7 +268,7 @@ impl PlatformRef for Arc<DefaultPlatform> {
             _ => unreachable!(),
         };
 
-        Box::pin(async move {
+        let socket_future = async {
             let tcp_socket = match tcp_socket_addr {
                 either::Left(socket_addr) => smol::net::TcpStream::connect(socket_addr).await,
                 either::Right((dns, port)) => smol::net::TcpStream::connect((&dns[..], port)).await,
@@ -163,41 +278,25 @@ impl PlatformRef for Arc<DefaultPlatform> {
                 let _ = tcp_socket.set_nodelay(true);
             }
 
-            let socket: TcpOrWs = match (tcp_socket, host_if_websocket) {
-                (Ok(tcp_socket), Some(host)) => future::Either::Right(
+            match (tcp_socket, host_if_websocket) {
+                (Ok(tcp_socket), Some(host)) => {
                     websocket::websocket_client_handshake(websocket::Config {
                         tcp_socket,
                         host: &host,
                         url: "/",
                     })
                     .await
-                    .map_err(|err| ConnectError {
-                        message: format!("Failed to negotiate WebSocket: {err}"),
-                    })?,
-                ),
-                (Ok(tcp_socket), None) => future::Either::Left(tcp_socket),
-                (Err(err), _) => {
-                    return Err(ConnectError {
-                        message: format!("Failed to reach peer: {err}"),
-                    })
+                    .map(TcpOrWs::Right)
                 }
-            };
 
-            Ok(Stream {
-                socket,
-                buffers: Some((
-                    StreamReadBuffer::Open {
-                        buffer: vec![0; 16384],
-                        cursor: 0..0,
-                    },
-                    StreamWriteBuffer::Open {
-                        buffer: VecDeque::with_capacity(16384),
-                        must_close: false,
-                        must_flush: false,
-                    },
-                )),
-            })
-        })
+                (Ok(tcp_socket), None) => Ok(TcpOrWs::Left(tcp_socket)),
+                (Err(err), _) => Err(err),
+            }
+        };
+
+        future::ready(Stream(with_buffers::WithBuffers::new(Box::pin(
+            socket_future,
+        ))))
     }
 
     fn connect_multistream(&self, _address: MultiStreamAddress) -> Self::MultiStreamConnectFuture {
@@ -216,215 +315,65 @@ impl PlatformRef for Arc<DefaultPlatform> {
         match *c {}
     }
 
-    fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a> {
-        Box::pin(future::poll_fn(|cx| {
-            let Some((read_buffer, write_buffer)) = stream.buffers.as_mut() else {
-                return Poll::Pending;
-            };
+    fn read_write_access<'a>(
+        &self,
+        stream: Pin<&'a mut Self::Stream>,
+    ) -> Result<Self::ReadWriteAccess<'a>, &'a io::Error> {
+        let stream = stream.project();
+        stream.0.read_write_access(Instant::now())
+    }
 
-            // Whether the future returned by `update_stream` should return `Ready` or `Pending`.
-            let mut update_stream_future_ready = false;
-
-            if let StreamReadBuffer::Open {
-                buffer: ref mut buf,
-                ref mut cursor,
-            } = read_buffer
-            {
-                // When reading data from the socket, `poll_read` might return "EOF". In that
-                // situation, we transition to the `Closed` state, which would discard the data
-                // currently in the buffer. For this reason, we only try to read if there is no
-                // data left in the buffer.
-                if cursor.start == cursor.end {
-                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_read(cx, buf) {
-                        update_stream_future_ready = true;
-                        match result {
-                            Err(_) => {
-                                // End the stream.
-                                stream.buffers = None;
-                                return Poll::Ready(());
-                            }
-                            Ok(0) => {
-                                // EOF.
-                                *read_buffer = StreamReadBuffer::Closed;
-                            }
-                            Ok(bytes) => {
-                                *cursor = 0..bytes;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let StreamWriteBuffer::Open {
-                buffer: ref mut buf,
-                must_flush,
-                must_close,
-            } = write_buffer
-            {
-                while !buf.is_empty() {
-                    let write_queue_slices = buf.as_slices();
-                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_write_vectored(
-                        cx,
-                        &[
-                            IoSlice::new(write_queue_slices.0),
-                            IoSlice::new(write_queue_slices.1),
-                        ],
-                    ) {
-                        if !*must_close {
-                            // In the situation where the API user wants to close the writing
-                            // side, simply sending the buffered data isn't enough to justify
-                            // making the future ready.
-                            update_stream_future_ready = true;
-                        }
-
-                        match result {
-                            Err(_) => {
-                                // End the stream.
-                                stream.buffers = None;
-                                return Poll::Ready(());
-                            }
-                            Ok(bytes) => {
-                                *must_flush = true;
-                                for _ in 0..bytes {
-                                    buf.pop_front();
-                                }
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-
-                if buf.is_empty() && *must_close {
-                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_close(cx) {
-                        update_stream_future_ready = true;
-                        match result {
-                            Err(_) => {
-                                // End the stream.
-                                stream.buffers = None;
-                                return Poll::Ready(());
-                            }
-                            Ok(()) => {
-                                *write_buffer = StreamWriteBuffer::Closed;
-                            }
-                        }
-                    }
-                } else if *must_flush {
-                    if let Poll::Ready(result) = Pin::new(&mut stream.socket).poll_flush(cx) {
-                        update_stream_future_ready = true;
-                        match result {
-                            Err(_) => {
-                                // End the stream.
-                                stream.buffers = None;
-                                return Poll::Ready(());
-                            }
-                            Ok(()) => {
-                                *must_flush = false;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if update_stream_future_ready {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
+    fn wait_read_write_again<'a>(
+        &self,
+        stream: Pin<&'a mut Self::Stream>,
+    ) -> Self::StreamUpdateFuture<'a> {
+        let stream = stream.project();
+        Box::pin(stream.0.wait_read_write_again(|when| async move {
+            smol::Timer::at(when).await;
         }))
     }
+}
 
-    fn read_buffer<'a>(&self, stream: &'a mut Self::Stream) -> ReadBuffer<'a> {
-        match stream.buffers.as_ref().map(|(r, _)| r) {
-            None => ReadBuffer::Reset,
-            Some(StreamReadBuffer::Closed) => ReadBuffer::Closed,
-            Some(StreamReadBuffer::Open { buffer, cursor }) => {
-                ReadBuffer::Open(&buffer[cursor.clone()])
-            }
-        }
-    }
-
-    fn advance_read_cursor(&self, stream: &mut Self::Stream, extra_bytes: usize) {
-        let Some(StreamReadBuffer::Open { ref mut cursor, .. }) =
-            stream.buffers.as_mut().map(|(r, _)| r)
-        else {
-            assert_eq!(extra_bytes, 0);
-            return;
-        };
-
-        assert!(cursor.start + extra_bytes <= cursor.end);
-        cursor.start += extra_bytes;
-    }
-
-    fn writable_bytes(&self, stream: &mut Self::Stream) -> usize {
-        let Some(StreamWriteBuffer::Open {
-            ref mut buffer,
-            must_close: false,
-            ..
-        }) = stream.buffers.as_mut().map(|(_, w)| w)
-        else {
-            return 0;
-        };
-        buffer.capacity() - buffer.len()
-    }
-
-    fn send(&self, stream: &mut Self::Stream, data: &[u8]) {
-        debug_assert!(!data.is_empty());
-
-        // Because `writable_bytes` returns 0 if the writing side is closed, and because `data`
-        // must always have a size inferior or equal to `writable_bytes`, we know for sure that
-        // the writing side isn't closed.
-        let Some(StreamWriteBuffer::Open { ref mut buffer, .. }) =
-            stream.buffers.as_mut().map(|(_, w)| w)
-        else {
-            panic!()
-        };
-        buffer.reserve(data.len());
-        buffer.extend(data.iter().copied());
-    }
-
-    fn close_send(&self, stream: &mut Self::Stream) {
-        // It is not illegal to call this on an already-reset stream.
-        let Some((_, write_buffer)) = stream.buffers.as_mut() else {
-            return;
-        };
-
-        match write_buffer {
-            StreamWriteBuffer::Open {
-                must_close: must_close @ false,
-                ..
-            } => *must_close = true,
-            _ => {
-                // However, it is illegal to call this on a stream that was already close
-                // attempted.
-                panic!()
-            }
-        }
+impl Drop for DefaultPlatform {
+    fn drop(&mut self) {
+        self.shutdown_notify.notify(usize::max_value());
     }
 }
 
 /// Implementation detail of [`DefaultPlatform`].
-pub struct Stream {
-    socket: TcpOrWs,
-    /// Read and write buffers of the connection, or `None` if the socket has been reset.
-    buffers: Option<(StreamReadBuffer, StreamWriteBuffer)>,
-}
-
-enum StreamReadBuffer {
-    Open {
-        buffer: Vec<u8>,
-        cursor: ops::Range<usize>,
-    },
-    Closed,
-}
-
-enum StreamWriteBuffer {
-    Open {
-        buffer: VecDeque<u8>,
-        must_flush: bool,
-        must_close: bool,
-    },
-    Closed,
-}
+#[pin_project::pin_project]
+pub struct Stream(
+    #[pin]
+    with_buffers::WithBuffers<
+        future::BoxFuture<'static, Result<TcpOrWs, io::Error>>,
+        TcpOrWs,
+        Instant,
+    >,
+);
 
 type TcpOrWs = future::Either<smol::net::TcpStream, websocket::Connection<smol::net::TcpStream>>;
+
+#[cfg(test)]
+mod tests {
+    use super::{DefaultPlatform, PlatformRef as _};
+
+    #[test]
+    fn tasks_run_indefinitely() {
+        let platform_destroyed = event_listener::Event::new();
+        let (tx, mut rx) = futures_channel::oneshot::channel();
+
+        {
+            let platform = DefaultPlatform::new("".to_string(), "".to_string());
+            let when_platform_destroyed = platform_destroyed.listen();
+            platform.spawn_task("".into(), async move {
+                when_platform_destroyed.await;
+                tx.send(()).unwrap();
+            })
+        }
+
+        // The platform is destroyed, but the task must still be running.
+        assert!(matches!(rx.try_recv(), Ok(None)));
+        platform_destroyed.notify(usize::max_value());
+        assert!(matches!(smol::block_on(rx), Ok(())));
+    }
+}

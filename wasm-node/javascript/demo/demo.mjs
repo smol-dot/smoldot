@@ -19,7 +19,7 @@
 
 import * as smoldot from '../dist/mjs/index-nodejs.js';
 import { WebSocketServer } from 'ws';
-import * as process from 'node:process';
+import process from 'node:process';
 import * as fs from 'node:fs';
 import { Worker } from 'node:worker_threads';
 
@@ -29,6 +29,7 @@ const chainSpecsFiles = [
     '../../demo-chain-specs/westend.json',
     '../../demo-chain-specs/westend-westmint.json',
     '../../demo-chain-specs/polkadot.json',
+    '../../demo-chain-specs/polkadot-asset-hub.json',
     '../../demo-chain-specs/polkadot-acala.json',
     '../../demo-chain-specs/kusama.json',
     '../../demo-chain-specs/kusama-statemine.json',
@@ -58,7 +59,7 @@ worker.postMessage(port2, [port2]);
 
 const client = smoldot.start({
     portToWorker: port1,
-    maxLogLevel: 3,  // Can be increased for more verbosity
+    maxLogLevel: process.stdout.isTTY ? 3 : 4,  // Can be modified manually for more verbosity
     forbidTcp: false,
     forbidWs: false,
     forbidNonLocalWs: false,
@@ -98,6 +99,15 @@ const defaultChain = client
         console.error("Error while adding chain: " + error);
         process.exit(1);
     });
+
+// Catch SIGINT in order to call `remove` and `terminate`. This is mostly a way to test whether
+// these two functions work as intended or if they crash/panic.
+process.on("SIGINT", () => {
+    defaultChain
+        .then((chain) => chain.remove())
+        .then(() => client.terminate())
+        .then(() => process.exit(0))
+});
 
 // Uncomment if you want to test the database.
 /*defaultChain.then(async (chain) => {

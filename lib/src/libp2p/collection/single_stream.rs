@@ -21,7 +21,7 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, InboundTy, NotificationsOutErr, ShutdownCause, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, ShutdownCause, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -82,17 +82,18 @@ enum SingleStreamConnectionTaskInner<TNow> {
 
     /// Connection has been fully established.
     Established {
-        established: established::SingleStream<TNow, either::Either<SubstreamId, usize>>,
+        established: established::SingleStream<TNow, Option<SubstreamId>>,
 
         /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
         /// of the "outer ids" to "inner ids".
         outbound_substreams_map:
             hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
 
-        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
+        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] or a
+        /// [`ConnectionToCoordinatorInner::NotificationsInClose`] is emitted, an
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
-        /// list, the acceptance/refusal is dismissed.
-        notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
+        /// list, or closes a substream in this list, the acceptance/refusal/closing is dismissed.
+        notifications_in_close_acknowledgments: VecDeque<established::SubstreamId>,
 
         /// After a `NotificationsInOpenCancel` is emitted by the connection, an
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
@@ -216,7 +217,7 @@ where
     /// Calling this function might generate data to send to the connection. You should call
     /// [`SingleStreamConnectionTask::read_write`] after this function has returned (unless you
     /// have called [`SingleStreamConnectionTask::reset`] in the past).
-    pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
+    pub fn inject_coordinator_message(&mut self, now: &TNow, message: CoordinatorToConnection) {
         match (message.inner, &mut self.connection) {
             (
                 CoordinatorToConnectionInner::AcceptInbound {
@@ -229,33 +230,11 @@ where
                     ..
                 },
             ) => {
-                let (inbound_ty, protocol_index) = match inbound_ty {
-                    InboundTy::Notifications {
-                        protocol_index,
-                        max_handshake_size,
-                    } => (
-                        established::InboundTy::Notifications { max_handshake_size },
-                        protocol_index,
-                    ),
-                    InboundTy::Request {
-                        protocol_index,
-                        request_max_size,
-                    } => (
-                        established::InboundTy::Request { request_max_size },
-                        protocol_index,
-                    ),
-                    InboundTy::Ping => (established::InboundTy::Ping, 0),
-                };
-
                 if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
-                    established.accept_inbound(
-                        substream_id,
-                        inbound_ty,
-                        either::Right(protocol_index),
-                    );
+                    established.accept_inbound(substream_id, inbound_ty, None);
                 } else {
                     self.pending_messages.push_back(
-                        ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: substream_id },
+                        ConnectionToCoordinatorInner::InboundAcceptedCancel { id: substream_id },
                     )
                 }
             }
@@ -270,6 +249,21 @@ where
                 if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
                     established.reject_inbound(substream_id);
                 }
+            }
+            (
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+                SingleStreamConnectionTaskInner::Handshake {
+                    max_protocol_name_len,
+                    ..
+                },
+            ) => {
+                *max_protocol_name_len = new_max_length;
+            }
+            (
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+                SingleStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                established.set_max_protocol_name_len(new_max_length);
             }
             (
                 CoordinatorToConnectionInner::StartRequest {
@@ -288,9 +282,9 @@ where
                 let inner_substream_id = established.add_request(
                     protocol_name,
                     request_data,
-                    timeout,
+                    now.clone() + timeout,
                     max_response_size,
-                    either::Left(substream_id),
+                    Some(substream_id),
                 );
 
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
@@ -301,7 +295,7 @@ where
                     protocol_name,
                     max_handshake_size,
                     handshake,
-                    now,
+                    handshake_timeout,
                     substream_id: outer_substream_id,
                 },
                 SingleStreamConnectionTaskInner::Established {
@@ -314,8 +308,8 @@ where
                     protocol_name,
                     handshake,
                     max_handshake_size,
-                    now + Duration::from_secs(20), // TODO: make configurable
-                    either::Left(outer_substream_id),
+                    now.clone() + handshake_timeout,
+                    Some(outer_substream_id),
                 );
 
                 let _prev_value =
@@ -335,7 +329,7 @@ where
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
                 if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
-                    established.close_notifications_substream(inner_substream_id);
+                    established.close_out_notifications_substream(inner_substream_id);
                 }
             }
             (
@@ -380,15 +374,15 @@ where
                 },
                 SingleStreamConnectionTaskInner::Established {
                     established,
-                    notifications_in_open_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                if let Some(idx) = notifications_in_close_acknowledgments
                     .iter()
                     .position(|s| *s == substream_id)
                 {
-                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                    notifications_in_close_acknowledgments.remove(idx);
                 } else {
                     established.accept_in_notifications_substream(
                         substream_id,
@@ -401,17 +395,38 @@ where
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
                 SingleStreamConnectionTaskInner::Established {
                     established,
-                    notifications_in_open_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                if let Some(idx) = notifications_in_close_acknowledgments
                     .iter()
                     .position(|s| *s == substream_id)
                 {
-                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                    notifications_in_close_acknowledgments.remove(idx);
                 } else {
                     established.reject_in_notifications_substream(substream_id);
+                }
+            }
+            (
+                CoordinatorToConnectionInner::CloseInNotifications {
+                    substream_id,
+                    timeout,
+                },
+                SingleStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_close_acknowledgments,
+                    ..
+                },
+            ) => {
+                if let Some(idx) = notifications_in_close_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_close_acknowledgments.remove(idx);
+                } else {
+                    established
+                        .close_in_notifications_substream(substream_id, now.clone() + timeout);
                 }
             }
             (
@@ -431,8 +446,10 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInbound { .. }
                 | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::CloseInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
@@ -444,8 +461,10 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInbound { .. }
                 | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::CloseInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
@@ -554,7 +573,7 @@ where
     ///
     /// Panics if [`SingleStreamConnectionTask::reset`] has been called in the past.
     ///
-    pub fn read_write(&mut self, read_write: &'_ mut ReadWrite<'_, TNow>) {
+    pub fn read_write(&mut self, read_write: &'_ mut ReadWrite<TNow>) {
         // There is already at least one pending message. We back-pressure the connection by not
         // performing any reading or writing, as this might generate more messages and open the
         // door for a DoS attack by the remote. As documented, the API user is supposed to pull
@@ -570,11 +589,11 @@ where
             SingleStreamConnectionTaskInner::Established {
                 established,
                 mut outbound_substreams_map,
-                mut notifications_in_open_cancel_acknowledgments,
+                mut notifications_in_close_acknowledgments,
                 mut inbound_negotiated_cancel_acknowledgments,
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
-                    if read_write.is_dead() && event.is_none() {
+                    if read_write.is_dead() && read_write.wake_up_after.is_none() {
                         self.pending_messages.push_back(
                             ConnectionToCoordinatorInner::StartShutdown(Some(
                                 ShutdownCause::CleanShutdown,
@@ -620,27 +639,19 @@ where
                         }
                         Some(established::Event::InboundAcceptedCancel { id, .. }) => {
                             self.pending_messages.push_back(
-                                ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: id },
+                                ConnectionToCoordinatorInner::InboundAcceptedCancel { id },
                             );
                         }
                         Some(established::Event::RequestIn { id, request, .. }) => {
-                            let either::Right(protocol_index) = connection[id] else {
-                                panic!()
-                            };
-                            self.pending_messages.push_back(
-                                ConnectionToCoordinatorInner::RequestIn {
-                                    id,
-                                    protocol_index,
-                                    request,
-                                },
-                            );
+                            self.pending_messages
+                                .push_back(ConnectionToCoordinatorInner::RequestIn { id, request });
                         }
                         Some(established::Event::Response {
                             response,
                             user_data,
                             ..
                         }) => {
-                            let either::Left(outer_substream_id) = user_data else {
+                            let Some(outer_substream_id) = user_data else {
                                 panic!()
                             };
                             outbound_substreams_map.remove(&outer_substream_id).unwrap();
@@ -652,19 +663,12 @@ where
                             );
                         }
                         Some(established::Event::NotificationsInOpen { id, handshake, .. }) => {
-                            let either::Right(protocol_index) = connection[id] else {
-                                panic!()
-                            };
                             self.pending_messages.push_back(
-                                ConnectionToCoordinatorInner::NotificationsInOpen {
-                                    id,
-                                    protocol_index,
-                                    handshake,
-                                },
+                                ConnectionToCoordinatorInner::NotificationsInOpen { id, handshake },
                             );
                         }
                         Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
-                            notifications_in_open_cancel_acknowledgments.push_back(id);
+                            notifications_in_close_acknowledgments.push_back(id);
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsInOpenCancel { id },
                             );
@@ -675,6 +679,8 @@ where
                             );
                         }
                         Some(established::Event::NotificationsInClose { id, outcome, .. }) => {
+                            // TODO: only do this if not sent by API user
+                            notifications_in_close_acknowledgments.push_back(id);
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsInClose { id, outcome },
                             );
@@ -682,13 +688,13 @@ where
                         Some(established::Event::NotificationsOutResult { id, result }) => {
                             let (outer_substream_id, result) = match result {
                                 Ok(r) => {
-                                    let either::Left(outer_substream_id) = connection[id] else {
+                                    let Some(outer_substream_id) = connection[id] else {
                                         panic!()
                                     };
                                     (outer_substream_id, Ok(r))
                                 }
                                 Err((err, ud)) => {
-                                    let either::Left(outer_substream_id) = ud else {
+                                    let Some(outer_substream_id) = ud else {
                                         panic!()
                                     };
                                     outbound_substreams_map.remove(&outer_substream_id);
@@ -704,7 +710,7 @@ where
                             );
                         }
                         Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                            let either::Left(outer_substream_id) = connection[id] else {
+                            let Some(outer_substream_id) = connection[id] else {
                                 panic!()
                             };
                             self.pending_messages.push_back(
@@ -714,7 +720,7 @@ where
                             );
                         }
                         Some(established::Event::NotificationsOutReset { user_data, .. }) => {
-                            let either::Left(outer_substream_id) = user_data else {
+                            let Some(outer_substream_id) = user_data else {
                                 panic!()
                             };
                             outbound_substreams_map.remove(&outer_substream_id);
@@ -724,9 +730,10 @@ where
                                 },
                             );
                         }
-                        Some(established::Event::PingOutSuccess) => {
-                            self.pending_messages
-                                .push_back(ConnectionToCoordinatorInner::PingOutSuccess);
+                        Some(established::Event::PingOutSuccess { ping_time }) => {
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::PingOutSuccess { ping_time },
+                            );
                         }
                         Some(established::Event::PingOutFailed) => {
                             self.pending_messages
@@ -738,7 +745,8 @@ where
                     self.connection = SingleStreamConnectionTaskInner::Established {
                         established: connection,
                         outbound_substreams_map,
-                        notifications_in_open_cancel_acknowledgments,
+                        notifications_in_close_acknowledgments:
+                            notifications_in_close_acknowledgments,
                         inbound_negotiated_cancel_acknowledgments,
                     };
                 }
@@ -788,13 +796,9 @@ where
                     return;
                 }
 
-                // `read_write()` should be called again as soon as possible after `timeout` in
-                // order for the check above to work.
-                read_write.wake_up_after(&timeout);
-
                 loop {
                     let (read_before, written_before) =
-                        (read_write.read_bytes, read_write.written_bytes);
+                        (read_write.read_bytes, read_write.write_bytes_queued);
 
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
@@ -816,8 +820,11 @@ where
                     match result {
                         single_stream_handshake::Handshake::Healthy(updated_handshake)
                             if (read_before, written_before)
-                                == (read_write.read_bytes, read_write.written_bytes) =>
+                                == (read_write.read_bytes, read_write.write_bytes_queued) =>
                         {
+                            // `read_write()` should be called again as soon as possible
+                            // after `timeout`.
+                            read_write.wake_up_after(&timeout);
                             self.connection = SingleStreamConnectionTaskInner::Handshake {
                                 handshake: updated_handshake,
                                 randomness_seed,
@@ -856,8 +863,7 @@ where
                                         0,
                                         Default::default(),
                                     ), // TODO: capacity?
-                                notifications_in_open_cancel_acknowledgments:
-                                    VecDeque::with_capacity(4),
+                                notifications_in_close_acknowledgments: VecDeque::with_capacity(4),
                                 inbound_negotiated_cancel_acknowledgments:
                                     hashbrown::HashSet::with_capacity_and_hasher(
                                         2,

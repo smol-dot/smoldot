@@ -19,21 +19,30 @@ use super::{
     BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
     SubscribeAll, ToBackground,
 };
-use crate::{network_service, platform::PlatformRef, util};
+use crate::{log, network_service, platform::PlatformRef, util};
 
-use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned as _},
+    boxed::Box,
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
-    iter,
+    cmp, iter,
     num::{NonZeroU32, NonZeroU64},
+    pin::Pin,
     time::Duration,
 };
+use futures_lite::FutureExt as _;
 use futures_util::{future, stream, FutureExt as _, StreamExt as _};
 use hashbrown::{HashMap, HashSet};
 use smoldot::{
     chain, header,
     informant::HashDisplay,
     libp2p,
-    network::{self, protocol},
+    network::{self, codec},
     sync::all,
 };
 
@@ -44,10 +53,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
     chain_information: chain::chain_information::ValidChainInformation,
     block_number_bytes: usize,
     runtime_code_hint: Option<ConfigRelayChainRuntimeCodeHint>,
-    mut from_foreground: async_channel::Receiver<ToBackground>,
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    network_chain_index: usize,
-    from_network_service: stream::BoxStream<'static, network_service::Event>,
+    mut from_foreground: Pin<Box<async_channel::Receiver<ToBackground>>>,
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 ) {
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
@@ -84,7 +91,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 // is 5k.
                 NonZeroU32::new(5000).unwrap()
             },
-            full_mode: false,
+            download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
             code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
                 merkle_value: hint.merkle_value,
                 storage_value: hint.storage_value,
@@ -95,14 +103,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         network_up_to_date_finalized: true,
         known_finalized_runtime: None,
         pending_requests: stream::FuturesUnordered::new(),
-        warp_sync_taking_long_time_warning: future::Either::Left(
+        warp_sync_taking_long_time_warning: future::Either::Left(Box::pin(
             platform.sleep(Duration::from_secs(10)),
-        )
+        ))
         .fuse(),
         all_notifications: Vec::<async_channel::Sender<Notification>>::new(),
         log_target,
+        from_network_service: None,
         network_service,
-        network_chain_index,
         peers_source_id_map: HashMap::with_capacity_and_hasher(
             0,
             util::SipHasherBuild::new({
@@ -113,9 +121,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         ),
         platform,
     };
-
-    // Necessary for the `select!` loop below.
-    let mut from_network_service = from_network_service.fuse();
 
     // Main loop of the syncing logic.
     //
@@ -128,14 +133,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // Try to perform some CPU-heavy operations.
         // If any CPU-heavy verification was performed, then `queue_empty` will be `false`, in
         // which case we will loop again as soon as possible.
+        // TODO: integrate this within WakeUpReason, see https://github.com/smol-dot/smoldot/issues/1382 this is however complicated because process_one() moves out from sync, and that sync doesn't impl Sync, a refactor of AllSync might be necessary
         let queue_empty = {
             let mut queue_empty = true;
-
-            // Start a networking request (block requests, warp sync requests, etc.) that the
-            // syncing state machine would like to start.
-            if task.start_next_request() {
-                queue_empty = false;
-            }
 
             // TODO: handle obsolete requests
 
@@ -157,185 +157,715 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             queue_empty
         };
 
-        // Processing the queue might have updated the best block of the syncing state machine.
-        if !task.network_up_to_date_best {
-            // The networking service needs to be kept up to date with what the local node
-            // considers as the best block.
-            // For some reason, first building the future then executing it solves a borrow
-            // checker error.
-            let fut = task.network_service.set_local_best_block(
-                network_chain_index,
-                task.sync.best_block_hash(),
-                task.sync.best_block_number(),
-            );
-            fut.await;
-
-            task.network_up_to_date_best = true;
+        // Now waiting for some event to happen: a network event, a request from the frontend
+        // of the sync service, or a request being finished.
+        enum WakeUpReason {
+            MustUpdateNetworkWithBestBlock,
+            MustUpdateNetworkWithFinalizedBlock,
+            MustSubscribeNetworkEvents,
+            NetworkEvent(network_service::Event),
+            ForegroundMessage(ToBackground),
+            ForegroundClosed,
+            StartRequest(all::SourceId, all::DesiredRequest),
+            RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
+            WarpSyncTakingLongTimeWarning,
+            MustLoopAgain,
         }
 
-        // Processing the queue might have updated the finalized block of the syncing state
-        // machine.
-        if !task.network_up_to_date_finalized {
-            // If the chain uses GrandPa, the networking has to be kept up-to-date with the
-            // state of finalization for other peers to send back relevant gossip messages.
-            // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
-            // checker issues.
-            let grandpa_set_id =
-                if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    ..
-                } = task.sync.as_chain_information().as_ref().finality
-                {
-                    Some(after_finalized_block_authorities_set_id)
+        let wake_up_reason = {
+            async {
+                if let Some(from_network_service) = task.from_network_service.as_mut() {
+                    match from_network_service.next().await {
+                        Some(ev) => WakeUpReason::NetworkEvent(ev),
+                        None => {
+                            task.from_network_service = None;
+                            WakeUpReason::MustSubscribeNetworkEvents
+                        }
+                    }
                 } else {
-                    None
-                };
+                    WakeUpReason::MustSubscribeNetworkEvents
+                }
+            }
+            .or(async {
+                from_foreground.next().await.map_or(
+                    WakeUpReason::ForegroundClosed,
+                    WakeUpReason::ForegroundMessage,
+                )
+            })
+            .or(async {
+                if task.pending_requests.is_empty() {
+                    future::pending::<()>().await
+                }
+                let (request_id, result) = task.pending_requests.select_next_some().await;
+                WakeUpReason::RequestFinished(request_id, result)
+            })
+            .or(async {
+                if !task.network_up_to_date_finalized {
+                    WakeUpReason::MustUpdateNetworkWithFinalizedBlock
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                if !task.network_up_to_date_best {
+                    WakeUpReason::MustUpdateNetworkWithBestBlock
+                } else {
+                    future::pending().await
+                }
+            })
+            .or(async {
+                (&mut task.warp_sync_taking_long_time_warning).await;
+                task.warp_sync_taking_long_time_warning =
+                    future::Either::Left(Box::pin(task.platform.sleep(Duration::from_secs(10))))
+                        .fuse();
+                WakeUpReason::WarpSyncTakingLongTimeWarning
+            })
+            .or({
+                // `desired_requests()` returns, in decreasing order of priority, the requests
+                // that should be started in order for the syncing to proceed. The fact that
+                // multiple requests are returned could be used to filter out undesired one. We
+                // use this filtering to enforce a maximum of one ongoing request per source.
+                let desired_request = task
+                    .sync
+                    .desired_requests()
+                    .find(|(source_id, _, _)| {
+                        task.sync.source_num_ongoing_requests(*source_id) == 0
+                    })
+                    .map(|(source_id, _, request_detail)| (source_id, request_detail));
+                async move {
+                    if let Some((source_id, request_detail)) = desired_request {
+                        WakeUpReason::StartRequest(source_id, request_detail)
+                    } else {
+                        future::pending().await
+                    }
+                }
+            })
+            .or(async {
+                // If the list of CPU-heavy operations to perform is potentially non-empty,
+                // then we wait for a future that is always instantly ready, in order to loop
+                // again and perform the next CPU-heavy operation.
+                // Note that if any of the other futures is ready, then that other ready
+                // future will take precedence.
+                if queue_empty {
+                    future::pending::<()>().await;
+                }
+                WakeUpReason::MustLoopAgain
+            })
+            .await
+        };
 
-            if let Some(set_id) = grandpa_set_id {
-                let commit_finalized_height = task.sync.finalized_block_header().number;
-                task.network_service
-                    .set_local_grandpa_state(
-                        network_chain_index,
-                        network::service::GrandpaState {
+        match wake_up_reason {
+            WakeUpReason::NetworkEvent(network_service::Event::Connected {
+                peer_id,
+                role,
+                best_block_number,
+                best_block_hash,
+            }) => {
+                task.peers_source_id_map.insert(
+                    peer_id.clone(),
+                    task.sync
+                        .add_source((peer_id, role), best_block_number, best_block_hash),
+                );
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }) => {
+                let sync_source_id = task.peers_source_id_map.remove(&peer_id).unwrap();
+                let (_, requests) = task.sync.remove_source(sync_source_id);
+
+                // The `Disconnect` network event indicates that the main notifications substream
+                // with that peer has been closed, not necessarily that the connection as a whole
+                // has been closed. As such, the in-progress network requests might continue if
+                // we don't abort them.
+                for (_, abort) in requests {
+                    abort.abort();
+                }
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                peer_id,
+                announce,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                let decoded = announce.decode();
+
+                // TODO: improve the logging here, requires some modifications to block_announce()
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "block-announce",
+                    sender = peer_id,
+                    hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                        decoded.scale_encoded_header
+                    )),
+                    is_best = decoded.is_best,
+                );
+
+                match task.sync.block_announce(
+                    sync_source_id,
+                    decoded.scale_encoded_header.to_owned(),
+                    decoded.is_best,
+                ) {
+                    all::BlockAnnounceOutcome::InvalidHeader(_) => {
+                        task.network_service
+                            .ban_and_disconnect(
+                                peer_id,
+                                network_service::BanSeverity::High,
+                                "bad-block-announce",
+                            )
+                            .await;
+                    }
+                    _ => {}
+                }
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::GrandpaNeighborPacket {
+                peer_id,
+                finalized_block_height,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                task.sync
+                    .update_source_finality_state(sync_source_id, finalized_block_height);
+            }
+
+            WakeUpReason::NetworkEvent(network_service::Event::GrandpaCommitMessage {
+                peer_id,
+                message,
+            }) => {
+                let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
+                match task
+                    .sync
+                    .grandpa_commit_message(sync_source_id, message.into_encoded())
+                {
+                    all::GrandpaCommitMessageOutcome::Queued => {
+                        // TODO: print more details?
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "grandpa-commit-message-queued",
+                            sender = peer_id
+                        );
+                    }
+                    all::GrandpaCommitMessageOutcome::Discarded => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "grandpa-commit-message-ignored",
+                            sender = peer_id
+                        );
+                    }
+                }
+            }
+
+            WakeUpReason::MustSubscribeNetworkEvents => {
+                debug_assert!(task.from_network_service.is_none());
+                for (_, sync_source_id) in task.peers_source_id_map.drain() {
+                    let (_, requests) = task.sync.remove_source(sync_source_id);
+                    for (_, abort) in requests {
+                        abort.abort();
+                    }
+                }
+                task.from_network_service = Some(Box::pin(
+                    // As documented, `subscribe().await` is expected to return quickly.
+                    task.network_service.subscribe().await,
+                ));
+            }
+
+            WakeUpReason::MustUpdateNetworkWithBestBlock => {
+                // The networking service needs to be kept up to date with what the local node
+                // considers as the best block.
+                // For some reason, first building the future then executing it solves a borrow
+                // checker error.
+                let fut = task.network_service.set_local_best_block(
+                    task.sync.best_block_hash(),
+                    task.sync.best_block_number(),
+                );
+                fut.await;
+
+                task.network_up_to_date_best = true;
+            }
+
+            WakeUpReason::MustUpdateNetworkWithFinalizedBlock => {
+                // If the chain uses GrandPa, the networking has to be kept up-to-date with the
+                // state of finalization for other peers to send back relevant gossip messages.
+                // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
+                // checker issues.
+                let grandpa_set_id =
+                    if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
+                        after_finalized_block_authorities_set_id,
+                        ..
+                    } = task.sync.as_chain_information().as_ref().finality
+                    {
+                        Some(after_finalized_block_authorities_set_id)
+                    } else {
+                        None
+                    };
+
+                if let Some(set_id) = grandpa_set_id {
+                    let commit_finalized_height = task.sync.finalized_block_header().number;
+                    task.network_service
+                        .set_local_grandpa_state(network::service::GrandpaState {
                             set_id,
                             round_number: 1, // TODO:
                             commit_finalized_height,
-                        },
+                        })
+                        .await;
+                }
+
+                task.network_up_to_date_finalized = true;
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::IsNearHeadOfChainHeuristic {
+                send_back,
+            }) => {
+                // Frontend is querying something.
+                let _ = send_back.send(task.sync.is_near_head_of_chain_heuristic());
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SubscribeAll {
+                send_back,
+                buffer_size,
+                runtime_interest,
+            }) => {
+                // Frontend would like to subscribe to events.
+
+                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
+                task.all_notifications.push(tx);
+
+                let non_finalized_blocks_ancestry_order = {
+                    let best_hash = task.sync.best_block_hash();
+                    task.sync
+                        .non_finalized_blocks_ancestry_order()
+                        .map(|h| {
+                            let scale_encoding =
+                                h.scale_encoding_vec(task.sync.block_number_bytes());
+                            BlockNotification {
+                                is_new_best: header::hash_from_scale_encoded_header(
+                                    &scale_encoding,
+                                ) == best_hash,
+                                scale_encoded_header: scale_encoding,
+                                parent_hash: *h.parent_hash,
+                            }
+                        })
+                        .collect()
+                };
+
+                let _ = send_back.send(SubscribeAll {
+                    finalized_block_scale_encoded_header: task
+                        .sync
+                        .finalized_block_header()
+                        .scale_encoding_vec(task.sync.block_number_bytes()),
+                    finalized_block_runtime: if runtime_interest {
+                        task.known_finalized_runtime.take()
+                    } else {
+                        None
+                    },
+                    non_finalized_blocks_ancestry_order,
+                    new_blocks,
+                });
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::PeersAssumedKnowBlock {
+                send_back,
+                block_number,
+                block_hash,
+            }) => {
+                // Frontend queries the list of peers which are expected to know about a certain
+                // block.
+                let finalized_num = task.sync.finalized_block_header().number;
+                let outcome = if block_number <= finalized_num {
+                    task.sync
+                        .sources()
+                        .filter(|source_id| {
+                            let source_best = task.sync.source_best_block(*source_id);
+                            source_best.0 > block_number
+                                || (source_best.0 == block_number && *source_best.1 == block_hash)
+                        })
+                        .map(|id| task.sync[id].0.clone())
+                        .collect()
+                } else {
+                    // As documented, `knows_non_finalized_block` would panic if the
+                    // block height was below the one of the known finalized block.
+                    task.sync
+                        .knows_non_finalized_block(block_number, &block_hash)
+                        .map(|id| task.sync[id].0.clone())
+                        .collect()
+                };
+                let _ = send_back.send(outcome);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SyncingPeers { send_back }) => {
+                // Frontend is querying the list of peers.
+                let out = task
+                    .sync
+                    .sources()
+                    .map(|src| {
+                        let (peer_id, role) = task.sync[src].clone();
+                        let (height, hash) = task.sync.source_best_block(src);
+                        (peer_id, role, height, *hash)
+                    })
+                    .collect::<Vec<_>>();
+                let _ = send_back.send(out);
+            }
+
+            WakeUpReason::ForegroundMessage(ToBackground::SerializeChainInformation {
+                send_back,
+            }) => {
+                // Frontend is querying the chain information.
+                let _ = send_back.send(Some(task.sync.as_chain_information().into()));
+            }
+
+            WakeUpReason::ForegroundClosed => {
+                // The channel with the frontend sync service has been closed.
+                // Closing the sync background task as a result.
+                return;
+            }
+
+            WakeUpReason::RequestFinished(_, Err(_)) => {
+                // A request has been cancelled by the sync state machine. Nothing to do.
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Ok(v)))) => {
+                // Successful block request.
+                task.sync.blocks_request_response(
+                    request_id,
+                    Ok(v.into_iter().filter_map(|block| {
+                        Some(all::BlockRequestSuccessBlock {
+                            scale_encoded_header: block.header?,
+                            scale_encoded_justifications: block
+                                .justifications
+                                .unwrap_or(Vec::new())
+                                .into_iter()
+                                .map(|j| all::Justification {
+                                    engine_id: j.engine_id,
+                                    justification: j.justification,
+                                })
+                                .collect(),
+                            scale_encoded_extrinsics: Vec::new(),
+                            user_data: (),
+                        })
+                    })),
+                );
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Block(Err(_)))) => {
+                // Failed block request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-blocks-request",
                     )
                     .await;
+                task.sync
+                    .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
             }
 
-            task.network_up_to_date_finalized = true;
-        }
-
-        // Now waiting for some event to happen: a network event, a request from the frontend
-        // of the sync service, or a request being finished.
-        let response_outcome = futures_util::select! {
-            network_event = from_network_service.next() => {
-                // Something happened on the network.
-                // We expect the networking channel to never close, so the event is unwrapped.
-                task.inject_network_event(network_event.unwrap());
-                continue;
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Ok(result)))) => {
+                // Successful warp sync request.
+                let decoded = result.decode();
+                let fragments = decoded
+                    .fragments
+                    .into_iter()
+                    .map(|f| all::WarpSyncFragment {
+                        scale_encoded_header: f.scale_encoded_header.to_vec(),
+                        scale_encoded_justification: f.scale_encoded_justification.to_vec(),
+                    })
+                    .collect();
+                task.sync
+                    .grandpa_warp_sync_response_ok(request_id, fragments, decoded.is_finished);
             }
 
-            message = from_foreground.next() => {
-                // Received message from the front `SyncService`.
-                let message = match message {
-                    Some(m) => m,
-                    None => {
-                        // The channel with the frontend sync service has been closed.
-                        // Closing the sync background task as a result.
-                        return
-                    },
-                };
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Err(_)))) => {
+                // Failed warp sync request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-warp-sync-request",
+                    )
+                    .await;
+                task.sync.grandpa_warp_sync_response_err(request_id);
+            }
 
-                task.process_foreground_message(message);
-                continue;
-            },
-
-            (request_id, result) = task.pending_requests.select_next_some() => {
-                // A request has been finished.
-                // `result` is an error if the request got cancelled by the sync state machine.
-                let Ok(result) = result else { continue; };
-
-                // Inject the result of the request into the sync state machine.
-                match result {
-                    RequestOutcome::Block(Ok(v)) => {
-                        task.sync.blocks_request_response(
-                            request_id,
-                            Ok(v.into_iter().filter_map(|block| {
-                                Some(all::BlockRequestSuccessBlock {
-                                    scale_encoded_header: block.header?,
-                                    scale_encoded_justifications: block.justifications
-                                        .unwrap_or(Vec::new())
-                                        .into_iter()
-                                        .map(|j| all::Justification { engine_id: j.engine_id, justification: j.justification })
-                                        .collect(),
-                                    scale_encoded_extrinsics: Vec::new(),
-                                    user_data: (),
-                                })
-                            }))
-                        ).1
-                    },
-                    RequestOutcome::Block(Err(_)) => {
-                        task.sync.blocks_request_response(request_id, Err::<iter::Empty<_>, _>(())).1
-                    },
-                    RequestOutcome::WarpSync(Ok(result)) => {
-                        let decoded = result.decode();
-                        let fragments = decoded.fragments
-                            .into_iter()
-                            .map(|f| all::WarpSyncFragment {
-                                scale_encoded_header: f.scale_encoded_header.to_vec(),
-                                scale_encoded_justification: f.scale_encoded_justification.to_vec(),
-                            })
-                            .collect();
-                        task.sync.grandpa_warp_sync_response_ok(
-                            request_id,
-                            fragments,
-                            decoded.is_finished,
-                        ).1
-                    }
-                    RequestOutcome::WarpSync(Err(_)) => {
-                        task.sync.grandpa_warp_sync_response_err(
-                            request_id,
-                        );
-                        continue;
-                    }
-                    RequestOutcome::Storage(r) => task.sync.storage_get_response(request_id, r).1,
-                    RequestOutcome::CallProof(Ok(r)) => task.sync.call_proof_response(request_id, Ok(r.decode().to_owned())).1, // TODO: need help from networking service to avoid this to_owned
-                    RequestOutcome::CallProof(Err(err)) => task.sync.call_proof_response(request_id, Err(err)).1,
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(r))) => {
+                // Storage proof request.
+                if r.is_err() {
+                    let source_peer_id =
+                        task.sync[task.sync.request_source_id(request_id)].0.clone();
+                    task.network_service
+                        .ban_and_disconnect(
+                            source_peer_id,
+                            network_service::BanSeverity::Low,
+                            "failed-storage-request",
+                        )
+                        .await;
                 }
-            },
+                task.sync.storage_get_response(request_id, r);
+            }
 
-            () = &mut task.warp_sync_taking_long_time_warning => {
-                match task.sync.status() {
-                    all::Status::Sync => {},
-                    all::Status::WarpSyncFragments { source: None, finalized_block_hash, finalized_block_number } => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "GrandPa warp sync idle at block #{} (0x{})",
-                            finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
-                        );
-                    }
-                    all::Status::WarpSyncFragments { source: Some((_, (peer_id, _))), finalized_block_hash, finalized_block_number } |
-                    all::Status::WarpSyncChainInformation { source: (_, (peer_id, _)), finalized_block_hash, finalized_block_number } => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "GrandPa warp sync in progress. Block: #{} (0x{}). Peer attempt: {}.",
-                            finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
-                            peer_id
-                        );
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Ok(r)))) => {
+                // Successful call proof request.
+                task.sync
+                    .call_proof_response(request_id, Ok(r.decode().to_owned()));
+                // TODO: need help from networking service to avoid this to_owned
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(err)))) => {
+                // Failed call proof request.
+                let source_peer_id = task.sync[task.sync.request_source_id(request_id)].0.clone();
+                task.network_service
+                    .ban_and_disconnect(
+                        source_peer_id,
+                        network_service::BanSeverity::Low,
+                        "failed-call-proof-request",
+                    )
+                    .await;
+                task.sync.call_proof_response(request_id, Err(err));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::BlocksRequest {
+                    first_block_hash,
+                    first_block_height,
+                    ascending,
+                    num_blocks,
+                    request_headers,
+                    request_bodies,
+                    request_justification,
+                },
+            ) => {
+                // Before inserting the request back to the syncing state machine, clamp the number
+                // of blocks to the number of blocks we expect to receive.
+                // This constant corresponds to the maximum number of blocks that nodes will answer
+                // in one request. If this constant happens to be inaccurate, everything will still
+                // work but less efficiently.
+                let num_blocks = NonZeroU64::new(cmp::min(64, num_blocks.get())).unwrap();
+
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let block_request = task.network_service.clone().blocks_request(
+                    peer_id,
+                    network::codec::BlocksRequestConfig {
+                        start: if let Some(first_block_hash) = first_block_hash {
+                            network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
+                        } else {
+                            network::codec::BlocksRequestConfigStart::Number(first_block_height)
+                        },
+                        desired_count: NonZeroU32::new(
+                            u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                        )
+                        .unwrap(),
+                        direction: if ascending {
+                            network::codec::BlocksRequestDirection::Ascending
+                        } else {
+                            network::codec::BlocksRequestDirection::Descending
+                        },
+                        fields: network::codec::BlocksRequestFields {
+                            header: request_headers,
+                            body: request_bodies,
+                            justifications: request_justification,
+                        },
                     },
+                    Duration::from_secs(10),
+                );
+
+                let (block_request, abort) = future::abortable(block_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::BlocksRequest {
+                        first_block_hash,
+                        first_block_height,
+                        ascending,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (request_id, block_request.await.map(RequestOutcome::Block))
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::WarpSync {
+                    sync_start_block_hash,
+                },
+            ) => {
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let grandpa_request = task.network_service.clone().grandpa_warp_sync_request(
+                    peer_id,
+                    sync_start_block_hash,
+                    // The timeout needs to be long enough to potentially download the maximum
+                    // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
+                    // 128 seconds. Unfortunately, 128 seconds is way too large, and for
+                    // pragmatic reasons we use a lower value.
+                    Duration::from_secs(24),
+                );
+
+                let (grandpa_request, abort) = future::abortable(grandpa_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::WarpSync {
+                        sync_start_block_hash,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        grandpa_request.await.map(RequestOutcome::WarpSync),
+                    )
+                }));
+            }
+
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::StorageGetMerkleProof {
+                    block_hash, keys, ..
+                },
+            ) => {
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let storage_request = task.network_service.clone().storage_proof_request(
+                    peer_id,
+                    network::codec::StorageProofRequestConfig {
+                        block_hash,
+                        keys: keys.clone().into_iter(),
+                    },
+                    Duration::from_secs(16),
+                );
+
+                let storage_request = async move {
+                    if let Ok(outcome) = storage_request.await {
+                        // TODO: log what happens
+                        Ok(outcome.decode().to_vec()) // TODO: no to_vec() here, needs some API change on the networking
+                    } else {
+                        Err(())
+                    }
                 };
 
-                task.warp_sync_taking_long_time_warning =
-                    future::Either::Left(task.platform.sleep(Duration::from_secs(10))).fuse();
-                continue;
-            },
+                let (storage_request, abort) = future::abortable(storage_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::StorageGet { block_hash, keys },
+                    abort,
+                );
 
-            // If the list of CPU-heavy operations to perform is potentially non-empty, then we
-            // wait for a future that is always instantly ready, in order to loop again and
-            // perform the next CPU-heavy operation.
-            // Note that if any of the other futures in that `select!` block is ready, then that
-            // other ready future might take precedence (or not, it is pseudo-random). This
-            // guarantees proper interleaving between CPU-heavy operations and responding to
-            // other kind of events.
-            () = if queue_empty { future::Either::Left(future::pending()) }
-                 else { future::Either::Right(future::ready(())) } =>
-            {
-                continue;
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        storage_request.await.map(RequestOutcome::Storage),
+                    )
+                }));
             }
-        };
 
-        // `response_outcome` represents the way the state machine has changed as a
-        // consequence of the response to a request.
-        match response_outcome {
-            all::ResponseOutcome::Outdated
-            | all::ResponseOutcome::Queued
-            | all::ResponseOutcome::NotFinalizedChain { .. }
-            | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
+            WakeUpReason::StartRequest(
+                source_id,
+                all::DesiredRequest::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            ) => {
+                let peer_id = task.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+
+                let call_proof_request = {
+                    // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
+                    let network_service = task.network_service.clone();
+                    let parameter_vectored = parameter_vectored.clone();
+                    let function_name = function_name.clone();
+                    async move {
+                        let rq = network_service.call_proof_request(
+                            peer_id,
+                            network::codec::CallProofRequestConfig {
+                                block_hash,
+                                method: Cow::Borrowed(&*function_name),
+                                parameter_vectored: iter::once(&parameter_vectored),
+                            },
+                            Duration::from_secs(16),
+                        );
+
+                        match rq.await {
+                            Ok(p) => Ok(p),
+                            Err(_) => Err(()),
+                        }
+                    }
+                };
+
+                let (call_proof_request, abort) = future::abortable(call_proof_request);
+                let request_id = task.sync.add_request(
+                    source_id,
+                    all::RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                    abort,
+                );
+
+                task.pending_requests.push(Box::pin(async move {
+                    (
+                        request_id,
+                        call_proof_request.await.map(RequestOutcome::CallProof),
+                    )
+                }));
+            }
+
+            WakeUpReason::WarpSyncTakingLongTimeWarning => {
+                match task.sync.status() {
+                    all::Status::Sync => {}
+                    all::Status::WarpSyncFragments {
+                        source: None,
+                        finalized_block_hash,
+                        finalized_block_number,
+                    } => {
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "GrandPa warp sync idle at block #{} (0x{})",
+                                finalized_block_number,
+                                HashDisplay(&finalized_block_hash)
+                            ),
+                        );
+                    }
+                    all::Status::WarpSyncFragments {
+                        finalized_block_hash,
+                        finalized_block_number,
+                        ..
+                    }
+                    | all::Status::WarpSyncChainInformation {
+                        finalized_block_hash,
+                        finalized_block_number,
+                    } => {
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "GrandPa warp sync in progress. Block: #{} (0x{}).",
+                                finalized_block_number,
+                                HashDisplay(&finalized_block_hash)
+                            )
+                        );
+                    }
+                };
+            }
+
+            WakeUpReason::MustLoopAgain => {}
         }
     }
 }
@@ -352,7 +882,7 @@ struct Task<TPlat: PlatformRef> {
     ///
     /// For each request, we store a [`future::AbortHandle`] that can be used to abort the
     /// request if desired.
-    sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, protocol::Role), ()>,
+    sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>,
 
     /// If `Some`, contains the runtime of the current finalized block.
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
@@ -374,13 +904,12 @@ struct Task<TPlat: PlatformRef> {
     /// time. Set to `Pending` after the warp sync has finished, so that future remains pending
     /// forever.
     warp_sync_taking_long_time_warning:
-        future::Fuse<future::Either<TPlat::Delay, future::Pending<()>>>,
+        future::Fuse<future::Either<Pin<Box<TPlat::Delay>>, future::Pending<()>>>,
 
-    /// Network service. Used to send out requests to peers.
-    network_service: Arc<network_service::NetworkService<TPlat>>,
-    /// Index within the network service of the chain we are interested in. Must be indicated to
-    /// the network service whenever a request is started.
-    network_chain_index: usize,
+    /// Chain of the network service. Used to send out requests to peers.
+    network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
+    /// Events coming from the networking service. `None` if not subscribed yet.
+    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
 
     /// List of requests currently in progress.
     pending_requests: stream::FuturesUnordered<
@@ -389,11 +918,11 @@ struct Task<TPlat: PlatformRef> {
 }
 
 enum RequestOutcome {
-    Block(Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>),
+    Block(Result<Vec<codec::BlockData>, network_service::BlocksRequestError>),
     WarpSync(
         Result<
             network::service::EncodedGrandpaWarpSyncResponse,
-            network_service::GrandpaWarpSyncRequestError,
+            network_service::WarpSyncRequestError,
         >,
     ),
     Storage(Result<Vec<u8>, ()>),
@@ -401,204 +930,6 @@ enum RequestOutcome {
 }
 
 impl<TPlat: PlatformRef> Task<TPlat> {
-    /// Starts one network request if any is necessary.
-    ///
-    /// Returns `true` if a request has been started.
-    fn start_next_request(&mut self) -> bool {
-        // `desired_requests()` returns, in decreasing order of priority, the requests
-        // that should be started in order for the syncing to proceed. The fact that multiple
-        // requests are returned could be used to filter out undesired one. We use this
-        // filtering to enforce a maximum of one ongoing request per source.
-        let (source_id, _, mut request_detail) = match self
-            .sync
-            .desired_requests()
-            .find(|(source_id, _, _)| self.sync.source_num_ongoing_requests(*source_id) == 0)
-        {
-            Some(v) => v,
-            None => return false,
-        };
-
-        // Before inserting the request back to the syncing state machine, clamp the number
-        // of blocks to the number of blocks we expect to receive.
-        // This constant corresponds to the maximum number of blocks that nodes will answer
-        // in one request. If this constant happens to be inaccurate, everything will still
-        // work but less efficiently.
-        request_detail.num_blocks_clamp(NonZeroU64::new(64).unwrap());
-
-        match request_detail {
-            all::DesiredRequest::BlocksRequest {
-                first_block_hash,
-                first_block_height,
-                ascending,
-                num_blocks,
-                request_headers,
-                request_bodies,
-                request_justification,
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                let block_request = self.network_service.clone().blocks_request(
-                    peer_id,
-                    self.network_chain_index,
-                    network::protocol::BlocksRequestConfig {
-                        start: if let Some(first_block_hash) = first_block_hash {
-                            network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
-                        } else {
-                            network::protocol::BlocksRequestConfigStart::Number(first_block_height)
-                        },
-                        desired_count: NonZeroU32::new(
-                            u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                        )
-                        .unwrap(),
-                        direction: if ascending {
-                            network::protocol::BlocksRequestDirection::Ascending
-                        } else {
-                            network::protocol::BlocksRequestDirection::Descending
-                        },
-                        fields: network::protocol::BlocksRequestFields {
-                            header: request_headers,
-                            body: request_bodies,
-                            justifications: request_justification,
-                        },
-                    },
-                    Duration::from_secs(10),
-                );
-
-                let (block_request, abort) = future::abortable(block_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(
-                    async move { (request_id, block_request.await.map(RequestOutcome::Block)) }
-                        .boxed(),
-                );
-            }
-
-            all::DesiredRequest::GrandpaWarpSync {
-                sync_start_block_hash,
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                let grandpa_request = self.network_service.clone().grandpa_warp_sync_request(
-                    peer_id,
-                    self.network_chain_index,
-                    sync_start_block_hash,
-                    // The timeout needs to be long enough to potentially download the maximum
-                    // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
-                    // 128 seconds. Unfortunately, 128 seconds is way too large, and for
-                    // pragmatic reasons we use a lower value.
-                    Duration::from_secs(24),
-                );
-
-                let (grandpa_request, abort) = future::abortable(grandpa_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(
-                    async move {
-                        (
-                            request_id,
-                            grandpa_request.await.map(RequestOutcome::WarpSync),
-                        )
-                    }
-                    .boxed(),
-                );
-            }
-
-            all::DesiredRequest::StorageGetMerkleProof {
-                block_hash,
-                ref keys,
-                ..
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                let storage_request = self.network_service.clone().storage_proof_request(
-                    self.network_chain_index,
-                    peer_id,
-                    network::protocol::StorageProofRequestConfig {
-                        block_hash,
-                        keys: keys.clone().into_iter(),
-                    },
-                    Duration::from_secs(16),
-                );
-
-                let storage_request = async move {
-                    if let Ok(outcome) = storage_request.await {
-                        // TODO: log what happens
-                        Ok(outcome.decode().to_vec()) // TODO: no to_vec() here, needs some API change on the networking
-                    } else {
-                        Err(())
-                    }
-                };
-
-                let (storage_request, abort) = future::abortable(storage_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(
-                    async move {
-                        (
-                            request_id,
-                            storage_request.await.map(RequestOutcome::Storage),
-                        )
-                    }
-                    .boxed(),
-                );
-            }
-
-            all::DesiredRequest::RuntimeCallMerkleProof {
-                block_hash,
-                ref function_name,
-                ref parameter_vectored,
-            } => {
-                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
-                let network_service = self.network_service.clone();
-                let network_chain_index = self.network_chain_index;
-                // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
-                let parameter_vectored = parameter_vectored.clone();
-                let function_name = function_name.clone();
-
-                let call_proof_request = async move {
-                    let rq = network_service.call_proof_request(
-                        network_chain_index,
-                        peer_id,
-                        network::protocol::CallProofRequestConfig {
-                            block_hash,
-                            method: function_name,
-                            parameter_vectored: iter::once(parameter_vectored),
-                        },
-                        Duration::from_secs(16),
-                    );
-
-                    match rq.await {
-                        Ok(p) => Ok(p),
-                        Err(_) => Err(()),
-                    }
-                };
-
-                let (call_proof_request, abort) = future::abortable(call_proof_request);
-                let request_id = self
-                    .sync
-                    .add_request(source_id, request_detail.into(), abort);
-
-                self.pending_requests.push(
-                    async move {
-                        (
-                            request_id,
-                            call_proof_request.await.map(RequestOutcome::CallProof),
-                        )
-                    }
-                    .boxed(),
-                );
-            }
-        }
-
-        true
-    }
-
     /// Verifies one block, or finality proof, or warp sync fragment, etc. that is queued for
     /// verification.
     ///
@@ -617,19 +948,42 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Warp syncing compiles the runtime. The compiled runtime will later be yielded
                 // in the `WarpSyncFinished` variant, which is then provided as an event.
                 let before_instant = self.platform.now();
-                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                // Because the runtime being compiled has been validated by 2/3rds of the
+                // validators of the chain, we can assume that it is valid. Doing so significantly
+                // increases the compilation speed.
+                let (new_sync, error) =
+                    req.build(all::ExecHint::CompileWithNonDeterministicValidation, true);
                 let elapsed = self.platform.now() - before_instant;
                 match error {
                     Ok(()) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => WarpSyncRuntimeBuild(success=true, duration={:?})",
-                            elapsed
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-runtime-build-success",
+                            success = ?true,
+                            duration = ?elapsed
                         );
                     }
-                    Err(err) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                    Err(error) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-runtime-build-error",
+                            ?error
+                        );
+                        if !matches!(error, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
+                            log!(
+                                &self.platform,
+                                Debug,
+                                &self.log_target,
+                                format!(
+                                    "Failed to compile runtime during warp syncing process: {}",
+                                    error
+                                )
+                            );
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -639,11 +993,32 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let (new_sync, error) = req.build();
                 match error {
                     Ok(()) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-chain-information-build-success"
+                        );
                     }
-                    Err(err) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
-                        log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                    Err(error) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-chain-information-build-error",
+                            ?error
+                        );
+                        if !matches!(
+                            error,
+                            all::WarpSyncBuildChainInformationError::SourceMisbehavior(_)
+                        ) {
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                format!("Failed to build the chain information during warp syncing process: {}", error)
+                            );
+                        }
                     }
                 };
                 self.sync = new_sync;
@@ -656,15 +1031,20 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 finalized_storage_code_closest_ancestor_excluding,
                 finalized_storage_heap_pages,
                 finalized_storage_code_merkle_value,
+                finalized_body: _,
             } => {
                 self.sync = sync;
 
                 let finalized_header = self.sync.finalized_block_header();
-                log::info!(
-                    target: &self.log_target,
-                    "GrandPa warp sync finished to #{} ({})",
-                    finalized_header.number,
-                    HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                log!(
+                    &self.platform,
+                    Debug,
+                    &self.log_target,
+                    format!(
+                        "GrandPa warp sync finished to #{} ({})",
+                        finalized_header.number,
+                        HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                    )
                 );
 
                 self.warp_sync_taking_long_time_warning =
@@ -688,7 +1068,9 @@ impl<TPlat: PlatformRef> Task<TPlat> {
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                 // Grandpa warp sync fragment to verify.
-                let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
+                let sender_if_still_connected = verify
+                    .proof_sender()
+                    .map(|(_, (peer_id, _))| peer_id.clone());
 
                 let (sync, result) = verify.perform({
                     let mut seed = [0; 32];
@@ -697,25 +1079,53 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 });
                 self.sync = sync;
 
-                if let Err(err) = result {
-                    let maybe_forced_change = matches!(err, all::WarpSyncFragmentError::Verify(_));
-                    log::warn!(
-                        target: &self.log_target,
-                        "Failed to verify warp sync fragment from {}: {}{}",
-                        sender_peer_id,
-                        err,
-                        if maybe_forced_change {
-                            ". This might be caused by a forced GrandPa authorities change having \
-                            been enacted on the chain. If this is the case, please update the \
-                            chain specification with a checkpoint past this forced change."
-                        } else { "" }
-                    );
-                } else {
-                    log::debug!(
-                        target: &self.log_target,
-                        "Sync => WarpSyncFragmentVerified(sender={})",
-                        sender_peer_id,
-                    );
+                match result {
+                    Ok((fragment_hash, fragment_number)) => {
+                        // TODO: must call `set_local_grandpa_state` and `set_local_best_block` so that other peers notify us of neighbor packets
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-fragment-verify-success",
+                            sender = sender_if_still_connected
+                                .as_ref()
+                                .map(|p| Cow::Owned(p.to_base58()))
+                                .unwrap_or(Cow::Borrowed("<disconnected>")),
+                            verified_hash = HashDisplay(&fragment_hash),
+                            verified_height = fragment_number
+                        );
+                    }
+                    Err(err) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            format!(
+                                "Failed to verify warp sync fragment from {}: {}{}",
+                                sender_if_still_connected
+                                    .as_ref()
+                                    .map(|p| Cow::Owned(p.to_base58()))
+                                    .unwrap_or(Cow::Borrowed("<disconnected>")),
+                                err,
+                                if matches!(err, all::VerifyFragmentError::JustificationVerify(_)) {
+                                    ". This might be caused by a forced GrandPa authorities change having \
+                                been enacted on the chain. If this is the case, please update the \
+                                chain specification with a checkpoint past this forced change."
+                                } else {
+                                    ""
+                                }
+                            )
+                        );
+                        if let Some(sender_if_still_connected) = sender_if_still_connected {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender_if_still_connected,
+                                    network_service::BanSeverity::High,
+                                    "bad-warp-sync-fragment",
+                                )
+                                .await;
+                        }
+                    }
                 }
             }
 
@@ -731,11 +1141,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         let verified_height = success.height();
                         self.sync = success.finish(());
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => HeaderVerified(hash={}, new_best={})",
-                            HashDisplay(&verified_hash),
-                            if is_new_best { "yes" } else { "no" }
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "header-verify-success",
+                            hash = HashDisplay(&verified_hash),
+                            is_new_best = if is_new_best { "yes" } else { "no" }
                         );
 
                         if is_new_best {
@@ -779,7 +1191,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             let mut all_sources = self
                                 .sync
                                 .sources()
-                                .filter(|s| matches!(self.sync[*s].1, protocol::Role::Light))
+                                .filter(|s| matches!(self.sync[*s].1, codec::Role::Light))
                                 .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                             for knows in self
                                 .sync
@@ -795,25 +1207,26 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             // stay borrowed accross an `await`, which isn't possible because it
                             // doesn't implement `Sync`.
                             let (source_peer_id, _source_role) = &self.sync[source_id].clone();
-                            debug_assert!(matches!(_source_role, protocol::Role::Light));
+                            debug_assert!(matches!(_source_role, codec::Role::Light));
 
                             if self
                                 .network_service
                                 .clone()
                                 .send_block_announce(
                                     source_peer_id,
-                                    self.network_chain_index,
                                     &scale_encoded_header,
                                     is_new_best,
                                 )
                                 .await
                                 .is_ok()
                             {
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Network <= BlockAnnounce(peer_id={}, hash={})",
-                                    source_peer_id,
-                                    HashDisplay(&verified_hash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "block-announce-received",
+                                    peer_id = source_peer_id,
+                                    block_hash = HashDisplay(&verified_hash)
                                 );
 
                                 // Update the sync state machine with the fact that the target of
@@ -849,25 +1262,43 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.sync = sync;
 
                         // TODO: print which peer sent the header
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => HeaderVerifyError(hash={}, error={:?})",
-                            HashDisplay(&verified_hash),
-                            error
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "header-verify-error",
+                            hash = HashDisplay(&verified_hash),
+                            ?error
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying header {}: {}",
-                            HashDisplay(&verified_hash),
-                            error
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!(
+                                "Error while verifying header {}: {}",
+                                HashDisplay(&verified_hash),
+                                error
+                            )
                         );
+
+                        // TODO: ban peers that have announced the block
+                        /*for peer_id in self.sync.knows_non_finalized_block(height, hash) {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    peer_id,
+                                    network_service::BanSeverity::High,
+                                    "bad-block",
+                                )
+                                .await;
+                        }*/
                     }
                 }
             }
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
                 // Finality proof to verify.
+                let sender = verify.sender().1 .0.clone();
                 match verify.perform({
                     let mut seed = [0; 32];
                     self.platform.fill_random_bytes(&mut seed);
@@ -877,16 +1308,19 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         sync,
                         all::FinalityProofVerifyOutcome::NewFinalized {
                             updates_best_block,
-                            finalized_blocks,
+                            finalized_blocks_newest_to_oldest,
                             ..
                         },
                     ) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => FinalityProofVerified(finalized_blocks={})",
-                            finalized_blocks.len(),
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-success",
+                            finalized_blocks = finalized_blocks_newest_to_oldest.len(),
+                            sender
                         );
 
                         if updates_best_block {
@@ -895,7 +1329,7 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.network_up_to_date_finalized = false;
                         // Invalidate the cache of the runtime of the finalized blocks if any
                         // of the finalized blocks indicates that a runtime update happened.
-                        if finalized_blocks
+                        if finalized_blocks_newest_to_oldest
                             .iter()
                             .any(|b| b.header.digest.has_runtime_environment_updated())
                         {
@@ -921,310 +1355,65 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     (sync, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the proof
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => JustificationVerificationError(error={:?})",
-                            error,
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-error",
+                            ?error,
+                            sender,
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying justification: {}",
-                            error
+                        // TODO: don't print for consensusenginemismatch?
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!("Error while verifying justification: {error}")
                         );
+
+                        // TODO: don't ban for consensusenginemismatch?
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender,
+                                network_service::BanSeverity::High,
+                                "bad-justification",
+                            )
+                            .await;
                     }
 
                     (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the proof
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => GrandpaCommitVerificationError(error={:?})",
-                            error,
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-error",
+                            ?error,
+                            sender,
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying GrandPa commit: {}",
-                            error
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!("Error while verifying GrandPa commit: {}", error)
                         );
+
+                        self.network_service
+                            .ban_and_disconnect(
+                                sender,
+                                network_service::BanSeverity::High,
+                                "bad-grandpa-commit",
+                            )
+                            .await;
                     }
                 }
             }
         }
 
         (self, true)
-    }
-
-    /// Process a request coming from the foreground service.
-    fn process_foreground_message(&mut self, message: ToBackground) {
-        match message {
-            ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                let _ = send_back.send(self.sync.is_near_head_of_chain_heuristic());
-            }
-
-            ToBackground::SubscribeAll {
-                send_back,
-                buffer_size,
-                runtime_interest,
-            } => {
-                let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
-                self.all_notifications.push(tx);
-
-                let non_finalized_blocks_ancestry_order = {
-                    let best_hash = self.sync.best_block_hash();
-                    self.sync
-                        .non_finalized_blocks_ancestry_order()
-                        .map(|h| {
-                            let scale_encoding =
-                                h.scale_encoding_vec(self.sync.block_number_bytes());
-                            BlockNotification {
-                                is_new_best: header::hash_from_scale_encoded_header(
-                                    &scale_encoding,
-                                ) == best_hash,
-                                scale_encoded_header: scale_encoding,
-                                parent_hash: *h.parent_hash,
-                            }
-                        })
-                        .collect()
-                };
-
-                let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: self
-                        .sync
-                        .finalized_block_header()
-                        .scale_encoding_vec(self.sync.block_number_bytes()),
-                    finalized_block_runtime: if runtime_interest {
-                        self.known_finalized_runtime.take()
-                    } else {
-                        None
-                    },
-                    non_finalized_blocks_ancestry_order,
-                    new_blocks,
-                });
-            }
-
-            ToBackground::PeersAssumedKnowBlock {
-                send_back,
-                block_number,
-                block_hash,
-            } => {
-                let finalized_num = self.sync.finalized_block_header().number;
-                let outcome = if block_number <= finalized_num {
-                    self.sync
-                        .sources()
-                        .filter(|source_id| {
-                            let source_best = self.sync.source_best_block(*source_id);
-                            source_best.0 > block_number
-                                || (source_best.0 == block_number && *source_best.1 == block_hash)
-                        })
-                        .map(|id| self.sync[id].0.clone())
-                        .collect()
-                } else {
-                    // As documented, `knows_non_finalized_block` would panic if the
-                    // block height was below the one of the known finalized block.
-                    self.sync
-                        .knows_non_finalized_block(block_number, &block_hash)
-                        .map(|id| self.sync[id].0.clone())
-                        .collect()
-                };
-                let _ = send_back.send(outcome);
-            }
-
-            ToBackground::SyncingPeers { send_back } => {
-                let out = self
-                    .sync
-                    .sources()
-                    .map(|src| {
-                        let (peer_id, role) = self.sync[src].clone();
-                        let (height, hash) = self.sync.source_best_block(src);
-                        (peer_id, role, height, *hash)
-                    })
-                    .collect::<Vec<_>>();
-                let _ = send_back.send(out);
-            }
-
-            ToBackground::SerializeChainInformation { send_back } => {
-                let _ = send_back.send(Some(self.sync.as_chain_information().into()));
-            }
-        }
-    }
-
-    /// Updates the task with a new event coming from the network service.
-    fn inject_network_event(&mut self, network_event: network_service::Event) {
-        match network_event {
-            network_service::Event::Connected {
-                peer_id,
-                role,
-                chain_index,
-                best_block_number,
-                best_block_hash,
-            } if chain_index == self.network_chain_index => {
-                self.peers_source_id_map.insert(
-                    peer_id.clone(),
-                    self.sync
-                        .add_source((peer_id, role), best_block_number, best_block_hash),
-                );
-            }
-
-            network_service::Event::Disconnected {
-                peer_id,
-                chain_index,
-            } if chain_index == self.network_chain_index => {
-                let sync_source_id = self.peers_source_id_map.remove(&peer_id).unwrap();
-                let (_, requests) = self.sync.remove_source(sync_source_id);
-
-                // The `Disconnect` network event indicates that the main notifications substream
-                // with that peer has been closed, not necessarily that the connection as a whole
-                // has been closed. As such, the in-progress network requests might continue if
-                // we don't abort them.
-                for (_, abort) in requests {
-                    abort.abort();
-                }
-            }
-
-            network_service::Event::BlockAnnounce {
-                chain_index,
-                peer_id,
-                announce,
-            } if chain_index == self.network_chain_index => {
-                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                let decoded = announce.decode();
-
-                match header::decode(decoded.scale_encoded_header, self.sync.block_number_bytes()) {
-                    Ok(decoded_header) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                            HashDisplay(decoded_header.parent_hash)
-                        );
-                    }
-                    Err(error) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                        );
-
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => InvalidBlockHeader(error={})",
-                            error
-                        );
-
-                        log::warn!(
-                            target: &self.log_target,
-                            "Failed to decode header in block announce received from {}. Error: {}",
-                            peer_id, error,
-                        )
-                    }
-                }
-
-                match self.sync.block_announce(
-                    sync_source_id,
-                    decoded.scale_encoded_header.to_owned(),
-                    decoded.is_best,
-                ) {
-                    all::BlockAnnounceOutcome::HeaderVerify
-                    | all::BlockAnnounceOutcome::AlreadyInChain => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => Ok"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::Discarded => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => Discarded"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::StoredForLater {} => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => StoredForLater"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::TooOld {
-                        announce_block_height,
-                        ..
-                    } => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => TooOld"
-                        );
-
-                        log::warn!(
-                            target: &self.log_target,
-                            "Block announce header height (#{}) from {} is below finalized block",
-                            announce_block_height,
-                            peer_id
-                        );
-                    }
-                    all::BlockAnnounceOutcome::NotFinalizedChain => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => NotFinalized"
-                        );
-
-                        log::warn!(
-                            target: &self.log_target,
-                            "Block announce from {} isn't part of finalized chain",
-                            peer_id
-                        );
-                    }
-                    all::BlockAnnounceOutcome::InvalidHeader(_) => {
-                        // Log messages are already printed above.
-                    }
-                }
-            }
-
-            network_service::Event::GrandpaNeighborPacket {
-                peer_id,
-                chain_index,
-                finalized_block_height,
-            } if chain_index == self.network_chain_index => {
-                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                self.sync
-                    .update_source_finality_state(sync_source_id, finalized_block_height);
-            }
-
-            network_service::Event::GrandpaCommitMessage {
-                chain_index,
-                peer_id,
-                message,
-            } if chain_index == self.network_chain_index => {
-                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                match self
-                    .sync
-                    .grandpa_commit_message(sync_source_id, message.into_encoded())
-                {
-                    all::GrandpaCommitMessageOutcome::Queued => {
-                        // TODO: print more details?
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= QueuedGrandpaCommit"
-                        );
-                    }
-                    all::GrandpaCommitMessageOutcome::Discarded => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync <= IgnoredGrandpaCommit"
-                        );
-                    }
-                }
-            }
-
-            _ => {
-                // Different chain index.
-            }
-        }
     }
 
     /// Sends a notification to all the notification receivers.

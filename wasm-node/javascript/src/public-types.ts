@@ -58,15 +58,6 @@ export class CrashError extends Error {
 }
 
 /**
- * Thrown in case a malformed JSON-RPC request is sent.
- */
-export class MalformedJsonRpcError extends Error {
-    constructor() {
-        super("JSON-RPC request is malformed");
-    }
-}
-
-/**
  * Thrown in case the buffer of JSON-RPC requests is full and cannot accept any more request.
  */
 export class QueueFullError extends Error {
@@ -137,22 +128,19 @@ export interface Chain {
     /**
      * Enqueues a JSON-RPC request that the client will process as soon as possible.
      *
-     * The response will be sent back using the callback passed when adding the chain.
+     * The response can be pulled by calling {@link Chain.nextJsonRpcResponse}.
      *
      * See <https://www.jsonrpc.org/specification> for a specification of the JSON-RPC format. Only
      * version 2 is supported.
-     * Be aware that some requests will cause notifications to be sent back using the same callback
-     * as the responses.
+     * Be aware that some requests will cause notifications to be sent back through
+     * {@link Chain.nextJsonRpcResponse}.
      *
-     * A {@link MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request
-     * (for example if it is not valid JSON) or if the request is unreasonably large (64 MiB at the
-     * time of writing of this comment).
+     * If the request is not a valid JSON-RPC request, then a JSON-RPC error response is later
+     * generated with an `id` equal to `null`, in accordance with the JSON-RPC 2.0 specification.
+     *
      * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, or
      * if for example some parameters are missing, an error response is properly generated and
-     * yielded through the JSON-RPC callback.
-     * In other words, a {@link MalformedJsonRpcError} is thrown in situations where something
-     * is *so wrong* with the request that it is not possible for smoldot to send back an error
-     * through the JSON-RPC callback.
+     * yielded through {@link Chain.nextJsonRpcResponse}.
      *
      * Two JSON-RPC APIs are supported by smoldot:
      *
@@ -161,7 +149,6 @@ export interface Chain {
      *
      * @param rpc JSON-encoded RPC request.
      *
-     * @throws {@link MalformedJsonRpcError} If the payload isn't valid JSON-RPC.
      * @throws {@link QueueFullError} If the queue of JSON-RPC requests of the chain is full.
      * @throws {@link AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
      * @throws {@link JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
@@ -173,9 +160,10 @@ export interface Chain {
      * Waits for a JSON-RPC response or notification to be generated.
      *
      * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
-     * pulls one element from the buffer. If this function is called at a slower rate than responses
-     * are generated, then the buffer will eventually become full, at which point calling
-     * {@link Chain.sendJsonRpc} will throw an exception.
+     * pulls one element from the buffer. If this function is called at a slower rate than
+     * responses are generated, then the buffer will eventually become full, at which point calling
+     * {@link Chain.sendJsonRpc} will throw an exception. The size of this buffer can be configured
+     * through {@link AddChainOptions.jsonRpcMaxPendingRequests}.
      *
      * If this function is called multiple times "simultaneously" (generating multiple different
      * `Promise`s), each `Promise` will return a different JSON-RPC response or notification. In
@@ -192,15 +180,23 @@ export interface Chain {
     /**
      * Disconnects from the blockchain.
      *
-     * The JSON-RPC callback will no longer be called. This is the case immediately after this
-     * function is called. Any on-going JSON-RPC request is instantaneously aborted.
+     * Any on-going call to {@link Chain.nextJsonRpcResponse} is instantaneously aborted and will
+     * throw a {@link AlreadyDestroyedError}.
      *
-     * Trying to use the chain again will lead to an exception being thrown.
+     * Trying to use the chain again after this function has returned will lead to a
+     * {@link AlreadyDestroyedError} exception being thrown.
      *
-     * If this chain is a relay chain, then all parachains that use it will continue to work. Smoldot
-     * automatically keeps alive all relay chains that have an active parachains. There is no need
-     * to track parachains and relay chains, or to destroy them in the correct order, as this is
-     * handled automatically internally.
+     * While the chain instantaneously disappears from the public API as soon as this function is
+     * called, its shutdown process actually happens asynchronously in the background. This means
+     * for example that networking connections to the chain will remain open for a little bit even
+     * after this function returns.
+     *
+     * If the chain is a relay chain, and that there exists {@link Chain} instances corresponding
+     * to parachains that are using this relay chain, then these parachains will continue to work
+     * and the relay chain will actually remain connected in the background.
+     * Smoldot automatically keeps alive all relay chains that have an active parachains. There
+     * is no need to track parachains and relay chains, or to destroy them in the correct order,
+     * as this is handled automatically internally.
      *
      * @throws {@link AlreadyDestroyedError} If the chain has already been removed or the client has been terminated.
      * @throws {@link CrashError} If the background client has crashed.
@@ -430,7 +426,7 @@ export interface AddChainOptions {
      *
      * This field is ignored if {@link AddChainOptions.disableJsonRpc} is `true`.
      *
-     * A zero, negative or NaN value is invalid.
+     * A zero, negative or NaN value is invalid and will generate a {@link AddChainError}.
      *
      * If this value is not set, it means that there is no maximum.
      */
@@ -441,7 +437,7 @@ export interface AddChainOptions {
      *
      * This field is ignored if {@link AddChainOptions.disableJsonRpc} is `true`.
      *
-     * A negative or NaN value is invalid.
+     * A negative or NaN value is invalid and will generate a {@link AddChainError}.
      *
      * If this value is not set, it means that there is no maximum.
      */

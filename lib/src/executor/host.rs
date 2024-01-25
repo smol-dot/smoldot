@@ -152,7 +152,7 @@
 //!     let prototype = HostVmPrototype::new(Config {
 //!         module: &wasm_binary_code,
 //!         heap_pages: HeapPages::from(2048),
-//!         exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+//!         exec_hint: smoldot::executor::vm::ExecHint::ValidateAndExecuteOnce,
 //!         allow_unresolved_imports: false
 //!     }).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
@@ -194,14 +194,9 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{
-    borrow::ToOwned as _,
-    boxed::Box,
-    string::{String, ToString as _},
-    vec,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use core::{fmt, hash::Hasher as _, iter, str};
+use functions::HostFunction;
 
 pub mod runtime_version;
 
@@ -213,6 +208,7 @@ pub use trie::TrieEntryVersion;
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
+mod functions;
 mod tests;
 mod zstd;
 
@@ -265,10 +261,10 @@ struct VmCommon {
 
     /// List of functions that the Wasm code imports.
     ///
-    /// The keys of this `Vec` (i.e. the `usize` indices) have been passed to the virtual machine
+    /// The keys of this list (i.e. the `usize` indices) have been passed to the virtual machine
     /// executor. Whenever the Wasm code invokes a host function, we obtain its index, and look
-    /// within this `Vec` to know what to do.
-    registered_functions: Vec<FunctionImport>,
+    /// within this list to know what to do.
+    registered_functions: Arc<[FunctionImport]>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
@@ -349,8 +345,7 @@ impl HostVmPrototype {
                     Ok(id)
                 },
             })?;
-            registered_functions.shrink_to_fit();
-            (vm_proto, registered_functions)
+            (vm_proto, registered_functions.into())
         };
 
         // In the runtime environment, Wasm blobs must export a global symbol named
@@ -436,7 +431,10 @@ impl HostVmPrototype {
 
     /// Returns the runtime version found in the module.
     pub fn runtime_version(&self) -> &CoreVersion {
-        self.common.runtime_version.as_ref().unwrap()
+        self.common
+            .runtime_version
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
     }
 
     /// Starts the VM, calling the function passed as parameter.
@@ -498,17 +496,19 @@ impl HostVmPrototype {
             .checked_sub(u32::from(vm.memory_size()))
         {
             // If the memory can't be grown, it indicates a bug in the allocator.
-            vm.grow_memory(HeapPages::from(to_grow)).unwrap();
+            vm.grow_memory(HeapPages::from(to_grow))
+                .unwrap_or_else(|_| unreachable!());
         }
 
         // Writing the input data into the VM.
         let mut data_ptr_iter = data_ptr;
         for data in data {
             let data = data.as_ref();
-            vm.write_memory(data_ptr_iter, data).unwrap();
+            vm.write_memory(data_ptr_iter, data)
+                .unwrap_or_else(|_| unreachable!());
             data_ptr_iter = data_ptr_iter
-                .checked_add(u32::try_from(data.len()).unwrap())
-                .unwrap();
+                .checked_add(u32::try_from(data.len()).unwrap_or_else(|_| unreachable!()))
+                .unwrap_or_else(|| unreachable!());
         }
 
         // Now start executing the function. We pass as parameter the location and size of the
@@ -707,8 +707,8 @@ impl ReadyToRun {
                 // According to the runtime environment specification, the return value is two
                 // consecutive I32s representing the length and size of the SCALE-encoded
                 // return value.
-                let value_size = u32::try_from(ret >> 32).unwrap();
-                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap();
+                let value_size = u32::try_from(ret >> 32).unwrap_or_else(|_| unreachable!());
+                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap_or_else(|_| unreachable!());
 
                 if value_size.saturating_add(value_ptr)
                     <= u32::from(self.inner.vm.memory_size()) * 64 * 1024
@@ -768,7 +768,7 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = match self.inner.common.registered_functions.get_mut(id) {
+        let host_fn = match self.inner.common.registered_functions.get(id) {
             Some(FunctionImport::Resolved(f)) => *f,
             Some(FunctionImport::Unresolved { name, module }) => {
                 return HostVm::Error {
@@ -792,8 +792,8 @@ impl ReadyToRun {
                     _ => unreachable!(),
                 };
 
-                let len = u32::try_from(val >> 32).unwrap();
-                let ptr = u32::try_from(val & 0xffffffff).unwrap();
+                let len = u32::try_from(val >> 32).unwrap_or_else(|_| unreachable!());
+                let ptr = u32::try_from(val & 0xffffffff).unwrap_or_else(|_| unreachable!());
 
                 let result = self.inner.vm.read_memory(ptr, len);
                 match result {
@@ -823,8 +823,8 @@ impl ReadyToRun {
                     _ => unreachable!(),
                 };
 
-                let len = u32::try_from(val >> 32).unwrap();
-                let ptr = u32::try_from(val & 0xffffffff).unwrap();
+                let len = u32::try_from(val >> 32).unwrap_or_else(|_| unreachable!());
+                let ptr = u32::try_from(val & 0xffffffff).unwrap_or_else(|_| unreachable!());
 
                 if len.saturating_add(ptr) > u32::from(self.inner.vm.memory_size()) * 64 * 1024 {
                     return HostVm::Error {
@@ -853,7 +853,9 @@ impl ReadyToRun {
 
                 let result = self.inner.vm.read_memory(ptr, $size);
                 match result {
-                    Ok(v) => *<&[u8; $size]>::try_from(v.as_ref()).unwrap(),
+                    Ok(v) => {
+                        *<&[u8; $size]>::try_from(v.as_ref()).unwrap_or_else(|_| unreachable!())
+                    }
                     Err(vm::OutOfBoundsError) => {
                         drop(result);
                         return HostVm::Error {
@@ -901,6 +903,28 @@ impl ReadyToRun {
             ($num:expr) => {{
                 match &params[$num] {
                     vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+                    // The signatures are checked at initialization and the Wasm VM ensures that
+                    // the proper parameter types are provided.
+                    _ => unreachable!(),
+                }
+            }};
+        }
+
+        macro_rules! expect_offchain_storage_kind {
+            ($num:expr) => {{
+                match &params[$num] {
+                    // `0` indicates `StorageKind::PERSISTENT`, the only kind of offchain
+                    // storage that is available.
+                    vm::WasmValue::I32(0) => true,
+                    // `1` indicates `StorageKind::LOCAL`, which is valid but has never been
+                    // implemented in Substrate.
+                    vm::WasmValue::I32(1) => false,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
                     // The signatures are checked at initialization and the Wasm VM ensures that
                     // the proper parameter types are provided.
                     _ => unreachable!(),
@@ -1021,7 +1045,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1068,7 +1092,7 @@ impl ReadyToRun {
                     .common
                     .runtime_version
                     .as_ref()
-                    .unwrap()
+                    .unwrap_or_else(|| unreachable!())
                     .decode()
                     .state_version
                     .unwrap_or(TrieEntryVersion::V0);
@@ -1205,7 +1229,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(1);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1252,7 +1276,7 @@ impl ReadyToRun {
                     let input = expect_pointer_size!(2);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
                         nom::combinator::all_consuming(util::nom_option_decode(
-                            nom::number::complete::le_u32,
+                            nom::number::streaming::le_u32,
                         ))(input.as_ref())
                         .map(|(_, parse_result)| parse_result);
 
@@ -1349,7 +1373,7 @@ impl ReadyToRun {
                     .common
                     .runtime_version
                     .as_ref()
-                    .unwrap()
+                    .unwrap_or_else(|| unreachable!())
                     .decode()
                     .state_version
                     .unwrap_or(TrieEntryVersion::V0);
@@ -1445,7 +1469,7 @@ impl ReadyToRun {
                     blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
                         .as_bytes(),
                 )
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
                 let message = libsecp256k1::Message::parse(&data);
 
                 if let Ok(sc) =
@@ -1550,7 +1574,8 @@ impl ReadyToRun {
 
                         if let Ok(v) = v {
                             let pubkey = libsecp256k1::recover(
-                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &libsecp256k1::Message::parse_slice(&msg)
+                                    .unwrap_or_else(|_| unreachable!()),
                                 &rs,
                                 &v,
                             );
@@ -1599,7 +1624,8 @@ impl ReadyToRun {
 
                         if let Ok(v) = v {
                             let pubkey = libsecp256k1::recover(
-                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &libsecp256k1::Message::parse_slice(&msg)
+                                    .unwrap_or_else(|_| unreachable!()),
                                 &rs,
                                 &v,
                             );
@@ -1639,12 +1665,11 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                let Some(outcome) = self.inner.signatures_batch_verification.take()
-                else {
+                let Some(outcome) = self.inner.signatures_batch_verification.take() else {
                     return HostVm::Error {
                         error: Error::NoBatchVerify,
                         prototype: self.inner.into_prototype(),
-                    }
+                    };
                 };
 
                 HostVm::ReadyToRun(ReadyToRun {
@@ -1789,51 +1814,73 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_offchain_local_storage_set_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(2);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: None,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(2);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        old_value: None,
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                }
             }
             HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
-                let (value_ptr, value_size) = expect_pointer_size_raw!(3);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: Some((value_ptr, value_size)),
-                    old_value: Some((old_value_ptr, old_value_size)),
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    let (old_value_ptr, old_value_size) = expect_pointer_size_raw!(2);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(3);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
+                        old_value: Some((old_value_ptr, old_value_size)),
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: Some(vm::WasmValue::I32(0)),
+                    })
+                }
             }
             HostFunction::ext_offchain_local_storage_get_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-
-                HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
-                    key_ptr,
-                    key_size,
-                    calling: id,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    HostVm::ExternalOffchainStorageGet(ExternalOffchainStorageGet {
+                        key_ptr,
+                        key_size,
+                        calling: id,
+                        inner: self.inner,
+                    })
+                } else {
+                    // Write a SCALE-encoded `None`.
+                    self.inner
+                        .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&[0]))
+                }
             }
             HostFunction::ext_offchain_local_storage_clear_version_1 => {
-                let _kind = expect_u32!(0); // TODO: parse and provide the storage kind
-                let (key_ptr, key_size) = expect_pointer_size_raw!(1);
-                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
-                    key_ptr,
-                    key_size,
-                    value: None,
-                    old_value: None,
-                    inner: self.inner,
-                })
+                if expect_offchain_storage_kind!(0) {
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(1);
+                    HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                        key_ptr,
+                        key_size,
+                        value: None,
+                        old_value: None,
+                        inner: self.inner,
+                    })
+                } else {
+                    HostVm::ReadyToRun(ReadyToRun {
+                        inner: self.inner,
+                        resume_value: None,
+                    })
+                }
             }
             HostFunction::ext_offchain_http_request_start_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_offchain_http_request_add_header_version_1 => {
@@ -1875,11 +1922,11 @@ impl ReadyToRun {
                                     nom::sequence::tuple((
                                         nom::combinator::flat_map(
                                             crate::util::nom_scale_compact_usize,
-                                            nom::bytes::complete::take,
+                                            nom::bytes::streaming::take,
                                         ),
                                         nom::combinator::flat_map(
                                             crate::util::nom_scale_compact_usize,
-                                            nom::bytes::complete::take,
+                                            nom::bytes::streaming::take,
                                         ),
                                     )),
                                 )
@@ -1940,7 +1987,7 @@ impl ReadyToRun {
                                     num_elems,
                                     nom::combinator::flat_map(
                                         crate::util::nom_scale_compact_usize,
-                                        nom::bytes::complete::take,
+                                        nom::bytes::streaming::take,
                                     ),
                                 )
                             },
@@ -1999,7 +2046,7 @@ impl ReadyToRun {
                     self.inner
                         .vm
                         .read_memory(str_ptr, str_size)
-                        .unwrap()
+                        .unwrap_or_else(|_| unreachable!())
                         .as_ref(),
                 )
                 .map(|_| ());
@@ -2087,7 +2134,7 @@ impl ReadyToRun {
                     self.inner
                         .vm
                         .read_memory(target_str_ptr, target_str_size)
-                        .unwrap()
+                        .unwrap_or_else(|_| unreachable!())
                         .as_ref(),
                 )
                 .map(|_| ());
@@ -2095,7 +2142,7 @@ impl ReadyToRun {
                     return HostVm::Error {
                         error: Error::Utf8Error {
                             function: host_fn.name(),
-                            param_num: 2,
+                            param_num: 1,
                             error,
                         },
                         prototype: self.inner.into_prototype(),
@@ -2107,7 +2154,7 @@ impl ReadyToRun {
                     self.inner
                         .vm
                         .read_memory(msg_str_ptr, msg_str_size)
-                        .unwrap()
+                        .unwrap_or_else(|_| unreachable!())
                         .as_ref(),
                 )
                 .map(|_| ());
@@ -2125,9 +2172,9 @@ impl ReadyToRun {
                 HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry: LogEmitInner::Log {
-                        _log_level: log_level,
-                        _target_str_ptr: target_str_ptr,
-                        _target_str_size: target_str_size,
+                        log_level,
+                        target_str_ptr,
+                        target_str_size,
                         msg_str_ptr,
                         msg_str_size,
                     },
@@ -2135,6 +2182,27 @@ impl ReadyToRun {
             }
             HostFunction::ext_logging_max_level_version_1 => {
                 HostVm::GetMaxLogLevel(GetMaxLogLevel { inner: self.inner })
+            }
+            HostFunction::ext_panic_handler_abort_on_panic_version_1 => {
+                let message = {
+                    let message_bytes = expect_pointer_size!(0);
+                    str::from_utf8(message_bytes.as_ref()).map(|msg| msg.to_owned())
+                };
+
+                match message {
+                    Ok(message) => HostVm::Error {
+                        error: Error::AbortOnPanic { message },
+                        prototype: self.inner.into_prototype(),
+                    },
+                    Err(error) => HostVm::Error {
+                        error: Error::Utf8Error {
+                            function: host_fn.name(),
+                            param_num: 0,
+                            error,
+                        },
+                        prototype: self.inner.into_prototype(),
+                    },
+                }
             }
         }
     }
@@ -2166,7 +2234,7 @@ impl Finished {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Turns the virtual machine back into a prototype.
@@ -2211,7 +2279,7 @@ impl ExternalStorageGet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
@@ -2221,7 +2289,7 @@ impl ExternalStorageGet {
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2247,10 +2315,14 @@ impl ExternalStorageGet {
     /// use when the full storage value is already present in memory.
     pub fn resume_full_value(self, value: Option<&[u8]>) -> HostVm {
         if let Some(value) = value {
-            if usize::try_from(self.offset).unwrap() < value.len() {
-                let value_slice = &value[usize::try_from(self.offset).unwrap()..];
-                if usize::try_from(self.max_size).unwrap() < value_slice.len() {
-                    let value_slice = &value_slice[..usize::try_from(self.max_size).unwrap()];
+            if usize::try_from(self.offset).unwrap_or_else(|_| unreachable!()) < value.len() {
+                let value_slice =
+                    &value[usize::try_from(self.offset).unwrap_or_else(|_| unreachable!())..];
+                if usize::try_from(self.max_size).unwrap_or_else(|_| unreachable!())
+                    < value_slice.len()
+                {
+                    let value_slice = &value_slice
+                        [..usize::try_from(self.max_size).unwrap_or_else(|_| unreachable!())];
                     self.resume(Some((value_slice, value.len())))
                 } else {
                     self.resume(Some((value_slice, value.len())))
@@ -2335,19 +2407,26 @@ impl ExternalStorageGet {
             HostFunction::ext_storage_read_version_1
             | HostFunction::ext_default_child_storage_read_version_1 => {
                 let outcome = if let Some((value, value_total_len)) = value {
-                    let mut remaining_max_allowed = usize::try_from(self.max_size).unwrap();
-                    let mut offset = self.value_out_ptr.unwrap();
+                    let mut remaining_max_allowed =
+                        usize::try_from(self.max_size).unwrap_or_else(|_| unreachable!());
+                    let mut offset = self.value_out_ptr.unwrap_or_else(|| unreachable!());
                     for value in value {
                         let value = value.as_ref();
                         assert!(value.len() <= remaining_max_allowed);
                         remaining_max_allowed -= value.len();
-                        self.inner.vm.write_memory(offset, value).unwrap();
-                        offset += u32::try_from(value.len()).unwrap();
+                        self.inner
+                            .vm
+                            .write_memory(offset, value)
+                            .unwrap_or_else(|_| unreachable!());
+                        offset += u32::try_from(value.len()).unwrap_or_else(|_| unreachable!());
                     }
 
                     // Note: the https://github.com/paritytech/substrate/pull/7084 PR has changed
                     // the meaning of this return value.
-                    Some(u32::try_from(value_total_len).unwrap() - self.offset)
+                    Some(
+                        u32::try_from(value_total_len).unwrap_or_else(|_| unreachable!())
+                            - self.offset,
+                    )
                 } else {
                     None
                 };
@@ -2416,7 +2495,7 @@ impl ExternalStorageSet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
@@ -2428,7 +2507,11 @@ impl ExternalStorageSet {
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         match &self.child_trie_ptr_size {
             Some((ptr, size)) => {
-                let child_trie = self.inner.vm.read_memory(*ptr, *size).unwrap();
+                let child_trie = self
+                    .inner
+                    .vm
+                    .read_memory(*ptr, *size)
+                    .unwrap_or_else(|_| unreachable!());
                 Some(child_trie)
             }
             None => None,
@@ -2439,8 +2522,12 @@ impl ExternalStorageSet {
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
     pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
-        self.value
-            .map(|(ptr, size)| self.inner.vm.read_memory(ptr, size).unwrap())
+        self.value.map(|(ptr, size)| {
+            self.inner
+                .vm
+                .read_memory(ptr, size)
+                .unwrap_or_else(|_| unreachable!())
+        })
     }
 
     /// Returns the state trie version indicated by the runtime.
@@ -2452,7 +2539,7 @@ impl ExternalStorageSet {
             .common
             .runtime_version
             .as_ref()
-            .unwrap()
+            .unwrap_or_else(|| unreachable!())
             .decode()
             .state_version
             .unwrap_or(TrieEntryVersion::V0)
@@ -2518,7 +2605,7 @@ impl ExternalStorageAppend {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, write to the given child trie. If `None`, write to the main trie.
@@ -2537,7 +2624,7 @@ impl ExternalStorageAppend {
         self.inner
             .vm
             .read_memory(self.value_ptr, self.value_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Resumes execution after having set the value.
@@ -2584,7 +2671,12 @@ impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
         if let Some((prefix_ptr, prefix_size)) = self.prefix_ptr_size {
-            either::Left(self.inner.vm.read_memory(prefix_ptr, prefix_size).unwrap())
+            either::Left(
+                self.inner
+                    .vm
+                    .read_memory(prefix_ptr, prefix_size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             either::Right(&[][..])
         }
@@ -2600,7 +2692,7 @@ impl ExternalStorageClearPrefix {
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2687,7 +2779,11 @@ impl ExternalStorageRoot {
     /// Returns the child trie whose root hash must be provided. `None` for the main trie.
     pub fn child_trie(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.child_trie_ptr_size {
-            let child_trie = self.inner.vm.read_memory(ptr, size).unwrap();
+            let child_trie = self
+                .inner
+                .vm
+                .read_memory(ptr, size)
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2733,7 +2829,7 @@ impl ExternalStorageNextKey {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// If `Some`, read from the given child trie. If `None`, read from the main trie.
@@ -2743,7 +2839,7 @@ impl ExternalStorageNextKey {
                 .inner
                 .vm
                 .read_memory(child_trie_ptr, child_trie_size)
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             Some(child_trie)
         } else {
             None
@@ -2759,7 +2855,7 @@ impl ExternalStorageNextKey {
             .inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!());
 
         match follow_up {
             Some(next) => {
@@ -2825,7 +2921,7 @@ impl SignatureVerification {
         self.inner
             .vm
             .read_memory(self.message_ptr, self.message_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the signature.
@@ -2844,7 +2940,7 @@ impl SignatureVerification {
         self.inner
             .vm
             .read_memory(self.signature_ptr, signature_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the public key the signature is against.
@@ -2863,7 +2959,7 @@ impl SignatureVerification {
         self.inner
             .vm
             .read_memory(self.public_key_ptr, public_key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Verify the signature. Returns `true` if it is valid.
@@ -2875,7 +2971,8 @@ impl SignatureVerification {
 
                 if let Ok(public_key) = public_key {
                     let signature = ed25519_zebra::Signature::from(
-                        <[u8; 64]>::try_from(self.signature().as_ref()).unwrap(),
+                        <[u8; 64]>::try_from(self.signature().as_ref())
+                            .unwrap_or_else(|_| unreachable!()),
                     );
                     public_key
                         .verify(&signature, self.message().as_ref())
@@ -2899,7 +2996,8 @@ impl SignatureVerification {
                     pk.verify_simple(
                         b"substrate",
                         self.message().as_ref(),
-                        &schnorrkel::Signature::from_bytes(self.signature().as_ref()).unwrap(),
+                        &schnorrkel::Signature::from_bytes(self.signature().as_ref())
+                            .unwrap_or_else(|_| unreachable!()),
                     )
                     .is_ok()
                 })
@@ -2909,7 +3007,7 @@ impl SignatureVerification {
                 let data = <[u8; 32]>::try_from(
                     blake2_rfc::blake2b::blake2b(32, &[], self.message().as_ref()).as_bytes(),
                 )
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
                 let message = libsecp256k1::Message::parse(&data);
 
                 // signature (64 bytes) + recovery ID (1 byte)
@@ -2927,7 +3025,8 @@ impl SignatureVerification {
                 // We can safely unwrap, as the size is checked when the `SignatureVerification`
                 // is constructed.
                 let message = libsecp256k1::Message::parse(
-                    &<[u8; 32]>::try_from(self.message().as_ref()).unwrap(),
+                    &<[u8; 32]>::try_from(self.message().as_ref())
+                        .unwrap_or_else(|_| unreachable!()),
                 );
 
                 // signature (64 bytes) + recovery ID (1 byte)
@@ -3018,7 +3117,7 @@ impl CallRuntimeVersion {
         self.inner
             .vm
             .read_memory(self.wasm_blob_ptr, self.wasm_blob_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Writes the SCALE-encoded runtime version to the memory and prepares for execution.
@@ -3071,7 +3170,7 @@ impl ExternalOffchainIndexSet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the value to set.
@@ -3079,7 +3178,12 @@ impl ExternalOffchainIndexSet {
     /// If `None` is returned, the key should be removed from the storage entirely.
     pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.value {
-            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+            Some(
+                self.inner
+                    .vm
+                    .read_memory(ptr, size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             None
         }
@@ -3122,7 +3226,7 @@ impl ExternalOffchainStorageSet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Returns the value to set.
@@ -3130,7 +3234,12 @@ impl ExternalOffchainStorageSet {
     /// If `None` is returned, the key should be removed from the storage entirely.
     pub fn value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.value {
-            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+            Some(
+                self.inner
+                    .vm
+                    .read_memory(ptr, size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             None
         }
@@ -3139,7 +3248,12 @@ impl ExternalOffchainStorageSet {
     /// Returns the value the current value should be compared against. The operation is a no-op if they don't compare equal.
     pub fn old_value(&'_ self) -> Option<impl AsRef<[u8]> + '_> {
         if let Some((ptr, size)) = self.old_value {
-            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+            Some(
+                self.inner
+                    .vm
+                    .read_memory(ptr, size)
+                    .unwrap_or_else(|_| unreachable!()),
+            )
         } else {
             None
         }
@@ -3187,7 +3301,7 @@ impl ExternalOffchainStorageGet {
         self.inner
             .vm
             .read_memory(self.key_ptr, self.key_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Resumes execution after having set the value.
@@ -3289,7 +3403,7 @@ impl OffchainSubmitTransaction {
         self.inner
             .vm
             .read_memory(self.tx_ptr, self.tx_size)
-            .unwrap()
+            .unwrap_or_else(|_| unreachable!())
     }
 
     /// Resumes execution after having submitted the transaction.
@@ -3318,8 +3432,7 @@ impl fmt::Debug for OffchainSubmitTransaction {
 
 /// Report about a log entry being emitted.
 ///
-/// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
-/// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
+/// Use [`LogEmit::info`] to obtain what must be printed.
 pub struct LogEmit {
     inner: Box<Inner>,
     log_entry: LogEmitInner,
@@ -3341,11 +3454,11 @@ enum LogEmitInner {
     },
     Log {
         /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
-        _log_level: u32,
+        log_level: u32,
         /// Pointer to the string of the log target. Guaranteed to be in range and to be UTF-8.
-        _target_str_ptr: u32,
+        target_str_ptr: u32,
         /// Size of the string of the log target. Guaranteed to be in range and to be UTF-8.
-        _target_str_size: u32,
+        target_str_size: u32,
         /// Pointer to the string of the log message. Guaranteed to be in range and to be UTF-8.
         msg_str_ptr: u32,
         /// Size of the string of the log message. Guaranteed to be in range and to be UTF-8.
@@ -3354,7 +3467,58 @@ enum LogEmitInner {
 }
 
 impl LogEmit {
-    /// Resumes execution after having set the value.
+    /// Returns the data that the runtime would like to print.
+    pub fn info(&self) -> LogEmitInfo {
+        match self.log_entry {
+            LogEmitInner::Num(n) => LogEmitInfo::Num(n),
+            LogEmitInner::Utf8 { str_ptr, str_size } => LogEmitInfo::Utf8(LogEmitInfoStr {
+                data: Box::new(
+                    self.inner
+                        .vm
+                        .read_memory(str_ptr, str_size)
+                        .unwrap_or_else(|_| unreachable!()),
+                ),
+            }),
+            LogEmitInner::Hex {
+                data_ptr,
+                data_size,
+            } => LogEmitInfo::Hex(LogEmitInfoHex {
+                data: Box::new(
+                    self.inner
+                        .vm
+                        .read_memory(data_ptr, data_size)
+                        .unwrap_or_else(|_| unreachable!()),
+                ),
+            }),
+            LogEmitInner::Log {
+                msg_str_ptr,
+                msg_str_size,
+                target_str_ptr,
+                target_str_size,
+                log_level,
+            } => LogEmitInfo::Log {
+                log_level,
+                target: LogEmitInfoStr {
+                    data: Box::new(
+                        self.inner
+                            .vm
+                            .read_memory(target_str_ptr, target_str_size)
+                            .unwrap_or_else(|_| unreachable!()),
+                    ),
+                },
+                message: LogEmitInfoStr {
+                    data: Box::new(
+                        self.inner
+                            .vm
+                            .read_memory(msg_str_ptr, msg_str_size)
+                            .unwrap_or_else(|_| unreachable!()),
+                    ),
+                },
+            },
+        }
+    }
+
+    /// Resumes execution.
     pub fn resume(self) -> HostVm {
         HostVm::ReadyToRun(ReadyToRun {
             inner: self.inner,
@@ -3363,45 +3527,83 @@ impl LogEmit {
     }
 }
 
-impl fmt::Display for LogEmit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.log_entry {
-            LogEmitInner::Num(num) => write!(f, "{num}"),
-            LogEmitInner::Utf8 { str_ptr, str_size } => {
-                let str = self.inner.vm.read_memory(str_ptr, str_size).unwrap();
-                let str = str::from_utf8(str.as_ref()).unwrap();
-                write!(f, "{str}")
-            }
-            LogEmitInner::Hex {
-                data_ptr,
-                data_size,
-            } => {
-                let data = self.inner.vm.read_memory(data_ptr, data_size).unwrap();
-                write!(f, "{}", hex::encode(data.as_ref()))
-            }
-            LogEmitInner::Log {
-                msg_str_ptr,
-                msg_str_size,
-                ..
-            } => {
-                let str = self
-                    .inner
-                    .vm
-                    .read_memory(msg_str_ptr, msg_str_size)
-                    .unwrap();
-                let str = str::from_utf8(str.as_ref()).unwrap();
-                // TODO: don't just ignore the target and log level? better log representation? more control? also, it's unclear whether it should be an individual line
-                writeln!(f, "{str}")
-            }
-        }
-    }
-}
-
 impl fmt::Debug for LogEmit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("LogEmit")
-            .field("message", &self.to_string())
+            .field("info", &self.info())
             .finish()
+    }
+}
+
+/// Detail about what a [`LogEmit`] should output. See [`LogEmit::info`].
+#[derive(Debug)]
+pub enum LogEmitInfo<'a> {
+    /// Must output a single number.
+    Num(u64),
+    /// Must output a UTF-8 string.
+    Utf8(LogEmitInfoStr<'a>),
+    /// Must output the hexadecimal encoding of the given buffer.
+    Hex(LogEmitInfoHex<'a>),
+    /// Must output a log line.
+    Log {
+        /// Log level. Arbitrary number indicated by runtime, but typically in the `1..=5` range.
+        log_level: u32,
+        /// "Target" of the log. Arbitrary string indicated by the runtime. Typically indicates
+        /// the subsystem which has emitted the log line.
+        target: LogEmitInfoStr<'a>,
+        /// Actual log message being emitted.
+        message: LogEmitInfoStr<'a>,
+    },
+}
+
+/// See [`LogEmitInfo`]. Use the `AsRef` trait implementation to retrieve the buffer.
+pub struct LogEmitInfoHex<'a> {
+    // TODO: don't use a Box once Rust supports type Foo = impl Trait;
+    data: Box<dyn AsRef<[u8]> + Send + Sync + 'a>,
+}
+
+impl<'a> AsRef<[u8]> for LogEmitInfoHex<'a> {
+    fn as_ref(&self) -> &[u8] {
+        (*self.data).as_ref()
+    }
+}
+
+impl<'a> fmt::Debug for LogEmitInfoHex<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl<'a> fmt::Display for LogEmitInfoHex<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&hex::encode(self.as_ref()), f)
+    }
+}
+
+/// See [`LogEmitInfo`]. Use the `AsRef` trait implementation to retrieve the string.
+pub struct LogEmitInfoStr<'a> {
+    // TODO: don't use a Box once Rust supports type Foo = impl Trait;
+    data: Box<dyn AsRef<[u8]> + Send + Sync + 'a>,
+}
+
+impl<'a> AsRef<str> for LogEmitInfoStr<'a> {
+    fn as_ref(&self) -> &str {
+        let data = (*self.data).as_ref();
+        // The creator of `LogEmitInfoStr` always makes sure that the string is indeed UTF-8
+        // before creating it.
+        str::from_utf8(data).unwrap_or_else(|_| unreachable!())
+    }
+}
+
+impl<'a> fmt::Debug for LogEmitInfoStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl<'a> fmt::Display for LogEmitInfoStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_ref(), f)
     }
 }
 
@@ -3538,7 +3740,9 @@ impl Inner {
         let mut ptr_iter = dest_ptr;
         for chunk in data {
             let chunk = chunk.as_ref();
-            self.vm.write_memory(ptr_iter, chunk).unwrap();
+            self.vm
+                .write_memory(ptr_iter, chunk)
+                .unwrap_or_else(|_| unreachable!());
             ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
         }
 
@@ -3587,7 +3791,9 @@ impl Inner {
         let mut ptr_iter = dest_ptr;
         for chunk in data {
             let chunk = chunk.as_ref();
-            self.vm.write_memory(ptr_iter, chunk).unwrap();
+            self.vm
+                .write_memory(ptr_iter, chunk)
+                .unwrap_or_else(|_| unreachable!());
             ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
         }
 
@@ -3647,8 +3853,10 @@ impl Inner {
             let to_grow = last_byte_memory_page - current_num_pages + HeapPages::new(1);
 
             // We check at initialization that the virtual machine is capable of growing up to
-            // `memory_total_pages`, meaning that this `unwrap` can't panic.
-            self.vm.grow_memory(to_grow).unwrap();
+            // `memory_total_pages`, meaning that this can't panic.
+            self.vm
+                .grow_memory(to_grow)
+                .unwrap_or_else(|_| unreachable!());
         }
 
         Ok(dest_ptr)
@@ -3714,6 +3922,12 @@ pub enum Error {
     /// Error in the Wasm code execution.
     #[display(fmt = "{_0}")]
     Trap(vm::Trap),
+    /// Runtime has called the `ext_panic_handler_abort_on_panic_version_1` host function.
+    #[display(fmt = "Runtime has aborted: {message:?}")]
+    AbortOnPanic {
+        /// Message generated by the runtime.
+        message: String,
+    },
     /// A non-`i64` value has been returned by the Wasm entry point.
     #[display(fmt = "A non-I64 value has been returned: {actual:?}")]
     BadReturnValue {
@@ -3828,435 +4042,6 @@ pub enum Error {
     },
 }
 
-macro_rules! externalities {
-    ($($ext:ident,)*) => {
-        /// List of possible externalities.
-        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-        #[allow(non_camel_case_types)]
-        enum HostFunction {
-            $(
-                $ext,
-            )*
-        }
-
-        impl HostFunction {
-            fn by_name(name: &str) -> Option<Self> {
-                $(
-                    if name == stringify!($ext) {
-                        return Some(HostFunction::$ext);
-                    }
-                )*
-                None
-            }
-
-            fn name(&self) -> &'static str {
-                match self {
-                    $(
-                        HostFunction::$ext => stringify!($ext),
-                    )*
-                }
-            }
-        }
-    };
-}
-
-externalities! {
-    ext_storage_set_version_1,
-    ext_storage_get_version_1,
-    ext_storage_read_version_1,
-    ext_storage_clear_version_1,
-    ext_storage_exists_version_1,
-    ext_storage_clear_prefix_version_1,
-    ext_storage_clear_prefix_version_2,
-    ext_storage_root_version_1,
-    ext_storage_root_version_2,
-    ext_storage_changes_root_version_1,
-    ext_storage_next_key_version_1,
-    ext_storage_append_version_1,
-    ext_storage_start_transaction_version_1,
-    ext_storage_rollback_transaction_version_1,
-    ext_storage_commit_transaction_version_1,
-    ext_default_child_storage_get_version_1,
-    ext_default_child_storage_read_version_1,
-    ext_default_child_storage_storage_kill_version_1,
-    ext_default_child_storage_storage_kill_version_2,
-    ext_default_child_storage_storage_kill_version_3,
-    ext_default_child_storage_clear_prefix_version_1,
-    ext_default_child_storage_clear_prefix_version_2,
-    ext_default_child_storage_set_version_1,
-    ext_default_child_storage_clear_version_1,
-    ext_default_child_storage_exists_version_1,
-    ext_default_child_storage_next_key_version_1,
-    ext_default_child_storage_root_version_1,
-    ext_default_child_storage_root_version_2,
-    ext_crypto_ed25519_public_keys_version_1,
-    ext_crypto_ed25519_generate_version_1,
-    ext_crypto_ed25519_sign_version_1,
-    ext_crypto_ed25519_verify_version_1,
-    ext_crypto_ed25519_batch_verify_version_1,
-    ext_crypto_sr25519_public_keys_version_1,
-    ext_crypto_sr25519_generate_version_1,
-    ext_crypto_sr25519_sign_version_1,
-    ext_crypto_sr25519_verify_version_1,
-    ext_crypto_sr25519_verify_version_2,
-    ext_crypto_sr25519_batch_verify_version_1,
-    ext_crypto_ecdsa_generate_version_1,
-    ext_crypto_ecdsa_sign_version_1,
-    ext_crypto_ecdsa_public_keys_version_1,
-    ext_crypto_ecdsa_verify_version_1,
-    ext_crypto_ecdsa_verify_version_2,
-    ext_crypto_ecdsa_sign_prehashed_version_1,
-    ext_crypto_ecdsa_verify_prehashed_version_1,
-    ext_crypto_ecdsa_batch_verify_version_1,
-    ext_crypto_secp256k1_ecdsa_recover_version_1,
-    ext_crypto_secp256k1_ecdsa_recover_version_2,
-    ext_crypto_secp256k1_ecdsa_recover_compressed_version_1,
-    ext_crypto_secp256k1_ecdsa_recover_compressed_version_2,
-    ext_crypto_start_batch_verify_version_1,
-    ext_crypto_finish_batch_verify_version_1,
-    ext_hashing_keccak_256_version_1,
-    ext_hashing_keccak_512_version_1,
-    ext_hashing_sha2_256_version_1,
-    ext_hashing_blake2_128_version_1,
-    ext_hashing_blake2_256_version_1,
-    ext_hashing_twox_64_version_1,
-    ext_hashing_twox_128_version_1,
-    ext_hashing_twox_256_version_1,
-    ext_offchain_index_set_version_1,
-    ext_offchain_index_clear_version_1,
-    ext_offchain_is_validator_version_1,
-    ext_offchain_submit_transaction_version_1,
-    ext_offchain_network_state_version_1,
-    ext_offchain_timestamp_version_1,
-    ext_offchain_sleep_until_version_1,
-    ext_offchain_random_seed_version_1,
-    ext_offchain_local_storage_set_version_1,
-    ext_offchain_local_storage_compare_and_set_version_1,
-    ext_offchain_local_storage_get_version_1,
-    ext_offchain_local_storage_clear_version_1,
-    ext_offchain_http_request_start_version_1,
-    ext_offchain_http_request_add_header_version_1,
-    ext_offchain_http_request_write_body_version_1,
-    ext_offchain_http_response_wait_version_1,
-    ext_offchain_http_response_headers_version_1,
-    ext_offchain_http_response_read_body_version_1,
-    ext_trie_blake2_256_root_version_1,
-    ext_trie_blake2_256_root_version_2,
-    ext_trie_blake2_256_ordered_root_version_1,
-    ext_trie_blake2_256_ordered_root_version_2,
-    ext_trie_keccak_256_root_version_1,
-    ext_trie_keccak_256_root_version_2,
-    ext_trie_keccak_256_ordered_root_version_1,
-    ext_trie_keccak_256_ordered_root_version_2,
-    ext_trie_blake2_256_verify_proof_version_1,
-    ext_trie_blake2_256_verify_proof_version_2,
-    ext_trie_keccak_256_verify_proof_version_1,
-    ext_trie_keccak_256_verify_proof_version_2,
-    ext_misc_print_num_version_1,
-    ext_misc_print_utf8_version_1,
-    ext_misc_print_hex_version_1,
-    ext_misc_runtime_version_version_1,
-    ext_allocator_malloc_version_1,
-    ext_allocator_free_version_1,
-    ext_logging_log_version_1,
-    ext_logging_max_level_version_1,
-}
-
-impl HostFunction {
-    // TODO: make this a `const fn` function
-    fn signature(&self) -> vm::Signature {
-        match *self {
-            HostFunction::ext_storage_set_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_get_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_read_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_clear_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_exists_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_storage_clear_prefix_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_clear_prefix_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_root_version_1 => crate::signature!(() => vm::ValueType::I64),
-            HostFunction::ext_storage_root_version_2 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_changes_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_next_key_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_storage_append_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_storage_start_transaction_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_storage_rollback_transaction_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_storage_commit_transaction_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_default_child_storage_get_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_read_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_default_child_storage_storage_kill_version_3 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_set_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_clear_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_default_child_storage_exists_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_default_child_storage_next_key_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_default_child_storage_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ed25519_public_keys_version_1 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ed25519_generate_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ed25519_sign_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ed25519_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ed25519_batch_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_public_keys_version_1 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_sr25519_generate_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_sign_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_sr25519_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_verify_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_sr25519_batch_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_generate_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_sign_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ecdsa_public_keys_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ecdsa_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_verify_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_ecdsa_batch_verify_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I32) => vm::ValueType::I64)
-            }
-            HostFunction::ext_crypto_start_batch_verify_version_1 => crate::signature!(() => ()),
-            HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_keccak_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_keccak_512_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_sha2_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_blake2_128_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_blake2_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_twox_64_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_twox_128_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_hashing_twox_256_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_index_set_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_index_clear_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_is_validator_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_submit_transaction_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_network_state_version_1 => {
-                crate::signature!(() => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_timestamp_version_1 => {
-                crate::signature!(() => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_sleep_until_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_random_seed_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_local_storage_set_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_offchain_local_storage_get_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_local_storage_clear_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_offchain_http_request_start_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_request_add_header_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_request_write_body_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_response_wait_version_1 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_response_headers_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_offchain_http_response_read_body_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_trie_blake2_256_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => {
-                crate::signature!((vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_blake2_256_verify_proof_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_verify_proof_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64) => vm::ValueType::I32)
-            }
-            HostFunction::ext_trie_keccak_256_verify_proof_version_2 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I64, vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_misc_print_num_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_misc_print_utf8_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_misc_print_hex_version_1 => {
-                crate::signature!((vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_misc_runtime_version_version_1 => {
-                crate::signature!((vm::ValueType::I64) => vm::ValueType::I64)
-            }
-            HostFunction::ext_allocator_malloc_version_1 => {
-                crate::signature!((vm::ValueType::I32) => vm::ValueType::I32)
-            }
-            HostFunction::ext_allocator_free_version_1 => {
-                crate::signature!((vm::ValueType::I32) => ())
-            }
-            HostFunction::ext_logging_log_version_1 => {
-                crate::signature!((vm::ValueType::I32, vm::ValueType::I64, vm::ValueType::I64) => ())
-            }
-            HostFunction::ext_logging_max_level_version_1 => {
-                crate::signature!(() => vm::ValueType::I32)
-            }
-        }
-    }
-}
-
 // Glue between the `allocator` module and the `vm` module.
 //
 // The allocator believes that there are `memory_total_pages` pages available and allocated, where
@@ -4300,15 +4085,15 @@ impl<'a> allocator::Memory for MemAccess<'a> {
             // This is the simple case: the memory access is in bounds.
             match self.vm {
                 MemAccessVm::Prepare(ref vm) => {
-                    let bytes = vm.read_memory(ptr, 8).unwrap();
+                    let bytes = vm.read_memory(ptr, 8).unwrap_or_else(|_| unreachable!());
                     Ok(u64::from_le_bytes(
-                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap_or_else(|_| unreachable!()),
                     ))
                 }
                 MemAccessVm::Running(ref vm) => {
-                    let bytes = vm.read_memory(ptr, 8).unwrap();
+                    let bytes = vm.read_memory(ptr, 8).unwrap_or_else(|_| unreachable!());
                     Ok(u64::from_le_bytes(
-                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+                        <[u8; 8]>::try_from(bytes.as_ref()).unwrap_or_else(|_| unreachable!()),
                     ))
                 }
             }
@@ -4318,7 +4103,7 @@ impl<'a> allocator::Memory for MemAccess<'a> {
                 MemAccessVm::Prepare(ref vm) => {
                     let partial_bytes = vm
                         .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
-                        .unwrap();
+                        .unwrap_or_else(|_| unreachable!());
                     let partial_bytes = partial_bytes.as_ref();
                     debug_assert!(partial_bytes.len() < 8);
 
@@ -4329,7 +4114,7 @@ impl<'a> allocator::Memory for MemAccess<'a> {
                 MemAccessVm::Running(ref vm) => {
                     let partial_bytes = vm
                         .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
-                        .unwrap();
+                        .unwrap_or_else(|_| unreachable!());
                     let partial_bytes = partial_bytes.as_ref();
                     debug_assert!(partial_bytes.len() < 8);
 
@@ -4370,16 +4155,24 @@ impl<'a> allocator::Memory for MemAccess<'a> {
             let to_grow = written_memory_page - current_num_pages + HeapPages::new(1);
 
             // We check at initialization that the virtual machine is capable of growing up to
-            // `memory_total_pages`, meaning that this `unwrap` can't panic.
+            // `memory_total_pages`, meaning that this can't panic.
             match self.vm {
-                MemAccessVm::Prepare(ref mut vm) => vm.grow_memory(to_grow).unwrap(),
-                MemAccessVm::Running(ref mut vm) => vm.grow_memory(to_grow).unwrap(),
+                MemAccessVm::Prepare(ref mut vm) => {
+                    vm.grow_memory(to_grow).unwrap_or_else(|_| unreachable!())
+                }
+                MemAccessVm::Running(ref mut vm) => {
+                    vm.grow_memory(to_grow).unwrap_or_else(|_| unreachable!())
+                }
             }
         }
 
         match self.vm {
-            MemAccessVm::Prepare(ref mut vm) => vm.write_memory(ptr, &bytes).unwrap(),
-            MemAccessVm::Running(ref mut vm) => vm.write_memory(ptr, &bytes).unwrap(),
+            MemAccessVm::Prepare(ref mut vm) => vm
+                .write_memory(ptr, &bytes)
+                .unwrap_or_else(|_| unreachable!()),
+            MemAccessVm::Running(ref mut vm) => vm
+                .write_memory(ptr, &bytes)
+                .unwrap_or_else(|_| unreachable!()),
         }
         Ok(())
     }

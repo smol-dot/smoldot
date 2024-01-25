@@ -23,13 +23,7 @@ use super::{
 };
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{
-    fmt, future, mem,
-    pin::Pin,
-    slice,
-    task::{Context, Poll, Waker},
-};
-use futures_util::{task, FutureExt as _};
+use core::{fmt, future, mem, pin, ptr, slice, task};
 // TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
 use std::sync::Mutex;
 
@@ -83,11 +77,14 @@ impl JitPrototype {
         // by default, but we just disable them all to be sure.
         config.wasm_threads(false);
         config.wasm_reference_types(false);
+        config.wasm_function_references(false);
         config.wasm_simd(false);
+        config.wasm_relaxed_simd(false);
         config.wasm_bulk_memory(false);
         config.wasm_multi_value(false);
         config.wasm_multi_memory(false);
         config.wasm_memory64(false);
+        config.wasm_tail_call(false);
 
         let engine =
             wasmtime::Engine::new(&config).map_err(|err| NewErr::InvalidWasm(err.to_string()))?;
@@ -224,7 +221,7 @@ impl JitPrototype {
                                             ..
                                         } => {
                                             *in_interrupted_waker = Some(cx.waker().clone());
-                                            Poll::Pending
+                                            task::Poll::Pending
                                         }
                                         Shared::MemoryGrowRequired {
                                             ref memory,
@@ -241,7 +238,7 @@ impl JitPrototype {
                                                 ),
                                                 expected_return_ty,
                                             };
-                                            Poll::Pending
+                                            task::Poll::Pending
                                         }
                                         Shared::Return {
                                             ref mut return_value,
@@ -255,7 +252,7 @@ impl JitPrototype {
                                             }
 
                                             *shared_lock = Shared::OutsideFunctionCall { memory };
-                                            Poll::Ready(Ok(()))
+                                            task::Poll::Ready(Ok(()))
                                         }
                                         _ => unreachable!(),
                                     }
@@ -295,10 +292,18 @@ impl JitPrototype {
         // If the `start` function doesn't call any import, then it will go undetected and no
         // error will be returned.
         // TODO: detect `start` anyway, for consistency with other backends
-        let instance = wasmtime::Instance::new_async(&mut store, &base_components.module, &imports)
-            .now_or_never()
-            .ok_or(NewErr::StartFunctionNotSupported)? // TODO: hacky error value, as the error could also be different
-            .map_err(|err| NewErr::Other(err.to_string()))?;
+        let instance = match future::Future::poll(
+            pin::pin!(wasmtime::Instance::new_async(
+                &mut store,
+                &base_components.module,
+                &imports
+            )),
+            &mut task::Context::from_waker(&noop_waker()),
+        ) {
+            task::Poll::Pending => return Err(NewErr::StartFunctionNotSupported), // TODO: hacky error value, as the error could also be different
+            task::Poll::Ready(Ok(i)) => i,
+            task::Poll::Ready(Err(err)) => return Err(NewErr::Instantiation(err.to_string())),
+        };
 
         // Now that we are passed the `start` stage, update the state of execution.
         *shared.lock().unwrap() = Shared::Poisoned;
@@ -542,7 +547,7 @@ enum Shared {
         /// See [`Shared::WithinFunctionCall::expected_return_ty`].
         expected_return_ty: Option<ValueType>,
         /// See [`Shared::WithinFunctionCall::in_interrupted_waker`].
-        in_interrupted_waker: Option<Waker>,
+        in_interrupted_waker: Option<task::Waker>,
     },
     WithinFunctionCall {
         /// Pointer and size of the location where the virtual machine memory is located in the
@@ -560,7 +565,7 @@ enum Shared {
         /// `waker` that it has passed (the one stored here) wasn't waken up.
         /// This field therefore exists in order to future-proof against this possible optimization
         /// that `wasmtime` might perform in the future.
-        in_interrupted_waker: Option<Waker>,
+        in_interrupted_waker: Option<task::Waker>,
     },
     MemoryGrowRequired {
         memory: wasmtime::Memory,
@@ -612,7 +617,7 @@ enum JitInner {
     Done(wasmtime::Store<()>),
 }
 
-type BoxFuture<T> = Pin<Box<dyn future::Future<Output = T> + Send>>;
+type BoxFuture<T> = pin::Pin<Box<dyn future::Future<Output = T> + Send>>;
 type ExecOutcomeValue = Result<Option<WasmValue>, wasmtime::Error>;
 
 impl Jit {
@@ -727,9 +732,9 @@ impl Jit {
         // execution might be able to progress, hence the lack of need for a waker.
         match future::Future::poll(
             function_call.as_mut(),
-            &mut Context::from_waker(task::noop_waker_ref()),
+            &mut task::Context::from_waker(&noop_waker()),
         ) {
-            Poll::Ready((store, Ok(val))) => {
+            task::Poll::Ready((store, Ok(val))) => {
                 self.inner = JitInner::Done(store);
                 Ok(ExecOutcome::Finished {
                     // Since we verify at initialization that the signature of the function to
@@ -738,13 +743,13 @@ impl Jit {
                     return_value: Ok(val),
                 })
             }
-            Poll::Ready((store, Err(err))) => {
+            task::Poll::Ready((store, Err(err))) => {
                 self.inner = JitInner::Done(store);
                 Ok(ExecOutcome::Finished {
                     return_value: Err(Trap(err.to_string())),
                 })
             }
-            Poll::Pending => {
+            task::Poll::Pending => {
                 let mut shared_lock = self.shared.try_lock().unwrap();
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::EnteredFunctionCall {
@@ -920,10 +925,10 @@ impl Jit {
                 // execution might be able to progress, hence the lack of need for a waker.
                 match future::Future::poll(
                     function_call.as_mut(),
-                    &mut Context::from_waker(task::noop_waker_ref()),
+                    &mut task::Context::from_waker(&noop_waker()),
                 ) {
-                    Poll::Ready(_) => unreachable!(),
-                    Poll::Pending => {
+                    task::Poll::Ready(_) => unreachable!(),
+                    task::Poll::Pending => {
                         debug_assert!(matches!(
                             *self.shared.try_lock().unwrap(),
                             Shared::WithinFunctionCall { .. }
@@ -946,5 +951,25 @@ impl Jit {
 impl fmt::Debug for Jit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Jit").finish()
+    }
+}
+
+// Because `BoxFuture` doesn't implement `Sync`, `Jit` also doesn't implement `Sync`. In
+// reality, however, none of the `&self`-accepting functions of `Jit` ever access the
+// `BoxFuture` and even if they did, there's no `&self`-accepting function on `BoxFuture` itself
+// anyway.
+// TODO: maybe find a way to remove this unsafe implementation
+unsafe impl Sync for Jit {}
+
+fn noop_waker() -> task::Waker {
+    // Safety: all the requirements in the documentation of wakers (e.g. thread safety) is
+    // irrelevant here due to the implementation being trivial.
+    unsafe {
+        fn clone(_: *const ()) -> task::RawWaker {
+            task::RawWaker::new(ptr::null(), &VTABLE)
+        }
+        fn noop(_: *const ()) {}
+        static VTABLE: task::RawWakerVTable = task::RawWakerVTable::new(clone, noop, noop, noop);
+        task::Waker::from_raw(task::RawWaker::new(ptr::null(), &VTABLE))
     }
 }

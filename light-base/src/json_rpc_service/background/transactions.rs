@@ -22,8 +22,8 @@ use super::{Background, PlatformRef};
 use crate::transactions_service;
 
 use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec::Vec};
+use core::pin;
 use futures_lite::future;
-use futures_util::StreamExt as _;
 use smoldot::json_rpc::{methods, service};
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -73,7 +73,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`] (if `is_legacy`
-    /// is `true`) or to [`methods::MethodCall::transaction_unstable_submitAndWatch`] (if
+    /// is `true`) or to [`methods::MethodCall::transactionWatch_unstable_submitAndWatch`] (if
     /// `is_legacy` is `false`).
     pub(super) async fn submit_and_watch_transaction(
         self: &Arc<Self>,
@@ -83,7 +83,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
                 (transaction, true)
             }
-            methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
+            methods::MethodCall::transactionWatch_unstable_submitAndWatch { transaction } => {
                 (transaction, false)
             }
             _ => unreachable!(),
@@ -91,12 +91,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
         self.platform
             .spawn_task(format!("{}-transaction-watch", self.log_target).into(), {
-                let mut transaction_updates = self
+                let transaction_updates = self
                     .transactions_service
                     .submit_and_watch_transaction(transaction.0, 16)
                     .await;
 
                 async move {
+                    let mut transaction_updates = pin::pin!(transaction_updates);
+
                     let mut subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
 
@@ -105,7 +107,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
                     loop {
                         let status_update = match future::or(
-                            async { Some(transaction_updates.next().await) },
+                            async { Some(transaction_updates.as_mut().next().await) },
                             async { subscription.wait_until_stale().await; None }
                         ).await {
                             Some(Some(status)) => status,
@@ -146,7 +148,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 num_broadcasted_peers += peers.len();
                                 subscription
                                     .send_notification(
-                                        methods::ServerToClient::transaction_unstable_watchEvent {
+                                        methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                             subscription: (&subscription_id).into(),
                                             result: methods::TransactionWatchEvent::Broadcasted {
                                                 num_peers: u32::try_from(num_broadcasted_peers)
@@ -163,7 +165,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                             (transactions_service::TransactionStatus::Validated, false) => {
                                 subscription
                                     .send_notification(
-                                        methods::ServerToClient::transaction_unstable_watchEvent {
+                                        methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                             subscription: (&subscription_id).into(),
                                             result: methods::TransactionWatchEvent::Validated {},
                                         },
@@ -215,13 +217,13 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 false,
                             ) => {
                                 included_block = Some(block_hash);
-                                subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                                subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                     subscription: (&subscription_id).into(),
                                     result:
                                         methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: Some(methods::TransactionWatchEventBlock {
                                                 hash: methods::HashHexString(block_hash),
-                                                index: methods::NumberAsString(index),
+                                                index,
                                             }),
                                         },
                                 }).await;
@@ -232,7 +234,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                 },
                                 false,
                             ) => {
-                                subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                                subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::TransactionWatchEvent::BestChainBlockIncluded {
                                         block: None,
@@ -263,6 +265,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::ValidateError(_),
                                 ),
                                 true,
+                            )
+                            | (
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Crashed,
+                                ),
+                                true,
                             ) => {
                                 subscription.send_notification(methods::ServerToClient::author_extrinsicUpdate {
                                     subscription: (&subscription_id).into(),
@@ -274,7 +282,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::GapInChain,
                                 ),
                                 false,
-                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                            ) => subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Dropped {
                                     error: "gap in chain of blocks".into(),
@@ -286,7 +294,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::MaxPendingTransactionsReached,
                                 ),
                                 false,
-                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                            ) => subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Dropped {
                                     error: "transactions pool full".into(),
@@ -298,7 +306,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::Invalid(error),
                                 ),
                                 false,
-                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                            ) => subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Invalid {
                                     error: error.to_string().into(),
@@ -309,10 +317,21 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     transactions_service::DropReason::ValidateError(error),
                                 ),
                                 false,
-                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                            ) => subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Error {
                                     error: error.to_string().into(),
+                                },
+                            }).await,
+                            (
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Crashed,
+                                ),
+                                false,
+                            ) => subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                subscription: (&subscription_id).into(),
+                                result: methods::TransactionWatchEvent::Error {
+                                    error: "transactions service has crashed".into(),
                                 },
                             }).await,
 
@@ -337,12 +356,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                                     },
                                 ),
                                 false,
-                            ) => subscription.send_notification(methods::ServerToClient::transaction_unstable_watchEvent {
+                            ) => subscription.send_notification(methods::ServerToClient::transactionWatch_unstable_watchEvent {
                                 subscription: (&subscription_id).into(),
                                 result: methods::TransactionWatchEvent::Finalized {
                                     block: methods::TransactionWatchEventBlock {
                                         hash: methods::HashHexString(block_hash),
-                                        index: methods::NumberAsString(index),
+                                        index,
                                     },
                                 },
                             }).await,

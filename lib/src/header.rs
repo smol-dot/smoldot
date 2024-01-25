@@ -1338,7 +1338,7 @@ fn decode_item(
     slice = &slice[1..];
 
     match index {
-        4 | 5 | 6 => {
+        4..=6 => {
             if slice.len() < 4 {
                 return Err(Error::TooShort);
             }

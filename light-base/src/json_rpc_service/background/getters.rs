@@ -24,7 +24,7 @@ use core::num::NonZeroUsize;
 use smoldot::{
     header,
     json_rpc::{methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -35,7 +35,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     ) {
         let finalized_hash = header::hash_from_scale_encoded_header(
             self.runtime_service
-                .subscribe_all("chain_getFinalizedHead", 16, NonZeroUsize::new(24).unwrap())
+                .subscribe_all(16, NonZeroUsize::new(24).unwrap())
                 .await
                 .finalized_block_scale_encoded_header,
         );
@@ -45,42 +45,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         ));
     }
 
-    /// Handles a call to [`methods::MethodCall::chainHead_unstable_genesisHash`].
-    pub(super) async fn chain_head_unstable_genesis_hash(
-        self: &Arc<Self>,
-        request: service::RequestProcess,
-    ) {
-        request.respond(methods::Response::chainHead_unstable_genesisHash(
-            methods::HashHexString(self.genesis_block_hash),
-        ));
-    }
-
-    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_chainName`].
+    /// Handles a call to [`methods::MethodCall::chainSpec_v1_chainName`].
     pub(super) async fn chain_spec_unstable_chain_name(
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        request.respond(methods::Response::chainSpec_unstable_chainName(
+        request.respond(methods::Response::chainSpec_v1_chainName(
             (&self.chain_name).into(),
         ));
     }
 
-    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_genesisHash`].
+    /// Handles a call to [`methods::MethodCall::chainSpec_v1_genesisHash`].
     pub(super) async fn chain_spec_unstable_genesis_hash(
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        request.respond(methods::Response::chainSpec_unstable_genesisHash(
+        request.respond(methods::Response::chainSpec_v1_genesisHash(
             methods::HashHexString(self.genesis_block_hash),
         ));
     }
 
-    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_properties`].
+    /// Handles a call to [`methods::MethodCall::chainSpec_v1_properties`].
     pub(super) async fn chain_spec_unstable_properties(
         self: &Arc<Self>,
         request: service::RequestProcess,
     ) {
-        request.respond(methods::Response::chainSpec_unstable_properties(
+        request.respond(methods::Response::chainSpec_v1_properties(
             serde_json::from_str(&self.chain_properties_json).unwrap(),
         ));
     }
@@ -133,13 +123,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request.respond(methods::Response::system_localListenAddresses(Vec::new()));
     }
 
-    /// Handles a call to [`methods::MethodCall::system_localPeerId`].
-    pub(super) async fn system_local_peer_id(self: &Arc<Self>, request: service::RequestProcess) {
-        request.respond(methods::Response::system_localPeerId(
-            (&self.peer_id_base58).into(),
-        ));
-    }
-
     /// Handles a call to [`methods::MethodCall::system_name`].
     pub(super) async fn system_name(self: &Arc<Self>, request: service::RequestProcess) {
         request.respond(methods::Response::system_name((&self.system_name).into()));
@@ -162,9 +145,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
                         peer_id: peer_id.to_string(),
                         roles: match role {
-                            protocol::Role::Authority => methods::SystemPeerRole::Authority,
-                            protocol::Role::Full => methods::SystemPeerRole::Full,
-                            protocol::Role::Light => methods::SystemPeerRole::Light,
+                            codec::Role::Authority => methods::SystemPeerRole::Authority,
+                            codec::Role::Full => methods::SystemPeerRole::Full,
+                            codec::Role::Light => methods::SystemPeerRole::Light,
                         },
                         best_hash: methods::HashHexString(best_hash),
                         best_number,
@@ -200,7 +183,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         };
 
         let response = crate::database::encode_database(
-            &self.network_service.0,
+            &self.network_service,
             &self.sync_service,
             &self.runtime_service,
             &self.genesis_block_hash,

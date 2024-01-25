@@ -56,21 +56,26 @@
 //! >           forever remain part of the chain.
 //!
 //! Additionally, a [`NonFinalizedTree::verify_justification`] method is provided in order to
-//! verify the correctness of a [justification](crate::finality::justification).
+//! verify the correctness of a [justification](crate::finality).
 
 // TODO: expand this doc ^
-// TODO: this module is an essential part of the code and needs clean up and testing
 
 use crate::{
     chain::{chain_information, fork_tree},
     header,
 };
 
-use alloc::{collections::BTreeMap, format, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    sync::Arc,
+    vec::Vec,
+};
 use core::{cmp, fmt, mem, num::NonZeroU64, ops, time::Duration};
 use hashbrown::HashMap;
 
 mod finality;
+mod tests;
 mod verify;
 
 pub use self::finality::*;
@@ -113,6 +118,8 @@ pub struct NonFinalizedTree<T> {
     finalized_block_header: Vec<u8>,
     /// Hash of [`NonFinalizedTree::finalized_block_header`].
     finalized_block_hash: [u8; 32],
+    /// Number of [`NonFinalizedTree::finalized_block_header`].
+    finalized_block_number: u64,
     /// State of the chain finality engine.
     finality: Finality,
     /// State of the consensus of the finalized block.
@@ -136,6 +143,10 @@ pub struct NonFinalizedTree<T> {
     /// Blocks indexed by the value in [`Block::best_score`]. The best block is the one with the
     /// highest score.
     blocks_by_best_score: BTreeMap<BestScore, fork_tree::NodeIndex>,
+    /// Subset of [`NonFinalizedTree::blocks`] whose [`BlockFinality::Grandpa::triggers_change`]
+    /// is `true`, indexed by the value in
+    /// [`BlockFinality::Grandpa::prev_auth_change_trigger_number`].
+    blocks_trigger_gp_change: BTreeSet<(Option<u64>, fork_tree::NodeIndex)>,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
     /// See [`Config::allow_unknown_consensus_engines`].
@@ -153,15 +164,14 @@ impl<T> NonFinalizedTree<T> {
         let chain_information: chain_information::ChainInformation =
             config.chain_information.into();
 
-        let finalized_block_hash = chain_information
-            .finalized_block_header
-            .hash(config.block_number_bytes);
-
         NonFinalizedTree {
+            finalized_block_number: chain_information.finalized_block_header.number,
+            finalized_block_hash: chain_information
+                .finalized_block_header
+                .hash(config.block_number_bytes),
             finalized_block_header: chain_information
                 .finalized_block_header
                 .scale_encoding_vec(config.block_number_bytes),
-            finalized_block_hash,
             finality: match chain_information.finality {
                 chain_information::ChainInformationFinality::Outsourced => Finality::Outsourced,
                 chain_information::ChainInformationFinality::Grandpa {
@@ -210,6 +220,7 @@ impl<T> NonFinalizedTree<T> {
                 Default::default(),
             ),
             blocks_by_best_score: BTreeMap::new(),
+            blocks_trigger_gp_change: BTreeSet::new(),
             block_number_bytes: config.block_number_bytes,
             allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
         }
@@ -220,6 +231,7 @@ impl<T> NonFinalizedTree<T> {
         self.blocks.clear();
         self.blocks_by_hash.clear();
         self.blocks_by_best_score.clear();
+        self.blocks_trigger_gp_change.clear();
     }
 
     /// Returns true if there isn't any non-finalized block in the chain.
@@ -430,6 +442,15 @@ impl<T> NonFinalizedTree<T> {
         Some(&self.blocks.get(node_index).unwrap().user_data)
     }
 
+    /// Returns the SCALE-encoded header of a block stored by the [`NonFinalizedTree`], identified
+    /// by its hash.
+    ///
+    /// Returns `None` if the block can't be found.
+    pub fn non_finalized_block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        let node_index = *self.blocks_by_hash.get(hash)?;
+        Some(&self.blocks.get(node_index).unwrap().header)
+    }
+
     /// Gives access to a block stored by the [`NonFinalizedTree`], identified by its hash.
     pub fn non_finalized_block_by_hash(&mut self, hash: &[u8; 32]) -> Option<BlockAccess<T>> {
         let node_index = *self.blocks_by_hash.get(hash)?;
@@ -560,6 +581,8 @@ struct Block<T> {
     /// Cache of the hash of the block. Always equal to the hash of the header stored in this
     /// same struct.
     hash: [u8; 32],
+    /// Number contained in [`Block::header`].
+    number: u64,
     /// Changes to the consensus made by the block.
     consensus: BlockConsensus,
     /// Information about finality attached to each block.

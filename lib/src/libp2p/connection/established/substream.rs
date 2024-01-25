@@ -27,8 +27,12 @@ use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
 use alloc::{borrow::ToOwned as _, collections::VecDeque, string::String, vec::Vec};
-use core::mem;
-use core::{fmt, num::NonZeroUsize};
+use core::{
+    fmt, mem,
+    num::NonZeroUsize,
+    ops::{Add, Sub},
+    time::Duration,
+};
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow> {
@@ -61,8 +65,11 @@ enum SubstreamInner<TNow> {
         timeout: TNow,
         /// State of the protocol negotiation. `None` if the handshake has already finished.
         negotiation: Option<multistream_select::InProgress<String>>,
-        /// Buffer for the incoming handshake.
-        handshake_in: leb128::FramedInProgress,
+        /// Size of the remote handshake, if known. If `Some`, we have already extracted the length
+        /// from the incoming buffer.
+        handshake_in_size: Option<usize>,
+        /// Maximum allowed size of the remote handshake.
+        handshake_in_max_size: usize,
         /// Handshake payload to write out.
         handshake_out: VecDeque<u8>,
     },
@@ -81,8 +88,11 @@ enum SubstreamInner<TNow> {
     /// A notifications protocol has been negotiated on an incoming substream. A handshake from
     /// the remote is expected.
     NotificationsInHandshake {
-        /// Buffer for the incoming handshake.
-        handshake: leb128::FramedInProgress,
+        /// Size of the handshake, if known. If `Some`, we have already extracted the length
+        /// from the incoming buffer.
+        handshake_size: Option<usize>,
+        /// Maximum allowed size of the handshake.
+        handshake_max_size: usize,
     },
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
@@ -95,10 +105,12 @@ enum SubstreamInner<TNow> {
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
-        /// If true, the local node wants to shut down the substream.
-        close_desired: bool,
-        /// Buffer for the next notification.
-        next_notification: leb128::FramedInProgress,
+        /// If `Some`, the local node wants to shut down the substream. If the given timeout is
+        /// reached, the closing is forced.
+        close_desired_timeout: Option<TNow>,
+        /// Size of the next notification, if known. If `Some`, we have already extracted the
+        /// length from the incoming buffer.
+        next_notification_size: Option<usize>,
         /// Handshake payload to write out.
         handshake: VecDeque<u8>,
         /// Maximum size, in bytes, allowed for each notification.
@@ -115,15 +127,21 @@ enum SubstreamInner<TNow> {
         negotiation: Option<multistream_select::InProgress<String>>,
         /// Request payload to write out.
         request: VecDeque<u8>,
-        /// Buffer for the incoming response.
-        response: leb128::FramedInProgress,
+        /// Size of the response, if known. If `Some`, we have already extracted the length
+        /// from the incoming buffer.
+        response_size: Option<usize>,
+        /// Maximum allowed size of the response.
+        response_max_size: usize,
     },
 
     /// A request-response protocol has been negotiated on an inbound substream. A request is now
     /// expected.
     RequestInRecv {
-        /// Buffer for the incoming request.
-        request: leb128::FramedInProgress,
+        /// Size of the request, if known. If `Some`, we have already extracted the length
+        /// from the incoming buffer.
+        request_size: Option<usize>,
+        /// Maximum allowed size of the request.
+        request_max_size: usize,
     },
     /// Similar to [`SubstreamInner::RequestInRecv`], but doesn't expect any request body.
     /// Immediately reports an event and switches to [`SubstreamInner::RequestInApiWait`].
@@ -137,15 +155,12 @@ enum SubstreamInner<TNow> {
     },
 
     /// Inbound ping substream. Waiting for the ping payload to be received.
-    PingIn {
-        payload_in: arrayvec::ArrayVec<u8, 32>,
-        payload_out: VecDeque<u8>,
-    },
+    PingIn { payload_out: VecDeque<u8> },
 
     /// Failed to negotiate a protocol for an outgoing ping substream.
     PingOutFailed {
         /// FIFO queue of pings that will immediately fail.
-        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+        queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
     },
     /// Outbound ping substream.
     PingOut {
@@ -155,16 +170,16 @@ enum SubstreamInner<TNow> {
         outgoing_payload: VecDeque<u8>,
         /// Data waiting to be received from the remote. Any mismatch will cause an error.
         /// Contains even the data that is still queued in `outgoing_payload`.
-        expected_payload: VecDeque<u8>,
-        /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occurred.
-        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+        expected_payload: VecDeque<Vec<u8>>,
+        /// FIFO queue of pings waiting to be answered. For each ping, when the ping was queued
+        /// and after how long it will time out, or `None` if the timeout has already occurred.
+        queued_pings: smallvec::SmallVec<[Option<(TNow, Duration)>; 1]>,
     },
 }
 
 impl<TNow> Substream<TNow>
 where
-    TNow: Clone + Ord,
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Initializes an new `ingoing` substream.
     ///
@@ -208,7 +223,7 @@ where
     ///
     /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
     /// [`Substream::notification_substream_queued_bytes`] and
-    /// [`Substream::close_notifications_substream`] can be used, and
+    /// [`Substream::close_out_notifications_substream`] can be used, and
     /// [`Event::NotificationsOutCloseDemanded`] and [`Event::NotificationsOutReset`] can be
     /// generated.
     pub fn notifications_out(
@@ -226,7 +241,7 @@ where
         let handshake_out = {
             let handshake_len = handshake.len();
             leb128::encode_usize(handshake_len)
-                .chain(handshake.into_iter())
+                .chain(handshake)
                 .collect::<VecDeque<_>>()
         };
 
@@ -234,7 +249,8 @@ where
             inner: SubstreamInner::NotificationsOutHandshakeRecv {
                 timeout,
                 negotiation: Some(negotiation),
-                handshake_in: leb128::FramedInProgress::new(max_handshake_size),
+                handshake_in_size: None,
+                handshake_in_max_size: max_handshake_size,
                 handshake_out,
             },
         }
@@ -261,7 +277,7 @@ where
         let request_payload = if let Some(request) = request {
             let request_len = request.len();
             leb128::encode_usize(request_len)
-                .chain(request.into_iter())
+                .chain(request)
                 .collect::<VecDeque<_>>()
         } else {
             VecDeque::new()
@@ -272,7 +288,8 @@ where
                 timeout,
                 negotiation: Some(negotiation),
                 request: request_payload,
-                response: leb128::FramedInProgress::new(max_response_size),
+                response_size: None,
+                response_max_size: max_response_size,
             },
         }
 
@@ -312,7 +329,7 @@ where
     /// substream must be reset if it is not closed.
     pub fn read_write(
         self,
-        read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
+        read_write: &'_ mut read_write::ReadWrite<TNow>,
     ) -> (Option<Self>, Option<Event>) {
         let (me, event) = self.read_write2(read_write);
         (me.map(|inner| Substream { inner }), event)
@@ -320,7 +337,7 @@ where
 
     fn read_write2(
         self,
-        read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
+        read_write: &'_ mut read_write::ReadWrite<TNow>,
     ) -> (Option<SubstreamInner<TNow>>, Option<Event>) {
         match self.inner {
             SubstreamInner::InboundNegotiating(nego, was_rejected_already) => {
@@ -381,14 +398,14 @@ where
                     Ok(multistream_select::Negotiation::Success) => match inbound_ty {
                         InboundTy::Ping => (
                             Some(SubstreamInner::PingIn {
-                                payload_in: Default::default(),
                                 payload_out: VecDeque::with_capacity(32),
                             }),
                             None,
                         ),
                         InboundTy::Notifications { max_handshake_size } => (
                             Some(SubstreamInner::NotificationsInHandshake {
-                                handshake: leb128::FramedInProgress::new(max_handshake_size),
+                                handshake_size: None,
+                                handshake_max_size: max_handshake_size,
                             }),
                             None,
                         ),
@@ -396,7 +413,8 @@ where
                             if let Some(request_max_size) = request_max_size {
                                 (
                                     Some(SubstreamInner::RequestInRecv {
-                                        request: leb128::FramedInProgress::new(request_max_size),
+                                        request_max_size,
+                                        request_size: None,
                                     }),
                                     None,
                                 )
@@ -449,10 +467,12 @@ where
             SubstreamInner::NotificationsOutHandshakeRecv {
                 timeout,
                 mut negotiation,
-                handshake_in,
+                mut handshake_in_size,
+                handshake_in_max_size,
                 mut handshake_out,
             } => {
                 if timeout < read_write.now {
+                    read_write.wake_up_asap();
                     return (
                         Some(SubstreamInner::NotificationsOutNegotiationFailed),
                         Some(Event::NotificationsOutResult {
@@ -460,8 +480,6 @@ where
                         }),
                     );
                 }
-
-                read_write.wake_up_after(&timeout);
 
                 if let Some(extracted_negotiation) = negotiation.take() {
                     match extracted_negotiation.read_write(read_write) {
@@ -474,12 +492,13 @@ where
                         }
                         Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
+                            read_write.wake_up_asap();
                             return (
                                 Some(SubstreamInner::NotificationsOutNegotiationFailed),
                                 Some(Event::NotificationsOutResult {
                                     result: Err(NotificationsOutErr::ProtocolNotAvailable),
                                 }),
-                            )
+                            );
                         }
                         Err(err) => {
                             return (
@@ -500,17 +519,15 @@ where
                 }
 
                 if negotiation.is_none() {
-                    let incoming_buffer = match read_write.incoming_buffer {
-                        Some(buf) => buf,
-                        None => {
-                            return (
-                                Some(SubstreamInner::NotificationsOutNegotiationFailed),
-                                Some(Event::NotificationsOutResult {
-                                    result: Err(NotificationsOutErr::RefusedHandshake),
-                                }),
-                            );
-                        }
-                    };
+                    if read_write.expected_incoming_bytes.is_none() {
+                        read_write.wake_up_asap();
+                        return (
+                            Some(SubstreamInner::NotificationsOutNegotiationFailed),
+                            Some(Event::NotificationsOutResult {
+                                result: Err(NotificationsOutErr::RefusedHandshake),
+                            }),
+                        );
+                    }
 
                     // Don't actually process incoming data before handshake is sent out, in order
                     // to not accidentally perform a state transition.
@@ -519,57 +536,75 @@ where
                             Some(SubstreamInner::NotificationsOutHandshakeRecv {
                                 timeout,
                                 negotiation,
-                                handshake_in,
+                                handshake_in_size,
+                                handshake_in_max_size,
                                 handshake_out,
                             }),
                             None,
                         );
                     }
 
-                    match handshake_in.update(incoming_buffer) {
-                        Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
-                            read_write.advance_read(num_read);
-
-                            (
-                                Some(SubstreamInner::NotificationsOut {
-                                    notifications: VecDeque::new(),
-                                    close_demanded_by_remote: false,
-                                }),
-                                Some(Event::NotificationsOutResult {
-                                    result: Ok(remote_handshake),
-                                }),
-                            )
+                    if let Some(handshake_in_size) = handshake_in_size {
+                        match read_write.incoming_bytes_take(handshake_in_size) {
+                            Ok(Some(remote_handshake)) => {
+                                read_write.wake_up_asap();
+                                return (
+                                    Some(SubstreamInner::NotificationsOut {
+                                        notifications: VecDeque::new(),
+                                        close_demanded_by_remote: false,
+                                    }),
+                                    Some(Event::NotificationsOutResult {
+                                        result: Ok(remote_handshake),
+                                    }),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                                read_write.wake_up_asap();
+                                return (
+                                    Some(SubstreamInner::NotificationsOutNegotiationFailed),
+                                    Some(Event::NotificationsOutResult {
+                                        result: Err(NotificationsOutErr::RefusedHandshake),
+                                    }),
+                                );
+                            }
                         }
-                        Ok((num_read, leb128::Framed::InProgress(handshake_in))) => {
-                            read_write.advance_read(num_read);
-                            (
-                                Some(SubstreamInner::NotificationsOutHandshakeRecv {
-                                    timeout,
-                                    negotiation,
-                                    handshake_in,
-                                    handshake_out,
-                                }),
+                    } else {
+                        match read_write.incoming_bytes_take_leb128(handshake_in_max_size) {
+                            Ok(Some(s)) => handshake_in_size = Some(s),
+                            Ok(None) => {}
+                            Err(error) => return (
                                 None,
-                            )
+                                Some(Event::Response {
+                                    response: Err(match error {
+                                        read_write::IncomingBytesTakeLeb128Error::InvalidLeb128 => {
+                                            RequestError::ResponseInvalidLeb128
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::ReadClosed => {
+                                            RequestError::SubstreamClosed
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::TooLarge => {
+                                            RequestError::ResponseTooLarge
+                                        }
+                                    }),
+                                }),
+                            ),
                         }
-                        Err(err) => (
-                            None,
-                            Some(Event::NotificationsOutResult {
-                                result: Err(NotificationsOutErr::HandshakeRecvError(err)),
-                            }),
-                        ),
                     }
-                } else {
-                    (
-                        Some(SubstreamInner::NotificationsOutHandshakeRecv {
-                            timeout,
-                            negotiation,
-                            handshake_in,
-                            handshake_out,
-                        }),
-                        None,
-                    )
                 }
+
+                read_write.wake_up_after(&timeout);
+
+                (
+                    Some(SubstreamInner::NotificationsOutHandshakeRecv {
+                        timeout,
+                        negotiation,
+                        handshake_in_size,
+                        handshake_in_max_size,
+                        handshake_out,
+                    }),
+                    None,
+                )
             }
             SubstreamInner::NotificationsOut {
                 mut notifications,
@@ -579,11 +614,14 @@ where
                 read_write.discard_all_incoming();
                 read_write.write_from_vec_deque(&mut notifications);
 
-                // If this debug assertion fails, it means that `incoming_buffer` was `None` in
+                // If this debug assertion fails, it means that `expected_incoming_bytes` was `None` in
                 // the past then became `Some` again.
-                debug_assert!(!close_demanded_by_remote || read_write.incoming_buffer.is_none());
+                debug_assert!(
+                    !close_demanded_by_remote || read_write.expected_incoming_bytes.is_none()
+                );
 
-                if !close_demanded_by_remote && read_write.incoming_buffer.is_none() {
+                if !close_demanded_by_remote && read_write.expected_incoming_bytes.is_none() {
+                    read_write.wake_up_asap();
                     return (
                         Some(SubstreamInner::NotificationsOut {
                             notifications,
@@ -618,7 +656,8 @@ where
                 timeout,
                 mut negotiation,
                 mut request,
-                response,
+                mut response_size,
+                response_max_size,
             } => {
                 // Note that this might trigger timeouts for requests whose response is available
                 // in `incoming_buffer`. This is intentional, as from the perspective of
@@ -633,7 +672,6 @@ where
                         }),
                     );
                 }
-                read_write.wake_up_after(&timeout);
 
                 if let Some(extracted_nego) = negotiation.take() {
                     match extracted_nego.read_write(read_write) {
@@ -676,96 +714,110 @@ where
                 }
 
                 if negotiation.is_none() {
-                    let incoming_buffer = match read_write.incoming_buffer {
-                        Some(buf) => buf,
-                        None => {
-                            read_write.close_write();
-                            return (
+                    if let Some(response_size) = response_size {
+                        match read_write.incoming_bytes_take(response_size) {
+                            Ok(Some(response)) => {
+                                return (
+                                    None,
+                                    Some(Event::Response {
+                                        response: Ok(response),
+                                    }),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                                return (
+                                    None,
+                                    Some(Event::Response {
+                                        response: Err(RequestError::SubstreamClosed),
+                                    }),
+                                )
+                            }
+                        }
+                    } else {
+                        match read_write.incoming_bytes_take_leb128(response_max_size) {
+                            Ok(Some(s)) => response_size = Some(s),
+                            Ok(None) => {}
+                            Err(error) => return (
                                 None,
                                 Some(Event::Response {
-                                    response: Err(RequestError::SubstreamClosed),
+                                    response: Err(match error {
+                                        read_write::IncomingBytesTakeLeb128Error::InvalidLeb128 => {
+                                            RequestError::ResponseInvalidLeb128
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::ReadClosed => {
+                                            RequestError::SubstreamClosed
+                                        }
+                                        read_write::IncomingBytesTakeLeb128Error::TooLarge => {
+                                            RequestError::ResponseTooLarge
+                                        }
+                                    }),
                                 }),
-                            );
+                            ),
                         }
-                    };
-
-                    match response.update(incoming_buffer) {
-                        Ok((num_read, leb128::Framed::Finished(response))) => {
-                            read_write.advance_read(num_read);
-                            read_write.close_write();
-                            (
-                                None,
-                                Some(Event::Response {
-                                    response: Ok(response),
-                                }),
-                            )
-                        }
-                        Ok((num_read, leb128::Framed::InProgress(response))) => {
-                            read_write.advance_read(num_read);
-                            (
-                                Some(SubstreamInner::RequestOut {
-                                    timeout,
-                                    negotiation,
-                                    request,
-                                    response,
-                                }),
-                                None,
-                            )
-                        }
-                        Err(err) => (
-                            None,
-                            Some(Event::Response {
-                                response: Err(RequestError::ResponseLebError(err)),
-                            }),
-                        ),
                     }
-                } else {
-                    (
-                        Some(SubstreamInner::RequestOut {
-                            timeout,
-                            negotiation,
-                            request,
-                            response,
-                        }),
-                        None,
-                    )
                 }
+
+                read_write.wake_up_after(&timeout);
+
+                (
+                    Some(SubstreamInner::RequestOut {
+                        timeout,
+                        negotiation,
+                        request,
+                        response_size,
+                        response_max_size,
+                    }),
+                    None,
+                )
             }
 
-            SubstreamInner::RequestInRecv { request } => {
-                let incoming_buffer = match read_write.incoming_buffer {
-                    Some(buf) => buf,
-                    None => {
-                        return (
-                            None,
-                            Some(Event::InboundError {
-                                error: InboundError::RequestInExpectedEof,
-                                was_accepted: true,
-                            }),
-                        );
+            SubstreamInner::RequestInRecv {
+                mut request_size,
+                request_max_size,
+            } => {
+                if let Some(request_size) = request_size {
+                    match read_write.incoming_bytes_take(request_size) {
+                        Ok(Some(request)) => {
+                            return (
+                                Some(SubstreamInner::RequestInApiWait),
+                                Some(Event::RequestIn { request }),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            return (
+                                None,
+                                Some(Event::InboundError {
+                                    error: InboundError::SubstreamClosed,
+                                    was_accepted: true,
+                                }),
+                            )
+                        }
                     }
-                };
-
-                match request.update(incoming_buffer) {
-                    Ok((num_read, leb128::Framed::Finished(request))) => {
-                        read_write.advance_read(num_read);
-                        (
-                            Some(SubstreamInner::RequestInApiWait),
-                            Some(Event::RequestIn { request }),
-                        )
+                } else {
+                    match read_write.incoming_bytes_take_leb128(request_max_size) {
+                        Ok(Some(s)) => request_size = Some(s),
+                        Ok(None) => {}
+                        Err(error) => {
+                            return (
+                                None,
+                                Some(Event::InboundError {
+                                    error: InboundError::RequestInLebError(error),
+                                    was_accepted: true,
+                                }),
+                            )
+                        }
                     }
-                    Ok((num_read, leb128::Framed::InProgress(request))) => {
-                        read_write.advance_read(num_read);
-                        (Some(SubstreamInner::RequestInRecv { request }), None)
-                    }
-                    Err(err) => (
-                        None,
-                        Some(Event::InboundError {
-                            error: InboundError::RequestInLebError(err),
-                            was_accepted: true,
-                        }),
-                    ),
                 }
+
+                (
+                    Some(SubstreamInner::RequestInRecv {
+                        request_max_size,
+                        request_size,
+                    }),
+                    None,
+                )
             }
             SubstreamInner::RequestInRecvEmpty => (
                 Some(SubstreamInner::RequestInApiWait),
@@ -784,50 +836,59 @@ where
                 }
             }
 
-            SubstreamInner::NotificationsInHandshake { handshake } => {
-                let incoming_buffer = match read_write.incoming_buffer {
-                    Some(buf) => buf,
-                    None => {
-                        read_write.close_write();
-                        return (
-                            None,
-                            Some(Event::InboundError {
-                                error: InboundError::NotificationsInUnexpectedEof,
-                                was_accepted: true,
-                            }),
-                        );
+            SubstreamInner::NotificationsInHandshake {
+                handshake_max_size,
+                mut handshake_size,
+            } => {
+                if let Some(handshake_size) = handshake_size {
+                    match read_write.incoming_bytes_take(handshake_size) {
+                        Ok(Some(handshake)) => {
+                            return (
+                                Some(SubstreamInner::NotificationsInWait),
+                                Some(Event::NotificationsInOpen { handshake }),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            return (
+                                None,
+                                Some(Event::InboundError {
+                                    error: InboundError::SubstreamClosed,
+                                    was_accepted: true,
+                                }),
+                            )
+                        }
                     }
-                };
-
-                match handshake.update(incoming_buffer) {
-                    Ok((num_read, leb128::Framed::Finished(handshake))) => {
-                        read_write.advance_read(num_read);
-                        (
-                            Some(SubstreamInner::NotificationsInWait),
-                            Some(Event::NotificationsInOpen { handshake }),
-                        )
+                } else {
+                    match read_write.incoming_bytes_take_leb128(handshake_max_size) {
+                        Ok(Some(s)) => handshake_size = Some(s),
+                        Ok(None) => {}
+                        Err(error) => {
+                            return (
+                                None,
+                                Some(Event::InboundError {
+                                    error: InboundError::NotificationsInError { error },
+                                    was_accepted: true,
+                                }),
+                            )
+                        }
                     }
-                    Ok((num_read, leb128::Framed::InProgress(handshake))) => {
-                        read_write.advance_read(num_read);
-                        (
-                            Some(SubstreamInner::NotificationsInHandshake { handshake }),
-                            None,
-                        )
-                    }
-                    Err(error) => (
-                        None,
-                        Some(Event::InboundError {
-                            error: InboundError::NotificationsInError { error },
-                            was_accepted: true,
-                        }),
-                    ),
                 }
+
+                (
+                    Some(SubstreamInner::NotificationsInHandshake {
+                        handshake_max_size,
+                        handshake_size,
+                    }),
+                    None,
+                )
             }
             SubstreamInner::NotificationsInWait => {
                 // Incoming data isn't processed, potentially back-pressuring it.
-                if read_write.incoming_buffer.is_some() {
+                if read_write.expected_incoming_bytes.is_some() {
                     (Some(SubstreamInner::NotificationsInWait), None)
                 } else {
+                    read_write.wake_up_asap();
                     (
                         Some(SubstreamInner::NotificationsInRefused),
                         Some(Event::NotificationsInOpenCancel),
@@ -847,65 +908,75 @@ where
                 )
             }
             SubstreamInner::NotificationsIn {
-                close_desired,
-                mut next_notification,
+                close_desired_timeout,
+                mut next_notification_size,
                 mut handshake,
                 max_notification_size,
             } => {
                 read_write.write_from_vec_deque(&mut handshake);
 
-                if close_desired && handshake.is_empty() {
+                if close_desired_timeout
+                    .as_ref()
+                    .map_or(false, |timeout| *timeout >= read_write.now)
+                {
+                    read_write.wake_up_asap();
+                    return (
+                        Some(SubstreamInner::NotificationsInClosed),
+                        Some(Event::NotificationsInClose {
+                            outcome: Err(NotificationsInClosedErr::CloseDesiredTimeout),
+                        }),
+                    );
+                }
+
+                if close_desired_timeout.is_some() && handshake.is_empty() {
                     read_write.close_write();
                 }
 
-                let incoming_buffer = match read_write.incoming_buffer {
-                    Some(buf) => buf,
-                    None => {
-                        read_write.close_write();
-                        return (
-                            Some(SubstreamInner::NotificationsInClosed),
-                            Some(Event::NotificationsInClose { outcome: Ok(()) }),
-                        );
-                    }
-                };
+                let mut notification = None;
 
-                match next_notification.update(incoming_buffer) {
-                    Ok((num_read, leb128::Framed::Finished(notification))) => {
-                        read_write.advance_read(num_read);
-
-                        (
-                            Some(SubstreamInner::NotificationsIn {
-                                close_desired,
-                                next_notification: leb128::FramedInProgress::new(
-                                    max_notification_size,
-                                ),
-                                handshake,
-                                max_notification_size,
-                            }),
-                            Some(Event::NotificationIn { notification }),
-                        )
+                if let Some(sz) = next_notification_size {
+                    match read_write.incoming_bytes_take(sz) {
+                        Ok(Some(notif)) => {
+                            read_write.wake_up_asap();
+                            notification = Some(notif);
+                            next_notification_size = None;
+                        }
+                        Ok(None) => {}
+                        Err(read_write::IncomingBytesTakeError::ReadClosed) => {
+                            read_write.wake_up_asap();
+                            return (
+                                Some(SubstreamInner::NotificationsInClosed),
+                                Some(Event::NotificationsInClose {
+                                    outcome: Err(NotificationsInClosedErr::SubstreamClosed),
+                                }),
+                            );
+                        }
                     }
-                    Ok((num_read, leb128::Framed::InProgress(next))) => {
-                        read_write.advance_read(num_read);
-                        next_notification = next;
-
-                        (
-                            Some(SubstreamInner::NotificationsIn {
-                                close_desired,
-                                next_notification,
-                                handshake,
-                                max_notification_size,
-                            }),
-                            None,
-                        )
+                } else {
+                    match read_write.incoming_bytes_take_leb128(max_notification_size) {
+                        Ok(Some(s)) => next_notification_size = Some(s),
+                        Ok(None) => {}
+                        Err(error) => {
+                            read_write.wake_up_asap();
+                            return (
+                                Some(SubstreamInner::NotificationsInClosed),
+                                Some(Event::NotificationsInClose {
+                                    outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
+                                }),
+                            );
+                        }
                     }
-                    Err(error) => (
-                        Some(SubstreamInner::NotificationsInClosed),
-                        Some(Event::NotificationsInClose {
-                            outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
-                        }),
-                    ),
                 }
+
+                (
+                    Some(SubstreamInner::NotificationsIn {
+                        close_desired_timeout,
+                        next_notification_size,
+                        handshake,
+                        max_notification_size,
+                    }),
+                    notification.map(|n| Event::NotificationIn { notification: n }),
+                )
             }
             SubstreamInner::NotificationsInClosed => {
                 read_write.discard_all_incoming();
@@ -920,38 +991,25 @@ where
                 )
             }
 
-            SubstreamInner::PingIn {
-                mut payload_in,
-                mut payload_out,
-            } => {
+            SubstreamInner::PingIn { mut payload_out } => {
                 // Inbound ping substream.
                 // The ping protocol consists in sending 32 bytes of data, which the remote has
-                // to send back. The `payload` field contains these 32 bytes being received.
-                while read_write.incoming_buffer_available() != 0
-                    && read_write.outgoing_buffer_available() != 0
-                {
-                    let available = payload_in.remaining_capacity();
-                    payload_in.extend(read_write.incoming_bytes_iter().take(available));
-                    if payload_in.is_full() {
-                        payload_out.extend(payload_in.iter().copied());
-                        payload_in.clear();
+                // to send back.
+                read_write.write_from_vec_deque(&mut payload_out);
+                if payload_out.is_empty() {
+                    if let Ok(Some(ping)) = read_write.incoming_bytes_take(32) {
+                        payload_out.extend(ping);
                     }
-                    read_write.write_from_vec_deque(&mut payload_out);
                 }
 
-                (
-                    Some(SubstreamInner::PingIn {
-                        payload_in,
-                        payload_out,
-                    }),
-                    None,
-                )
+                (Some(SubstreamInner::PingIn { payload_out }), None)
             }
 
             SubstreamInner::PingOutFailed { mut queued_pings } => {
                 read_write.close_write();
                 if !queued_pings.is_empty() {
                     queued_pings.remove(0);
+                    read_write.wake_up_asap();
                     (
                         Some(SubstreamInner::PingOutFailed { queued_pings }),
                         Some(Event::PingOutError {
@@ -979,10 +1037,12 @@ where
                         }
                         Ok(multistream_select::Negotiation::Success) => {}
                         Ok(multistream_select::Negotiation::NotAvailable) => {
-                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                            read_write.wake_up_asap();
+                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                         Err(_) => {
-                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                            read_write.wake_up_asap();
+                            return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
                     }
                 }
@@ -997,8 +1057,11 @@ where
                 // We check the timeouts before checking the incoming data, as otherwise pings
                 // might succeed after their timeout.
                 for timeout in queued_pings.iter_mut() {
-                    if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
+                    if timeout.as_ref().map_or(false, |(when_started, timeout)| {
+                        (read_write.now.clone() - when_started.clone()) >= *timeout
+                    }) {
                         *timeout = None;
+                        read_write.wake_up_asap();
                         return (
                             Some(SubstreamInner::PingOut {
                                 negotiation,
@@ -1012,32 +1075,32 @@ where
                         );
                     }
 
-                    if let Some(timeout) = timeout {
-                        read_write.wake_up_after(timeout);
+                    if let Some((when_started, timeout)) = timeout {
+                        read_write.wake_up_after(&(when_started.clone() + *timeout));
                     }
                 }
 
                 if negotiation.is_none() {
-                    for actual_byte in read_write.incoming_bytes_iter() {
-                        if expected_payload.pop_front() != Some(actual_byte) {
+                    if let Ok(Some(pong)) = read_write.incoming_bytes_take(32) {
+                        if expected_payload
+                            .pop_front()
+                            .map_or(true, |expected| pong != *expected)
+                        {
+                            read_write.wake_up_asap();
                             return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
                         }
-
-                        // When a ping has been fully answered is determined based on the number of
-                        // bytes in `expected_payload`.
-                        if expected_payload.len() % 32 == 0 {
-                            debug_assert!(!queued_pings.is_empty()); // `expected_payload.pop_front()` should have returned `None` above otherwise
-                            if queued_pings.remove(0).is_some() {
-                                return (
-                                    Some(SubstreamInner::PingOut {
-                                        negotiation,
-                                        expected_payload,
-                                        outgoing_payload,
-                                        queued_pings,
-                                    }),
-                                    Some(Event::PingOutSuccess),
-                                );
-                            }
+                        if let Some((when_started, _)) = queued_pings.remove(0) {
+                            return (
+                                Some(SubstreamInner::PingOut {
+                                    negotiation,
+                                    expected_payload,
+                                    outgoing_payload,
+                                    queued_pings,
+                                }),
+                                Some(Event::PingOutSuccess {
+                                    ping_time: read_write.now.clone() - when_started,
+                                }),
+                            );
                         }
                     }
                 }
@@ -1106,12 +1169,12 @@ where
     ) {
         if let SubstreamInner::NotificationsInWait = &mut self.inner {
             self.inner = SubstreamInner::NotificationsIn {
-                close_desired: false,
-                next_notification: leb128::FramedInProgress::new(max_notification_size),
+                close_desired_timeout: None,
+                next_notification_size: None,
                 handshake: {
                     let handshake_len = handshake.len();
                     leb128::encode_usize(handshake_len)
-                        .chain(handshake.into_iter())
+                        .chain(handshake)
                         .collect::<VecDeque<_>>()
                 },
                 max_notification_size,
@@ -1149,7 +1212,7 @@ where
             SubstreamInner::NotificationsOut { notifications, .. } => {
                 // TODO: expensive copying?
                 notifications.extend(leb128::encode_usize(notification.len()));
-                notifications.extend(notification.into_iter());
+                notifications.extend(notification);
             }
             _ => panic!(),
         }
@@ -1171,30 +1234,46 @@ where
         }
     }
 
-    /// Closes a notifications substream opened after a successful
-    /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`Substream::accept_in_notifications_substream`].
+    /// Closes a outgoing notifications substream opened after a successful
+    /// [`Event::NotificationsOutResult`].
     ///
-    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
-    /// in other words before the remote has accepted/refused the substream.
-    ///
-    /// In the case of an inbound substream, notifications can continue to be received. Calling
-    /// this function only asynchronously signals to the remote that the substream should be
-    /// closed. It does not enforce the closing.
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the substream isn't a notifications substream, or if the notifications substream
     /// isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self) {
+    pub fn close_out_notifications_substream(&mut self) {
         match &mut self.inner {
             SubstreamInner::NotificationsOutHandshakeRecv { .. }
             | SubstreamInner::NotificationsOut { .. } => {
                 self.inner = SubstreamInner::NotificationsOutClosed;
             }
-            SubstreamInner::NotificationsIn { close_desired, .. } if !*close_desired => {
-                *close_desired = true
+            _ => panic!(),
+        };
+    }
+
+    /// Closes an ingoing notifications substream that was accepted using
+    /// [`Substream::accept_in_notifications_substream`].
+    ///
+    /// Notifications can continue to be received. Calling this function only asynchronously
+    /// signals to the remote that the substream should be closed. The closing is enforced only
+    /// after the given timeout elapses.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
+    ///
+    pub fn close_in_notifications_substream(&mut self, timeout: TNow) {
+        match &mut self.inner {
+            SubstreamInner::NotificationsIn {
+                close_desired_timeout,
+                ..
+            } if close_desired_timeout.is_none() => {
+                *close_desired_timeout = Some(timeout);
             }
             _ => panic!(),
         };
@@ -1207,11 +1286,11 @@ where
     ///
     /// Panics if the substream isn't an outgoing ping substream.
     ///
-    pub fn queue_ping(&mut self, payload: &[u8; 32], timeout: TNow) {
+    pub fn queue_ping(&mut self, payload: &[u8; 32], now: TNow, timeout: Duration) {
         match &mut self.inner {
             SubstreamInner::PingOut { queued_pings, .. }
             | SubstreamInner::PingOutFailed { queued_pings, .. } => {
-                queued_pings.push(Some(timeout));
+                queued_pings.push(Some((now, timeout)));
             }
             _ => panic!(),
         }
@@ -1223,7 +1302,7 @@ where
                 ..
             } => {
                 outgoing_payload.extend(payload.iter().copied());
-                expected_payload.extend(payload.iter().copied());
+                expected_payload.push_back(payload.to_vec());
             }
             SubstreamInner::PingOutFailed { .. } => {}
             _ => panic!(),
@@ -1242,9 +1321,7 @@ where
                 self.inner = SubstreamInner::RequestInRespond {
                     response: if let Ok(response) = response {
                         let response_len = response.len();
-                        leb128::encode_usize(response_len)
-                            .chain(response.into_iter())
-                            .collect()
+                        leb128::encode_usize(response_len).chain(response).collect()
                     } else {
                         // An error is indicated by closing the substream without even sending
                         // back the length of the response.
@@ -1418,7 +1495,10 @@ pub enum Event {
     NotificationsOutReset,
 
     /// A ping has been successfully answered by the remote.
-    PingOutSuccess,
+    PingOutSuccess {
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
     /// Remote has failed to answer one or more pings.
     PingOutError {
         /// Number of pings that the remote has failed to answer.
@@ -1433,6 +1513,7 @@ pub enum InboundTy {
         /// Maximum allowed size of the request.
         /// If `None`, then no data is expected on the substream, not even the length of the
         /// request.
+        // TODO: use a proper enum
         request_max_size: Option<usize>,
     },
     Notifications {
@@ -1448,14 +1529,17 @@ pub enum InboundError {
     NegotiationError(multistream_select::Error),
     /// Error while receiving an inbound request.
     #[display(fmt = "Error receiving inbound request: {_0}")]
-    RequestInLebError(leb128::FramedError),
+    RequestInLebError(read_write::IncomingBytesTakeLeb128Error),
+    /// Substream has been unexpectedly closed.
+    #[display(fmt = "Substream unexpectedly closed")]
+    SubstreamClosed,
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
     /// Error while receiving an inbound notifications substream handshake.
     #[display(fmt = "Error while receiving an inbound notifications substream handshake: {error}")]
     NotificationsInError {
         /// Error that happened.
-        error: leb128::FramedError,
+        error: read_write::IncomingBytesTakeLeb128Error,
     },
     /// Unexpected end of file while receiving an inbound notifications substream handshake.
     #[display(
@@ -1480,9 +1564,10 @@ pub enum RequestError {
     /// Error during protocol negotiation.
     #[display(fmt = "Protocol negotiation error: {_0}")]
     NegotiationError(multistream_select::Error),
-    /// Error while receiving the response.
-    #[display(fmt = "Error while receiving response: {_0}")]
-    ResponseLebError(leb128::FramedError),
+    /// Invalid LEB128 number when receiving the response.
+    ResponseInvalidLeb128,
+    /// Number of bytes decoded is larger than expected when receiving the response.
+    ResponseTooLarge,
 }
 
 impl RequestError {
@@ -1495,7 +1580,8 @@ impl RequestError {
             RequestError::SubstreamClosed => false,
             RequestError::SubstreamReset => true,
             RequestError::NegotiationError(_) => true,
-            RequestError::ResponseLebError(_) => true,
+            RequestError::ResponseInvalidLeb128 => true,
+            RequestError::ResponseTooLarge => true,
         }
     }
 }
@@ -1523,7 +1609,7 @@ pub enum NotificationsOutErr {
     SubstreamReset,
     /// Error while receiving the remote's handshake.
     #[display(fmt = "Error while receiving remote handshake: {_0}")]
-    HandshakeRecvError(leb128::FramedError),
+    HandshakeRecvError(read_write::IncomingBytesTakeLeb128Error),
 }
 
 /// Reason why an inbound notifications substream has been closed.
@@ -1531,7 +1617,11 @@ pub enum NotificationsOutErr {
 pub enum NotificationsInClosedErr {
     /// Error in the protocol.
     #[display(fmt = "Error while receiving notification: {_0}")]
-    ProtocolError(leb128::FramedError),
+    ProtocolError(read_write::IncomingBytesTakeLeb128Error),
+    /// Substream has been closed.
+    SubstreamClosed,
     /// Substream has been reset.
     SubstreamReset,
+    /// Substream has been force-closed because the graceful timeout has been reached.
+    CloseDesiredTimeout,
 }

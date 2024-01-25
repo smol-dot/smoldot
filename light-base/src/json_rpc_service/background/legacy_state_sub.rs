@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::log;
+
 use core::{
     future::Future,
     iter,
@@ -23,21 +25,20 @@ use core::{
     time::Duration,
 };
 
-use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use futures_channel::oneshot;
 use futures_lite::{FutureExt as _, StreamExt as _};
-use futures_util::{future, FutureExt as _};
 use smoldot::{
     executor, header,
     informant::HashDisplay,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 /// Message that can be passed to the task started with [`start_task`].
-pub(super) enum Message<TPlat: PlatformRef> {
+pub(super) enum Message {
     /// JSON-RPC client has sent a subscription request.
     ///
     /// Only the legacy API subscription requests are supported. Any other will trigger a panic.
@@ -52,11 +53,11 @@ pub(super) enum Message<TPlat: PlatformRef> {
 
     /// The task must send back access to the runtime of the given block, or `None` if the block
     /// isn't available in the cache.
-    RecentBlockRuntimeAccess {
+    RecentBlockPinnedRuntime {
         /// Hash of the block to query.
         block_hash: [u8; 32],
         /// How to send back the result.
-        result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
+        result_tx: oneshot::Sender<Option<(runtime_service::PinnedRuntime, [u8; 32], u64)>>,
     },
 
     /// The task must send back the current best block hash.
@@ -102,6 +103,13 @@ pub(super) enum Message<TPlat: PlatformRef> {
         /// Results provided by the [`sync_service`].
         result: Result<Vec<sync_service::StorageResultItem>, sync_service::StorageQueryError>,
     },
+    /// Internal message. Do not use.
+    BlockStateRootAndNumberFinished {
+        /// Hash of the block that has been queried.
+        block_hash: [u8; 32],
+        /// Outcome of the fetch.
+        result: Result<([u8; 32], u64), StateTrieRootHashError>,
+    },
 }
 
 /// Configuration to pass to [`start_task`].
@@ -130,16 +138,13 @@ pub(super) enum StateTrieRootHashError {
 /// JSON-RPC client starts.
 pub(super) fn start_task<TPlat: PlatformRef>(
     config: Config<TPlat>,
-) -> async_channel::Sender<Message<TPlat>> {
+) -> async_channel::Sender<Message> {
     let (requests_tx, requests_rx) = async_channel::bounded(8);
+    let requests_rx = Box::pin(requests_rx);
 
     config.platform.clone().spawn_task(
         format!("{}-legacy-state-subscriptions", config.log_target).into(),
-        Box::pin(run(Task {
-            block_state_root_hashes_numbers: lru::LruCache::with_hasher(
-                NonZeroUsize::new(32).unwrap(),
-                Default::default(),
-            ),
+        run(Task {
             log_target: config.log_target.clone(),
             platform: config.platform.clone(),
             best_block_report: Vec::with_capacity(4),
@@ -181,7 +186,15 @@ pub(super) fn start_task<TPlat: PlatformRef>(
                 Default::default(),
             ),
             storage_query_in_progress: false,
-        })),
+            block_state_root_hashes_numbers_cache: lru::LruCache::with_hasher(
+                NonZeroUsize::new(32).unwrap(),
+                Default::default(),
+            ),
+            block_state_root_hashes_numbers_pending: hashbrown::HashMap::with_capacity_and_hasher(
+                32,
+                Default::default(),
+            ),
+        }),
     );
 
     requests_tx
@@ -204,9 +217,9 @@ struct Task<TPlat: PlatformRef> {
     best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
 
     /// Sending side of [`Task::requests_rx`].
-    requests_tx: async_channel::WeakSender<Message<TPlat>>,
+    requests_tx: async_channel::WeakSender<Message>,
     /// How to receive messages from the API user.
-    requests_rx: async_channel::Receiver<Message<TPlat>>,
+    requests_rx: Pin<Box<async_channel::Receiver<Message>>>,
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
     // TODO: shrink_to_fit?
@@ -245,29 +258,30 @@ struct Task<TPlat: PlatformRef> {
     /// subscriptions. This task will send a [`Message::StorageFetch`] once it's finished.
     storage_query_in_progress: bool,
 
-    /// State trie root hashes and numbers of blocks that were not in
+    /// Cache of known state trie root hashes and numbers of blocks that were not in
     /// [`Subscription::Active::pinned_blocks`].
     ///
     /// The state trie root hash can also be an `Err` if the network request failed or if the
     /// header is of an invalid format.
-    ///
-    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
-    /// requests need the state trie root hash and number of the same block, they are only queried
-    /// once and the query is inserted in the cache while in progress. This way, the multiple
-    /// requests can all wait on that single future.
     ///
     /// Most of the time, the JSON-RPC client will query blocks that are found in
     /// [`Subscription::Active::pinned_blocks`], but occasionally it will query older blocks. When
     /// the storage of an older block is queried, it is common for the JSON-RPC client to make
     /// several storage requests to that same old block. In order to avoid having to retrieve the
     /// state trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes_numbers: lru::LruCache<
+    block_state_root_hashes_numbers_cache: lru::LruCache<
         [u8; 32],
-        future::MaybeDone<
-            future::Shared<
-                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
-            >,
-        >,
+        Result<([u8; 32], u64), StateTrieRootHashError>,
+        fnv::FnvBuildHasher,
+    >,
+
+    /// Requests for blocks state root hash and numbers that are still in progress.
+    /// For each block hash, contains a list of senders that are interested in the response.
+    /// Once the operation has been finished, the value is inserted in
+    /// [`Task::block_state_root_hashes_numbers_cache`].
+    block_state_root_hashes_numbers_pending: hashbrown::HashMap<
+        [u8; 32],
+        Vec<oneshot::Sender<Result<([u8; 32], u64), StateTrieRootHashError>>>,
         fnv::FnvBuildHasher,
     >,
 }
@@ -364,12 +378,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     ) {
                         Ok(h) => h,
                         Err(error) => {
-                            log::warn!(
-                                target: &task.log_target,
-                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
-                                due to undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(current_finalized_block),
-                                error,
+                            log!(
+                                &task.platform,
+                                Warn,
+                                &task.log_target,
+                                format!(
+                                    "`chain_subscribeFinalizedHeads` subscription has skipped \
+                                    block due to undecodable header. Hash: {}. Error: {}",
+                                    HashDisplay(current_finalized_block),
+                                    error,
+                                )
                             );
                             continue;
                         }
@@ -408,12 +426,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 ) {
                     Ok(h) => h,
                     Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeNewHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(current_best_block),
-                            error,
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(current_best_block),
+                                error
+                            )
                         );
                         continue;
                     }
@@ -508,17 +530,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 task.storage_query_in_progress = true;
                 task.platform.spawn_task(
                     format!("{}-storage-subscriptions-fetch", task.log_target).into(),
-                    Box::pin({
+                    {
                         let block_hash = *current_best_block;
                         let sync_service = task.sync_service.clone();
                         let requests_tx = task.requests_tx.clone();
                         async move {
-                            let result = sync_service
+                            let mut out = Vec::with_capacity(keys.len());
+                            let mut query = sync_service
                                 .clone()
                                 .storage_query(
                                     block_number,
-                                    &block_hash,
-                                    &state_trie_root,
+                                    block_hash,
+                                    state_trie_root,
                                     keys.into_iter()
                                         .map(|key| sync_service::StorageRequestItem {
                                             key,
@@ -528,19 +551,49 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                     Duration::from_secs(12),
                                     NonZeroU32::new(2).unwrap(),
                                 )
+                                .advance()
                                 .await;
-                            if let Some(requests_tx) = requests_tx.upgrade() {
-                                let _ = requests_tx
-                                    .send(Message::StorageFetch { block_hash, result })
-                                    .await;
+                            loop {
+                                match query {
+                                    sync_service::StorageQueryProgress::Progress {
+                                        item,
+                                        query: next,
+                                        ..
+                                    } => {
+                                        out.push(item);
+                                        query = next.advance().await;
+                                    }
+                                    sync_service::StorageQueryProgress::Finished => {
+                                        if let Some(requests_tx) = requests_tx.upgrade() {
+                                            let _ = requests_tx
+                                                .send(Message::StorageFetch {
+                                                    block_hash,
+                                                    result: Ok(out),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                    sync_service::StorageQueryProgress::Error(error) => {
+                                        if let Some(requests_tx) = requests_tx.upgrade() {
+                                            let _ = requests_tx
+                                                .send(Message::StorageFetch {
+                                                    block_hash,
+                                                    result: Err(error),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                }
                             }
                         }
-                    }),
+                    },
                 );
             }
         }
 
-        enum WhatHappened<'a, TPlat: PlatformRef> {
+        enum WakeUpReason<'a, TPlat: PlatformRef> {
             SubscriptionNotification {
                 notification: runtime_service::Notification,
                 subscription: &'a mut runtime_service::Subscription<TPlat>,
@@ -554,15 +607,15 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
-            Message(Message<TPlat>),
+            Message(Message),
             ForegroundDead,
         }
 
         // Asynchronously wait for something to happen. This can potentially take a long time.
-        let event: WhatHappened<'_, TPlat> = {
+        let event: WakeUpReason<'_, TPlat> = {
             let subscription_event = async {
                 match &mut task.subscription {
-                    Subscription::NotCreated => WhatHappened::SubscriptionDead,
+                    Subscription::NotCreated => WakeUpReason::SubscriptionDead,
                     Subscription::Active {
                         subscription,
                         pinned_blocks,
@@ -572,7 +625,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         current_finalized_block,
                         finalized_heads_subscriptions_stale,
                     } => match subscription.next().await {
-                        Some(notification) => WhatHappened::SubscriptionNotification {
+                        Some(notification) => WakeUpReason::SubscriptionNotification {
                             notification,
                             subscription,
                             pinned_blocks,
@@ -582,18 +635,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             current_finalized_block,
                             finalized_heads_subscriptions_stale,
                         },
-                        None => WhatHappened::SubscriptionDead,
+                        None => WakeUpReason::SubscriptionDead,
                     },
                     Subscription::Pending(pending) => {
-                        WhatHappened::SubscriptionReady(pending.await)
+                        WakeUpReason::SubscriptionReady(pending.await)
                     }
                 }
             };
 
             let message = async {
                 match task.requests_rx.next().await {
-                    Some(msg) => WhatHappened::Message(msg),
-                    None => WhatHappened::ForegroundDead,
+                    Some(msg) => WakeUpReason::Message(msg),
+                    None => WakeUpReason::ForegroundDead,
                 }
             };
 
@@ -603,7 +656,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
         // Perform internal state updates depending on what happened.
         match event {
             // Runtime service is now ready to give us blocks.
-            WhatHappened::SubscriptionReady(subscribe_all) => {
+            WakeUpReason::SubscriptionReady(subscribe_all) => {
                 // We must transition to `Subscription::Active`.
                 let mut pinned_blocks =
                     hashbrown::HashMap::with_capacity_and_hasher(32, Default::default());
@@ -660,7 +713,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // A new non-finalized block has appeared!
-            WhatHappened::SubscriptionNotification {
+            WakeUpReason::SubscriptionNotification {
                 notification: runtime_service::Notification::Block(block),
                 pinned_blocks,
                 current_best_block,
@@ -673,14 +726,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 ) {
                     Ok(h) => h,
                     Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeAllHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(&header::hash_from_scale_encoded_header(
-                                &block.scale_encoded_header
-                            )),
-                            error,
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeAllHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header
+                                )),
+                                error
+                            )
                         );
                         continue;
                     }
@@ -719,7 +776,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // A block has been finalized.
-            WhatHappened::SubscriptionNotification {
+            WakeUpReason::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::Finalized {
                         hash: finalized_hash,
@@ -737,18 +794,22 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 *current_finalized_block = finalized_hash;
                 *finalized_heads_subscriptions_stale = true;
 
+                debug_assert!(pruned_blocks
+                    .iter()
+                    .all(|hash| pinned_blocks.contains_key(hash)));
+
                 // Add the pruned and finalized blocks to the LRU cache. The least-recently used
                 // entries in the cache are unpinned and no longer tracked.
                 //
                 // An important detail here is that the newly-finalized block is added to the list
-                // at the end, in order to guaranteed that it doesn't get removed. This is
+                // at the end, in order to guarantee that it doesn't get removed. This is
                 // necessary in order to guarantee that the current finalized (and current best,
                 // if the best block is also the finalized block) remains pinned until at least
                 // a different block gets finalized.
                 for block_hash in pruned_blocks.into_iter().chain(iter::once(finalized_hash)) {
                     if finalized_and_pruned_lru.len() == finalized_and_pruned_lru.cap().get() {
                         let (hash_to_unpin, _) = finalized_and_pruned_lru.pop_lru().unwrap();
-                        subscription.unpin_block(&hash_to_unpin).await;
+                        subscription.unpin_block(hash_to_unpin).await;
                         pinned_blocks.remove(&hash_to_unpin).unwrap();
                     }
                     finalized_and_pruned_lru.put(block_hash, ());
@@ -761,7 +822,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // The current best block has now changed.
-            WhatHappened::SubscriptionNotification {
+            WakeUpReason::SubscriptionNotification {
                 notification:
                     runtime_service::Notification::BestBlockChanged {
                         hash: new_best_hash,
@@ -776,7 +837,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
 
             // Request from the JSON-RPC client.
-            WhatHappened::Message(Message::SubscriptionStart(request)) => match request.request() {
+            WakeUpReason::Message(Message::SubscriptionStart(request)) => match request.request() {
                 methods::MethodCall::chain_subscribeAllHeads {} => {
                     let subscription = request.accept();
                     let subscription_id = subscription.subscription_id().to_owned();
@@ -802,12 +863,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             ) {
                                 Ok(h) => h,
                                 Err(error) => {
-                                    log::warn!(
-                                        target: &task.log_target,
-                                        "`chain_subscribeNewHeads` subscription has skipped \
-                                        block due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(current_best_block),
-                                        error,
+                                    log!(
+                                        &task.platform,
+                                        Warn,
+                                        &task.log_target,
+                                        format!(
+                                            "`chain_subscribeNewHeads` subscription has \
+                                            skipped block due to undecodable header. Hash: {}. \
+                                            Error: {}",
+                                            HashDisplay(current_best_block),
+                                            error
+                                        )
                                     );
                                     continue;
                                 }
@@ -846,12 +912,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             ) {
                                 Ok(h) => h,
                                 Err(error) => {
-                                    log::warn!(
-                                        target: &task.log_target,
-                                        "`chain_subscribeFinalizedHeads` subscription has skipped \
-                                        block due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(current_finalized_block),
-                                        error,
+                                    log!(
+                                        &task.platform,
+                                        Warn,
+                                        &task.log_target,
+                                        format!(
+                                            "`chain_subscribeFinalizedHeads` subscription \
+                                            has skipped block due to undecodable header. \
+                                            Hash: {}. Error: {}",
+                                            HashDisplay(current_finalized_block),
+                                            error,
+                                        )
                                     );
                                     continue;
                                 }
@@ -934,7 +1005,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             },
 
             // JSON-RPC client has unsubscribed.
-            WhatHappened::Message(Message::SubscriptionDestroyed { subscription_id }) => {
+            WakeUpReason::Message(Message::SubscriptionDestroyed { subscription_id }) => {
                 // We don't know the type of the unsubscription, that's not a big deal. Just
                 // remove the entry from everywhere.
                 task.all_heads_subscriptions.remove(&subscription_id);
@@ -959,7 +1030,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 // TODO: shrink_to_fit?
             }
 
-            WhatHappened::Message(Message::RecentBlockRuntimeAccess {
+            WakeUpReason::Message(Message::RecentBlockPinnedRuntime {
                 block_hash,
                 result_tx,
             }) => {
@@ -981,10 +1052,20 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let access = if let Some(subscription_id) = subscription_id_with_block {
-                    task.runtime_service
-                        .pinned_block_runtime_access(subscription_id, &block_hash)
+                    match task
+                        .runtime_service
+                        .pin_pinned_block_runtime(subscription_id, block_hash)
                         .await
-                        .ok()
+                    {
+                        Ok(r) => Some(r),
+                        Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                            debug_assert!(false);
+                            None
+                        }
+                        Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
@@ -992,7 +1073,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(access);
             }
 
-            WhatHappened::Message(Message::CurrentBestBlockHash { result_tx }) => {
+            WakeUpReason::Message(Message::CurrentBestBlockHash { result_tx }) => {
                 match &task.subscription {
                     Subscription::Active {
                         current_best_block, ..
@@ -1005,14 +1086,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 }
             }
 
-            WhatHappened::Message(Message::BlockNumber {
+            WakeUpReason::Message(Message::BlockNumber {
                 block_hash,
                 result_tx,
             }) => {
-                if let Some(future) = task.block_state_root_hashes_numbers.get_mut(&block_hash) {
-                    let _ = future.now_or_never();
-                }
-
                 let block_number = if let Subscription::Active {
                     pinned_blocks: recent_pinned_blocks,
                     ..
@@ -1025,10 +1102,10 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                 task.runtime_service.block_number_bytes(),
                             )
                         }),
-                        task.block_state_root_hashes_numbers.get(&block_hash),
+                        task.block_state_root_hashes_numbers_cache.get(&block_hash),
                     ) {
                         (Some(Ok(header)), _) => Some(header.number),
-                        (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
+                        (_, Some(Ok((_, num)))) => Some(*num),
                         _ => None,
                     }
                 } else {
@@ -1038,7 +1115,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(block_number);
             }
 
-            WhatHappened::Message(Message::BlockHeader {
+            WakeUpReason::Message(Message::BlockHeader {
                 block_hash,
                 result_tx,
             }) => {
@@ -1047,11 +1124,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     ..
                 } = &mut task.subscription
                 {
-                    if let Some(block) = recent_pinned_blocks.get(&block_hash) {
-                        Some(block.scale_encoded_header.clone())
-                    } else {
-                        None
-                    }
+                    recent_pinned_blocks
+                        .get(&block_hash)
+                        .map(|block| block.scale_encoded_header.clone())
                 } else {
                     None
                 };
@@ -1059,124 +1134,144 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let _ = result_tx.send(header);
             }
 
-            WhatHappened::Message(Message::BlockStateRootAndNumber {
+            WakeUpReason::Message(Message::BlockStateRootAndNumber {
                 block_hash,
                 result_tx,
             }) => {
-                let fetch = {
-                    // Try to find an existing entry in cache, and if not create one.
-
-                    // Look in `recent_pinned_blocks`.
-                    if let Subscription::Active {
-                        pinned_blocks: recent_pinned_blocks,
-                        ..
-                    } = &mut task.subscription
-                    {
-                        match recent_pinned_blocks.get(&block_hash).map(|b| {
-                            header::decode(
-                                &b.scale_encoded_header,
-                                task.runtime_service.block_number_bytes(),
-                            )
-                        }) {
-                            Some(Ok(header)) => {
-                                let _ = result_tx.send(Ok((*header.state_root, header.number)));
-                                continue;
-                            }
-                            Some(Err(err)) => {
-                                let _ = result_tx
-                                    .send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
-                                continue;
-                            } // TODO: can this actually happen? unclear
-                            None => {}
+                // Look in `recent_pinned_blocks`.
+                if let Subscription::Active {
+                    pinned_blocks: recent_pinned_blocks,
+                    ..
+                } = &mut task.subscription
+                {
+                    match recent_pinned_blocks.get(&block_hash).map(|b| {
+                        header::decode(
+                            &b.scale_encoded_header,
+                            task.runtime_service.block_number_bytes(),
+                        )
+                    }) {
+                        Some(Ok(header)) => {
+                            let _ = result_tx.send(Ok((*header.state_root, header.number)));
+                            continue;
                         }
+                        Some(Err(err)) => {
+                            let _ =
+                                result_tx.send(Err(StateTrieRootHashError::HeaderDecodeError(err)));
+                            continue;
+                        } // TODO: can this actually happen? unclear
+                        None => {}
                     }
+                }
 
-                    // Look in `block_state_root_hashes`.
-                    match task.block_state_root_hashes_numbers.get(&block_hash) {
-                        Some(future::MaybeDone::Done(Ok(val))) => {
-                            let _ = result_tx.send(Ok(*val));
-                            continue;
-                        }
-                        Some(future::MaybeDone::Future(f)) => f.clone(),
-                        Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
-                        Some(future::MaybeDone::Done(Err(
-                            err @ StateTrieRootHashError::HeaderDecodeError(_),
-                        ))) => {
-                            // In case of a fatal error, return immediately.
-                            let _ = result_tx.send(Err(err.clone()));
-                            continue;
-                        }
-                        Some(future::MaybeDone::Done(Err(
-                            StateTrieRootHashError::NetworkQueryError,
-                        )))
-                        | None => {
-                            // No existing cache entry. Create the future that will perform the fetch
-                            // but do not actually start doing anything now.
-                            let fetch = {
-                                let sync_service = task.sync_service.clone();
-                                async move {
-                                    // The sync service knows which peers are potentially aware of
-                                    // this block.
-                                    let result = sync_service
-                                        .clone()
-                                        .block_query_unknown_number(
-                                            block_hash,
-                                            protocol::BlocksRequestFields {
-                                                header: true,
-                                                body: false,
-                                                justifications: false,
-                                            },
-                                            4,
-                                            Duration::from_secs(8),
-                                            NonZeroU32::new(2).unwrap(),
-                                        )
-                                        .await;
+                // Look in `block_state_root_hashes_numbers_cache`.
+                if let Some(entry) = task.block_state_root_hashes_numbers_cache.get(&block_hash) {
+                    let _ = result_tx.send(entry.clone());
+                    continue;
+                }
 
-                                    if let Ok(block) = result {
-                                        // If successful, the `block_query` function guarantees that the
-                                        // header is present and valid.
-                                        let header = block.header.unwrap();
-                                        debug_assert_eq!(
-                                            header::hash_from_scale_encoded_header(&header),
-                                            block_hash
-                                        );
-                                        let decoded = header::decode(
-                                            &header,
-                                            sync_service.block_number_bytes(),
-                                        )
-                                        .unwrap();
-                                        Ok((*decoded.state_root, decoded.number))
+                // Look in `block_state_root_hashes_numbers_pending`.
+                if let Some(entry) = task
+                    .block_state_root_hashes_numbers_pending
+                    .get_mut(&block_hash)
+                {
+                    entry.push(result_tx);
+                    continue;
+                }
+
+                // Start a new task to retrieve the value.
+                task.platform
+                    .spawn_task("block-state-root-number-fetch∏".into(), {
+                        let sync_service = task.sync_service.clone();
+                        let requests_tx = task.requests_tx.clone();
+                        async move {
+                            // The sync service knows which peers are potentially aware of
+                            // this block.
+                            let result = sync_service
+                                .clone()
+                                .block_query_unknown_number(
+                                    block_hash,
+                                    codec::BlocksRequestFields {
+                                        header: true,
+                                        body: false,
+                                        justifications: false,
+                                    },
+                                    4,
+                                    Duration::from_secs(8),
+                                    NonZeroU32::new(2).unwrap(),
+                                )
+                                .await;
+
+                            let result = match result {
+                                Ok(block) => {
+                                    if let Some(header) = block.header {
+                                        if header::hash_from_scale_encoded_header(&header)
+                                            == block_hash
+                                        {
+                                            match header::decode(
+                                                &header,
+                                                sync_service.block_number_bytes(),
+                                            ) {
+                                                Ok(decoded) => {
+                                                    Ok((*decoded.state_root, decoded.number))
+                                                }
+                                                Err(err) => Err(
+                                                    StateTrieRootHashError::HeaderDecodeError(err),
+                                                ),
+                                            }
+                                        } else {
+                                            // TODO: try request again?
+                                            Err(StateTrieRootHashError::NetworkQueryError)
+                                        }
                                     } else {
-                                        // TODO: better error details?
+                                        // TODO: try request again?
                                         Err(StateTrieRootHashError::NetworkQueryError)
                                     }
                                 }
+                                Err(_) => {
+                                    // TODO: better error details?
+                                    Err(StateTrieRootHashError::NetworkQueryError)
+                                }
                             };
 
-                            // Insert the future in the cache, so that any other call will use the same
-                            // future.
-                            let wrapped = (Box::pin(fetch)
-                                as Pin<Box<dyn Future<Output = _> + Send>>)
-                                .shared();
-                            task.block_state_root_hashes_numbers
-                                .put(block_hash, future::maybe_done(wrapped.clone()));
-                            wrapped
+                            if let Some(requests_tx) = requests_tx.upgrade() {
+                                let _ = requests_tx
+                                    .send(Message::BlockStateRootAndNumberFinished {
+                                        block_hash,
+                                        result,
+                                    })
+                                    .await;
+                            }
                         }
-                    }
-                };
-
-                // We await separately to be certain that the lock isn't held anymore.
-                // TODO: crappy design
-                task.platform
-                    .spawn_task("dummy-adapter".into(), async move {
-                        let outcome = fetch.await;
-                        let _ = result_tx.send(outcome);
                     });
+
+                // Insert `result_tx` so that it gets sent the result once the operation is
+                // finished.
+                task.block_state_root_hashes_numbers_pending
+                    .insert(block_hash, vec![result_tx]);
+            }
+
+            // Background task dedicated to performing a fetch for a block trie root and number
+            // has finished.
+            WakeUpReason::Message(Message::BlockStateRootAndNumberFinished {
+                block_hash,
+                result,
+            }) => {
+                if let Some(senders) = task
+                    .block_state_root_hashes_numbers_pending
+                    .remove(&block_hash)
+                {
+                    for sender in senders {
+                        let _ = sender.send(result.clone());
+                    }
+                }
+
+                task.block_state_root_hashes_numbers_cache
+                    .push(block_hash, result);
             }
 
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished.
-            WhatHappened::Message(Message::StorageFetch {
+            WakeUpReason::Message(Message::StorageFetch {
                 block_hash,
                 result: Ok(result),
             }) => {
@@ -1247,19 +1342,19 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
 
             // Background task dedicated to performing a storage query for the storage
             // subscription has finished but was unsuccessful.
-            WhatHappened::Message(Message::StorageFetch { result: Err(_), .. }) => {
+            WakeUpReason::Message(Message::StorageFetch { result: Err(_), .. }) => {
                 debug_assert!(task.storage_query_in_progress);
                 task.storage_query_in_progress = false;
                 // TODO: add a delay or something?
             }
 
             // JSON-RPC service has been destroyed. Stop the task altogether.
-            WhatHappened::ForegroundDead => {
+            WakeUpReason::ForegroundDead => {
                 return;
             }
 
             // The subscription towards the runtime service needs to be renewed.
-            WhatHappened::SubscriptionDead => {
+            WakeUpReason::SubscriptionDead => {
                 // The buffer size should be large enough so that, if the CPU is busy, it
                 // doesn't become full before the execution of this task resumes.
                 // The maximum number of pinned block is ignored, as this maximum is a way to
@@ -1268,11 +1363,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 let runtime_service = task.runtime_service.clone();
                 task.subscription = Subscription::Pending(Box::pin(async move {
                     runtime_service
-                        .subscribe_all(
-                            "json-rpc-blocks-cache",
-                            32,
-                            NonZeroUsize::new(usize::max_value()).unwrap(),
-                        )
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await
                 }));
             }

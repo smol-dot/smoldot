@@ -55,8 +55,9 @@ export interface Config {
 }
 
 export type Event =
-    { ty: "add-chain-result", success: true, chainId: number } |
-    { ty: "add-chain-result", success: false, error: string } |
+    { ty: "add-chain-id-allocated", chainId: number } |
+    { ty: "add-chain-result", chainId: number, success: true } |
+    { ty: "add-chain-result", chainId: number, success: false, error: string } |
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     // Smoldot has crashed. Note that the public API of the instance can technically still be
@@ -69,7 +70,7 @@ export type Event =
     { ty: "connection-reset", connectionId: number } |
     { ty: "connection-stream-open", connectionId: number } |
     { ty: "connection-stream-reset", connectionId: number, streamId: number } |
-    { ty: "stream-send", connectionId: number, streamId?: number, data: Uint8Array } |
+    { ty: "stream-send", connectionId: number, streamId?: number, data: Array<Uint8Array> } |
     { ty: "stream-send-close", connectionId: number, streamId?: number };
 
 export type ParsedMultiaddr =
@@ -80,6 +81,15 @@ export type ParsedMultiaddr =
 export interface Instance {
     request: (request: string, chainId: number) => number,
     peekJsonRpcResponse: (chainId: number) => string | null,
+    /**
+     * Later generates a `add-chain-id-allocated` event.
+     * If this function is called multiple times, the `add-chain-id-allocated` events are generated
+     * in the same order as the function calls.
+     *
+     * Then, later and asynchronously, a `add-chain-result` event is generated in order to
+     * indicate whether the initialization was actually successful. If `success` is `false`, then
+     * the `chainId` becomes unallocated.
+     */
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number) => void,
     removeChain: (chainId: number) => void,
     /**
@@ -91,12 +101,12 @@ export interface Instance {
      * all connections.
      */
     shutdownExecutor: () => void,
-    connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => void,
+    connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => void,
     connectionReset: (connectionId: number, message: string) => void,
     streamWritableBytes: (connectionId: number, numExtra: number, streamId?: number) => void,
     streamMessage: (connectionId: number, message: Uint8Array, streamId?: number) => void,
-    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void,
-    streamReset: (connectionId: number, streamId: number) => void,
+    streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => void,
+    streamReset: (connectionId: number, streamId: number, message: string) => void,
 }
 
 /**
@@ -120,16 +130,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         currentTask: string | null,
         bufferIndices: Uint8Array[],
         advanceExecutionPromise: null | (() => void),
-        stdoutBuffer: string,
-        stderrBuffer: string,
         onShutdownExecutorOrWasmPanic: () => void,
     } = {
         instance: null,
         currentTask: null,
         bufferIndices: new Array(),
         advanceExecutionPromise: null,
-        stdoutBuffer: "",
-        stderrBuffer: "",
         onShutdownExecutorOrWasmPanic: () => { }
     };
 
@@ -148,6 +154,49 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             state.onShutdownExecutorOrWasmPanic();
             state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
+        },
+
+        chain_initialized: (chainId: number, errorMsgPtr: number, errorMsgLen: number) => {
+            const instance = state.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+
+            errorMsgPtr >>>= 0;
+            errorMsgLen >>>= 0;
+
+            if (errorMsgPtr === 0) {
+                eventCallback({ ty: "add-chain-result", chainId, success: true });
+            } else {
+                const errorMsg = buffer.utf8BytesToString(mem, errorMsgPtr, errorMsgLen);
+                eventCallback({ ty: "add-chain-result", chainId, success: false, error: errorMsg });
+            }
+        },
+
+        random_get: (ptr: number, len: number) => {
+            const instance = state.instance!;
+
+            ptr >>>= 0;
+            len >>>= 0;
+
+            const baseBuffer = new Uint8Array(instance.exports.memory.buffer)
+                .subarray(ptr, ptr + len);
+            for (let iter = 0; iter < len; iter += 65536) {
+                // `baseBuffer.subarray` automatically saturates at the end of the buffer
+                config.getRandomValues(baseBuffer.subarray(iter, iter + 65536))
+            }
+        },
+
+        unix_timestamp_us: (): bigint => {
+            const value = Math.floor(Date.now());
+            if (value < 0) throw new Error("UNIX timestamp inferior to 0");
+            return BigInt(value) * BigInt(1_000);
+        },
+
+        monotonic_clock_us: (): bigint => {
+            const nowMs = config.performanceNow();
+            const nowMsInt = Math.floor(nowMs);
+            const now = BigInt(nowMsInt) * BigInt(1_000) +
+                BigInt(Math.floor(((nowMs - nowMsInt) * 1_000)));
+            return now;
         },
 
         buffer_size: (bufferIndex: number) => {
@@ -293,14 +342,14 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
                 case 16: {
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
-                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 3);
+                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
                     address = { ty: "webrtc", ipVersion: '4', remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
                 case 17: {
                     const targetPort = buffer.readUInt16BE(mem, addrPtr + 1);
                     const remoteTlsCertificateSha256 = mem.slice(addrPtr + 3, addrPtr + 35);
-                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 3);
+                    const targetIp = buffer.utf8BytesToString(mem, addrPtr + 35, addrLen - 35);
                     address = { ty: "webrtc", ipVersion: '6', remoteTlsCertificateSha256, targetIp, targetPort }
                     break;
                 }
@@ -331,11 +380,18 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
             const instance = state.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
 
             ptr >>>= 0;
             len >>>= 0;
 
-            const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
+            const data = new Array();
+            for (let i = 0; i < len; ++i) {
+                const bufPtr = buffer.readUInt32LE(mem, ptr + 8 * i);
+                const bufLen = buffer.readUInt32LE(mem, ptr + 8 * i + 4);
+                data.push(mem.slice(bufPtr, bufPtr + bufLen));
+            } 
+
             // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
             eventCallback({ ty: "stream-send", connectionId, streamId, data });
         },
@@ -358,195 +414,12 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
         }
     };
 
-    const wasiBindings = {
-        // Need to fill the buffer described by `ptr` and `len` with random data.
-        // This data will be used in order to generate secrets. Do not use a dummy implementation!
-        random_get: (ptr: number, len: number) => {
-            const instance = state.instance!;
-
-            ptr >>>= 0;
-            len >>>= 0;
-
-            const baseBuffer = new Uint8Array(instance.exports.memory.buffer)
-                .subarray(ptr, ptr + len);
-            for (let iter = 0; iter < len; iter += 65536) {
-                // `baseBuffer.subarray` automatically saturates at the end of the buffer
-                config.getRandomValues(baseBuffer.subarray(iter, iter + 65536))
-            }
-
-            return 0;
-        },
-
-        clock_time_get: (clockId: number, _precision: bigint, outPtr: number): number => {
-            // See <https://github.com/rust-lang/rust/blob/master/library/std/src/sys/wasi/time.rs>
-            // and <docs.rs/wasi/> for help.
-
-            const instance = state.instance!;
-            const mem = new Uint8Array(instance.exports.memory.buffer);
-            outPtr >>>= 0;
-
-            // We ignore the precision, as it can't be implemented anyway.
-
-            switch (clockId) {
-                case 0: {
-                    // Realtime clock.
-                    const now = BigInt(Math.floor(Date.now())) * BigInt(1_000_000);
-                    buffer.writeUInt64LE(mem, outPtr, now)
-
-                    // Success.
-                    return 0;
-                }
-                case 1: {
-                    // Monotonic clock.
-                    const nowMs = config.performanceNow();
-                    const nowMsInt = Math.floor(nowMs);
-                    const now = BigInt(nowMsInt) * BigInt(1_000_000) +
-                        BigInt(Math.floor(((nowMs - nowMsInt) * 1_000_000)));
-                    buffer.writeUInt64LE(mem, outPtr, now)
-
-                    // Success.
-                    return 0;
-                }
-                default:
-                    // Return an `EINVAL` error.
-                    return 28
-            }
-        },
-
-        // Writing to a file descriptor is used in order to write to stdout/stderr.
-        fd_write: (fd: number, addr: number, num: number, outPtr: number) => {
-            const instance = state.instance!;
-
-            outPtr >>>= 0;
-
-            // Only stdout and stderr are open for writing.
-            if (fd != 1 && fd != 2) {
-                return 8;
-            }
-
-            const mem = new Uint8Array(instance.exports.memory.buffer);
-
-            // `fd_write` passes a buffer containing itself a list of pointers and lengths to the
-            // actual buffers. See writev(2).
-            let toWrite = "";
-            let totalLength = 0;
-            for (let i = 0; i < num; i++) {
-                const buf = buffer.readUInt32LE(mem, addr + 4 * i * 2);
-                const bufLen = buffer.readUInt32LE(mem, addr + 4 * (i * 2 + 1));
-                toWrite += buffer.utf8BytesToString(mem, buf, bufLen);
-                totalLength += bufLen;
-            }
-
-            const flushBuffer = (string: string) => {
-                // As documented in the documentation of `println!`, lines are always split by a
-                // single `\n` in Rust.
-                while (true) {
-                    const index = string.indexOf('\n');
-                    if (index != -1) {
-                        // Note that it is questionnable to use `console.log` from within a
-                        // library. However this simply reflects the usage of `println!` in the
-                        // Rust code. In other words, it is `println!` that shouldn't be used in
-                        // the first place. The harm of not showing text printed with `println!`
-                        // at all is greater than the harm possibly caused by accidentally leaving
-                        // a `println!` in the code.
-                        console.log(string.substring(0, index));
-                        string = string.substring(index + 1);
-                    } else {
-                        return string;
-                    }
-                }
-            };
-
-            // Append the newly-written data to either `stdout_buffer` or `stderr_buffer`, and
-            // print their content if necessary.
-            if (fd == 1) {
-                state.stdoutBuffer += toWrite;
-                state.stdoutBuffer = flushBuffer(state.stdoutBuffer);
-            } else if (fd == 2) {
-                state.stderrBuffer += toWrite;
-                state.stderrBuffer = flushBuffer(state.stderrBuffer);
-            }
-
-            // Need to write in `out_ptr` how much data was "written".
-            buffer.writeUInt32LE(mem, outPtr, totalLength);
-            return 0;
-        },
-
-        // It's unclear how to properly implement yielding, but a no-op works fine as well.
-        sched_yield: () => {
-            return 0;
-        },
-
-        // Used by Rust in catastrophic situations, such as a double panic.
-        proc_exit: (retCode: number) => {
-            state.instance = null;
-            eventCallback({
-                ty: "wasm-panic",
-                message: `proc_exit called: ${retCode}`,
-                currentTask: state.currentTask
-            });
-            state.onShutdownExecutorOrWasmPanic();
-            state.onShutdownExecutorOrWasmPanic = () => { };
-            throw new Error();
-        },
-
-        // Return the number of environment variables and the total size of all environment
-        // variables. This is called in order to initialize buffers before `environ_get`.
-        environ_sizes_get: (argcOut: number, argvBufSizeOut: number) => {
-            const instance = state.instance!;
-
-            argcOut >>>= 0;
-            argvBufSizeOut >>>= 0;
-
-            let totalLen = 0;
-            config.envVars.forEach(e => totalLen += new TextEncoder().encode(e).length + 1); // +1 for trailing \0
-
-            const mem = new Uint8Array(instance.exports.memory.buffer);
-            buffer.writeUInt32LE(mem, argcOut, config.envVars.length);
-            buffer.writeUInt32LE(mem, argvBufSizeOut, totalLen);
-            return 0;
-        },
-
-        // Write the environment variables to the given pointers.
-        // `argv` is a pointer to a buffer that must be overwritten with a list of pointers to
-        // environment variables, and `argvBuf` is a pointer to a buffer where to actually store
-        // the environment variables.
-        // The sizes of the buffers were determined by calling `environ_sizes_get`.
-        environ_get: (argv: number, argvBuf: number) => {
-            const instance = state.instance!;
-
-            argv >>>= 0;
-            argvBuf >>>= 0;
-
-            const mem = new Uint8Array(instance.exports.memory.buffer);
-
-            let argvPos = 0;
-            let argvBufPos = 0;
-
-            config.envVars.forEach(envVar => {
-                const encoded = new TextEncoder().encode(envVar);
-
-                buffer.writeUInt32LE(mem, argv + argvPos, argvBuf + argvBufPos);
-                argvPos += 4;
-
-                mem.set(encoded, argvBuf + argvBufPos);
-                argvBufPos += encoded.length;
-                buffer.writeUInt8(mem, argvBuf + argvBufPos, 0);
-                argvBufPos += 1;
-            });
-
-            return 0;
-        },
-    };
-
     // Start the Wasm virtual machine.
     // The Rust code defines a list of imports that must be fulfilled by the environment. The second
     // parameter provides their implementations.
     const result = await WebAssembly.instantiate(wasmModule, {
         // The functions with the "smoldot" prefix are specific to smoldot.
         "smoldot": smoldotJsBindings,
-        // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
-        "wasi_snapshot_preview1": wasiBindings,
     });
 
     state.instance = result as SmoldotWasmInstance;
@@ -627,7 +500,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
     return {
         request: (request: string, chainId: number) => {
             if (!state.instance)
-                return 2;  // TODO: return a different error code? should be documented
+                return 1;  // TODO: return a different error code? should be documented
             state.bufferIndices[0] = new TextEncoder().encode(request);
             return state.instance.exports.json_rpc_send(0, chainId) >>> 0;
         },
@@ -654,7 +527,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number) => {
             if (!state.instance) {
-                eventCallback({ ty: "add-chain-result", success: false, error: "Smoldot has crashed" });
+                eventCallback({ ty: "add-chain-id-allocated", chainId: 0 });
+                eventCallback({ ty: "add-chain-result", chainId: 0, success: false, error: "Smoldot has crashed" });
                 return;
             }
 
@@ -680,15 +554,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             delete state.bufferIndices[1]
             delete state.bufferIndices[2]
 
-            if (state.instance.exports.chain_is_ok(chainId) != 0) {
-                eventCallback({ ty: "add-chain-result", success: true, chainId });
-            } else {
-                const errorMsgLen = state.instance.exports.chain_error_len(chainId) >>> 0;
-                const errorMsgPtr = state.instance.exports.chain_error_ptr(chainId) >>> 0;
-                const errorMsg = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
-                state.instance.exports.remove_chain(chainId);
-                eventCallback({ ty: "add-chain-result", success: false, error: errorMsg });
-            }
+            eventCallback({ ty: "add-chain-id-allocated", chainId });
         },
 
         removeChain: (chainId: number): void => {
@@ -705,25 +571,16 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             cb();
         },
 
-        connectionOpened: (connectionId: number, info: { type: 'single-stream', handshake: 'multistream-select-noise-yamux', initialWritableBytes: number } | { type: 'multi-stream', handshake: 'webrtc', localTlsCertificateSha256: Uint8Array, remoteTlsCertificateSha256: Uint8Array }) => {
+        connectionMultiStreamSetHandshakeInfo: (connectionId: number, info: { handshake: 'webrtc', localTlsCertificateSha256: Uint8Array }) => {
             if (!state.instance)
                 return;
-            switch (info.type) {
-                case 'single-stream': {
-                    state.instance.exports.connection_open_single_stream(connectionId, info.initialWritableBytes);
-                    break
-                }
-                case 'multi-stream': {
-                    const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length + info.remoteTlsCertificateSha256.length);
-                    buffer.writeUInt8(handshakeTy, 0, 0);
-                    handshakeTy.set(info.localTlsCertificateSha256, 1)
-                    handshakeTy.set(info.remoteTlsCertificateSha256, 1 + info.localTlsCertificateSha256.length)
-                    state.bufferIndices[0] = handshakeTy;
-                    state.instance.exports.connection_open_multi_stream(connectionId, 0);
-                    delete state.bufferIndices[0]
-                    break
-                }
-            }
+
+            const handshakeTy = new Uint8Array(1 + info.localTlsCertificateSha256.length);
+            buffer.writeUInt8(handshakeTy, 0, 0);
+            handshakeTy.set(info.localTlsCertificateSha256, 1)
+            state.bufferIndices[0] = handshakeTy;
+            state.instance.exports.connection_multi_stream_set_handshake_info(connectionId, 0);
+            delete state.bufferIndices[0]
         },
 
         connectionReset: (connectionId: number, message: string) => {
@@ -752,21 +609,22 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             delete state.bufferIndices[0]
         },
 
-        streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => {
+        streamOpened: (connectionId: number, streamId: number, direction: 'inbound' | 'outbound') => {
             if (!state.instance)
                 return;
             state.instance.exports.connection_stream_opened(
                 connectionId,
                 streamId,
-                direction === 'outbound' ? 1 : 0,
-                initialWritableBytes
+                direction === 'outbound' ? 1 : 0
             );
         },
 
-        streamReset: (connectionId: number, streamId: number) => {
+        streamReset: (connectionId: number, streamId: number, message: string) => {
             if (!state.instance)
                 return;
-            state.instance.exports.stream_reset(connectionId, streamId);
+            state.bufferIndices[0] = new TextEncoder().encode(message);
+            state.instance.exports.stream_reset(connectionId, streamId, 0);
+            delete state.bufferIndices[0]
         },
     };
 }
@@ -790,13 +648,12 @@ interface SmoldotWasmExports extends WebAssembly.Exports {
     json_rpc_responses_peek: (chainId: number) => number,
     json_rpc_responses_pop: (chainId: number) => void,
     timer_finished: () => void,
-    connection_open_single_stream: (connectionId: number, initialWritableBytes: number) => void,
-    connection_open_multi_stream: (connectionId: number, handshakeTyBufferIndex: number) => void,
+    connection_multi_stream_set_handshake_info: (connectionId: number, handshakeTyBufferIndex: number) => void,
     stream_writable_bytes: (connectionId: number, streamId: number, numBytes: number) => void,
     stream_message: (connectionId: number, streamId: number, bufferIndex: number) => void,
-    connection_stream_opened: (connectionId: number, streamId: number, outbound: number, initialWritableBytes: number) => void,
+    connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
     connection_reset: (connectionId: number, bufferIndex: number) => void,
-    stream_reset: (connectionId: number, streamId: number) => void,
+    stream_reset: (connectionId: number, streamId: number, bufferIndex: number) => void,
 }
 
 interface SmoldotWasmInstance extends WebAssembly.Instance {

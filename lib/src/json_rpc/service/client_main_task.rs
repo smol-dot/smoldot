@@ -29,6 +29,7 @@ use async_lock::Mutex;
 use core::{
     cmp, fmt, mem,
     num::NonZeroU32,
+    pin::Pin,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use futures_lite::FutureExt as _;
@@ -68,7 +69,7 @@ struct Inner {
     responses_notifications_queue: Arc<ResponsesNotificationsQueue>,
 
     /// Event notified after the [`SerializedRequestsIo`] is destroyed.
-    on_serialized_requests_io_destroyed: event_listener::EventListener,
+    on_serialized_requests_io_destroyed: Pin<Box<event_listener::EventListener>>,
 }
 
 struct InnerSubscription {
@@ -217,12 +218,12 @@ impl ClientMainTask {
     /// Processes the task's internals and waits until something noteworthy happens.
     pub async fn run_until_event(mut self) -> Event {
         loop {
-            enum WhatHappened {
+            enum WakeUpReason {
                 NewRequest(String),
                 Message(ToMainTask),
             }
 
-            let what_happened = {
+            let wake_up_reason = {
                 let serialized_requests_io_destroyed = async {
                     (&mut self.inner.on_serialized_requests_io_destroyed).await;
                     Err(())
@@ -236,7 +237,7 @@ impl ClientMainTask {
                                 .serialized_io
                                 .on_request_pulled_or_task_destroyed
                                 .notify(usize::max_value());
-                            break Ok(WhatHappened::NewRequest(elem));
+                            break Ok(WakeUpReason::NewRequest(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
@@ -250,7 +251,7 @@ impl ClientMainTask {
                     let mut wait = None;
                     loop {
                         if let Some(elem) = self.inner.responses_notifications_queue.queue.pop() {
-                            break Ok(WhatHappened::Message(elem));
+                            break Ok(WakeUpReason::Message(elem));
                         }
                         if let Some(wait) = wait.take() {
                             wait.await
@@ -266,15 +267,15 @@ impl ClientMainTask {
                     .or(response_notif)
                     .await
                 {
-                    Ok(what_happened) => what_happened,
+                    Ok(wake_up_reason) => wake_up_reason,
                     Err(()) => return Event::SerializedRequestsIoClosed,
                 }
             };
 
             // Immediately handle every event apart from `NewRequest`.
-            let new_request = match what_happened {
-                WhatHappened::NewRequest(request) => request,
-                WhatHappened::Message(ToMainTask::SubscriptionDestroyed { subscription_id }) => {
+            let new_request = match wake_up_reason {
+                WakeUpReason::NewRequest(request) => request,
+                WakeUpReason::Message(ToMainTask::SubscriptionDestroyed { subscription_id }) => {
                     let InnerSubscription {
                         unsubscribe_response,
                         ..
@@ -311,7 +312,7 @@ impl ClientMainTask {
                         subscription_id,
                     };
                 }
-                WhatHappened::Message(ToMainTask::RequestResponse(response)) => {
+                WakeUpReason::Message(ToMainTask::RequestResponse(response)) => {
                     let mut responses_queue = self.inner.serialized_io.responses_queue.lock().await;
                     let pos = responses_queue
                         .pending_serialized_responses
@@ -325,7 +326,7 @@ impl ClientMainTask {
                         .notify(usize::max_value());
                     continue;
                 }
-                WhatHappened::Message(ToMainTask::Notification(notification)) => {
+                WakeUpReason::Message(ToMainTask::Notification(notification)) => {
                     // TODO: filter out redundant notifications, as it's the entire point of this module
                     let mut responses_queue = self.inner.serialized_io.responses_queue.lock().await;
                     let pos = responses_queue
@@ -342,30 +343,43 @@ impl ClientMainTask {
                 }
             };
 
-            let (request_id, parsed_request) = match methods::parse_json_call(&new_request) {
-                Ok((request_id, method)) => (request_id, method),
-                Err(methods::ParseCallError::Method { request_id, error }) => {
-                    let response = error.to_json_error(request_id);
-                    let mut responses_queue = self.inner.serialized_io.responses_queue.lock().await;
-                    let pos = responses_queue
-                        .pending_serialized_responses
-                        .insert((response, true));
-                    responses_queue
-                        .pending_serialized_responses_queue
-                        .push_back(pos);
-                    self.inner
-                        .serialized_io
-                        .on_response_pushed_or_task_destroyed
-                        .notify(usize::max_value());
-                    continue;
-                }
-                Err(methods::ParseCallError::UnknownNotification(_)) => continue,
-                Err(methods::ParseCallError::JsonRpcParse(_)) => {
-                    // The `SerializedRequestsIo` makes sure that requests are valid before
-                    // sending them.
-                    unreachable!()
-                }
-            };
+            let (request_id, parsed_request) =
+                match methods::parse_jsonrpc_client_to_server(&new_request) {
+                    Ok((request_id, method)) => (request_id, method),
+                    Err(methods::ParseClientToServerError::Method { request_id, error }) => {
+                        let response = error.to_json_error(request_id);
+                        let mut responses_queue =
+                            self.inner.serialized_io.responses_queue.lock().await;
+                        let pos = responses_queue
+                            .pending_serialized_responses
+                            .insert((response, true));
+                        responses_queue
+                            .pending_serialized_responses_queue
+                            .push_back(pos);
+                        self.inner
+                            .serialized_io
+                            .on_response_pushed_or_task_destroyed
+                            .notify(usize::max_value());
+                        continue;
+                    }
+                    Err(methods::ParseClientToServerError::UnknownNotification(_)) => continue,
+                    Err(methods::ParseClientToServerError::JsonRpcParse(_)) => {
+                        let response = parse::build_parse_error_response();
+                        let mut responses_queue =
+                            self.inner.serialized_io.responses_queue.lock().await;
+                        let pos = responses_queue
+                            .pending_serialized_responses
+                            .insert((response, true));
+                        responses_queue
+                            .pending_serialized_responses_queue
+                            .push_back(pos);
+                        self.inner
+                            .serialized_io
+                            .on_response_pushed_or_task_destroyed
+                            .notify(usize::max_value());
+                        continue;
+                    }
+                };
 
             // There exists three types of requests:
             //
@@ -422,16 +436,19 @@ impl ClientMainTask {
                 | methods::MethodCall::system_properties { .. }
                 | methods::MethodCall::system_removeReservedPeer { .. }
                 | methods::MethodCall::system_version { .. }
-                | methods::MethodCall::chainHead_unstable_genesisHash { .. }
-                | methods::MethodCall::chainSpec_unstable_chainName { .. }
-                | methods::MethodCall::chainSpec_unstable_genesisHash { .. }
-                | methods::MethodCall::chainSpec_unstable_properties { .. }
+                | methods::MethodCall::chainSpec_v1_chainName { .. }
+                | methods::MethodCall::chainSpec_v1_genesisHash { .. }
+                | methods::MethodCall::chainSpec_v1_properties { .. }
                 | methods::MethodCall::rpc_methods { .. }
                 | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
                 | methods::MethodCall::sudo_unstable_version { .. }
+                | methods::MethodCall::chainHead_unstable_body { .. }
+                | methods::MethodCall::chainHead_unstable_call { .. }
+                | methods::MethodCall::chainHead_unstable_continue { .. }
                 | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. }
                 | methods::MethodCall::chainHead_unstable_header { .. }
-                | methods::MethodCall::chainHead_unstable_storageContinue { .. }
+                | methods::MethodCall::chainHead_unstable_stopOperation { .. }
+                | methods::MethodCall::chainHead_unstable_storage { .. }
                 | methods::MethodCall::chainHead_unstable_unpin { .. } => {
                     // Simple one-request-one-response.
                     return Event::HandleRequest {
@@ -453,12 +470,9 @@ impl ClientMainTask {
                 | methods::MethodCall::chain_subscribeNewHeads { .. }
                 | methods::MethodCall::state_subscribeRuntimeVersion { .. }
                 | methods::MethodCall::state_subscribeStorage { .. }
-                | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
-                | methods::MethodCall::network_unstable_subscribeEvents { .. }
-                | methods::MethodCall::chainHead_unstable_body { .. }
-                | methods::MethodCall::chainHead_unstable_call { .. }
-                | methods::MethodCall::chainHead_unstable_follow { .. }
-                | methods::MethodCall::chainHead_unstable_storage { .. } => {
+                | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+                | methods::MethodCall::sudo_network_unstable_watch { .. }
+                | methods::MethodCall::chainHead_unstable_follow { .. } => {
                     // Subscription starting requests.
 
                     // We must check the maximum number of subscriptions.
@@ -526,13 +540,8 @@ impl ClientMainTask {
                 methods::MethodCall::author_unwatchExtrinsic { subscription, .. }
                 | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription, .. }
                 | methods::MethodCall::state_unsubscribeStorage { subscription, .. }
-                | methods::MethodCall::transaction_unstable_unwatch { subscription, .. }
-                | methods::MethodCall::network_unstable_unsubscribeEvents {
-                    subscription, ..
-                }
-                | methods::MethodCall::chainHead_unstable_stopBody { subscription, .. }
-                | methods::MethodCall::chainHead_unstable_stopStorage { subscription, .. }
-                | methods::MethodCall::chainHead_unstable_stopCall { subscription, .. }
+                | methods::MethodCall::transactionWatch_unstable_unwatch { subscription, .. }
+                | methods::MethodCall::sudo_network_unstable_unwatch { subscription, .. }
                 | methods::MethodCall::chainHead_unstable_unfollow {
                     follow_subscription: subscription,
                     ..
@@ -554,21 +563,12 @@ impl ClientMainTask {
                                     methods::MethodCall::state_unsubscribeStorage { .. } => {
                                         methods::Response::state_unsubscribeStorage(true)
                                     }
-                                    methods::MethodCall::transaction_unstable_unwatch {
+                                    methods::MethodCall::transactionWatch_unstable_unwatch {
                                         ..
-                                    } => methods::Response::transaction_unstable_unwatch(()),
-                                    methods::MethodCall::network_unstable_unsubscribeEvents {
+                                    } => methods::Response::transactionWatch_unstable_unwatch(()),
+                                    methods::MethodCall::sudo_network_unstable_unwatch {
                                         ..
-                                    } => methods::Response::network_unstable_unsubscribeEvents(()),
-                                    methods::MethodCall::chainHead_unstable_stopBody { .. } => {
-                                        methods::Response::chainHead_unstable_stopBody(())
-                                    }
-                                    methods::MethodCall::chainHead_unstable_stopStorage {
-                                        ..
-                                    } => methods::Response::chainHead_unstable_stopStorage(()),
-                                    methods::MethodCall::chainHead_unstable_stopCall { .. } => {
-                                        methods::Response::chainHead_unstable_stopCall(())
-                                    }
+                                    } => methods::Response::sudo_network_unstable_unwatch(()),
                                     methods::MethodCall::chainHead_unstable_unfollow { .. } => {
                                         methods::Response::chainHead_unstable_unfollow(())
                                     }
@@ -834,16 +834,6 @@ impl SerializedRequestsIo {
     /// This might cause a call to [`ClientMainTask::run_until_event`] to return
     /// [`Event::HandleRequest`] or [`Event::HandleSubscriptionStart`].
     pub async fn send_request(&self, request: String) -> Result<(), SendRequestError> {
-        // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
-        // requests that can't be parsed.
-        if let Err(methods::ParseCallError::JsonRpcParse(err)) = methods::parse_json_call(&request)
-        {
-            return Err(SendRequestError {
-                request,
-                cause: SendRequestErrorCause::MalformedJson(err),
-            });
-        }
-
         // Wait until it is possible to increment `num_requests_in_fly`.
         let mut wait = None;
         let queue = loop {
@@ -889,16 +879,6 @@ impl SerializedRequestsIo {
     /// This might cause a call to [`ClientMainTask::run_until_event`] to return
     /// [`Event::HandleRequest`] or [`Event::HandleSubscriptionStart`].
     pub fn try_send_request(&self, request: String) -> Result<(), TrySendRequestError> {
-        // Try parse the request here. This guarantees that the [`ClientMainTask`] can't receive
-        // requests that can't be parsed.
-        if let Err(methods::ParseCallError::JsonRpcParse(err)) = methods::parse_json_call(&request)
-        {
-            return Err(TrySendRequestError {
-                request,
-                cause: TrySendRequestErrorCause::MalformedJson(err),
-            });
-        }
-
         let Some(queue) = self.serialized_io.upgrade() else {
             return Err(TrySendRequestError {
                 request,
@@ -967,9 +947,6 @@ pub struct SendRequestError {
 /// See [`SendRequestError::cause`].
 #[derive(Debug, derive_more::Display)]
 pub enum SendRequestErrorCause {
-    /// Data is not JSON, or JSON is missing or has invalid fields.
-    #[display(fmt = "{_0}")]
-    MalformedJson(ParseError),
     /// The attached [`ClientMainTask`] has been destroyed.
     ClientMainTaskDestroyed,
 }
@@ -987,9 +964,6 @@ pub struct TrySendRequestError {
 /// See [`TrySendRequestError::cause`].
 #[derive(Debug, derive_more::Display)]
 pub enum TrySendRequestErrorCause {
-    /// Data is not JSON, or JSON is missing or has invalid fields.
-    #[display(fmt = "{_0}")]
-    MalformedJson(ParseError),
     /// Limit to the maximum number of pending requests that was passed as
     /// [`Config::max_pending_requests`] has been reached. No more requests can be sent before
     /// some responses have been pulled.
@@ -1017,14 +991,18 @@ impl RequestProcess {
     /// The request is guaranteed to not be related to subscriptions in any way.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
     pub fn request(&self) -> methods::MethodCall {
-        methods::parse_json_call(&self.request).unwrap().1
+        methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .1
     }
 
     /// Indicate the response to the request to the [`ClientMainTask`].
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn respond(mut self, response: methods::Response<'_>) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = response.to_json_response(request_id);
         self.responses_notifications_queue
             .queue
@@ -1040,7 +1018,9 @@ impl RequestProcess {
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     // TODO: the necessity for this function is basically a hack
     pub fn respond_null(mut self) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_success_response(request_id, "null");
         self.responses_notifications_queue
             .queue
@@ -1055,7 +1035,9 @@ impl RequestProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn fail(mut self, error: ErrorResponse) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_error_response(request_id, error, None);
         self.responses_notifications_queue
             .queue
@@ -1073,7 +1055,9 @@ impl RequestProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn fail_with_attached_json(mut self, error: ErrorResponse, json: &str) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_error_response(request_id, error, Some(json));
         self.responses_notifications_queue
             .queue
@@ -1094,7 +1078,9 @@ impl fmt::Debug for RequestProcess {
 impl Drop for RequestProcess {
     fn drop(&mut self) {
         if !self.has_sent_response {
-            let request_id = methods::parse_json_call(&self.request).unwrap().0;
+            let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+                .unwrap()
+                .0;
             let serialized =
                 parse::build_error_response(request_id, ErrorResponse::InternalError, None);
             self.responses_notifications_queue
@@ -1132,7 +1118,9 @@ impl SubscriptionStartProcess {
     /// The request is guaranteed to be a request that starts a subscription.
     // TODO: with stronger typing users wouldn't have to worry about the type of request
     pub fn request(&self) -> methods::MethodCall {
-        methods::parse_json_call(&self.request).unwrap().1
+        methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .1
     }
 
     /// Indicate to the [`ClientMainTask`] that the subscription is accepted.
@@ -1141,7 +1129,8 @@ impl SubscriptionStartProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn accept(mut self) -> Subscription {
-        let (request_id, parsed_request) = methods::parse_json_call(&self.request).unwrap();
+        let (request_id, parsed_request) =
+            methods::parse_jsonrpc_client_to_server(&self.request).unwrap();
 
         let serialized_response = match parsed_request {
             methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
@@ -1168,27 +1157,16 @@ impl SubscriptionStartProcess {
             methods::MethodCall::state_subscribeStorage { .. } => {
                 methods::Response::state_subscribeStorage(Cow::Borrowed(&self.subscription_id))
             }
-            methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
-                methods::Response::transaction_unstable_submitAndWatch(Cow::Borrowed(
+            methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
+                methods::Response::transactionWatch_unstable_submitAndWatch(Cow::Borrowed(
                     &self.subscription_id,
                 ))
             }
-            methods::MethodCall::network_unstable_subscribeEvents { .. } => {
-                methods::Response::network_unstable_subscribeEvents(Cow::Borrowed(
-                    &self.subscription_id,
-                ))
-            }
-            methods::MethodCall::chainHead_unstable_body { .. } => {
-                methods::Response::chainHead_unstable_body(Cow::Borrowed(&self.subscription_id))
-            }
-            methods::MethodCall::chainHead_unstable_call { .. } => {
-                methods::Response::chainHead_unstable_call(Cow::Borrowed(&self.subscription_id))
+            methods::MethodCall::sudo_network_unstable_watch { .. } => {
+                methods::Response::sudo_network_unstable_watch(Cow::Borrowed(&self.subscription_id))
             }
             methods::MethodCall::chainHead_unstable_follow { .. } => {
                 methods::Response::chainHead_unstable_follow(Cow::Borrowed(&self.subscription_id))
-            }
-            methods::MethodCall::chainHead_unstable_storage { .. } => {
-                methods::Response::chainHead_unstable_storage(Cow::Borrowed(&self.subscription_id))
             }
             _ => unreachable!(),
         }
@@ -1214,7 +1192,9 @@ impl SubscriptionStartProcess {
     ///
     /// Has no effect if the [`ClientMainTask`] has been destroyed.
     pub fn fail(mut self, error: ErrorResponse) {
-        let request_id = methods::parse_json_call(&self.request).unwrap().0;
+        let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+            .unwrap()
+            .0;
         let serialized = parse::build_error_response(request_id, error, None);
         self.responses_notifications_queue
             .queue
@@ -1240,7 +1220,9 @@ impl fmt::Debug for SubscriptionStartProcess {
 impl Drop for SubscriptionStartProcess {
     fn drop(&mut self) {
         if !self.has_sent_response {
-            let request_id = methods::parse_json_call(&self.request).unwrap().0;
+            let request_id = methods::parse_jsonrpc_client_to_server(&self.request)
+                .unwrap()
+                .0;
             let serialized =
                 parse::build_error_response(request_id, ErrorResponse::InternalError, None);
             self.responses_notifications_queue
@@ -1298,7 +1280,7 @@ impl Subscription {
     /// >           this function, otherwise it might never return.
     // TODO: with stronger typing we could automatically fill the subscription_id
     pub async fn send_notification(&mut self, notification: methods::ServerToClient<'_>) {
-        let serialized = notification.to_json_call_object_parameters(None);
+        let serialized = notification.to_json_request_object_parameters(None);
 
         // Wait until there is space in the queue or that the subscription is dead.
         // Note that this is intentionally racy.

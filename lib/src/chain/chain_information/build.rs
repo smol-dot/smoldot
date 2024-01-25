@@ -25,11 +25,11 @@ use core::{fmt, iter, num::NonZeroU64};
 
 use crate::{
     chain::chain_information,
-    executor::{host, runtime_host},
+    executor::{host, runtime_call},
     header, trie,
 };
 
-pub use runtime_host::{Nibble, TrieEntryVersion};
+pub use runtime_call::{Nibble, TrieEntryVersion};
 
 /// Configuration to provide to [`ChainInformationBuild::new`].
 pub struct Config {
@@ -53,8 +53,8 @@ pub enum ConfigFinalizedBlockHeader {
         /// Hash of the root of the state trie of the genesis.
         state_trie_root_hash: [u8; 32],
     },
-    /// The block is not the genesis block of the chain.
-    NonGenesis {
+    /// The block can any block, genesis block of the chain or not.
+    Any {
         /// Header of the block.
         scale_encoded_header: Vec<u8>,
         /// Can be used to pass information about the finality of the chain, if already known.
@@ -104,7 +104,7 @@ pub enum Error {
     #[display(fmt = "While calling {call:?}: {error}")]
     WasmVm {
         call: RuntimeCall,
-        error: runtime_host::ErrorDetail,
+        error: runtime_call::ErrorDetail,
     },
     /// Runtime has called an offchain worker host function.
     OffchainWorkerHostFunction,
@@ -185,42 +185,24 @@ impl ChainInformationBuild {
     ///
     /// # Panic
     ///
-    /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header can't
-    /// be decoded.
-    /// Panics if a [`ConfigFinalizedBlockHeader::NonGenesis`] is provided, and the header has
-    /// number 0.
+    /// Panics if a [`ConfigFinalizedBlockHeader::Any`] is provided, and the header can't be
+    /// decoded.
     ///
     pub fn new(config: Config) -> Self {
-        // TODO: document
-        if let ConfigFinalizedBlockHeader::NonGenesis {
-            scale_encoded_header: header,
-            ..
-        } = &config.finalized_block_header
-        {
-            assert_ne!(
-                header::decode(header, config.block_number_bytes)
-                    .unwrap()
-                    .number,
-                0
-            );
-        }
-
-        // TODO: also check version numbers?
-        let apis_versions = config
+        let [aura_version, babe_version, grandpa_version] = config
             .runtime
             .runtime_version()
             .decode()
             .apis
             .find_versions(["AuraApi", "BabeApi", "GrandpaApi"]);
-        let runtime_has_aura = apis_versions[0].map_or(false, |version_number| version_number == 1);
-        let runtime_babeapi_is_v1 =
-            apis_versions[1].and_then(|version_number| match version_number {
-                1 => Some(true),
-                2 => Some(false),
-                _ => None,
-            });
+        let runtime_has_aura = aura_version.map_or(false, |version_number| version_number == 1);
+        let runtime_babeapi_is_v1 = babe_version.and_then(|version_number| match version_number {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        });
         let runtime_grandpa_supports_currentsetid =
-            apis_versions[2].and_then(|version_number| match version_number {
+            grandpa_version.and_then(|version_number| match version_number {
                 // Version 1 is from 2019 and isn't used by any chain in production, so we don't
                 // care about it.
                 2 => Some(false),
@@ -282,7 +264,7 @@ impl InProgress {
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(runtime_host::StorageGet, ChainInformationBuildInner);
+pub struct StorageGet(runtime_call::StorageGet, ChainInformationBuildInner);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -313,7 +295,7 @@ impl StorageGet {
 /// to continue.
 #[must_use]
 pub struct ClosestDescendantMerkleValue(
-    runtime_host::ClosestDescendantMerkleValue,
+    runtime_call::ClosestDescendantMerkleValue,
     ChainInformationBuildInner,
 );
 
@@ -356,7 +338,7 @@ impl ClosestDescendantMerkleValue {
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(runtime_host::NextKey, ChainInformationBuildInner);
+pub struct NextKey(runtime_call::NextKey, ChainInformationBuildInner);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
@@ -420,9 +402,12 @@ impl ChainInformationBuild {
                 None
             };
 
-        let babe_current_epoch = if !matches!(
+        let babe_current_epoch = if matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::Genesis { .. }
+            ConfigFinalizedBlockHeader::Any {
+                ref scale_encoded_header,
+                ..
+            } if header::decode(scale_encoded_header, inner.block_number_bytes).unwrap().number != 0
         ) && inner.runtime_babeapi_is_v1.is_some()
             && inner.babe_current_epoch_call_output.is_none()
         {
@@ -431,9 +416,12 @@ impl ChainInformationBuild {
             None
         };
 
-        let babe_next_epoch = if !matches!(
+        let babe_next_epoch = if matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::Genesis { .. }
+            ConfigFinalizedBlockHeader::Any {
+                ref scale_encoded_header,
+                ..
+            } if header::decode(scale_encoded_header, inner.block_number_bytes).unwrap().number != 0
         ) && inner.runtime_babeapi_is_v1.is_some()
             && inner.babe_next_epoch_call_output.is_none()
         {
@@ -452,7 +440,7 @@ impl ChainInformationBuild {
 
         let grandpa_authorities = if !matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::NonGenesis {
+            ConfigFinalizedBlockHeader::Any {
                 known_finality: Some(chain_information::ChainInformationFinality::Grandpa { .. }),
                 ..
             },
@@ -469,10 +457,11 @@ impl ChainInformationBuild {
         // always 0.
         let grandpa_current_set_id = if matches!(
             inner.finalized_block_header,
-            ConfigFinalizedBlockHeader::NonGenesis {
+            ConfigFinalizedBlockHeader::Any {
+                ref scale_encoded_header,
                 known_finality: None,
                 ..
-            },
+            } if header::decode(scale_encoded_header, inner.block_number_bytes).unwrap().number != 0,
         ) && inner.runtime_grandpa_supports_currentsetid
             == Some(true)
             && inner.grandpa_current_set_id_call_output.is_none()
@@ -500,7 +489,7 @@ impl ChainInformationBuild {
         debug_assert!(inner.virtual_machine.is_some());
 
         if let Some(call) = ChainInformationBuild::necessary_calls(&inner).next() {
-            let vm_start_result = runtime_host::run(runtime_host::Config {
+            let vm_start_result = runtime_call::run(runtime_call::Config {
                 function_to_call: call.function_name(),
                 parameter: call.parameter_vectored(),
                 virtual_machine: inner.virtual_machine.take().unwrap(),
@@ -537,7 +526,18 @@ impl ChainInformationBuild {
                     }
                 }
                 (false, None, _) => chain_information::ChainInformationConsensus::Unknown,
-                (false, Some(_), ConfigFinalizedBlockHeader::NonGenesis { .. }) => {
+                (
+                    false,
+                    Some(_),
+                    ConfigFinalizedBlockHeader::Any {
+                        scale_encoded_header,
+                        ..
+                    },
+                ) if header::decode(scale_encoded_header, inner.block_number_bytes)
+                    .unwrap()
+                    .number
+                    != 0 =>
+                {
                     chain_information::ChainInformationConsensus::Babe {
                         finalized_block_epoch_information: Some(Box::new(
                             inner.babe_current_epoch_call_output.take().unwrap(),
@@ -552,7 +552,7 @@ impl ChainInformationBuild {
                             .slots_per_epoch,
                     }
                 }
-                (false, Some(_), ConfigFinalizedBlockHeader::Genesis { .. }) => {
+                (false, Some(_), _) => {
                     let config = inner.babe_configuration_call_output.take().unwrap();
                     chain_information::ChainInformationConsensus::Babe {
                         slots_per_epoch: config.slots_per_epoch,
@@ -592,7 +592,7 @@ impl ChainInformationBuild {
 
                     (header, None)
                 }
-                ConfigFinalizedBlockHeader::NonGenesis {
+                ConfigFinalizedBlockHeader::Any {
                     scale_encoded_header: header,
                     known_finality,
                 } => (header, known_finality),
@@ -673,14 +673,14 @@ impl ChainInformationBuild {
     }
 
     fn from_call_in_progress(
-        mut call: runtime_host::RuntimeHostVm,
+        mut call: runtime_call::RuntimeCall,
         mut inner: ChainInformationBuildInner,
     ) -> Self {
         loop {
             debug_assert!(inner.call_in_progress.is_some());
 
             match call {
-                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                runtime_call::RuntimeCall::Finished(Ok(success)) => {
                     inner.virtual_machine = Some(match inner.call_in_progress.take() {
                         None => unreachable!(),
                         Some(RuntimeCall::AuraApiSlotDuration) => {
@@ -804,7 +804,7 @@ impl ChainInformationBuild {
 
                     break ChainInformationBuild::start_next_call(inner);
                 }
-                runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                runtime_call::RuntimeCall::Finished(Err(err)) => {
                     break ChainInformationBuild::Finished {
                         result: Err(Error::WasmVm {
                             call: inner.call_in_progress.unwrap(),
@@ -813,37 +813,40 @@ impl ChainInformationBuild {
                         virtual_machine: err.prototype,
                     }
                 }
-                runtime_host::RuntimeHostVm::StorageGet(call) => {
+                runtime_call::RuntimeCall::StorageGet(call) => {
                     break ChainInformationBuild::InProgress(InProgress::StorageGet(StorageGet(
                         call, inner,
                     )))
                 }
-                runtime_host::RuntimeHostVm::NextKey(call) => {
+                runtime_call::RuntimeCall::NextKey(call) => {
                     break ChainInformationBuild::InProgress(InProgress::NextKey(NextKey(
                         call, inner,
                     )))
                 }
-                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(call) => {
+                runtime_call::RuntimeCall::ClosestDescendantMerkleValue(call) => {
                     break ChainInformationBuild::InProgress(
                         InProgress::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                             call, inner,
                         )),
                     )
                 }
-                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
+                runtime_call::RuntimeCall::SignatureVerification(sig) => {
                     call = sig.verify_and_resume();
                 }
-                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
+                runtime_call::RuntimeCall::OffchainStorageSet(req) => {
                     // Do nothing.
                     call = req.resume();
                 }
-                runtime_host::RuntimeHostVm::Offchain(req) => {
-                    let virtual_machine =
-                        runtime_host::RuntimeHostVm::Offchain(req).into_prototype();
+                runtime_call::RuntimeCall::Offchain(req) => {
+                    let virtual_machine = runtime_call::RuntimeCall::Offchain(req).into_prototype();
                     break ChainInformationBuild::Finished {
                         result: Err(Error::OffchainWorkerHostFunction),
                         virtual_machine,
                     };
+                }
+                runtime_call::RuntimeCall::LogEmit(req) => {
+                    // Generated logs are ignored.
+                    call = req.resume();
                 }
             }
         }
@@ -926,18 +929,18 @@ fn decode_babe_configuration_output(
     let result: nom::IResult<_, _> =
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
-                nom::number::complete::le_u64,
-                nom::number::complete::le_u64,
+                nom::number::streaming::le_u64,
+                nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
+                nom::number::streaming::le_u64,
+                nom::number::streaming::le_u64,
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
                     nom::multi::many_m_n(
                         num_elems,
                         num_elems,
                         nom::combinator::map(
                             nom::sequence::tuple((
-                                nom::bytes::complete::take(32u32),
-                                nom::number::complete::le_u64,
+                                nom::bytes::streaming::take(32u32),
+                                nom::number::streaming::le_u64,
                             )),
                             move |(public_key, weight)| header::BabeAuthority {
                                 public_key: <[u8; 32]>::try_from(public_key).unwrap(),
@@ -946,28 +949,28 @@ fn decode_babe_configuration_output(
                         ),
                     )
                 }),
-                nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                     <[u8; 32]>::try_from(b).unwrap()
                 }),
                 |b| {
                     if is_babe_api_v1 {
                         nom::branch::alt((
-                            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                                 header::BabeAllowedSlots::PrimarySlots
                             }),
-                            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                                 header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
                             }),
                         ))(b)
                     } else {
                         nom::branch::alt((
-                            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                                 header::BabeAllowedSlots::PrimarySlots
                             }),
-                            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                                 header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
                             }),
-                            nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
                                 header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
                             }),
                         ))(b)
@@ -1005,17 +1008,17 @@ fn decode_babe_epoch_output(
 ) -> Result<chain_information::BabeEpochInformation, Error> {
     let mut combinator = nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
-            nom::number::complete::le_u64,
-            nom::number::complete::le_u64,
-            nom::number::complete::le_u64,
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
             nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
                 nom::multi::many_m_n(
                     num_elems,
                     num_elems,
                     nom::combinator::map(
                         nom::sequence::tuple((
-                            nom::bytes::complete::take(32u32),
-                            nom::number::complete::le_u64,
+                            nom::bytes::streaming::take(32u32),
+                            nom::number::streaming::le_u64,
                         )),
                         move |(public_key, weight)| header::BabeAuthority {
                             public_key: <[u8; 32]>::try_from(public_key).unwrap(),
@@ -1024,11 +1027,11 @@ fn decode_babe_epoch_output(
                     ),
                 )
             }),
-            nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+            nom::combinator::map(nom::bytes::streaming::take(32u32), |b| {
                 <[u8; 32]>::try_from(b).unwrap()
             }),
-            nom::number::complete::le_u64,
-            nom::number::complete::le_u64,
+            nom::number::streaming::le_u64,
+            nom::number::streaming::le_u64,
             |b| {
                 header::BabeAllowedSlots::from_slice(b)
                     .map(|v| (&[][..], v))
@@ -1088,8 +1091,8 @@ fn decode_grandpa_authorities_output(
                 num_elems,
                 num_elems,
                 nom::sequence::tuple((
-                    nom::bytes::complete::take(32u32),
-                    nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
+                    nom::bytes::streaming::take(32u32),
+                    nom::combinator::map_opt(nom::number::streaming::le_u64, NonZeroU64::new),
                 )),
                 move || Vec::with_capacity(num_elems),
                 |mut acc, (public_key, weight)| {

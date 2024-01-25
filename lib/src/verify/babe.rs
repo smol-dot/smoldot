@@ -132,7 +132,6 @@
 use crate::{chain::chain_information, header};
 
 use core::{num::NonZeroU64, time::Duration};
-use num_traits::{cast::ToPrimitive as _, identities::One as _};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a> {
@@ -214,6 +213,8 @@ pub enum VerifyError {
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
+    /// Public key used to for the signature is invalid.
+    BadPublicKey,
     /// Block header signature is invalid.
     BadSignature,
     /// VRF proof in the block header is invalid.
@@ -224,16 +225,30 @@ pub enum VerifyError {
     OverPrimaryClaimThreshold,
     /// Type of slot claim forbidden by current configuration.
     ForbiddenSlotType,
+    /// Overflow when calculating the starting slot of the next epoch.
+    NextEpochStartSlotNumberOverflow,
+    /// Overflow when calculating the index of the next epoch.
+    EpochIndexOverflow,
+    /// The configuration of the chain is invalid. It can't be determined whether the block is
+    /// valid or not.
+    InvalidChainConfiguration(InvalidChainConfiguration),
+}
+
+/// See [`VerifyError::InvalidChainConfiguration`]
+#[derive(Debug, derive_more::Display)]
+pub enum InvalidChainConfiguration {
+    /// The start slot of the epoch the parent block belongs to is superior to the slot where the
+    /// parent block was authored.
+    ParentEpochStartSlotWithBlockMismatch,
+    /// No current epoch was provided, but the next epoch has an index equal to 0.
+    NoCurrentEpochButNextEpochNonZero,
+    /// The next epoch has a non-zero epoch index, but has a start slot.
+    NonZeroNextEpochYetHasStartSlot,
+    /// Parent block doesn't belong to any epoch but is not the genesis block.
+    NonGenesisBlockNoCurrentEpoch,
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
-///
-/// # Panic
-///
-/// Panics if `config.parent_block_header` is invalid.
-/// Panics if `config.parent_block_epoch` is `None` and `config.parent_header.number` is not 0.
-/// Panics if `config.header.number` is not `config.parent_block_header.number + 1`.
-///
 pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError> {
     // TODO: handle OnDisabled
 
@@ -276,23 +291,29 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // Verify consistency of the configuration.
     if let Some(curr) = &config.parent_block_epoch {
-        assert_eq!(
-            curr.epoch_index.checked_add(1).unwrap(),
-            config.parent_block_next_epoch.epoch_index
-        );
-        assert!(curr.start_slot_number.is_some());
-        assert!(curr.start_slot_number <= parent_slot_number);
-    } else {
-        assert_eq!(config.parent_block_next_epoch.epoch_index, 0);
+        if curr.start_slot_number.map_or(true, |epoch_start| {
+            parent_slot_number.map_or(true, |parent_slot_number| epoch_start > parent_slot_number)
+        }) {
+            return Err(VerifyError::InvalidChainConfiguration(
+                InvalidChainConfiguration::ParentEpochStartSlotWithBlockMismatch,
+            ));
+        }
+    } else if config.parent_block_next_epoch.epoch_index != 0 {
+        return Err(VerifyError::InvalidChainConfiguration(
+            InvalidChainConfiguration::NoCurrentEpochButNextEpochNonZero,
+        ));
+    } else if config.parent_block_header.number != 0 {
+        return Err(VerifyError::InvalidChainConfiguration(
+            InvalidChainConfiguration::NonGenesisBlockNoCurrentEpoch,
+        ));
     }
-    assert!(config
-        .parent_block_next_epoch
-        .start_slot_number
-        .map_or(true, |n| n > parent_slot_number.unwrap()));
-    assert_eq!(
-        config.parent_block_next_epoch.epoch_index == 0,
-        config.parent_block_next_epoch.start_slot_number.is_none()
-    );
+    if (config.parent_block_next_epoch.epoch_index == 0)
+        != config.parent_block_next_epoch.start_slot_number.is_none()
+    {
+        return Err(VerifyError::InvalidChainConfiguration(
+            InvalidChainConfiguration::NonZeroNextEpochYetHasStartSlot,
+        ));
+    }
 
     // Verify the epoch transition of the block.
     // `block_epoch_info` contains the epoch the block belongs to.
@@ -302,7 +323,6 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     ) {
         (Some(parent_epoch), false) => parent_epoch,
         (None, false) => {
-            assert_eq!(config.parent_block_header.number, 0);
             return Err(VerifyError::MissingEpochChangeLog);
         }
         (Some(_), true)
@@ -317,12 +337,37 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             return Err(VerifyError::UnexpectedEpochChangeLog);
         }
         (None, true) => {
-            assert_eq!(config.header.number, 1);
+            // Should only happen if the block being verified is block 1. It is, however, not the
+            // responsibility of this module to check whether the block number is equal to the
+            // parent's plus one.
             &config.parent_block_next_epoch
         }
     };
 
-    // TODO: check that we didn't entirely skip an epoch?
+    // Check if the current slot number indicates that entire epochs have been skipped.
+    let skipped_epochs = if let Some(epoch_start_slot) = block_epoch_info.start_slot_number {
+        // We have checked that the slot number of the block is superior to its parent's, and
+        // we have checked that the parent's slot number is superior or equal to the epoch
+        // start slot number, and we have checked that the epoch cannot transition if the
+        // slot number of the block is inferior to the next epoch start. Consequently, the
+        // substraction below cannot underflow.
+        (slot_number - epoch_start_slot) / config.slots_per_epoch // `slots_per_epoch` is a `NonZero` type
+    } else {
+        0
+    };
+
+    // Calculate the epoch index of the epoch of the block.
+    // This is the vast majority of the time equal to `block_epoch_info.epoch_index`. However,
+    // if no block has been produced for an entire epoch, the value needs to be increased by the
+    // number of skipped epochs.
+    // Note that this calculation can only overflow in case where the `epoch_index` is superior
+    // to its starting slot, and that `slots_per_epoch` is 1. In other words, this is expected to
+    // never overflow as something else would overflow beforehand. But we prefer to return an error
+    // rather than unwrap in order to avoid all possible panicking situations.
+    let block_epoch_index = block_epoch_info
+        .epoch_index
+        .checked_add(skipped_epochs)
+        .ok_or(VerifyError::EpochIndexOverflow)?;
 
     // TODO: in case of epoch change, should also check the randomness value; while the runtime
     //       checks that the randomness value is correct, light clients in particular do not
@@ -351,37 +396,39 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // If the block contains an epoch transition, build the information about the new epoch.
     // This is done now, as the header is consumed below.
-    let epoch_transition_target = match config.header.digest.babe_epoch_information() {
-        None => None,
-        Some((info, None)) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
-            start_slot_number: Some(
+    let epoch_transition_target =
+        if let Some((info, maybe_config)) = config.header.digest.babe_epoch_information() {
+            let start_slot_number = Some(
                 block_epoch_info
                     .start_slot_number
                     .unwrap_or(slot_number)
                     .checked_add(config.slots_per_epoch.get())
-                    .unwrap(),
-            ),
-            authorities: info.authorities.map(Into::into).collect(),
-            randomness: *info.randomness,
-            c: block_epoch_info.c,
-            allowed_slots: block_epoch_info.allowed_slots,
-        }),
-        Some((info, Some(epoch_cfg))) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
-            start_slot_number: Some(
-                block_epoch_info
-                    .start_slot_number
-                    .unwrap_or(slot_number)
-                    .checked_add(config.slots_per_epoch.get())
-                    .unwrap(),
-            ),
-            authorities: info.authorities.map(Into::into).collect(),
-            randomness: *info.randomness,
-            c: epoch_cfg.c,
-            allowed_slots: epoch_cfg.allowed_slots,
-        }),
-    };
+                    .ok_or(VerifyError::NextEpochStartSlotNumberOverflow)?
+                    // If some epochs have been skipped, we need to adjust the starting slot of
+                    // the next epoch.
+                    .checked_add(
+                        skipped_epochs
+                            .checked_mul(config.slots_per_epoch.get())
+                            .ok_or(VerifyError::NextEpochStartSlotNumberOverflow)?,
+                    )
+                    .ok_or(VerifyError::NextEpochStartSlotNumberOverflow)?,
+            );
+
+            Some(chain_information::BabeEpochInformation {
+                epoch_index: block_epoch_index
+                    .checked_add(1)
+                    .ok_or(VerifyError::EpochIndexOverflow)?,
+                start_slot_number,
+                authorities: info.authorities.map(Into::into).collect(),
+                randomness: *info.randomness,
+                c: maybe_config.map_or(block_epoch_info.c, |config| config.c),
+                allowed_slots: maybe_config.map_or(block_epoch_info.allowed_slots, |config| {
+                    config.allowed_slots
+                }),
+            })
+        } else {
+            None
+        };
 
     // Make sure that the header wouldn't put Babe in a non-sensical state.
     if let Some(epoch_transition_target) = &epoch_transition_target {
@@ -407,12 +454,9 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         .nth(usize::try_from(authority_index).map_err(|_| VerifyError::InvalidAuthorityIndex)?)
         .ok_or(VerifyError::InvalidAuthorityIndex)?;
 
-    // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
-    // happen as it's of type `[u8; 32]`.
-    let signing_public_key =
-        schnorrkel::PublicKey::from_bytes(signing_authority.public_key).unwrap();
-
     // Now verifying the signature in the seal.
+    let signing_public_key = schnorrkel::PublicKey::from_bytes(signing_authority.public_key)
+        .map_err(|_| VerifyError::BadPublicKey)?;
     signing_public_key
         .verify_simple(b"substrate", &pre_seal_hash, &seal_signature)
         .map_err(|_| VerifyError::BadSignature)?;
@@ -426,7 +470,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         let transcript = {
             let mut transcript = merlin::Transcript::new(&b"BABE"[..]);
             transcript.append_u64(b"slot number", slot_number);
-            transcript.append_u64(b"current epoch", block_epoch_info.epoch_index);
+            transcript.append_u64(b"current epoch", block_epoch_index);
             transcript.append_message(b"chain randomness", &block_epoch_info.randomness[..]);
             transcript
         };
@@ -478,7 +522,9 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             hash % authorities_len
         };
 
-        if u32::try_from(expected_authority_index).map_or(true, |v| v != authority_index) {
+        if num_traits::cast::ToPrimitive::to_u32(&expected_authority_index)
+            .map_or(true, |v| v != authority_index)
+        {
             return Err(VerifyError::BadSecondarySlotAuthor);
         }
     }
@@ -491,37 +537,110 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
     })
 }
 
-/// Calculates the primary selection threshold for a given authority, taking
-/// into account `c` (`1 - c` represents the probability of a slot being empty).
-///
-/// The value of `c` can be found in the current Babe configuration.
-///
-/// `authorities_weights` must be the list of all weights of all authorities.
-/// `authority_weight` must be the weight of the authority whose threshold to calculate.
-///
-/// # Panic
-///
-/// Panics if `authorities_weights` is empty.
-/// Panics if `authority_weight` is 0.
-///
-fn calculate_primary_threshold(
-    c: (u64, u64),
-    authorities_weights: impl ExactSizeIterator<Item = u64>,
-    authority_weight: u64, // TODO: use a NonZeroU64 once crate::header also has weights that use NonZeroU64
-) -> u128 {
-    assert!(authorities_weights.len() != 0);
+// Because `f64::powf` isn't available in no-std contexts, we generate a version of this function
+// with either `f64::powf` or `libm::pow`. Both functions are equivalent, except that `f64::powf`
+// is expected to be faster on some platforms.
+macro_rules! gen_calculate_primary_threshold {
+    ($name:ident, $powf:expr) => {
+        /// Calculates the primary selection threshold for a given authority, taking
+        /// into account `c` (`1 - c` represents the probability of a slot being empty).
+        ///
+        /// The value of `c` can be found in the current Babe configuration.
+        ///
+        /// `authorities_weights` must be the list of all weights of all authorities.
+        /// `authority_weight` must be the weight of the authority whose threshold to calculate.
+        ///
+        /// # Panic
+        ///
+        /// Panics if `authorities_weights` is empty.
+        /// Panics if `authority_weight` is 0.
+        ///
+        fn $name(
+            c: (u64, u64),
+            authorities_weights: impl Iterator<Item = u64>,
+            authority_weight: u64, // TODO: use a NonZeroU64 once crate::header also has weights that use NonZeroU64
+        ) -> u128 {
+            // We import `libm` no matter what, so that there's no warning about an unused
+            // dependency.
+            use libm as _;
 
-    let c = c.0 as f64 / c.1 as f64;
-    assert!(c.is_finite());
+            let c = c.0 as f64 / c.1 as f64;
+            assert!(c.is_finite());
 
-    let theta = authority_weight as f64 / authorities_weights.sum::<u64>() as f64;
-    assert!(theta > 0.0);
+            let theta = authority_weight as f64 / authorities_weights.sum::<u64>() as f64;
+            assert!(theta > 0.0);
 
-    // The calculations below has been copy-pasted from Substrate and is guaranteed to not panic.
-    let p = num_rational::BigRational::from_float(1f64 - (1f64 - c).powf(theta)).unwrap();
-    let numer = p.numer().to_biguint().unwrap();
-    let denom = p.denom().to_biguint().unwrap();
-    ((num_bigint::BigUint::one() << 128u32) * numer / denom)
-        .to_u128()
-        .unwrap()
+            // The calculations below has been copy-pasted from Substrate and is guaranteed to
+            // not panic.
+            let p = num_rational::BigRational::from_float(1f64 - $powf(1f64 - c, theta)).unwrap();
+            let numer = p.numer().to_biguint().unwrap();
+            let denom = p.denom().to_biguint().unwrap();
+            num_traits::cast::ToPrimitive::to_u128(
+                &((<num_bigint::BigUint as num_traits::One>::one() << 128u32) * numer / denom),
+            )
+            .unwrap()
+        }
+    };
+}
+#[cfg(feature = "std")]
+gen_calculate_primary_threshold!(calculate_primary_threshold, f64::powf);
+#[cfg(not(feature = "std"))]
+gen_calculate_primary_threshold!(calculate_primary_threshold, libm::pow);
+
+#[cfg(test)]
+mod tests {
+    use core::iter;
+
+    gen_calculate_primary_threshold!(calculate_primary_threshold1, f64::powf);
+    gen_calculate_primary_threshold!(calculate_primary_threshold2, libm::pow);
+
+    #[test]
+    fn calculate_primary_threshold_tests() {
+        // These regression tests have been generated by performing calculations using the
+        // Substrate implementation. The input of the calculations were chosen more or less
+        // arbitrarily.
+
+        assert_eq!(
+            calculate_primary_threshold1((2, 9), [1, 1, 1, 1, 1, 1, 1, 1].into_iter(), 1),
+            10523572781773471998586657386560225280u128
+        );
+        assert_eq!(
+            calculate_primary_threshold2((2, 9), [1, 1, 1, 1, 1, 1, 1, 1].into_iter(), 1),
+            10523572781773471998586657386560225280u128
+        );
+
+        assert_eq!(
+            calculate_primary_threshold1(
+                (103, 971),
+                iter::successors(Some(2u64), |n| Some(n + 1)).take(900),
+                11
+            ),
+            1032931305829506557190946382938112u128
+        );
+        assert_eq!(
+            calculate_primary_threshold2(
+                (103, 971),
+                iter::successors(Some(2u64), |n| Some(n + 1)).take(900),
+                11
+            ),
+            1032931305829506557190946382938112u128
+        );
+
+        assert_eq!(
+            calculate_primary_threshold1(
+                (89, 91),
+                iter::successors(Some(2u64), |n| Some(n * 2 - 1)).take(50),
+                63
+            ),
+            72686664904329579129208832u128
+        );
+        assert_eq!(
+            calculate_primary_threshold2(
+                (89, 91),
+                iter::successors(Some(2u64), |n| Some(n * 2 - 1)).take(50),
+                63
+            ),
+            72686664904329579129208832u128
+        );
+    }
 }

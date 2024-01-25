@@ -47,6 +47,7 @@
 
 use crate::header;
 
+use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for [`verify_header`].
@@ -82,9 +83,9 @@ pub struct VerifyConfig<'a, TAuthList> {
 /// Information yielded back after successfully verifying a block.
 #[derive(Debug)]
 pub struct VerifySuccess {
-    /// If true, the block has a change of authorities that must be reflected when verifying the
-    /// following block.
-    pub authorities_change: bool,
+    /// `Some` if the list of authorities is modified by this block. Contains the new list of
+    /// authorities.
+    pub authorities_change: Option<Vec<header::AuraAuthority>>,
 }
 
 /// Failure to verify a block.
@@ -106,14 +107,11 @@ pub enum VerifyError {
     BadPublicKey,
     /// List of authorities is empty.
     EmptyAuthorities,
+    /// Header contains more than one new list of authorities.
+    MultipleAuthoritiesChangeDigestItems,
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
-///
-/// # Panic
-///
-/// Panics if `config.parent_block_header` is invalid.
-///
 pub fn verify_header<'a>(
     mut config: VerifyConfig<'a, impl ExactSizeIterator<Item = header::AuraAuthorityRef<'a>>>,
 ) -> Result<VerifySuccess, VerifyError> {
@@ -156,12 +154,20 @@ pub fn verify_header<'a>(
 
     // Check whether there is an authority change in the block.
     // This information is used in case of success.
-    let authorities_change = config.header.digest.logs().any(|item| {
-        matches!(
-            item,
-            header::DigestItemRef::AuraConsensus(header::AuraConsensusLogRef::AuthoritiesChange(_))
-        )
-    });
+    let mut authorities_change = None;
+    for digest_item in config.header.digest.logs() {
+        if let header::DigestItemRef::AuraConsensus(
+            header::AuraConsensusLogRef::AuthoritiesChange(new_list),
+        ) = digest_item
+        {
+            if authorities_change.is_some() {
+                return Err(VerifyError::MultipleAuthoritiesChangeDigestItems);
+            }
+
+            authorities_change = Some(new_list.map(Into::into).collect());
+            // We continue looping even after finding a list, to make sure there is only one list.
+        }
+    }
 
     // The signature in the seal applies to the header from where the signature isn't present.
     // Extract the signature and build the hash that is expected to be signed.
@@ -180,14 +186,19 @@ pub fn verify_header<'a>(
     };
 
     // Fetch the authority that has supposedly signed the block.
-    // It is assumed that no more than 2^64 authorities are passed.
     if config.current_authorities.len() == 0 {
         // Checked beforehand in order to not do a modulo 0 operation.
         return Err(VerifyError::EmptyAuthorities);
     }
-    let signing_authority =
-        usize::try_from(slot_number % u64::try_from(config.current_authorities.len()).unwrap())
-            .unwrap();
+    // About overflows:
+    // If `config.current_authorities.len()` doesn't fit in a `u64`, then
+    // `slot_number % config.current_authorities.len()` is necessarily equal to `slot_number`.
+    // Since we're using a modulo operation, `signing_authority` is always inferior to
+    // `current_authorities.len()`, meaning that it always fits in a `usize`.
+    let signing_authority = usize::try_from(
+        slot_number % u64::try_from(config.current_authorities.len()).unwrap_or(u64::max_value()),
+    )
+    .unwrap_or_else(|_| unreachable!());
 
     // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
     // happen as it's of type `[u8; 32]`.

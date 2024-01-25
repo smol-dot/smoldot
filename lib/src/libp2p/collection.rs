@@ -58,7 +58,7 @@ use alloc::{
 };
 use core::{
     hash::Hash,
-    iter,
+    marker::PhantomData,
     ops::{self, Add, Sub},
     time::Duration,
 };
@@ -69,7 +69,7 @@ use rand_chacha::{
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{InboundError, SubstreamFate};
+pub use established::{InboundError, InboundTy, SubstreamFate};
 pub use single_stream_handshake::HandshakeError;
 
 pub use multi_stream::MultiStreamConnectionTask;
@@ -83,6 +83,9 @@ pub enum SingleStreamHandshakeKind<'a> {
     /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
     /// multistream-select protocol to negotiate the Yamux multiplexing.
     MultistreamSelectNoiseYamux {
+        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
+        /// initiated by the remote.
+        is_initiator: bool,
         /// Local secret key to use for the handshake.
         noise_key: &'a noise::NoiseKey,
     },
@@ -97,6 +100,9 @@ pub enum MultiStreamHandshakeKind<'a> {
     /// The reading and writing side of substreams must never be closed. Substreams can only be
     /// abruptly destroyed by either side.
     WebRtc {
+        /// Must be `true` if the connection has been initiated locally, or `false` if it has been
+        /// initiated by the remote.
+        is_initiator: bool,
         /// Local secret key to use for the handshake.
         noise_key: &'a noise::NoiseKey,
         /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
@@ -120,9 +126,10 @@ pub struct Config {
     /// >           many substreams.
     pub max_inbound_substreams: usize,
 
-    pub notification_protocols: Vec<NotificationProtocolConfig>,
-
-    pub request_response_protocols: Vec<ConfigRequestResponse>,
+    /// Maximum size in bytes of the protocols supported by the local node. Any protocol larger
+    /// than that requested by the remote is automatically refused. Necessary in order to avoid
+    /// situations where the remote sends an infinitely-sized protocol name.
+    pub max_protocol_name_len: usize,
 
     /// Amount of time after which a connection handshake is considered to have taken too long
     /// and must be aborted.
@@ -130,50 +137,6 @@ pub struct Config {
 
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
-}
-
-/// Configuration for a request-response protocol.
-#[derive(Debug, Clone)]
-pub struct ConfigRequestResponse {
-    /// Name of the protocol transferred on the wire.
-    pub name: String,
-
-    /// Configuration related to sending out requests through this protocol.
-    ///
-    /// > **Note**: This is used even if `inbound_allowed` is `false` when performing outgoing
-    /// >           requests.
-    pub inbound_config: ConfigRequestResponseIn,
-
-    pub max_response_size: usize,
-
-    /// If true, incoming substreams are allowed to negotiate this protocol.
-    pub inbound_allowed: bool,
-}
-
-/// See [`ConfigRequestResponse::inbound_config`].
-#[derive(Debug, Clone)]
-pub enum ConfigRequestResponseIn {
-    /// Request must be completely empty, not even a length prefix.
-    Empty,
-    /// Request must contain a length prefix plus a potentially empty payload.
-    Payload {
-        /// Maximum allowed size for the payload in bytes.
-        max_size: usize,
-    },
-}
-
-/// Configuration for a specific overlay network.
-///
-/// See [`Config::notification_protocols`].
-pub struct NotificationProtocolConfig {
-    /// Name of the protocol negotiated on the wire.
-    pub protocol_name: String,
-
-    /// Maximum size, in bytes, of the handshake that can be received.
-    pub max_handshake_size: usize,
-
-    /// Maximum size, in bytes, of a notification that can be received.
-    pub max_notification_size: usize,
 }
 
 /// Identifier of a connection spawned by the [`Network`].
@@ -216,7 +179,7 @@ impl SubstreamId {
 /// state. See also [the module-level documentation](..).
 pub struct Network<TConn, TNow> {
     /// Messages waiting to be sent to connection tasks.
-    messages_to_connections: VecDeque<(ConnectionId, CoordinatorToConnectionInner<TNow>)>,
+    messages_to_connections: VecDeque<(ConnectionId, CoordinatorToConnectionInner)>,
 
     /// Messages received from connection tasks. Processed in [`Network::next_event`].
     pending_incoming_messages: VecDeque<(ConnectionId, ConnectionToCoordinatorInner)>,
@@ -238,6 +201,11 @@ pub struct Network<TConn, TNow> {
     /// that concern this connection before processing any other incoming message.
     shutting_down_connection: Option<ConnectionId>,
 
+    /// List of connections for which a [`ConnectionToCoordinatorInner::ShutdownFinished`] has
+    /// been received and a [`CoordinatorToConnectionInner::ShutdownFinishedAck`] has been sent.
+    /// We can now remove these connections and generate a [`Event::Shutdown`].
+    shutdown_finished_connections: VecDeque<ConnectionId>,
+
     /// List of all outgoing notification substreams that we have opened. Can be either pending
     /// (waiting for the connection task to say whether it has been accepted or not) or fully
     /// open.
@@ -246,10 +214,25 @@ pub struct Network<TConn, TNow> {
 
     /// Always contains the same entries as [`Network::outgoing_notification_substreams`] but
     /// ordered differently.
+    // TODO: group with the other similar BTreeSets?
     outgoing_notification_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
     /// List of all requests that have been started locally.
     outgoing_requests: BTreeSet<(ConnectionId, SubstreamId)>,
+
+    /// List of inbound negotiated substreams that connections have received and haven't been
+    /// answered by the API user yet.
+    ingoing_negotiated_substreams: hashbrown::HashMap<
+        SubstreamId,
+        (ConnectionId, established::SubstreamId, bool),
+        fnv::FnvBuildHasher,
+    >,
+
+    /// Always contains the same entries as [`Network::ingoing_negotiated_substreams`] but ordered
+    /// differently.
+    // TODO: group with the other similar BTreeSets?
+    ingoing_negotiated_substreams_by_connection:
+        BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
 
     /// List in incoming notification substreams that connections have received. Can be either
     /// pending (waiting to be accepted/refused) or fully opened.
@@ -264,6 +247,7 @@ pub struct Network<TConn, TNow> {
 
     /// Always contains the same entries as [`Network::ingoing_notification_substreams`] but
     /// ordered differently.
+    // TODO: group with the other similar BTreeSets?
     ingoing_notification_substreams_by_connection:
         BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
 
@@ -276,6 +260,7 @@ pub struct Network<TConn, TNow> {
     >,
 
     /// Always contains the same entries as [`Network::ingoing_requests`] but ordered differently.
+    // TODO: group with the other similar BTreeSets?
     ingoing_requests_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
     /// Generator for randomness seeds given to the established connections.
@@ -284,17 +269,18 @@ pub struct Network<TConn, TNow> {
     /// See [`Config::max_inbound_substreams`].
     max_inbound_substreams: usize,
 
+    /// See [`Config::max_protocol_name_len`].
+    max_protocol_name_len: usize,
+
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
-    /// See [`Config::notification_protocols`].
-    notification_protocols: Vec<NotificationProtocolConfig>,
-
-    /// See [`Config::request_response_protocols`].
-    request_response_protocols: Vec<ConfigRequestResponse>,
-
     /// See [`Config::ping_protocol`].
     ping_protocol: Arc<str>,
+
+    // Phantom data to keep the `TNow` type pinned.
+    // TODO: considering removing
+    now_pin: PhantomData<fn() -> TNow>,
 }
 
 struct Connection<TConn> {
@@ -331,6 +317,8 @@ enum SubstreamState {
     /// Substream hasn't been accepted or refused yet.
     Pending,
     Open,
+    /// Substream is in the process of being closed. Only relevant for inbound substreams.
+    RequestedClosing,
 }
 
 impl<TConn, TNow> Network<TConn, TNow>
@@ -352,42 +340,45 @@ where
                 Default::default(),
             ),
             shutting_down_connection: None,
+            shutdown_finished_connections: VecDeque::with_capacity(config.capacity),
             outgoing_requests: BTreeSet::new(),
             ingoing_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                config.request_response_protocols.len() * config.capacity,
+                4 * config.capacity,
                 Default::default(),
             ),
             ingoing_requests_by_connection: BTreeSet::new(),
             outgoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                config.notification_protocols.len() * config.capacity,
+                4 * config.capacity,
                 Default::default(),
             ),
             outgoing_notification_substreams_by_connection: BTreeSet::new(),
             ingoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                config.notification_protocols.len() * config.capacity,
+                4 * config.capacity,
                 Default::default(),
             ),
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
+            ingoing_negotiated_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                4 * config.capacity,
+                Default::default(),
+            ),
+            ingoing_negotiated_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             max_inbound_substreams: config.max_inbound_substreams,
-            notification_protocols: config.notification_protocols,
-            request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
+            max_protocol_name_len: config.max_protocol_name_len,
             ping_protocol: config.ping_protocol.into(),
+            now_pin: PhantomData,
         }
     }
 
     /// Adds a new single-stream connection to the collection.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
-    ///
-    /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
-    /// it has been initiated by the remote.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn insert_single_stream(
         &mut self,
-        when_connected: TNow,
+        when_connection_start: TNow,
         handshake_kind: SingleStreamHandshakeKind,
-        is_initiator: bool,
+        substreams_capacity: usize,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         let connection_id = self.next_connection_id;
@@ -395,27 +386,10 @@ where
 
         // We only support one kind of handshake at the moment. Make sure (at compile time) that
         // the value provided as parameter is indeed the one expected.
-        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux { noise_key } = handshake_kind;
-
-        // TODO: could be precalculated
-        let max_protocol_name_len = self
-            .request_response_protocols
-            .iter()
-            .map(|r| r.name.len())
-            .chain(
-                self.notification_protocols
-                    .iter()
-                    .map(|n| n.protocol_name.len()),
-            )
-            .chain(iter::once(self.ping_protocol.len()))
-            .max()
-            .unwrap_or(0);
-
-        // We expect at maximum one parallel request per protocol, plus one substream per direction
-        // (in and out) per notification substream, plus one ping substream per direction.
-        // TODO: could be precalculated
-        let substreams_capacity =
-            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
+        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux {
+            is_initiator,
+            noise_key,
+        } = handshake_kind;
 
         let connection_task = SingleStreamConnectionTask::new(single_stream::Config {
             randomness_seed: {
@@ -432,10 +406,10 @@ where
                     is_initiator,
                 )
             },
-            handshake_timeout: when_connected + self.handshake_timeout,
+            handshake_timeout: when_connection_start + self.handshake_timeout,
             max_inbound_substreams: self.max_inbound_substreams,
             substreams_capacity,
-            max_protocol_name_len,
+            max_protocol_name_len: self.max_protocol_name_len,
             ping_protocol: self.ping_protocol.clone(),
         });
 
@@ -453,13 +427,13 @@ where
 
     /// Adds a new multi-stream connection to the collection.
     ///
-    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
-    /// to determine when the handshake timeout expires.
+    /// Must be passed the moment (as a `TNow`) when the connection process has been started, in
+    /// order to determine when the handshake timeout expires.
     pub fn insert_multi_stream<TSubId>(
         &mut self,
-        now: TNow,
+        when_connection_start: TNow,
         handshake_kind: MultiStreamHandshakeKind,
-        is_initiator: bool,
+        substreams_capacity: usize,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -472,9 +446,10 @@ where
         // followed with the multihash-encoded fingerprints of the initiator's certificate
         // and the receiver's certificate.
         // See <https://github.com/libp2p/specs/pull/412>.
-        let (noise_key, noise_prologue) = {
+        let (noise_key, noise_prologue, local_is_noise_initiator) = {
             let MultiStreamHandshakeKind::WebRtc {
                 noise_key,
+                is_initiator,
                 local_tls_certificate_multihash,
                 remote_tls_certificate_multihash,
             } = handshake_kind;
@@ -492,36 +467,19 @@ where
                 out.extend_from_slice(&remote_tls_certificate_multihash);
                 out.extend_from_slice(&local_tls_certificate_multihash);
             }
-            (noise_key, out)
+
+            // In the WebRTC libp2p protocol, the initiator of the connection is *not* the
+            // initiator of the Noise handshake. Instead, it's the "server" that initiates the
+            // Noise handshake. This saves a round-trip.
+            (noise_key, out, !is_initiator)
         };
-
-        // TODO: could be precalculated
-        let max_protocol_name_len = self
-            .request_response_protocols
-            .iter()
-            .map(|r| r.name.len())
-            .chain(
-                self.notification_protocols
-                    .iter()
-                    .map(|n| n.protocol_name.len()),
-            )
-            .chain(iter::once(self.ping_protocol.len()))
-            .max()
-            .unwrap_or(0);
-
-        // We expect at maximum one parallel request per protocol, plus one substream per direction
-        // (in and out) per notification substream, plus one ping substream per direction.
-        // TODO: could be precalculated
-        let substreams_capacity =
-            self.request_response_protocols.len() + self.notification_protocols.len() * 2 + 2;
 
         let handshake = {
             let mut noise_ephemeral_key = zeroize::Zeroizing::new([0; 32]);
             self.randomness_seeds.fill_bytes(&mut *noise_ephemeral_key);
             noise::HandshakeInProgress::new(noise::Config {
                 key: noise_key,
-                // It's the "server" that initiates the Noise handshake.
-                is_initiator: !is_initiator,
+                is_initiator: local_is_noise_initiator,
                 prologue: &noise_prologue,
                 ephemeral_secret_key: &noise_ephemeral_key,
             })
@@ -533,11 +491,11 @@ where
                 self.randomness_seeds.fill_bytes(&mut seed);
                 seed
             },
-            now,
+            when_connection_start,
             handshake,
             self.max_inbound_substreams,
             substreams_capacity,
-            max_protocol_name_len,
+            self.max_protocol_name_len,
             self.ping_protocol.clone(),
         );
 
@@ -640,20 +598,77 @@ where
         }
     }
 
-    /// Returns the list the overlay networks originally passed as
-    /// [`Config::notification_protocols`].
-    pub fn notification_protocols(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &NotificationProtocolConfig> {
-        self.notification_protocols.iter()
+    /// Modifies the value that was initially passed through [`Config::max_protocol_name_len`].
+    ///
+    /// The new value only applies to substreams opened after this function has been called.
+    pub fn set_max_protocol_name_len(&mut self, new_max_length: usize) {
+        if self.max_protocol_name_len == new_max_length {
+            return;
+        }
+
+        self.max_protocol_name_len = new_max_length;
+
+        // Send a message to all connections to update this value.
+        self.messages_to_connections.reserve(self.connections.len());
+        for connection_id in self.connections.keys() {
+            self.messages_to_connections.push_back((
+                *connection_id,
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+            ));
+        }
     }
 
-    /// Returns the list the request-response protocols originally passed as
-    /// [`Config::request_response_protocols`].
-    pub fn request_response_protocols(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &ConfigRequestResponse> {
-        self.request_response_protocols.iter()
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to accept the protocol
+    /// name and indicate the type of the protocol.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn accept_inbound(&mut self, substream_id: SubstreamId, ty: InboundTy) {
+        let (connection_id, inner_substream_id, already_accepted) =
+            match self.ingoing_negotiated_substreams.get_mut(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
+        assert!(!*already_accepted);
+
+        self.messages_to_connections.push_back((
+            *connection_id,
+            CoordinatorToConnectionInner::AcceptInbound {
+                substream_id: *inner_substream_id,
+                inbound_ty: ty,
+            },
+        ));
+
+        *already_accepted = true;
+    }
+
+    /// Call after an [`Event::InboundNegotiated`] has been emitted in order to reject the
+    /// protocol name as not supported.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream is not in the correct state.
+    ///
+    pub fn reject_inbound(&mut self, substream_id: SubstreamId) {
+        let (connection_id, inner_substream_id, already_accepted) =
+            match self.ingoing_negotiated_substreams.remove(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
+        let _was_in = self
+            .ingoing_negotiated_substreams_by_connection
+            .remove(&(connection_id, inner_substream_id));
+        debug_assert!(_was_in.is_some());
+        assert!(!already_accepted);
+
+        self.messages_to_connections.push_back((
+            connection_id,
+            CoordinatorToConnectionInner::RejectInbound {
+                substream_id: inner_substream_id,
+            },
+        ));
     }
 
     /// Sends a request to the given peer.
@@ -682,15 +697,15 @@ where
     ///
     /// An error happens if the connection closes while the request is in progress, if the remote
     /// doesn't support the given protocol, if the request or response doesn't respect the protocol
-    /// limits (see [`ConfigRequestResponse`]), or if the remote takes too much time to answer.
+    /// limits, or if the remote takes too much time to answer.
     ///
     /// The timeout is the time between the moment the substream is opened and the moment the
-    /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
-    /// answer during this time window, the request is considered failed.
+    /// response is sent back. It starts ticking only after the request starts being sent. If the
+    /// emitter doesn't send the request or if the receiver doesn't answer during this time
+    /// window, the request is considered failed.
     ///
     /// # Panic
     ///
-    /// Panics if `protocol_index` isn't a valid index in [`Config::request_response_protocols`].
     /// Panics if the [`ConnectionId`] is invalid or is a connection that hasn't finished its
     /// handshake or is shutting down.
     ///
@@ -698,10 +713,11 @@ where
     pub fn start_request(
         &mut self,
         target: ConnectionId,
-        protocol_index: usize,
-        request_data: impl Into<Vec<u8>>,
-        timeout: TNow,
-    ) -> Result<SubstreamId, StartRequestError> {
+        protocol_name: String,
+        request_data: Option<Vec<u8>>,
+        timeout: Duration,
+        max_response_size: usize,
+    ) -> SubstreamId {
         let connection = match self.connections.get(&target) {
             Some(c) => c,
             None => panic!(),
@@ -710,28 +726,6 @@ where
             connection.state,
             InnerConnectionState::Established
         ));
-
-        let request_data = request_data.into();
-
-        let protocol_info = self
-            .request_response_protocols
-            .get(protocol_index)
-            .unwrap_or_else(|| panic!());
-
-        let has_length_prefix = match protocol_info.inbound_config {
-            ConfigRequestResponseIn::Payload { max_size } => {
-                if request_data.len() > max_size {
-                    return Err(StartRequestError::RequestTooLarge);
-                }
-                true
-            }
-            ConfigRequestResponseIn::Empty => {
-                if !request_data.is_empty() {
-                    return Err(StartRequestError::RequestTooLarge);
-                }
-                false
-            }
-        };
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -742,19 +736,15 @@ where
         self.messages_to_connections.push_back((
             target,
             CoordinatorToConnectionInner::StartRequest {
-                protocol_name: protocol_info.name.clone(),
-                request_data: if has_length_prefix {
-                    Some(request_data)
-                } else {
-                    None
-                },
+                protocol_name,
+                request_data,
                 timeout,
-                max_response_size: protocol_info.max_response_size,
+                max_response_size,
                 substream_id,
             },
         ));
 
-        Ok(substream_id)
+        substream_id
     }
 
     /// Start opening a notifications substream.
@@ -770,7 +760,6 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if `overlay_network_index` isn't a valid index in [`Config::notification_protocols`].
     /// Panics if the [`ConnectionId`] is invalid or is a connection that hasn't finished its
     /// handshake or is shutting down.
     ///
@@ -778,9 +767,10 @@ where
     pub fn open_out_notifications(
         &mut self,
         connection_id: ConnectionId,
-        overlay_network_index: usize,
-        now: TNow,
+        protocol_name: String,
+        handshake_timeout: Duration,
         handshake: impl Into<Vec<u8>>,
+        max_handshake_size: usize,
     ) -> SubstreamId {
         let connection = match self.connections.get(&connection_id) {
             Some(c) => c,
@@ -790,14 +780,6 @@ where
             connection.state,
             InnerConnectionState::Established
         ));
-
-        let (protocol_name, max_handshake_size) = {
-            let info = self
-                .notification_protocols
-                .get(overlay_network_index)
-                .unwrap_or_else(|| panic!());
-            (info.protocol_name.clone(), info.max_handshake_size)
-        };
 
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
@@ -816,7 +798,7 @@ where
             CoordinatorToConnectionInner::OpenOutNotifications {
                 protocol_name,
                 handshake: handshake.into(),
-                now,
+                handshake_timeout,
                 max_handshake_size,
                 substream_id,
             },
@@ -932,7 +914,12 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to an inbound notifications substream.
     ///
     #[track_caller]
-    pub fn accept_in_notifications(&mut self, substream_id: SubstreamId, handshake: Vec<u8>) {
+    pub fn accept_in_notifications(
+        &mut self,
+        substream_id: SubstreamId,
+        handshake: Vec<u8>,
+        max_notification_size: usize,
+    ) {
         let (connection_id, state, inner_substream_id) =
             match self.ingoing_notification_substreams.get_mut(&substream_id) {
                 Some(s) => s,
@@ -945,7 +932,7 @@ where
             CoordinatorToConnectionInner::AcceptInNotifications {
                 substream_id: *inner_substream_id,
                 handshake,
-                max_notification_size: 16 * 1024 * 1024, // TODO: obtain from protocol configuration
+                max_notification_size,
             },
         ));
 
@@ -991,6 +978,43 @@ where
         }
     }
 
+    /// Start the closing of an inbound notifications substream that was previously accepted with
+    /// [`Network::accept_in_notifications`]
+    ///
+    /// Calling this function will later generate a [`Event::NotificationsInClose`] event once the
+    /// substream is effectively closed.
+    /// This function gracefully asks the remote to close the substream. The remote has the
+    /// duration indicated with `timeout` to effectively close the substream. In the meanwhile,
+    /// notifications can still be received.
+    ///
+    /// This function generates a message destined to the connection. Use
+    /// [`Network::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to an accepted inbound notifications
+    /// substream.
+    ///
+    #[track_caller]
+    pub fn start_close_in_notifications(&mut self, substream_id: SubstreamId, timeout: Duration) {
+        let (connection_id, state, inner_substream_id) =
+            match self.ingoing_notification_substreams.get_mut(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
+        assert!(matches!(state, SubstreamState::Open));
+
+        self.messages_to_connections.push_back((
+            *connection_id,
+            CoordinatorToConnectionInner::CloseInNotifications {
+                substream_id: *inner_substream_id,
+                timeout,
+            },
+        ));
+
+        *state = SubstreamState::RequestedClosing;
+    }
+
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
     ///
     /// If the substream was in the meanwhile yielded in an [`Event::RequestInCancel`], then this
@@ -1032,13 +1056,21 @@ where
     ///
     /// This function guarantees that the [`ConnectionId`] always refers to a connection that
     /// is still alive, in the sense that [`SingleStreamConnectionTask::inject_coordinator_message`]
-    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`
+    /// and that no [`Event::Shutdown`] has been generated for this connection.
     pub fn pull_message_to_connection(
         &mut self,
-    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
-        self.messages_to_connections
+    ) -> Option<(ConnectionId, CoordinatorToConnection)> {
+        let message = self
+            .messages_to_connections
             .pop_front()
-            .map(|(id, inner)| (id, CoordinatorToConnection { inner }))
+            .map(|(id, inner)| (id, CoordinatorToConnection { inner }))?;
+
+        if let CoordinatorToConnectionInner::ShutdownFinishedAck = message.1.inner {
+            self.shutdown_finished_connections.push_back(message.0);
+        }
+
+        Some(message)
     }
 
     /// Injects into the state machine a message generated by
@@ -1072,6 +1104,22 @@ where
     /// [`Network::inject_connection_message`].
     pub fn next_event(&mut self) -> Option<Event<TConn>> {
         loop {
+            if let Some(connection_id) = self.shutdown_finished_connections.pop_front() {
+                let connection = self.connections.remove(&connection_id).unwrap();
+                let was_established = match &connection.state {
+                    InnerConnectionState::ShuttingDown {
+                        was_established, ..
+                    } => *was_established,
+                    _ => unreachable!(),
+                };
+
+                return Some(Event::Shutdown {
+                    id: connection_id,
+                    was_established,
+                    user_data: connection.user_data,
+                });
+            }
+
             // When a connection starts its shutdown, its id is put in `shutting_down_connection`.
             // When that happens, we go through the local state and clean up all requests and
             // notification substreams that are in progress/open and return the cancellations
@@ -1102,6 +1150,7 @@ where
                             substream_id,
                             result: Err(NotificationsOutErr::ConnectionShutdown),
                         },
+                        SubstreamState::RequestedClosing => unreachable!(), // Never set for outgoing notification substreams.
                     });
                 }
 
@@ -1121,16 +1170,24 @@ where
                     .map(|(k, v)| (*k, *v))
                     .next()
                 {
-                    self.ingoing_notification_substreams
+                    let (_, state, _) = self
+                        .ingoing_notification_substreams
                         .remove(&substream_id)
                         .unwrap();
                     self.ingoing_notification_substreams_by_connection
                         .remove(&key)
                         .unwrap();
 
-                    return Some(Event::NotificationsInClose {
-                        substream_id,
-                        outcome: Err(NotificationsInClosedErr::ConnectionShutdown),
+                    return Some(match state {
+                        SubstreamState::Open | SubstreamState::RequestedClosing => {
+                            Event::NotificationsInClose {
+                                substream_id,
+                                outcome: Err(NotificationsInClosedErr::ConnectionShutdown),
+                            }
+                        }
+                        SubstreamState::Pending => {
+                            Event::NotificationsInOpenCancel { substream_id }
+                        }
                     });
                 }
 
@@ -1172,6 +1229,39 @@ where
                     debug_assert!(_was_in);
 
                     return Some(Event::RequestInCancel { substream_id });
+                }
+
+                // Find ingoing negotiated substreams to cancel.
+                if let Some((key, substream_id)) = self
+                    .ingoing_negotiated_substreams_by_connection
+                    .range(
+                        (
+                            shutting_down_connection,
+                            established::SubstreamId::min_value(),
+                        )
+                            ..=(
+                                shutting_down_connection,
+                                established::SubstreamId::max_value(),
+                            ),
+                    )
+                    .map(|(k, v)| (*k, *v))
+                    .next()
+                {
+                    let Some((_, _, was_accepted)) =
+                        self.ingoing_negotiated_substreams.remove(&substream_id)
+                    else {
+                        unreachable!()
+                    };
+                    let _was_in = self
+                        .ingoing_negotiated_substreams_by_connection
+                        .remove(&key);
+                    debug_assert!(_was_in.is_some());
+
+                    if was_accepted {
+                        return Some(Event::InboundAcceptedCancel { substream_id });
+                    } else {
+                        return Some(Event::InboundNegotiatedCancel { substream_id });
+                    }
                 }
 
                 // If this is reached, this connection has no more request or notifications
@@ -1235,23 +1325,11 @@ where
                     }
                 }
                 ConnectionToCoordinatorInner::ShutdownFinished => {
-                    let was_established = match &connection.state {
-                        InnerConnectionState::ShuttingDown {
-                            was_established, ..
-                        } => *was_established,
-                        _ => unreachable!(),
-                    };
-
-                    let user_data = self.connections.remove(&connection_id).unwrap().user_data;
                     self.messages_to_connections.push_back((
                         connection_id,
                         CoordinatorToConnectionInner::ShutdownFinishedAck,
                     ));
-                    Event::Shutdown {
-                        id: connection_id,
-                        was_established,
-                        user_data,
-                    }
+                    continue;
                 }
                 ConnectionToCoordinatorInner::HandshakeFinished(peer_id) => {
                     debug_assert_eq!(
@@ -1328,70 +1406,44 @@ where
                         continue;
                     }
 
-                    if let Some((protocol_index, protocol)) = self
-                        .request_response_protocols
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, p)| p.inbound_allowed)
-                        .find(|(_, p)| p.name == protocol_name)
+                    let substream_id = self.next_substream_id;
+                    self.next_substream_id.0 += 1;
+
+                    self.ingoing_negotiated_substreams.insert(
+                        substream_id,
+                        (connection_id, connection_substream_id, false),
+                    );
+                    self.ingoing_negotiated_substreams_by_connection
+                        .insert((connection_id, connection_substream_id), substream_id);
+
+                    Event::InboundNegotiated {
+                        id: connection_id,
+                        substream_id,
+                        protocol_name,
+                    }
+                }
+                ConnectionToCoordinatorInner::InboundAcceptedCancel {
+                    id: connection_substream_id,
+                } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
+                        connection.state
                     {
-                        self.messages_to_connections.push_back((
-                            connection_id,
-                            CoordinatorToConnectionInner::AcceptInbound {
-                                substream_id: connection_substream_id,
-                                inbound_ty: InboundTy::Request {
-                                    protocol_index,
-                                    request_max_size: match protocol.inbound_config {
-                                        ConfigRequestResponseIn::Empty => None,
-                                        ConfigRequestResponseIn::Payload { max_size } => {
-                                            Some(max_size)
-                                        }
-                                    },
-                                },
-                            },
-                        ));
-                    } else if let Some((protocol_index, protocol)) = self
-                        .notification_protocols
-                        .iter()
-                        .enumerate()
-                        .find(|(_, p)| p.protocol_name == protocol_name)
-                    {
-                        self.messages_to_connections.push_back((
-                            connection_id,
-                            CoordinatorToConnectionInner::AcceptInbound {
-                                substream_id: connection_substream_id,
-                                inbound_ty: InboundTy::Notifications {
-                                    protocol_index,
-                                    max_handshake_size: protocol.max_handshake_size,
-                                },
-                            },
-                        ));
-                    } else if *self.ping_protocol == *protocol_name {
-                        self.messages_to_connections.push_back((
-                            connection_id,
-                            CoordinatorToConnectionInner::AcceptInbound {
-                                substream_id: connection_substream_id,
-                                inbound_ty: InboundTy::Ping,
-                            },
-                        ));
-                    } else {
-                        self.messages_to_connections.push_back((
-                            connection_id,
-                            CoordinatorToConnectionInner::RejectInbound {
-                                substream_id: connection_substream_id,
-                            },
-                        ));
+                        debug_assert!(api_initiated);
+                        continue;
                     }
 
-                    continue;
-                }
-                ConnectionToCoordinatorInner::InboundAcceptedCancel { .. } => {
-                    // Nothing to do, as we don't track inbound accepted substreams.
-                    continue;
+                    let substream_id = self
+                        .ingoing_negotiated_substreams_by_connection
+                        .remove(&(connection_id, connection_substream_id))
+                        .unwrap_or_else(|| unreachable!());
+                    let _was_in = self.ingoing_negotiated_substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
+
+                    Event::InboundAcceptedCancel { substream_id }
                 }
                 ConnectionToCoordinatorInner::RequestIn {
                     id: connection_substream_id,
-                    protocol_index,
                     request,
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
@@ -1402,8 +1454,12 @@ where
                         continue;
                     }
 
-                    let substream_id = self.next_substream_id;
-                    self.next_substream_id.0 += 1;
+                    let substream_id = self
+                        .ingoing_negotiated_substreams_by_connection
+                        .remove(&(connection_id, connection_substream_id))
+                        .unwrap_or_else(|| unreachable!());
+                    let _was_in = self.ingoing_negotiated_substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
 
                     self.ingoing_requests
                         .insert(substream_id, (connection_id, connection_substream_id));
@@ -1411,9 +1467,7 @@ where
                         .insert((connection_id, substream_id));
 
                     Event::RequestIn {
-                        id: connection_id,
                         substream_id,
-                        protocol_index,
                         request_payload: request,
                     }
                 }
@@ -1442,7 +1496,6 @@ where
                 }
                 ConnectionToCoordinatorInner::NotificationsInOpen {
                     id: inner_substream_id,
-                    protocol_index: overlay_network_index,
                     handshake,
                 } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
@@ -1453,8 +1506,12 @@ where
                         continue;
                     }
 
-                    let substream_id = self.next_substream_id;
-                    self.next_substream_id.0 += 1;
+                    let substream_id = self
+                        .ingoing_negotiated_substreams_by_connection
+                        .remove(&(connection_id, inner_substream_id))
+                        .unwrap_or_else(|| unreachable!());
+                    let _was_in = self.ingoing_negotiated_substreams.remove(&substream_id);
+                    debug_assert!(_was_in.is_some());
 
                     self.ingoing_notification_substreams.insert(
                         substream_id,
@@ -1464,9 +1521,7 @@ where
                         .insert((connection_id, inner_substream_id), substream_id);
 
                     Event::NotificationsInOpen {
-                        id: connection_id,
                         substream_id,
-                        notifications_protocol_index: overlay_network_index,
                         remote_handshake: handshake,
                     }
                 }
@@ -1494,12 +1549,14 @@ where
                             .remove(&substream_id)
                             .unwrap();
                         match state {
-                            SubstreamState::Open => Event::NotificationsInClose {
-                                substream_id,
-                                outcome: Err(NotificationsInClosedErr::Substream(
-                                    established::NotificationsInClosedErr::SubstreamReset,
-                                )),
-                            },
+                            SubstreamState::Open | SubstreamState::RequestedClosing => {
+                                Event::NotificationsInClose {
+                                    substream_id,
+                                    outcome: Err(NotificationsInClosedErr::Substream(
+                                        established::NotificationsInClosedErr::SubstreamReset,
+                                    )),
+                                }
+                            }
                             SubstreamState::Pending => {
                                 Event::NotificationsInOpenCancel { substream_id }
                             }
@@ -1555,8 +1612,26 @@ where
                         .ingoing_notification_substreams_by_connection
                         .remove(&(connection_id, inner_substream_id))
                         .unwrap();
-                    let _was_in = self.ingoing_notification_substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
+                    let (_, state, _) = self
+                        .ingoing_notification_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+                    debug_assert!(matches!(
+                        state,
+                        SubstreamState::Open | SubstreamState::RequestedClosing
+                    ));
+
+                    if let SubstreamState::Open = state {
+                        // As documented, we must confirm the reception of the event by sending
+                        // back a rejection, provided that no such event has been sent beforehand.
+                        self.messages_to_connections.push_back((
+                            connection_id,
+                            CoordinatorToConnectionInner::CloseInNotifications {
+                                substream_id: inner_substream_id,
+                                timeout: Duration::new(0, 0),
+                            },
+                        ));
+                    }
 
                     Event::NotificationsInClose {
                         substream_id,
@@ -1657,7 +1732,7 @@ where
 
                     Event::NotificationsOutReset { substream_id }
                 }
-                ConnectionToCoordinatorInner::PingOutSuccess => {
+                ConnectionToCoordinatorInner::PingOutSuccess { ping_time } => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
@@ -1666,7 +1741,10 @@ where
                         continue;
                     }
 
-                    Event::PingOutSuccess { id: connection_id }
+                    Event::PingOutSuccess {
+                        id: connection_id,
+                        ping_time,
+                    }
                 }
                 ConnectionToCoordinatorInner::PingOutFailed => {
                     // Ignore events if a shutdown has been initiated by the coordinator.
@@ -1695,13 +1773,6 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Network<TConn, TNow> {
     fn index_mut(&mut self, id: ConnectionId) -> &mut TConn {
         &mut self.connections.get_mut(&id).unwrap().user_data
     }
-}
-
-/// Error potentially returned when starting a request.
-#[derive(Debug, Clone, derive_more::Display)]
-pub enum StartRequestError {
-    /// Size of the request is over maximum allowed by the protocol.
-    RequestTooLarge,
 }
 
 /// See [`Network::connection_state`].
@@ -1733,14 +1804,12 @@ enum ConnectionToCoordinatorInner {
 
     /// See the corresponding event in [`established::Event`].
     InboundAcceptedCancel {
-        // TODO: this field is currently unused but is planned to be used in the future; if plans change then remove it
-        _id: established::SubstreamId,
+        id: established::SubstreamId,
     },
 
     /// See the corresponding event in [`established::Event`].
     RequestIn {
         id: established::SubstreamId,
-        protocol_index: usize,
         request: Vec<u8>,
     },
 
@@ -1753,7 +1822,6 @@ enum ConnectionToCoordinatorInner {
     /// See the corresponding event in [`established::Event`].
     NotificationsInOpen {
         id: established::SubstreamId,
-        protocol_index: usize,
         handshake: Vec<u8>,
     },
     /// See the corresponding event in [`established::Event`].
@@ -1786,6 +1854,10 @@ enum ConnectionToCoordinatorInner {
         notification: Vec<u8>,
     },
     /// See the corresponding event in [`established::Event`].
+    ///
+    /// In order to avoid race conditions, this must always be acknowledged by sending back a
+    /// [`CoordinatorToConnectionInner::CloseInNotifications`] message if no such message was
+    /// sent in the past.
     NotificationsInClose {
         id: established::SubstreamId,
         outcome: Result<(), established::NotificationsInClosedErr>,
@@ -1804,7 +1876,9 @@ enum ConnectionToCoordinatorInner {
         id: SubstreamId,
     },
     /// See the corresponding event in [`established::Event`].
-    PingOutSuccess,
+    PingOutSuccess {
+        ping_time: Duration,
+    },
     /// See the corresponding event in [`established::Event`].
     PingOutFailed,
 
@@ -1823,11 +1897,11 @@ enum ConnectionToCoordinatorInner {
 }
 
 /// Message from the coordinator destined to a connection task.
-pub struct CoordinatorToConnection<TNow> {
-    inner: CoordinatorToConnectionInner<TNow>,
+pub struct CoordinatorToConnection {
+    inner: CoordinatorToConnectionInner,
 }
 
-enum CoordinatorToConnectionInner<TNow> {
+enum CoordinatorToConnectionInner {
     /// Connection task must terminate. This is always sent back after a
     /// [`ConnectionToCoordinatorInner::ShutdownFinished`].
     ///
@@ -1848,11 +1922,14 @@ enum CoordinatorToConnectionInner<TNow> {
     RejectInbound {
         substream_id: established::SubstreamId,
     },
+    SetMaxProtocolNameLen {
+        new_max_length: usize,
+    },
 
     StartRequest {
         protocol_name: String,
         request_data: Option<Vec<u8>>,
-        timeout: TNow,
+        timeout: Duration,
         max_response_size: usize,
         /// Id of the substream assigned by the coordinator.
         /// This is **not** the same as the actual substream used in the connection.
@@ -1864,7 +1941,7 @@ enum CoordinatorToConnectionInner<TNow> {
         substream_id: SubstreamId,
         protocol_name: String,
         max_handshake_size: usize,
-        now: TNow,
+        handshake_timeout: Duration,
         handshake: Vec<u8>,
     },
     CloseOutNotifications {
@@ -1886,6 +1963,10 @@ enum CoordinatorToConnectionInner<TNow> {
     RejectInNotifications {
         substream_id: established::SubstreamId,
     },
+    CloseInNotifications {
+        substream_id: established::SubstreamId,
+        timeout: Duration,
+    },
 
     /// Answer an incoming request.
     ///
@@ -1897,23 +1978,6 @@ enum CoordinatorToConnectionInner<TNow> {
     AnswerRequest {
         substream_id: established::SubstreamId,
         response: Result<Vec<u8>, ()>,
-    },
-}
-
-/// Type of inbound protocol. Similar to [`established::InboundTy`], but contains the protocol
-/// index.
-enum InboundTy {
-    Ping,
-    Request {
-        protocol_index: usize,
-        /// Maximum allowed size of the request.
-        /// If `None`, then no data is expected on the substream, not even the length of the
-        /// request.
-        request_max_size: Option<usize>,
-    },
-    Notifications {
-        protocol_index: usize,
-        max_handshake_size: usize,
     },
 }
 
@@ -1974,6 +2038,32 @@ pub enum Event<TConn> {
         error: InboundError,
     },
 
+    /// An inbound substream has requested to use a protocol. Call [`Network::accept_inbound`] or
+    /// [`Network::reject_inbound`] in order to accept or reject this substream.
+    InboundNegotiated {
+        /// Identifier of the connection that has received the substream.
+        id: ConnectionId,
+        /// Identifier of the substream. Needs to be provided back when accepting or rejecting
+        /// the substream.
+        substream_id: SubstreamId,
+        /// Name of the protocol requested by the remote.
+        protocol_name: String,
+    },
+
+    /// An inbound substream that is waiting for a call to [`Network::accept_inbound`] or
+    /// [`Network::reject_inbound`] has been abruptly closed.
+    InboundNegotiatedCancel {
+        /// Identifier of the substream.
+        substream_id: SubstreamId,
+    },
+
+    /// An inbound substream that was previously accepted using [`Network::accept_inbound`] was
+    /// closed by the remote or has generated an error.
+    InboundAcceptedCancel {
+        /// Identifier of the substream.
+        substream_id: SubstreamId,
+    },
+
     /// Outcome of a request started using [`Network::start_request`].
     ///
     /// *All* requests always lead to an outcome, even if the connection has been closed while the
@@ -1988,13 +2078,9 @@ pub enum Event<TConn> {
 
     /// Received a request from a request-response protocol.
     RequestIn {
-        /// Identifier of the connection that has received the request.
-        id: ConnectionId,
         /// Substream on which the request has been received. Must be passed back when providing
         /// the response.
         substream_id: SubstreamId,
-        /// Index of the negotiated protocol within [`Config::request_response_protocols`].
-        protocol_index: usize,
         /// Payload that has been sent by the remote. Its interpretation is beyond the scope of
         /// this module.
         request_payload: Vec<u8>,
@@ -2036,13 +2122,9 @@ pub enum Event<TConn> {
     /// The substream needs to be accepted or refused using [`Network::accept_in_notifications`]
     /// or [`Network::reject_in_notifications`].
     NotificationsInOpen {
-        /// Identifier of the connection that has received the notification substream request.
-        id: ConnectionId,
         /// Newly-generated identifier for the substream on which the request has been received.
         /// Must be passed back when accepting or refusing the substream.
         substream_id: SubstreamId,
-        /// Index of the negotiated protocol within [`Config::notification_protocols`].
-        notifications_protocol_index: usize,
         /// Handshake that has been sent by the remote. Its interpretation is beyond the scope of
         /// this module.
         remote_handshake: Vec<u8>,
@@ -2080,7 +2162,11 @@ pub enum Event<TConn> {
 
     /// An outgoing ping has succeeded. This event is generated automatically over time for each
     /// connection in the collection.
-    PingOutSuccess { id: ConnectionId },
+    PingOutSuccess {
+        id: ConnectionId,
+        /// Time between sending the ping and receiving the pong.
+        ping_time: Duration,
+    },
     /// An outgoing ping has failed. This event is generated automatically over time for each
     /// connection in the collection.
     PingOutFailed { id: ConnectionId },

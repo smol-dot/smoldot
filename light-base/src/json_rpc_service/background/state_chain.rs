@@ -19,15 +19,15 @@
 
 use super::{legacy_state_sub, Background, GetKeysPagedCacheKey, PlatformRef};
 
-use crate::sync_service;
+use crate::{log, sync_service};
 
-use alloc::{format, string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned as _, format, string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, num::NonZeroU32, time::Duration};
 use futures_channel::oneshot;
 use smoldot::{
     header,
     json_rpc::{self, methods, service},
-    network::protocol,
+    network::codec,
 };
 
 impl<TPlat: PlatformRef> Background<TPlat> {
@@ -51,10 +51,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "AccountNonceApi",
+                "AccountNonceApi".to_owned(),
                 1..=1,
-                "AccountNonceApi_account_nonce",
-                iter::once(&account.0),
+                "AccountNonceApi_account_nonce".to_owned(),
+                account.0,
                 4,
                 Duration::from_secs(4),
                 NonZeroU32::new(2).unwrap(),
@@ -70,11 +70,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 request.respond(methods::Response::system_accountNextIndex(u64::from(index)));
             }
             Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Returning error from `system_accountNextIndex`. \
-                    API user might not function properly. Error: {}",
-                    error
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Returning error from `system_accountNextIndex`. \
+                        API user might not function properly. Error: {error}"
+                    )
                 );
                 request.fail(service::ErrorResponse::ServerError(
                     -32000,
@@ -123,17 +126,17 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             rx.await.unwrap()
         };
 
-        // Block bodies and justifications aren't stored locally. Ask the network.
-        let result = if let Some(block_number) = block_number {
+        // Block bodies and headers aren't stored locally. Ask the network.
+        let mut result = if let Some(block_number) = block_number {
             self.sync_service
                 .clone()
                 .block_query(
                     block_number,
                     hash,
-                    protocol::BlocksRequestFields {
+                    codec::BlocksRequestFields {
                         header: true,
                         body: true,
-                        justifications: true,
+                        justifications: false,
                     },
                     3,
                     Duration::from_secs(8),
@@ -145,10 +148,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .clone()
                 .block_query_unknown_number(
                     hash,
-                    protocol::BlocksRequestFields {
+                    codec::BlocksRequestFields {
                         header: true,
                         body: true,
-                        justifications: true,
+                        justifications: false,
                     },
                     3,
                     Duration::from_secs(8),
@@ -157,9 +160,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .await
         };
 
-        // The `block_query` function guarantees that the header and body are present and
-        // are correct.
+        // Check whether the header and body are present and valid.
+        // TODO: try the request again with a different peerin case the response is invalid, instead of returning null
+        if let Ok(block) = &result {
+            if let (Some(header), Some(body)) = (&block.header, &block.body) {
+                if header::hash_from_scale_encoded_header(header) == hash {
+                    if let Ok(decoded) =
+                        header::decode(header, self.sync_service.block_number_bytes())
+                    {
+                        if header::extrinsics_root(body) != *decoded.extrinsics_root {
+                            result = Err(());
+                        }
+                    } else {
+                        // Note that if the header is undecodable it doesn't necessarily mean
+                        // that the header and/or body is bad, but given that we have no way to
+                        // check this we return an error.
+                        result = Err(());
+                    }
+                } else {
+                    result = Err(());
+                }
+            } else {
+                result = Err(());
+            }
+        }
 
+        // Return the response.
         if let Ok(block) = result {
             request.respond(methods::Response::chain_getBlock(methods::Block {
                 extrinsics: block
@@ -173,11 +199,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     self.sync_service.block_number_bytes(),
                 )
                 .unwrap(),
-                justifications: block.justifications.map(|list| {
-                    list.into_iter()
-                        .map(|j| (j.engine_id, j.justification))
-                        .collect()
-                }),
+                // There's no way to verify the correctness of the justifications, consequently
+                // we always return an empty list.
+                justifications: None,
             }))
         } else {
             request.respond_null()
@@ -288,7 +312,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .block_query(
                             block_number,
                             hash,
-                            protocol::BlocksRequestFields {
+                            codec::BlocksRequestFields {
                                 header: true,
                                 body: false,
                                 justifications: false,
@@ -303,7 +327,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         .clone()
                         .block_query_unknown_number(
                             hash,
-                            protocol::BlocksRequestFields {
+                            codec::BlocksRequestFields {
                                 header: true,
                                 body: false,
                                 justifications: false,
@@ -378,10 +402,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "TransactionPaymentApi",
+                "TransactionPaymentApi".to_owned(),
                 1..=2,
-                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
-                json_rpc::payment_info::payment_info_parameters(&extrinsic.0),
+                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME.to_owned(),
+                json_rpc::payment_info::payment_info_parameters(&extrinsic.0).fold(
+                    Vec::new(),
+                    |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    },
+                ),
                 4,
                 Duration::from_secs(4),
                 NonZeroU32::new(2).unwrap(),
@@ -400,11 +430,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 )),
             },
             Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Returning error from `payment_queryInfo`. \
-                    API user might not function properly. Error: {}",
-                    error
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Returning error from `payment_queryInfo`. \
+                        API user might not function properly. Error: {error}"
+                    )
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
@@ -441,8 +474,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call_no_api_check(
                 &block_hash,
-                &function_to_call,
-                iter::once(call_parameters.0),
+                function_to_call.into_owned(),
+                call_parameters.0,
                 3,
                 Duration::from_secs(10),
                 NonZeroU32::new(3).unwrap(),
@@ -507,13 +540,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let outcome = self
+        let mut final_results = Vec::with_capacity(128);
+
+        let mut query = self
             .sync_service
             .clone()
             .storage_query(
                 block_number,
-                &hash,
-                &state_root,
+                hash,
+                state_root,
                 iter::once(sync_service::StorageRequestItem {
                     key: prefix.0,
                     ty: sync_service::StorageRequestItemTy::DescendantsHashes,
@@ -522,25 +557,32 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
             )
+            .advance()
             .await;
 
-        match outcome {
-            Ok(entries) => {
-                let out = entries
-                    .into_iter()
-                    .map(|item| match item {
-                        sync_service::StorageResultItem::DescendantHash { key, .. } => {
-                            methods::HexString(key)
-                        }
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>();
-                request.respond(methods::Response::state_getKeys(out))
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    request.respond(methods::Response::state_getKeys(final_results));
+                    break;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                    query: next,
+                    ..
+                } => {
+                    final_results.push(methods::HexString(key));
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &error.to_string(),
+                    ));
+                    break;
+                }
             }
-            Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
         }
     }
 
@@ -624,13 +666,15 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let outcome = self
+        let mut final_results = Vec::with_capacity(128);
+
+        let mut query = self
             .sync_service
             .clone()
             .storage_query(
                 block_number,
-                &hash,
-                &state_root,
+                hash,
+                state_root,
                 iter::once(sync_service::StorageRequestItem {
                     key: prefix.clone(),
                     ty: sync_service::StorageRequestItemTy::DescendantsHashes,
@@ -639,44 +683,52 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 Duration::from_secs(12),
                 NonZeroU32::new(1).unwrap(),
             )
+            .advance()
             .await;
 
-        match outcome {
-            Ok(entries) => {
-                // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                let keys = entries
-                    .into_iter()
-                    .map(|item| match item {
-                        sync_service::StorageResultItem::DescendantHash { key, .. } => key,
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>();
-
-                let out = keys
-                    .iter()
-                    .cloned()
-                    .filter(|k| start_key.as_ref().map_or(true, |start| *k >= start.0)) // TODO: not sure if start should be in the set or not?
-                    .map(methods::HexString)
-                    .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                    .collect::<Vec<_>>();
-
-                // If the returned response is somehow truncated, it is very likely that the
-                // JSON-RPC client will call the function again with the exact same parameters.
-                // Thus, store the results in a cache.
-                if out.len() != keys.len() {
-                    self.state_get_keys_paged_cache
-                        .lock()
-                        .await
-                        .push(GetKeysPagedCacheKey { hash, prefix }, keys);
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    break;
                 }
-
-                request.respond(methods::Response::state_getKeysPaged(out));
+                sync_service::StorageQueryProgress::Progress {
+                    item: sync_service::StorageResultItem::DescendantHash { key, .. },
+                    query: next,
+                    ..
+                } => {
+                    final_results.push(key);
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &error.to_string(),
+                    ));
+                    return;
+                }
             }
-            Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
         }
+
+        let out = final_results
+            .iter()
+            .cloned()
+            .filter(|k| start_key.as_ref().map_or(true, |start| *k >= start.0)) // TODO: not sure if start should be in the set or not?
+            .map(methods::HexString)
+            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+            .collect::<Vec<_>>();
+
+        // If the returned response is somehow truncated, it is very likely that the
+        // JSON-RPC client will call the function again with the exact same parameters.
+        // Thus, store the results in a cache.
+        if out.len() != final_results.len() {
+            self.state_get_keys_paged_cache
+                .lock()
+                .await
+                .push(GetKeysPagedCacheKey { hash, prefix }, final_results);
+        }
+
+        request.respond(methods::Response::state_getKeysPaged(out));
     }
 
     /// Handles a call to [`methods::MethodCall::state_getMetadata`].
@@ -701,10 +753,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let result = self
             .runtime_call(
                 &block_hash,
-                "Metadata",
+                "Metadata".to_owned(),
                 1..=2,
-                "Metadata_metadata",
-                iter::empty::<Vec<u8>>(),
+                "Metadata_metadata".to_owned(),
+                Vec::new(),
                 3,
                 Duration::from_secs(8),
                 NonZeroU32::new(1).unwrap(),
@@ -723,10 +775,14 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 &format!("Failed to decode metadata from runtime. Error: {error}"),
             )),
             Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Returning error from `state_getMetadata`. API user might not function \
-                    properly. Error: {error}"
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!(
+                        "Returning error from `state_getMetadata`. API user might not function \
+                        properly. Error: {error}"
+                    )
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
@@ -760,12 +816,23 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
+        let (pinned_runtime, _, _) = match self.pinned_runtime_and_block_info(&block_hash).await {
+            Ok(rt) => rt,
+            Err(error) => {
+                request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    &error.to_string(),
+                ));
+                return;
+            }
+        };
+
         match self
-            .runtime_access(&block_hash)
+            .runtime_service
+            .pinned_runtime_specification(pinned_runtime)
             .await
-            .map(|l| l.specification())
         {
-            Ok(Ok(spec)) => {
+            Ok(spec) => {
                 let runtime_spec = spec.decode();
                 request.respond(methods::Response::state_getRuntimeVersion(
                     methods::RuntimeVersion {
@@ -783,10 +850,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     },
                 ))
             }
-            Ok(Err(error)) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
-                -32000,
-                &error.to_string(),
-            )),
             Err(error) => request.fail(json_rpc::parse::ErrorResponse::ServerError(
                 -32000,
                 &error.to_string(),

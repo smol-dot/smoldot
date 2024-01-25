@@ -25,6 +25,8 @@ use super::{
 use alloc::{borrow::ToOwned as _, string::ToString as _, sync::Arc, vec::Vec};
 use core::fmt;
 
+pub use wasmi::CompilationMode;
+
 /// See [`super::VirtualMachinePrototype`].
 pub struct InterpreterPrototype {
     /// Base components that can be used to recreate a prototype later if desired.
@@ -52,6 +54,7 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module_bytes: &[u8],
+        compilation_mode: CompilationMode,
         symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let engine = {
@@ -66,6 +69,7 @@ impl InterpreterPrototype {
             config.wasm_mutable_global(false);
             config.wasm_saturating_float_to_int(false);
             config.wasm_tail_call(false);
+            config.compilation_mode(compilation_mode);
 
             wasmi::Engine::new(&config)
         };
@@ -129,7 +133,7 @@ impl InterpreterPrototype {
                         &mut store,
                         func_type.clone(),
                         move |_caller, parameters, _ret| {
-                            Err(wasmi::core::Trap::from(InterruptedTrap {
+                            Err(wasmi::Error::host(InterruptedTrap {
                                 function_index,
                                 parameters: parameters
                                     .iter()
@@ -172,7 +176,7 @@ impl InterpreterPrototype {
 
         let instance = linker
             .instantiate(&mut store, &base_components.module)
-            .map_err(|err| NewErr::Other(err.to_string()))?
+            .map_err(|err| NewErr::Instantiation(err.to_string()))?
             .ensure_no_start(&mut store)
             .map_err(|_| NewErr::StartFunctionNotSupported)?;
 
@@ -608,6 +612,10 @@ impl Interpreter {
         InterpreterPrototype::from_base_components(self.base_components).unwrap()
     }
 }
+
+// TODO: `wasmi::ResumableInvocation` doesn't implement `Sync`, see <https://github.com/paritytech/wasmi/issues/869>
+// while it's not 100% clear whether or not it should implement `Sync`, none of the `&self`-taking functions of `Interpreter` access this field, and it is thus safe to Sync-ify Interpreter
+unsafe impl Sync for Interpreter {}
 
 impl fmt::Debug for Interpreter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

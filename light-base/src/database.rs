@@ -49,11 +49,14 @@ pub use smoldot::trie::Nibble;
 pub struct DatabaseContent {
     /// Hash of the genesis block, as provided to [`encode_database`].
     pub genesis_block_hash: [u8; 32],
+
     /// Information about the finalized chain.
-    pub chain_information: chain::chain_information::ValidChainInformation,
+    pub chain_information: Option<chain::chain_information::ValidChainInformation>,
+
     /// List of nodes that were known to be part of the peer-to-peer network when the database
     /// was encoded.
     pub known_nodes: Vec<(PeerId, Vec<multiaddr::Multiaddr>)>,
+
     /// Known valid Merkle value and storage value combination for the `:code` key.
     ///
     /// Does **not** necessarily match the finalized block found in
@@ -62,7 +65,7 @@ pub struct DatabaseContent {
 }
 
 /// See [`DatabaseContent::runtime_code_hint`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DatabaseContentRuntimeCodeHint {
     /// Storage value of the `:code` trie node corresponding to
     /// [`DatabaseContentRuntimeCodeHint::code_merkle_value`].
@@ -79,7 +82,7 @@ pub struct DatabaseContentRuntimeCodeHint {
 /// The returned string is guaranteed to not exceed `max_size` bytes. A truncated or invalid
 /// database is intentionally returned if `max_size` is too low to fit all the information.
 pub async fn encode_database<TPlat: platform::PlatformRef>(
-    network_service: &network_service::NetworkService<TPlat>,
+    network_service: &network_service::NetworkServiceChain<TPlat>,
     sync_service: &sync_service::SyncService<TPlat>,
     runtime_service: &runtime_service::RuntimeService<TPlat>,
     genesis_block_hash: &[u8; 32],
@@ -93,25 +96,12 @@ pub async fn encode_database<TPlat: platform::PlatformRef>(
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
         genesis_hash: hex::encode(genesis_block_hash),
-        chain: match sync_service.serialize_chain_information().await {
-            Some(ci) => {
-                let encoded =
-                    finalized_serialize::encode_chain(&ci, sync_service.block_number_bytes());
-                serde_json::from_str(&encoded).unwrap()
-            }
-            None => {
-                // If the chain information can't be obtained, we just return a dummy value that
-                // will intentionally fail to decode if passed back.
-                let dummy_message = "<unknown>";
-                return if dummy_message.len() > max_size {
-                    String::new()
-                } else {
-                    dummy_message.to_owned()
-                };
-            }
-        },
+        chain: sync_service.serialize_chain_information().await.map(|ci| {
+            let encoded = finalized_serialize::encode_chain(&ci, sync_service.block_number_bytes());
+            serde_json::from_str(&encoded).unwrap()
+        }),
         nodes: network_service
-            .discovered_nodes(0) // TODO: hacky chain_index
+            .discovered_nodes()
             .await
             .map(|(peer_id, addrs)| {
                 (
@@ -190,13 +180,17 @@ pub fn decode_database(encoded: &str, block_number_bytes: usize) -> Result<Datab
         return Err(());
     };
 
-    let finalized_serialize::Decoded {
-        chain_information, ..
-    } = finalized_serialize::decode_chain(
-        &serde_json::to_string(&decoded.chain).unwrap(),
-        block_number_bytes,
-    )
-    .map_err(|_| ())?;
+    let chain_information = match &decoded.chain {
+        Some(chain) => Some(
+            finalized_serialize::decode_chain(
+                &serde_json::to_string(chain).unwrap(),
+                block_number_bytes,
+            )
+            .map_err(|_| ())?
+            .chain_information,
+        ),
+        None => None,
+    };
 
     // Nodes that fail to decode are simply ignored. This is especially important for
     // multiaddresses, as the definition of a valid or invalid multiaddress might change across
@@ -246,7 +240,8 @@ struct SerdeDatabase {
     /// Hexadecimal-encoded hash of the genesis block header. Has no `0x` prefix.
     #[serde(rename = "genesisHash")]
     genesis_hash: String,
-    chain: Box<serde_json::value::RawValue>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    chain: Option<Box<serde_json::value::RawValue>>,
     nodes: hashbrown::HashMap<String, Vec<String>, fnv::FnvBuildHasher>,
     #[serde(
         rename = "runtimeCode",

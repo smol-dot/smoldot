@@ -407,7 +407,7 @@ impl ProofBuilder {
                 // and the storage value.
                 either::Left(
                     iter::once(trie_structure_value.node_value)
-                        .chain(trie_structure_value.storage_value_node.into_iter()),
+                        .chain(trie_structure_value.storage_value_node),
                 )
             })
             .collect::<hashbrown::HashSet<_, fnv::FnvBuildHasher>>();
@@ -448,7 +448,7 @@ fn blake2_hash(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::super::{nibble, proof_decode, trie_node, trie_structure};
-    use core::array;
+    use core::{array, iter};
     use rand::distributions::{Distribution as _, Uniform};
 
     #[test]
@@ -608,7 +608,7 @@ mod tests {
             let proof =
                 proof_decode::decode_and_verify_proof(proof_decode::Config { proof }).unwrap();
             assert!(proof
-                .closest_descendant_merkle_value(&trie_root_hash, &[])
+                .closest_descendant_merkle_value(&trie_root_hash, iter::empty())
                 .is_ok());
         }
     }

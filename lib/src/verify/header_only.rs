@@ -21,6 +21,7 @@ use crate::{
     verify::{aura, babe},
 };
 
+use alloc::vec::Vec;
 use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for a block verification.
@@ -114,8 +115,9 @@ pub enum ConfigFinality {
 pub enum Success {
     /// Chain is using the Aura consensus engine.
     Aura {
-        /// True if the list of authorities is modified by this block.
-        authorities_change: bool,
+        /// `Some` if the list of authorities is modified by this block. Contains the new list of
+        /// authorities.
+        authorities_change: Option<Vec<header::AuraAuthority>>,
     },
 
     /// Chain is using the Babe consensus engine.
@@ -160,6 +162,17 @@ pub enum Error {
     BabeVerification(babe::VerifyError),
     /// Block schedules a Grandpa authorities change while another change is still in progress.
     GrandpaChangesOverlap,
+}
+
+impl Error {
+    /// Returns `true` if the error isn't actually about the block being verified but about a
+    /// bad configuration of the chain.
+    pub fn is_invalid_chain_configuration(&self) -> bool {
+        matches!(
+            self,
+            Error::BabeVerification(babe::VerifyError::InvalidChainConfiguration(_))
+        )
+    }
 }
 
 /// Verifies whether a block is valid.

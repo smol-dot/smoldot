@@ -205,8 +205,8 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     nom::combinator::flat_map(tag_decode, |(_, wire_ty)| {
         move |inner_bytes| match wire_ty {
             0 => nom::combinator::map(leb128::nom_leb128_u64, |_| ())(inner_bytes),
-            5 => nom::combinator::map(nom::bytes::complete::take(4u32), |_| ())(inner_bytes),
-            1 => nom::combinator::map(nom::bytes::complete::take(8u32), |_| ())(inner_bytes),
+            5 => nom::combinator::map(nom::bytes::streaming::take(4u32), |_| ())(inner_bytes),
+            1 => nom::combinator::map(nom::bytes::streaming::take(8u32), |_| ())(inner_bytes),
             2 => nom::combinator::map(nom::multi::length_data(leb128::nom_leb128_usize), |_| ())(
                 inner_bytes,
             ),

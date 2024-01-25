@@ -34,16 +34,6 @@
 //!
 //! This avoids potential stack overflows and tricky borrowing-related situations.
 //!
-//! # About wasi
-//!
-//! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
-//! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source
-//! of randomness and time.
-//!
-//! Consequently, the exports found in the `extern` block below are not the only functions that
-//! must be implemented. Several functions required by the Wasi ABI are also used. The best place
-//! to find documentation at the moment is <https://docs.rs/wasi>.
-//!
 //! # About `u32`s and JavaScript
 //!
 //! Many functions below accept as parameter or return a `u32`. In reality, however, the
@@ -59,6 +49,8 @@
 //! must do `>>> 0` on all the `u32` values before interpreting them, in order to be certain than
 //! they are treated as unsigned integers by the JavaScript.
 //!
+
+use alloc::vec::Vec;
 
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
@@ -90,6 +82,32 @@ extern "C" {
     /// Beyond the `panic` function itself, any other FFI function that throws must similarly
     /// behave like `abort` and prevent any further execution.
     pub fn panic(message_ptr: u32, message_len: u32);
+
+    /// Called in response to [`add_chain`] once the initialization of the chain is complete.
+    ///
+    /// If `error_msg_ptr` is equal to 0, then the chain initialization is successful. Otherwise,
+    /// `error_msg_ptr` and `error_msg_len` designate a buffer in the memory of the WebAssembly
+    /// virtual machine where a UTF-8 diagnostic error message can be found.
+    pub fn chain_initialized(chain_id: u32, error_msg_ptr: u32, error_msg_len: u32);
+
+    /// Fills the buffer of the WebAssembly virtual machine with random data, starting at `ptr`
+    /// and for `len` bytes.
+    ///
+    /// This data will be used in order to generate secrets. Do not use a dummy implementation!
+    pub fn random_get(ptr: u32, len: u32);
+
+    /// Returns the system clock in number of microseconds since the UNIX epoch, ignoring leap
+    /// seconds.
+    ///
+    /// This clock is allowed to go backwards.
+    ///
+    /// Must never return a negative number. Implementers should be aware that the system clock
+    /// can be negative, and abort execution if that is the case.
+    pub fn unix_timestamp_us() -> u64;
+
+    /// Returns the number of microseconds since an especified point in time. Must never decrease
+    /// over time.
+    pub fn monotonic_clock_us() -> u64;
 
     /// Copies the entire content of the buffer with the given index to the memory of the
     /// WebAssembly at offset `target_pointer`.
@@ -135,7 +153,7 @@ extern "C" {
     /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
     /// of the duration.
     ///
-    /// When [`timer_finished`] is called, the value of the monotonic clock (in the WASI bindings)
+    /// When [`timer_finished`] is called, the value of the monotonic clock (in the bindings)
     /// must have increased by at least the given number of `milliseconds`.
     ///
     /// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.
@@ -187,20 +205,15 @@ extern "C" {
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
     ///
-    /// At any time, a connection can be in one of the three following states:
+    /// At any time, a connection can be in either the `Open` (the initial state) or the `Reset`
+    /// state.
+    /// When in the `Open` state, the connection can transition to the `Reset` state if the remote
+    /// closes the connection or refuses the connection altogether. When that happens,
+    /// [`connection_reset`] must be called. Once in the `Reset` state, the connection cannot
+    /// transition back to the `Open` state.
     ///
-    /// - `Opening` (initial state)
-    /// - `Open`
-    /// - `Reset`
-    ///
-    /// When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
-    /// if the remote closes the connection or refuses the connection altogether. When that
-    /// happens, [`connection_reset`] must be called. Once in the `Reset` state, the connection
-    /// cannot transition back to another state.
-    ///
-    /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
-    /// remote accepts the connection. When that happens, [`connection_open_single_stream`] or
-    /// [`connection_open_multi_stream`] must be called depending on the type of connection.
+    /// If the connection is a multistream connection, then
+    /// [`connection_multi_stream_set_handshake_info`] must later be called as soon as possible.
     ///
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
     /// connections are assumed to have a single stream open at all time and the encryption and
@@ -245,8 +258,16 @@ extern "C" {
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
     pub fn connection_stream_reset(connection_id: u32, stream_id: u32);
 
-    /// Queues data on the given stream. The data is found in the memory of the WebAssembly
-    /// virtual machine, at the given pointer.
+    /// Queues data on the given stream.
+    ///
+    /// `ptr` is a memory address where `len` consecutive elements of type [`StreamSendIoVector`]
+    /// are found. Each element consists in two little-endian 32 bits unsigned integers: the first
+    /// one is a pointer, and the second one is a length in bytes. The data to write on the stream
+    /// consists in the concatenation of all these buffers.
+    ///
+    /// > **Note**: This interface is similar the famous UNIX function `writev`. `ptr` is the same
+    /// >           as `iov`, and `len` the same as `iovcnt`.
+    /// >           See <https://linux.die.net/man/2/writev>.
     ///
     /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
     /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
@@ -290,6 +311,16 @@ extern "C" {
     ///
     /// Only one task can be currently executing at any time.
     pub fn current_task_exit();
+}
+
+/// See [`stream_send`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(C)]
+pub struct StreamSendIoVector {
+    /// Pointer to a buffer of data to write.
+    pub ptr: u32,
+    /// Length of the buffer of data.
+    pub len: u32,
 }
 
 /// Initializes the client.
@@ -341,11 +372,11 @@ pub extern "C" fn advance_execution() {
 /// If `json_rpc_max_pending_requests` is 0, then the value of `json_rpc_max_subscriptions` is
 /// ignored.
 ///
-/// If an error happens during the creation of the chain, a chain id will be allocated
-/// nonetheless, and must later be de-allocated by calling [`remove_chain`]. This allocated chain,
-/// however, will be in an erroneous state. Use [`chain_is_ok`] to determine whether this function
-/// was successful. If not, use [`chain_error_len`] and [`chain_error_ptr`] to obtain the error
-/// message.
+/// Calling this function allocates a chain id and starts the chain initialization in the
+/// background. Once the initialization is complete, the [`chain_initialized`] function will be
+/// called by smoldot.
+/// It is possible to call [`remove_chain`] while the initialization is still in progress in
+/// order to cancel it.
 #[no_mangle]
 pub extern "C" fn add_chain(
     chain_spec_buffer_index: u32,
@@ -366,40 +397,10 @@ pub extern "C" fn add_chain(
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
 /// subscriptions and cancels all in-progress requests corresponding to that chain.
 ///
-/// If the removed chain was an erroneous chain, calling this function will invalidate the pointer
-/// returned by [`chain_error_ptr`].
+/// Can be called on a chain which hasn't finished initializing yet.
 #[no_mangle]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id);
-}
-
-/// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
-///
-/// If `0` is returned, use [`chain_error_len`] and [`chain_error_ptr`] to obtain an error
-/// message.
-#[no_mangle]
-pub extern "C" fn chain_is_ok(chain_id: u32) -> u32 {
-    super::chain_is_ok(chain_id)
-}
-
-/// Returns the length of the error message stored for this chain.
-///
-/// Must only be called on an erroneous chain. Use [`chain_is_ok`] to determine whether a chain is
-/// in an erroneous state. Returns `0` if the chain isn't erroneous.
-#[no_mangle]
-pub extern "C" fn chain_error_len(chain_id: u32) -> u32 {
-    super::chain_error_len(chain_id)
-}
-
-/// Returns a pointer to the error message stored for this chain. The error message is a UTF-8
-/// string starting at the memory offset returned by this function, and whose length can be
-/// determined by calling [`chain_error_len`].
-///
-/// Must only be called on an erroneous chain. Use [`chain_is_ok`] to determine whether a chain is
-/// in an erroneous state. Returns `0` if the chain isn't erroneous.
-#[no_mangle]
-pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
-    super::chain_error_ptr(chain_id)
 }
 
 /// Emit a JSON-RPC request or notification towards the given chain previously added using
@@ -409,6 +410,9 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
 ///
+/// If the buffer isn't a valid JSON-RPC request, then an error JSON-RPC response with an `id`
+/// equal to `null` is generated, in accordance with the JSON-RPC 2.0 specification.
+///
 /// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
 /// request, then provide this buffer index to the function. The Rust code will call
 /// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
@@ -417,13 +421,12 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// Responses and notifications are notified using [`json_rpc_responses_non_empty`], and can
 /// be read with [`json_rpc_responses_peek`].
 ///
-/// It is forbidden to call this function on an erroneous chain or a chain that was created with
-/// `json_rpc_running` equal to 0.
+/// It is forbidden to call this function on a chain which hasn't finished initializing yet or a
+/// chain that was created with `json_rpc_running` equal to 0.
 ///
 /// This function returns:
 /// - 0 on success.
-/// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
-/// - 2 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
+/// - 1 if the chain has too many pending JSON-RPC requests and refuses to queue another one.
 ///
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_buffer_index: u32, chain_id: u32) -> u32 {
@@ -466,8 +469,8 @@ pub struct JsonRpcResponseInfo {
 /// Calling this function invalidates the pointer previously returned by a call to
 /// [`json_rpc_responses_peek`] with the same `chain_id`.
 ///
-/// It is forbidden to call this function on an erroneous chain or a chain that was created with
-/// `json_rpc_running` equal to 0.
+/// It is forbidden to call this function on a chain that hasn't finished initializing yet, or a
+/// chain that was created with `json_rpc_running` equal to 0.
 #[no_mangle]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id);
@@ -479,22 +482,7 @@ pub extern "C" fn timer_finished() {
     crate::timers::timer_finished();
 }
 
-/// Called by the JavaScript code if the connection switches to the `Open` state. The connection
-/// must be in the `Opening` state.
-///
-/// Must be called at most once per connection object.
-///
-/// See also [`connection_new`].
-///
-/// When in the `Open` state, the connection can receive messages. Use [`stream_message`] in order
-/// to provide to the Rust code the messages received by the connection.
-#[no_mangle]
-pub extern "C" fn connection_open_single_stream(connection_id: u32, initial_writable_bytes: u32) {
-    crate::platform::connection_open_single_stream(connection_id, initial_writable_bytes);
-}
-
-/// Called by the JavaScript code if the connection switches to the `Open` state. The connection
-/// must be in the `Opening` state.
+/// Called by the JavaScript code in order to provide information about a multistream connection.
 ///
 /// Must be called at most once per connection object.
 ///
@@ -506,11 +494,13 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32, initial_writ
 /// de-assigned and buffer destroyed once this function returns.
 ///
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the SHA-256 hash of
-/// the local node's TLS certificate, followed with the SHA-256 hash of the remote node's TLS
-/// certificate.
+/// the local node's TLS certificate.
 #[no_mangle]
-pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_buffer_index: u32) {
-    crate::platform::connection_open_multi_stream(
+pub extern "C" fn connection_multi_stream_set_handshake_info(
+    connection_id: u32,
+    handshake_ty_buffer_index: u32,
+) {
+    crate::platform::connection_multi_stream_set_handshake_info(
         connection_id,
         get_buffer(handshake_ty_buffer_index),
     );
@@ -528,7 +518,7 @@ pub extern "C" fn connection_open_multi_stream(connection_id: u32, handshake_ty_
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
 /// on which the data was received, as was provided to [`connection_stream_opened`].
 ///
-/// See also [`connection_open_single_stream`] and [`connection_open_multi_stream`].
+/// See also [`connection_new`].
 #[no_mangle]
 pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_index: u32) {
     crate::platform::stream_message(connection_id, stream_id, get_buffer(buffer_index));
@@ -538,13 +528,8 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, buffer_inde
 /// stream (and, in the case of a multi-stream connection, the stream itself) must be in the
 /// `Open` state.
 ///
-/// `total_sent - total_reported_writable_bytes` must always be `>= 0`, where `total_sent` is the
-/// total number of bytes sent on the stream using [`stream_send`] and
-/// `total_reported_writable_bytes` is the total number of bytes reported using
-/// [`stream_writable_bytes`].
-/// In other words, this function is meant to notify that data sent using [`stream_send`̀] has
-/// effectively been sent out. It is not possible to exceed the `initial_writable_bytes` provided
-/// when the stream was created.
+/// The total of writable bytes must not go beyond reasonable values (e.g. a few megabytes). It
+/// is not legal to provide a dummy implementation that simply passes an exceedingly large value.
 ///
 /// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
 /// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
@@ -565,18 +550,8 @@ pub extern "C" fn stream_writable_bytes(connection_id: u32, stream_id: u32, num_
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
 #[no_mangle]
-pub extern "C" fn connection_stream_opened(
-    connection_id: u32,
-    stream_id: u32,
-    outbound: u32,
-    initial_writable_bytes: u32,
-) {
-    crate::platform::connection_stream_opened(
-        connection_id,
-        stream_id,
-        outbound,
-        initial_writable_bytes,
-    );
+pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
+    crate::platform::connection_stream_opened(connection_id, stream_id, outbound);
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Reset`
@@ -606,10 +581,15 @@ pub extern "C" fn connection_reset(connection_id: u32, buffer_index: u32) {
 ///
 /// It is illegal to call this function on a single-stream connections.
 ///
-/// See also [`connection_open_multi_stream`].
+/// Assign a so-called "buffer index" (a `u32`) representing the buffer containing the UTF-8
+/// reason for closing, then provide this buffer index to the function. The Rust code will call
+/// [`buffer_size`] and [`buffer_copy`] in order to obtain the content of this buffer. The buffer
+/// index can be de-assigned and buffer destroyed once this function returns.
+///
+/// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32) {
-    crate::platform::stream_reset(connection_id, stream_id);
+pub extern "C" fn stream_reset(connection_id: u32, stream_id: u32, buffer_index: u32) {
+    crate::platform::stream_reset(connection_id, stream_id, get_buffer(buffer_index));
 }
 
 pub(crate) fn get_buffer(buffer_index: u32) -> Vec<u8> {

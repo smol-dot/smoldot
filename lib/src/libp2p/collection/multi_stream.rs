@@ -15,21 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::util::{self, protobuf};
-
 use super::{
     super::{
-        connection::{established, noise},
+        connection::{established, noise, webrtc_framing},
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, InboundTy, NotificationsOutErr, PeerId, ShutdownCause,
-    SubstreamFate, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, PeerId, ShutdownCause, SubstreamFate,
+    SubstreamId,
 };
 
-use alloc::{collections::VecDeque, string::ToString as _, sync::Arc, vec, vec::Vec};
+use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
 use core::{
-    cmp,
     hash::Hash,
     ops::{Add, Sub},
     time::Duration,
@@ -43,16 +40,10 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
     /// Connection is still in its handshake phase.
     Handshake {
         /// Substream that has been opened to perform the handshake, if any.
-        opened_substream: Option<TSubId>,
+        opened_substream: Option<(TSubId, webrtc_framing::WebRtcFraming)>,
 
         /// Noise handshake in progress. Always `Some`, except to be temporarily extracted.
         handshake: Option<noise::HandshakeInProgress>,
-
-        /// All incoming data for the handshake substream is first transferred to this buffer.
-        // TODO: this is very suboptimal code, instead the parsing should be done in a streaming way
-        handshake_read_buffer: Vec<u8>,
-
-        handshake_read_buffer_partial_read: usize,
 
         /// Other substreams, besides [`MultiStreamConnectionTaskInner::Handshake::opened_substream`],
         /// that have been opened. For each substream, contains a boolean indicating whether the
@@ -69,13 +60,12 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// State machine used once the connection has been established. Unused during the
         /// handshake, but created ahead of time. Always `Some`, except to be temporarily
         /// extracted.
-        established:
-            Option<established::MultiStream<TNow, TSubId, either::Either<SubstreamId, usize>>>,
+        established: Option<established::MultiStream<TNow, TSubId, Option<SubstreamId>>>,
     },
 
     /// Connection has been fully established.
     Established {
-        established: established::MultiStream<TNow, TSubId, either::Either<SubstreamId, usize>>,
+        established: established::MultiStream<TNow, TSubId, Option<SubstreamId>>,
 
         /// If `Some`, contains the substream that was used for the handshake. This substream
         /// is meant to be closed as soon as possible.
@@ -89,16 +79,12 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         outbound_substreams_map:
             hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
 
-        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
+        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] or a
+        /// [`ConnectionToCoordinatorInner::NotificationsInClose`] is emitted, an
         /// entry is added to this list. If the coordinator accepts or refuses a substream in this
-        /// list, the acceptance/refusal is dismissed.
-        notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
-
-        /// After a `NotificationsInOpenCancel` is emitted by the connection, an
-        /// entry is added to this list. If the coordinator accepts or refuses a substream in this
-        /// list, the acceptance/refusal is dismissed.
+        /// list, or closes a substream in this list, the acceptance/refusal/closing is dismissed.
         // TODO: this works only because SubstreamIds aren't reused
-        inbound_negotiated_cancel_acknowledgments:
+        notifications_in_close_acknowledgments:
             hashbrown::HashSet<established::SubstreamId, fnv::FnvBuildHasher>,
 
         /// Messages about inbound accept cancellations to send back.
@@ -145,7 +131,7 @@ where
     // a function only called from the parent module.
     pub(super) fn new(
         randomness_seed: [u8; 32],
-        now: TNow,
+        when_connection_start: TNow,
         handshake: noise::HandshakeInProgress,
         max_inbound_substreams: usize,
         substreams_capacity: usize,
@@ -154,10 +140,9 @@ where
     ) -> Self {
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
+                // TODO: the handshake doesn't have a timeout
                 handshake: Some(handshake),
                 opened_substream: None,
-                handshake_read_buffer: Vec::new(),
-                handshake_read_buffer_partial_read: 0,
                 extra_open_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                     0,
                     Default::default(),
@@ -170,7 +155,7 @@ where
                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded
                     ping_timeout: Duration::from_secs(10),    // TODO: hardcoded
-                    first_out_ping: now + Duration::from_secs(2), // TODO: hardcoded
+                    first_out_ping: when_connection_start, // TODO: only start the ping after the Noise handshake has ended
                 })),
             },
         }
@@ -214,8 +199,7 @@ where
                 established,
                 outbound_substreams_map,
                 handshake_finished_message_to_send,
-                notifications_in_open_cancel_acknowledgments,
-                inbound_negotiated_cancel_acknowledgments,
+                notifications_in_close_acknowledgments,
                 inbound_accept_cancel_events,
                 ..
             } => {
@@ -233,7 +217,7 @@ where
                         Some(self),
                         Some(ConnectionToCoordinator {
                             inner: ConnectionToCoordinatorInner::InboundAcceptedCancel {
-                                _id: substream_id,
+                                id: substream_id,
                             },
                         }),
                     );
@@ -256,28 +240,21 @@ where
                         Some(ConnectionToCoordinatorInner::InboundNegotiated { id, protocol_name })
                     }
                     Some(established::Event::InboundNegotiatedCancel { id, .. }) => {
-                        inbound_negotiated_cancel_acknowledgments.insert(id);
+                        notifications_in_close_acknowledgments.insert(id);
                         None
                     }
                     Some(established::Event::InboundAcceptedCancel { id, .. }) => {
-                        Some(ConnectionToCoordinatorInner::InboundAcceptedCancel { _id: id })
+                        Some(ConnectionToCoordinatorInner::InboundAcceptedCancel { id })
                     }
                     Some(established::Event::RequestIn { id, request, .. }) => {
-                        let either::Right(protocol_index) = established[id] else {
-                            panic!()
-                        };
-                        Some(ConnectionToCoordinatorInner::RequestIn {
-                            id,
-                            protocol_index,
-                            request,
-                        })
+                        Some(ConnectionToCoordinatorInner::RequestIn { id, request })
                     }
                     Some(established::Event::Response {
                         response,
                         user_data,
                         ..
                     }) => {
-                        let either::Left(outer_substream_id) = user_data else {
+                        let Some(outer_substream_id) = user_data else {
                             panic!()
                         };
                         outbound_substreams_map.remove(&outer_substream_id).unwrap();
@@ -287,35 +264,29 @@ where
                         })
                     }
                     Some(established::Event::NotificationsInOpen { id, handshake, .. }) => {
-                        let either::Right(protocol_index) = established[id] else {
-                            panic!()
-                        };
-                        Some(ConnectionToCoordinatorInner::NotificationsInOpen {
-                            id,
-                            protocol_index,
-                            handshake,
-                        })
+                        Some(ConnectionToCoordinatorInner::NotificationsInOpen { id, handshake })
                     }
                     Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
-                        notifications_in_open_cancel_acknowledgments.push_back(id);
+                        notifications_in_close_acknowledgments.insert(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInOpenCancel { id })
                     }
                     Some(established::Event::NotificationIn { id, notification }) => {
                         Some(ConnectionToCoordinatorInner::NotificationIn { id, notification })
                     }
                     Some(established::Event::NotificationsInClose { id, outcome, .. }) => {
+                        notifications_in_close_acknowledgments.insert(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInClose { id, outcome })
                     }
                     Some(established::Event::NotificationsOutResult { id, result }) => {
                         let (outer_substream_id, result) = match result {
                             Ok(r) => {
-                                let either::Left(outer_substream_id) = established[id] else {
+                                let Some(outer_substream_id) = established[id] else {
                                     panic!()
                                 };
                                 (outer_substream_id, Ok(r))
                             }
                             Err((err, ud)) => {
-                                let either::Left(outer_substream_id) = ud else {
+                                let Some(outer_substream_id) = ud else {
                                     panic!()
                                 };
                                 outbound_substreams_map.remove(&outer_substream_id);
@@ -329,7 +300,7 @@ where
                         })
                     }
                     Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                        let either::Left(outer_substream_id) = established[id] else {
+                        let Some(outer_substream_id) = established[id] else {
                             panic!()
                         };
                         Some(
@@ -339,7 +310,7 @@ where
                         )
                     }
                     Some(established::Event::NotificationsOutReset { user_data, .. }) => {
-                        let either::Left(outer_substream_id) = user_data else {
+                        let Some(outer_substream_id) = user_data else {
                             panic!()
                         };
                         outbound_substreams_map.remove(&outer_substream_id);
@@ -347,8 +318,8 @@ where
                             id: outer_substream_id,
                         })
                     }
-                    Some(established::Event::PingOutSuccess) => {
-                        Some(ConnectionToCoordinatorInner::PingOutSuccess)
+                    Some(established::Event::PingOutSuccess { ping_time }) => {
+                        Some(ConnectionToCoordinatorInner::PingOutSuccess { ping_time })
                     }
                     Some(established::Event::PingOutFailed) => {
                         Some(ConnectionToCoordinatorInner::PingOutFailed)
@@ -396,7 +367,7 @@ where
     /// Calling this function might generate data to send to the connection. You should call
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] and
     /// [`MultiStreamConnectionTask::substream_read_write`] after this function has returned.
-    pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
+    pub fn inject_coordinator_message(&mut self, now: &TNow, message: CoordinatorToConnection) {
         match (message.inner, &mut self.connection) {
             (
                 CoordinatorToConnectionInner::AcceptInbound {
@@ -405,35 +376,13 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    inbound_negotiated_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     inbound_accept_cancel_events,
                     ..
                 },
             ) => {
-                let (inbound_ty, protocol_index) = match inbound_ty {
-                    InboundTy::Notifications {
-                        protocol_index,
-                        max_handshake_size,
-                    } => (
-                        established::InboundTy::Notifications { max_handshake_size },
-                        protocol_index,
-                    ),
-                    InboundTy::Request {
-                        protocol_index,
-                        request_max_size,
-                    } => (
-                        established::InboundTy::Request { request_max_size },
-                        protocol_index,
-                    ),
-                    InboundTy::Ping => (established::InboundTy::Ping, 0),
-                };
-
-                if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
-                    established.accept_inbound(
-                        substream_id,
-                        inbound_ty,
-                        either::Right(protocol_index),
-                    );
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
+                    established.accept_inbound(substream_id, inbound_ty, None);
                 } else {
                     inbound_accept_cancel_events.push_back(substream_id)
                 }
@@ -442,13 +391,31 @@ where
                 CoordinatorToConnectionInner::RejectInbound { substream_id },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    inbound_negotiated_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if !inbound_negotiated_cancel_acknowledgments.remove(&substream_id) {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.reject_inbound(substream_id);
                 }
+            }
+            (
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { new_max_length },
+                MultiStreamConnectionTaskInner::Handshake {
+                    established: Some(established),
+                    ..
+                }
+                | MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                established.set_max_protocol_name_len(new_max_length);
+            }
+            (
+                CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. },
+                MultiStreamConnectionTaskInner::Handshake {
+                    established: None, ..
+                },
+            ) => {
+                unreachable!()
             }
             (
                 CoordinatorToConnectionInner::StartRequest {
@@ -467,9 +434,9 @@ where
                 let inner_substream_id = established.add_request(
                     protocol_name,
                     request_data,
-                    timeout,
+                    now.clone() + timeout,
                     max_response_size,
-                    either::Left(substream_id),
+                    Some(substream_id),
                 );
                 let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
@@ -479,7 +446,7 @@ where
                     max_handshake_size,
                     protocol_name,
                     handshake,
-                    now,
+                    handshake_timeout,
                     substream_id: outer_substream_id,
                 },
                 MultiStreamConnectionTaskInner::Established {
@@ -492,8 +459,8 @@ where
                     protocol_name,
                     max_handshake_size,
                     handshake,
-                    now + Duration::from_secs(20), // TODO: make configurable
-                    either::Left(outer_substream_id),
+                    now.clone() + handshake_timeout,
+                    Some(outer_substream_id),
                 );
 
                 let _prev_value =
@@ -513,7 +480,7 @@ where
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
                 if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
-                    established.close_notifications_substream(inner_substream_id);
+                    established.close_out_notifications_substream(inner_substream_id);
                 }
             }
             (
@@ -558,16 +525,11 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    notifications_in_open_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if let Some(idx) = notifications_in_open_cancel_acknowledgments
-                    .iter()
-                    .position(|s| *s == substream_id)
-                {
-                    notifications_in_open_cancel_acknowledgments.remove(idx);
-                } else {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.accept_in_notifications_substream(
                         substream_id,
                         handshake,
@@ -579,17 +541,28 @@ where
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    notifications_in_open_cancel_acknowledgments,
+                    notifications_in_close_acknowledgments,
                     ..
                 },
             ) => {
-                if let Some(idx) = notifications_in_open_cancel_acknowledgments
-                    .iter()
-                    .position(|s| *s == substream_id)
-                {
-                    notifications_in_open_cancel_acknowledgments.remove(idx);
-                } else {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
                     established.reject_in_notifications_substream(substream_id);
+                }
+            }
+            (
+                CoordinatorToConnectionInner::CloseInNotifications {
+                    substream_id,
+                    timeout,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_close_acknowledgments,
+                    ..
+                },
+            ) => {
+                if !notifications_in_close_acknowledgments.remove(&substream_id) {
+                    established
+                        .close_in_notifications_substream(substream_id, now.clone() + timeout);
                 }
             }
             (
@@ -607,8 +580,10 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInbound { .. }
                 | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::CloseInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
@@ -620,8 +595,10 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInbound { .. }
                 | CoordinatorToConnectionInner::RejectInbound { .. }
+                | CoordinatorToConnectionInner::SetMaxProtocolNameLen { .. }
                 | CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::CloseInNotifications { .. }
                 | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
@@ -717,14 +694,16 @@ where
                 opened_substream: ref mut opened_substream @ None,
                 ..
             } if outbound => {
-                *opened_substream = Some(id);
+                *opened_substream = Some((id, webrtc_framing::WebRtcFraming::new()));
             }
             MultiStreamConnectionTaskInner::Handshake {
                 opened_substream,
                 extra_open_substreams,
                 ..
             } => {
-                assert!(opened_substream.as_ref().map_or(true, |open| *open != id));
+                assert!(opened_substream
+                    .as_ref()
+                    .map_or(true, |(open, _)| *open != id));
                 // TODO: add a limit to the number allowed?
                 let _was_in = extra_open_substreams.insert(id, outbound);
                 assert!(_was_in.is_none());
@@ -788,6 +767,20 @@ where
         }
     }
 
+    /// Returns `true` if [`MultiStreamConnectionTask::reset`] has been called in the past.
+    pub fn is_reset_called(&self) -> bool {
+        matches!(
+            self.connection,
+            MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                initiator: ShutdownInitiator::Api,
+                ..
+            } | MultiStreamConnectionTaskInner::ShutdownAcked {
+                initiator: ShutdownInitiator::Api,
+                ..
+            }
+        )
+    }
+
     /// Immediately destroys the substream with the given identifier.
     ///
     /// The given identifier is now considered invalid by the state machine.
@@ -811,12 +804,10 @@ where
                 established.reset_substream(substream_id)
             }
             MultiStreamConnectionTaskInner::Handshake {
-                opened_substream: Some(opened_substream),
-                handshake_read_buffer,
+                opened_substream: Some((opened_substream, _)),
                 ..
             } if opened_substream == substream_id => {
                 // TODO: the handshake has failed, kill the connection?
-                handshake_read_buffer.clear();
             }
             MultiStreamConnectionTaskInner::Handshake {
                 extra_open_substreams,
@@ -839,7 +830,7 @@ where
     /// writing side of the substream was still open, then the user should reset that substream.
     ///
     /// In the case of a WebRTC connection, the [`ReadWrite::incoming_buffer`] and
-    /// [`ReadWrite::outgoing_buffer`] must always be `Some`.
+    /// [`ReadWrite::write_bytes_queueable`] must always be `Some`.
     ///
     /// # Panic
     ///
@@ -850,179 +841,51 @@ where
     pub fn substream_read_write(
         &mut self,
         substream_id: &TSubId,
-        read_write: &'_ mut ReadWrite<'_, TNow>,
+        read_write: &'_ mut ReadWrite<TNow>,
     ) -> SubstreamFate {
         // In WebRTC, the reading and writing sides are never closed.
         // Note that the `established::MultiStream` state machine also performs this check, but
         // we do it here again because we're not necessarily in the ̀`established` state.
-        assert!(read_write.incoming_buffer.is_some() && read_write.outgoing_buffer.is_some());
+        assert!(
+            read_write.expected_incoming_bytes.is_some()
+                && read_write.write_bytes_queueable.is_some()
+        );
 
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
                 handshake,
-                opened_substream,
-                handshake_read_buffer,
-                handshake_read_buffer_partial_read,
+                opened_substream: Some((opened_handshake_substream, handshake_webrtc_framing)),
                 established,
                 extra_open_substreams,
-            } if opened_substream
-                .as_ref()
-                .map_or(false, |s| s == substream_id) =>
-            {
+            } if opened_handshake_substream == substream_id => {
                 // TODO: check the handshake timeout
 
-                // The Noise data is not directly the data of the substream. Instead, everything
-                // is wrapped within a Protobuf frame. For this reason, we first transfer the data
-                // to a buffer.
-                //
-                // According to the libp2p WebRTC spec, a frame and its length prefix must not be
-                // larger than 16kiB, meaning that the read buffer never has to exceed this size.
-                // TODO: this is very suboptimal; improve
-                if let Some(incoming_buffer) = read_write.incoming_buffer {
-                    // TODO: reset the substream if `remote_writing_side_closed`
-                    let max_to_transfer =
-                        cmp::min(incoming_buffer.len(), 16384 - handshake_read_buffer.len());
-                    handshake_read_buffer.extend_from_slice(&incoming_buffer[..max_to_transfer]);
-                    debug_assert!(handshake_read_buffer.len() <= 16384);
-                    read_write.advance_read(max_to_transfer);
-                }
-
-                // Try to parse the content of `handshake_read_buffer`.
-                // If the content of `handshake_read_buffer` is an incomplete frame, the flags
-                // will be `None` and the message will be `&[]`.
-                let (protobuf_frame_size, flags, message_within_frame) = {
-                    let mut parser = nom::combinator::complete::<_, _, nom::error::Error<&[u8]>, _>(
-                        nom::combinator::map_parser(
-                            nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                            protobuf::message_decode! {
-                                #[optional] flags = 1 => protobuf::enum_tag_decode,
-                                #[optional] message = 2 => protobuf::bytes_tag_decode,
-                            },
-                        ),
-                    );
-
-                    match nom::Finish::finish(parser(handshake_read_buffer)) {
-                        Ok((rest, framed_message)) => {
-                            let protobuf_frame_size = handshake_read_buffer.len() - rest.len();
-                            (
-                                protobuf_frame_size,
-                                framed_message.flags,
-                                framed_message.message.unwrap_or(&[][..]),
-                            )
-                        }
-                        Err(err) if err.code == nom::error::ErrorKind::Eof => {
-                            // TODO: reset the substream if incoming_buffer is full, as it means that the frame is too large, and remove the debug_assert below
-                            debug_assert!(handshake_read_buffer.len() < 16384);
-                            (0, None, &[][..])
-                        }
-                        Err(_) => {
-                            // Message decoding error.
-                            // TODO: no, handshake failed
+                // Progress the Noise handshake.
+                let handshake_outcome = {
+                    // The Noise data is not directly the data of the substream. Instead,
+                    // everything is wrapped within a Protobuf frame.
+                    let mut with_framing = match handshake_webrtc_framing.read_write(read_write) {
+                        Ok(f) => f,
+                        Err(_err) => {
+                            // TODO: not great for diagnostic to just ignore the error; also, the connection should just reset entirely
                             return SubstreamFate::Reset;
                         }
-                    }
+                    };
+                    handshake.take().unwrap().read_write(&mut with_framing)
                 };
-
-                // We allocate a buffer where the Noise state machine will temporarily write out
-                // its data. The size of the buffer is capped in order to prevent the substream
-                // from generating data that wouldn't fit in a single protobuf frame.
-                let mut intermediary_write_buffer =
-                    vec![
-                        0;
-                        cmp::min(read_write.outgoing_buffer_available(), 16384).saturating_sub(10)
-                    ]; // TODO: this -10 calculation is hacky because we need to account for the variable length prefixes everywhere
-
-                let mut sub_read_write = ReadWrite {
-                    now: read_write.now.clone(),
-                    incoming_buffer: Some(
-                        &message_within_frame[*handshake_read_buffer_partial_read..],
-                    ),
-                    outgoing_buffer: Some((&mut intermediary_write_buffer, &mut [])),
-                    read_bytes: 0,
-                    written_bytes: 0,
-                    wake_up_after: None,
-                };
-
-                let handshake_outcome = handshake.take().unwrap().read_write(&mut sub_read_write);
-                *handshake_read_buffer_partial_read += sub_read_write.read_bytes;
-                if let Some(wake_up_after) = &sub_read_write.wake_up_after {
-                    read_write.wake_up_after(wake_up_after)
-                }
-
-                // Send out the message that the Noise handshake has written
-                // into `intermediary_write_buffer`.
-                if sub_read_write.written_bytes != 0 {
-                    let written_bytes = sub_read_write.written_bytes;
-                    drop(sub_read_write);
-
-                    debug_assert!(written_bytes <= intermediary_write_buffer.len());
-
-                    let protobuf_frame =
-                        protobuf::bytes_tag_encode(2, &intermediary_write_buffer[..written_bytes]);
-                    let protobuf_frame_len = protobuf_frame.clone().fold(0, |mut l, b| {
-                        l += AsRef::<[u8]>::as_ref(&b).len();
-                        l
-                    });
-
-                    // The spec mentions that a frame plus its length prefix shouldn't exceed
-                    // 16kiB. This is normally ensured by forbidding the substream from writing
-                    // more data than would fit in 16kiB.
-                    debug_assert!(protobuf_frame_len <= 16384);
-                    debug_assert!(
-                        util::leb128::encode_usize(protobuf_frame_len).count() + protobuf_frame_len
-                            <= 16384
-                    );
-                    for byte in util::leb128::encode_usize(protobuf_frame_len) {
-                        read_write.write_out(&[byte]);
-                    }
-                    for buffer in protobuf_frame {
-                        read_write.write_out(AsRef::<[u8]>::as_ref(&buffer));
-                    }
-                }
-
-                if protobuf_frame_size != 0
-                    && message_within_frame.len() <= *handshake_read_buffer_partial_read
-                {
-                    // If the substream state machine has processed all the data within
-                    // `read_buffer`, process the flags of the current protobuf frame and
-                    // discard that protobuf frame so that at the next iteration we pick
-                    // up the rest.
-
-                    // Discard the data.
-                    *handshake_read_buffer_partial_read = 0;
-                    *handshake_read_buffer = handshake_read_buffer
-                        .split_at(protobuf_frame_size)
-                        .1
-                        .to_vec();
-
-                    // Process the flags.
-                    // TODO: ignore FIN and treat any other flag as error
-                    if flags.map_or(false, |f| f != 0) {
-                        todo!()
-                    }
-                }
 
                 match handshake_outcome {
                     Ok(noise::NoiseHandshake::InProgress(handshake_update)) => {
                         *handshake = Some(handshake_update);
                         SubstreamFate::Continue
                     }
-                    Err(_err) => todo!("{:?}", _err), // TODO: /!\
+                    Err(_err) => return SubstreamFate::Reset, // TODO: /!\
                     Ok(noise::NoiseHandshake::Success {
                         cipher: _,
                         remote_peer_id,
                     }) => {
                         // The handshake has succeeded and we will transition into "established"
                         // mode.
-                        // However the rest of the body of this function still needs to deal with
-                        // the substream used for the handshake.
-                        // We close the writing side. If the reading side is closed, we indicate
-                        // that the substream is dead. If the reading side is still open, we
-                        // indicate that it's not dead and store it in the state machine while
-                        // waiting for it to be closed by the remote.
-                        read_write.close_write();
-                        let handshake_substream_still_open = read_write.incoming_buffer.is_some();
-
                         let mut established = established.take().unwrap();
                         for (substream_id, outbound) in extra_open_substreams.drain() {
                             established.add_substream(substream_id, outbound);
@@ -1031,28 +894,18 @@ where
                         self.connection = MultiStreamConnectionTaskInner::Established {
                             established,
                             handshake_finished_message_to_send: Some(remote_peer_id),
-                            handshake_substream: if handshake_substream_still_open {
-                                Some(opened_substream.take().unwrap())
-                            } else {
-                                None
-                            },
+                            handshake_substream: None, // TODO: do properly
                             outbound_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
                                 0,
                                 Default::default(),
                             ),
-                            notifications_in_open_cancel_acknowledgments: VecDeque::with_capacity(
-                                4,
-                            ),
-                            inbound_negotiated_cancel_acknowledgments:
+                            notifications_in_close_acknowledgments:
                                 hashbrown::HashSet::with_capacity_and_hasher(2, Default::default()),
                             inbound_accept_cancel_events: VecDeque::with_capacity(2),
                         };
 
-                        if handshake_substream_still_open {
-                            SubstreamFate::Continue
-                        } else {
-                            SubstreamFate::Reset
-                        }
+                        // TODO: hacky
+                        SubstreamFate::Reset
                     }
                 }
             }
@@ -1068,7 +921,7 @@ where
                 // dead and simply wait for the remote to close it.
                 // TODO: kill the connection if the remote sends more data?
                 read_write.close_write();
-                if read_write.incoming_buffer.is_none() {
+                if read_write.expected_incoming_bytes.is_none() {
                     *handshake_substream = None;
                     SubstreamFate::Reset
                 } else {

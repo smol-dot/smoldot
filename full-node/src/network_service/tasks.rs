@@ -16,9 +16,9 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{LogCallback, LogLevel};
-use core::{future::Future, pin};
+use core::future::Future;
 use futures_lite::future;
-use futures_util::{FutureExt as _, StreamExt as _};
+use futures_util::StreamExt as _;
 use smol::{
     channel,
     future::FutureExt as _,
@@ -26,16 +26,15 @@ use smol::{
 };
 use smoldot::{
     libp2p::{
-        async_std_connection::with_buffers,
-        multiaddr::{Multiaddr, ProtocolRef},
-        websocket,
+        multiaddr::{Multiaddr, Protocol},
+        websocket, with_buffers,
     },
-    network::service,
+    network::service::{self, CoordinatorToConnection},
 };
 use std::{
     io,
     net::{IpAddr, SocketAddr},
-    pin::Pin,
+    pin,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -43,238 +42,164 @@ use std::{
 pub(super) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 
-/// Asynchronous task managing a specific connection, including the dialing process.
-pub(super) async fn opening_connection_task(
-    start_connect: service::StartConnect<Instant>,
-    log_callback: Arc<dyn LogCallback + Send + Sync>,
-) -> Result<impl AsyncReadWrite + Unpin, ()> {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-        Ok(socket) => socket,
-        Err(_) => {
-            log_callback.log(
-                LogLevel::Debug,
-                format!("not-tcp; address={}", start_connect.multiaddr),
-            );
-            return Err(());
-        }
-    };
-
-    // Finishing ongoing connection process.
-    let socket = async move { socket.await.map_err(|_| ()) }
-        .or(async move {
-            smol::Timer::at(start_connect.timeout).await;
-            Err(())
-        })
-        .await?;
-
-    Ok(socket)
-}
-
 /// Asynchronous task managing a specific connection.
-pub(super) async fn established_connection_task(
+pub(super) async fn connection_task(
     log_callback: Arc<dyn LogCallback + Send + Sync>,
-    socket: impl AsyncReadWrite + Unpin,
+    address: String,
+    socket: impl Future<Output = Result<impl AsyncReadWrite, io::Error>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
-    coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection<Instant>>,
-    connection_to_coordinator: channel::Sender<super::ToBackground>,
+    coordinator_to_connection: channel::Receiver<service::CoordinatorToConnection>,
+    connection_to_coordinator: channel::Sender<(
+        service::ConnectionId,
+        Option<service::ConnectionToCoordinator>,
+    )>,
 ) {
-    // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
-    // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
-    // reading/writing the socket.
-    //
-    // Contains `None` if an I/O error has happened on the socket in the past.
-    let mut socket_container = Some(with_buffers::WithBuffers::new(socket));
+    // The socket future is wrapped around an object containing a read buffer and a write buffer
+    // and allowing easier usage.
+    let mut socket = pin::pin!(with_buffers::WithBuffers::new(socket));
 
-    // We need to use `peek()` on this future later down this function.
-    let mut coordinator_to_connection = coordinator_to_connection.peekable();
+    // Future that sends a message to the coordinator. Only one message is sent to the coordinator
+    // at a time. `None` if no message is being sent.
+    let mut message_sending = pin::pin!(None);
+
+    // Channel receivers need to be pinned.
+    let mut coordinator_to_connection = pin::pin!(coordinator_to_connection);
 
     loop {
-        // Inject in the connection task the messages coming from the coordinator, if any.
-        while let Some(message) = coordinator_to_connection.next().now_or_never() {
-            match message {
-                Some(message) => connection_task.inject_coordinator_message(message),
-                None => {
-                    // The coordinator is dead. Shut down the task.
-                    return;
-                }
-            }
-        }
+        // Because only one message should be sent to the coordinator at a time, and that
+        // processing the socket might generate a message, we only process the socket if no
+        // message is currently being sent.
+        if message_sending.is_none() {
+            if let Ok(mut socket_read_write) = socket.as_mut().read_write_access(Instant::now()) {
+                let read_bytes_before = socket_read_write.read_bytes;
+                let written_bytes_before = socket_read_write.write_bytes_queued;
+                let write_closed = socket_read_write.write_bytes_queueable.is_none();
 
-        let wake_up_after = if let Some(socket) = socket_container.as_mut() {
-            let with_buffers::Buffers {
-                read_buffer,
-                write_buffer,
-            } = match socket.buffers() {
-                Ok(b) => b,
-                Err(error) => {
+                connection_task.read_write(&mut *socket_read_write);
+
+                if socket_read_write.read_bytes != read_bytes_before
+                    || socket_read_write.write_bytes_queued != written_bytes_before
+                    || (!write_closed && socket_read_write.write_bytes_queueable.is_none())
+                {
                     log_callback.log(
-                        LogLevel::Debug,
-                        format!("connection-error; error={}", error),
+                        LogLevel::Trace,
+                        format!(
+                            "connection-activity; address={address}; read={}; written={}; wake_up_after={:?}; write_close={:?}",
+                            socket_read_write.read_bytes - read_bytes_before,
+                            socket_read_write.write_bytes_queued - written_bytes_before,
+                            socket_read_write.wake_up_after.map(|w| w
+                                .checked_duration_since(socket_read_write.now)
+                                .unwrap_or(Duration::new(0, 0))),
+                            socket_read_write.write_bytes_queueable.is_none(),
+                        ),
+                    );
+                }
+            } else {
+                // Error on the socket.
+                if !connection_task.is_reset_called() {
+                    log_callback.log(
+                        LogLevel::Trace,
+                        format!("connection-activity; address={}; reset", address),
                     );
                     connection_task.reset();
-                    socket_container = None;
-                    continue;
                 }
-            };
-
-            let outgoing_buffer_was_closed = write_buffer.is_none();
-            let now = Instant::now();
-
-            let mut read_write = service::ReadWrite {
-                now,
-                incoming_buffer: read_buffer.map(|b| b.0),
-                outgoing_buffer: write_buffer,
-                read_bytes: 0,
-                written_bytes: 0,
-                wake_up_after: None,
-            };
-
-            connection_task.read_write(&mut read_write);
-
-            if read_write.read_bytes != 0
-                || read_write.written_bytes != 0
-                || read_write.outgoing_buffer.is_none()
-            {
-                log_callback.log(
-                    LogLevel::Trace,
-                    format!(
-                        "connection-activity; read={}; written={}; wake_up={:?}; write_close={:?}",
-                        read_write.read_bytes,
-                        read_write.written_bytes,
-                        read_write
-                            .wake_up_after
-                            .map(|w| w.checked_duration_since(now).unwrap_or(Duration::new(0, 0))),
-                        read_write.outgoing_buffer.is_none(),
-                    ),
-                );
             }
 
-            // We need to destroy `read_write` in order to un-borrow `socket`.
-            let read_bytes = read_write.read_bytes;
-            let written_bytes = read_write.written_bytes;
-            let wake_up_after = read_write.wake_up_after.take();
-            let outgoing_buffer_now_closed = read_write.outgoing_buffer.is_none();
+            // Try pull message to send to the coordinator.
 
-            socket.advance(read_bytes, written_bytes);
-
-            if outgoing_buffer_now_closed && !outgoing_buffer_was_closed {
-                socket.close();
-            }
-
-            if read_bytes != 0 || written_bytes != 0 {
-                continue;
-            }
-
-            wake_up_after
-        } else {
-            None
-        };
-
-        // Try pull message to send to the coordinator.
-
-        // Calling this method takes ownership of the task and returns that task if it has
-        // more work to do. If `None` is returned, then the entire task is gone and the
-        // connection must be abruptly closed, which is what happens when we return from
-        // this function.
-        let (mut task_update, message) = connection_task.pull_message_to_coordinator();
-
-        if message.is_some() || task_update.is_none() {
-            // Sending this message might take a long time (in case the coordinator is busy),
-            // but this is intentional and serves as a back-pressure mechanism.
-            // However, it is important to continue processing the messages coming from the
-            // coordinator, otherwise this could result in a deadlock.
-
-            // We do this by waiting for `connection_to_coordinator` to be ready to accept
-            // an element. Due to the way channels work, once a channel is ready it will
-            // always remain ready until we push an element. While waiting, we process
-            // incoming messages.
-            let result = {
-                let mut send_future =
-                    connection_to_coordinator.send(super::ToBackground::FromConnectionTask {
-                        connection_id,
-                        opaque_message: message,
-                        connection_now_dead: task_update.is_none(),
-                    });
-
-                loop {
-                    match future::or(async { either::Left((&mut send_future).await) }, async {
-                        either::Right(coordinator_to_connection.next().await)
-                    })
-                    .await
-                    {
-                        either::Left(result) => break result,
-                        either::Right(message) => {
-                            if let Some(message) = message {
-                                if let Some(task_update) = &mut task_update {
-                                    task_update.inject_coordinator_message(message);
-                                }
-                            } else {
-                                return;
-                            }
-                        }
-                    }
+            // Calling this method takes ownership of the task and returns that task if it has
+            // more work to do. If `None` is returned, then the entire task is gone and the
+            // connection must be abruptly closed, which is what happens when we return from
+            // this function.
+            let (task_update, opaque_message) = connection_task.pull_message_to_coordinator();
+            if let Some(task_update) = task_update {
+                connection_task = task_update;
+                debug_assert!(message_sending.is_none());
+                if let Some(opaque_message) = opaque_message {
+                    message_sending.set(Some(
+                        connection_to_coordinator.send((connection_id, Some(opaque_message))),
+                    ));
                 }
-            };
-
-            if result.is_err() {
+            } else {
+                let _ = connection_to_coordinator
+                    .send((connection_id, opaque_message))
+                    .await;
                 return;
             }
         }
 
-        if let Some(task_update) = task_update {
-            connection_task = task_update;
-        } else {
-            return;
+        // Now wait for something interesting to happen before looping again.
+
+        enum WakeUpReason {
+            CoordinatorMessage(CoordinatorToConnection),
+            CoordinatorDead,
+            SocketEvent,
+            MessageSent,
         }
 
-        // Starting from here, we block the current task until more processing needs to happen.
+        let wake_up_reason: WakeUpReason = {
+            let coordinator_message = async {
+                match coordinator_to_connection.next().await {
+                    Some(msg) => WakeUpReason::CoordinatorMessage(msg),
+                    None => WakeUpReason::CoordinatorDead,
+                }
+            };
 
-        // Future ready when the timeout indicated by the connection state machine is reached.
-        let poll_after = {
-            let now = Instant::now();
-            if wake_up_after
-                .as_ref()
-                .map_or(false, |wake_up_after| *wake_up_after <= now)
-            {
-                // "Wake up" immediately.
-                continue;
-            } else {
+            let socket_event = {
+                // The future returned by `wait_read_write_again` yields when `read_write_access`
+                // must be called. Because we only call `read_write_access` when `message_sending`
+                // is `None`, we also call `wait_read_write_again` only when `message_sending` is
+                // `None`.
+                let fut = if message_sending.is_none() {
+                    Some(socket.as_mut().wait_read_write_again(|when| async move {
+                        smol::Timer::at(when).await;
+                    }))
+                } else {
+                    None
+                };
                 async {
-                    if let Some(wake_up_after) = wake_up_after {
-                        smol::Timer::at(wake_up_after).await;
+                    if let Some(fut) = fut {
+                        fut.await;
+                        WakeUpReason::SocketEvent
                     } else {
                         future::pending().await
                     }
                 }
-            }
-        };
-        // Future that is woken up when new data is ready on the socket.
-        let connection_ready = async {
-            if let Some(socket) = socket_container.as_mut() {
-                Pin::new(socket).process().await;
-            } else {
-                future::pending().await
-            }
-        };
-        // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = async {
-            pin::Pin::new(&mut coordinator_to_connection).peek().await;
+            };
+
+            let message_sent = async {
+                let result =
+                    if let Some(message_sending) = message_sending.as_mut().as_mut().as_pin_mut() {
+                        message_sending.await
+                    } else {
+                        future::pending().await
+                    };
+                message_sending.set(None);
+                if result.is_ok() {
+                    WakeUpReason::MessageSent
+                } else {
+                    WakeUpReason::CoordinatorDead
+                }
+            };
+
+            coordinator_message.or(socket_event).or(message_sent).await
         };
 
-        // Combine all futures into one.
-        poll_after
-            .or(connection_ready)
-            .or(message_from_coordinator)
-            .await;
+        match wake_up_reason {
+            WakeUpReason::CoordinatorMessage(message) => {
+                connection_task.inject_coordinator_message(&Instant::now(), message);
+            }
+            WakeUpReason::CoordinatorDead => return,
+            WakeUpReason::SocketEvent => {}
+            WakeUpReason::MessageSent => {}
+        }
     }
 }
 
 /// Builds a future that connects to the given multiaddress. Returns an error if the multiaddress
 /// protocols aren't supported.
-fn multiaddr_to_socket(
+pub(super) fn multiaddr_to_socket(
     addr: &Multiaddr,
 ) -> Result<impl Future<Output = Result<impl AsyncReadWrite, io::Error>>, ()> {
     let mut iter = addr.iter().fuse();
@@ -290,33 +215,33 @@ fn multiaddr_to_socket(
 
     // Ensure ahead of time that the multiaddress is supported.
     let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
+        (Protocol::Ip4(ip), Protocol::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
             None,
         ),
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
+        (Protocol::Ip6(ip), Protocol::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
             None,
         ),
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+        (Protocol::Ip4(ip), Protocol::Tcp(port), Some(Protocol::Ws)) => {
             let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
             (either::Left(addr), Some(addr.to_string()))
         }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+        (Protocol::Ip6(ip), Protocol::Tcp(port), Some(Protocol::Ws)) => {
             let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
             (either::Left(addr), Some(addr.to_string()))
         }
 
         // TODO: we don't care about the differences between Dns, Dns4, and Dns6
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
             None,
         ) => (either::Right((addr.to_string(), *port)), None),
         (
-            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
-            ProtocolRef::Tcp(port),
-            Some(ProtocolRef::Ws),
+            Protocol::Dns(addr) | Protocol::Dns4(addr) | Protocol::Dns6(addr),
+            Protocol::Tcp(port),
+            Some(Protocol::Ws),
         ) => (
             either::Right((addr.to_string(), *port)),
             Some(format!("{}:{}", addr, *port)),

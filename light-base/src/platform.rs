@@ -15,21 +15,43 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::{borrow::Cow, string::String};
-use core::{future::Future, ops, str, time::Duration};
+use alloc::borrow::Cow;
+use core::{fmt, future::Future, ops, panic::UnwindSafe, pin::Pin, str, time::Duration};
 use futures_util::future;
 
+pub use smoldot::libp2p::read_write;
+
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use smoldot::libp2p::with_buffers;
+
+// TODO: this module should probably not be public?
 pub mod address_parse;
 pub mod default;
+
+mod with_prefix;
+
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use default::DefaultPlatform;
+
+pub use with_prefix::WithPrefix;
 
 /// Access to a platform's capabilities.
 ///
 /// Implementations of this trait are expected to be cheaply-clonable "handles". All clones of the
 /// same platform share the same objects. For instance, it is legal to create clone a platform,
 /// then create a connection on one clone, then access this connection on the other clone.
-// TODO: remove `Unpin` trait bounds
-pub trait PlatformRef: Clone + Send + Sync + 'static {
-    type Delay: Future<Output = ()> + Unpin + Send + 'static;
+pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
+    /// `Future` that resolves once a certain amount of time has passed or a certain point in time
+    /// is reached. See [`PlatformRef::sleep`] and [`PlatformRef::sleep_until`].
+    type Delay: Future<Output = ()> + Send + 'static;
+
+    /// A certain point in time. Typically `std::time::Instant`, but one can also
+    /// use `core::time::Duration`.
+    ///
+    /// The implementations of the `Add` and `Sub` traits must panic in case of overflow or
+    /// underflow, similar to the ones of `std::time::Instant` and `core::time::Duration`.
     type Instant: Clone
         + ops::Add<Duration, Output = Self::Instant>
         + ops::Sub<Self::Instant, Output = Duration>
@@ -47,6 +69,7 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// the `MultiStream` and all its associated substream objects ([`PlatformRef::Stream`]) have
     /// been dropped.
     type MultiStream: Send + Sync + 'static;
+
     /// Opaque object representing either a single-stream connection or a substream in a
     /// multi-stream connection.
     ///
@@ -54,17 +77,29 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// should be abruptly dropped (i.e. RST) as well, unless its reading and writing sides
     /// have been gracefully closed in the past.
     type Stream: Send + 'static;
-    type StreamConnectFuture: Future<Output = Result<Self::Stream, ConnectError>>
-        + Unpin
+
+    /// Object that dereferences to [`read_write::ReadWrite`] and gives access to the stream's
+    /// buffers. See the [`read_write`] module for more information.
+    /// See also [`PlatformRef::read_write_access`].
+    type ReadWriteAccess<'a>: ops::DerefMut<Target = read_write::ReadWrite<Self::Instant>> + 'a;
+
+    /// Reference to an error that happened on a stream.
+    ///
+    /// Potentially returned by [`PlatformRef::read_write_access`].
+    ///
+    /// Typically `&'a std::io::Error`.
+    type StreamErrorRef<'a>: fmt::Display + fmt::Debug;
+
+    /// `Future` returned by [`PlatformRef::connect_stream`].
+    type StreamConnectFuture: Future<Output = Self::Stream> + Send + 'static;
+    /// `Future` returned by [`PlatformRef::connect_multistream`].
+    type MultiStreamConnectFuture: Future<Output = MultiStreamWebRtcConnection<Self::MultiStream>>
         + Send
         + 'static;
-    type MultiStreamConnectFuture: Future<Output = Result<MultiStreamWebRtcConnection<Self::MultiStream>, ConnectError>>
-        + Unpin
-        + Send
-        + 'static;
-    type StreamUpdateFuture<'a>: Future<Output = ()> + Unpin + Send + 'a;
+    /// `Future` returned by [`PlatformRef::wait_read_write_again`].
+    type StreamUpdateFuture<'a>: Future<Output = ()> + Send + 'a;
+    /// `Future` returned by [`PlatformRef::next_substream`].
     type NextSubstreamFuture<'a>: Future<Output = Option<(Self::Stream, SubstreamDirection)>>
-        + Unpin
         + Send
         + 'a;
 
@@ -100,10 +135,42 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// The first parameter is the name of the task, which can be useful for debugging purposes.
     ///
     /// The `Future` must be run until it yields a value.
+    ///
+    /// Implementers should be aware of the fact that polling the `Future` might panic (never
+    /// intentionally, but in case of a bug). Many tasks can be restarted if they panic, and
+    /// implementers are encouraged to absorb the panics that happen when polling. If a panic
+    /// happens, the `Future` that has panicked must never be polled again.
+    ///
+    /// > **Note**: Ideally, the `task` parameter would require the `UnwindSafe` trait.
+    /// >           Unfortunately, at the time of writing of this comment, it is extremely
+    /// >           difficult if not impossible to implement this trait on `Future`s. It is for
+    /// >           the same reason that the `std::thread::spawn` function of the standard library
+    /// >           doesn't require its parameter to implement `UnwindSafe`.
     fn spawn_task(
         &self,
         task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
+    );
+
+    /// Emit a log line.
+    ///
+    /// The `log_level` and `log_target` can be used in order to filter desired log lines.
+    ///
+    /// The `message` is typically a short constant message indicating the nature of the log line.
+    /// The `key_values` are a list of keys and values that are the parameters of the log message.
+    ///
+    /// For example, `message` can be `"block-announce-received"` and `key_values` can contain
+    /// the entries `("block_hash", ...)` and `("sender", ...)`.
+    ///
+    /// At the time of writing of this comment, `message` can also be a message written in plain
+    /// english and destined to the user of the library. This might disappear in the future.
+    // TODO: act on this last sentence ^
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     );
 
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
@@ -122,7 +189,15 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     /// >           disabling certain connection types after start-up is not supported.
     fn supports_connection_type(&self, connection_type: ConnectionType) -> bool;
 
-    /// Starts a connection attempt to the given multiaddress.
+    /// Starts a connection attempt to the given address.
+    ///
+    /// This function is only ever called with an `address` of a type for which
+    /// [`PlatformRef::supports_connection_type`] returned `true` in the past.
+    ///
+    /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
+    /// must **not** wait for the connection to be established.
+    /// In most scenarios, the `Future` returned by this function should immediately produce
+    /// an output.
     ///
     /// # Panic
     ///
@@ -131,7 +206,22 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
     ///
     fn connect_stream(&self, address: Address) -> Self::StreamConnectFuture;
 
-    /// Starts a connection attempt to the given multiaddress.
+    /// Starts a connection attempt to the given address.
+    ///
+    /// This function is only ever called with an `address` of a type for which
+    /// [`PlatformRef::supports_connection_type`] returned `true` in the past.
+    ///
+    /// > **Note**: A so-called "multistream connection" is a connection made of multiple
+    /// >           substreams, and for which the opening and closing or substreams is handled by
+    /// >           the environment rather than by smoldot itself. Most platforms do not need to
+    /// >           support multistream connections. This function is in practice used in order
+    /// >           to support WebRTC connections when embedding smoldot-light within a web
+    /// >           browser.
+    ///
+    /// This function returns a `Future`. This `Future` **must** return as soon as possible, and
+    /// must **not** wait for the connection to be established.
+    /// In most scenarios, the `Future` returned by this function should immediately produce
+    /// an output.
     ///
     /// # Panic
     ///
@@ -166,82 +256,48 @@ pub trait PlatformRef: Clone + Send + Sync + 'static {
         connection: &'a mut Self::MultiStream,
     ) -> Self::NextSubstreamFuture<'a>;
 
-    /// Synchronizes the stream with the "actual" stream.
+    /// Returns an object that implements `DerefMut<Target = ReadWrite>`. The
+    /// [`read_write::ReadWrite`] object allows the API user to read data from the stream and write
+    /// data to the stream.
     ///
-    /// Returns a future that becomes ready when "something" in the state has changed. In other
-    /// words, when data has been added to the read buffer of the given stream , or the remote
-    /// closes their sending side, or the number of writable bytes (see
-    /// [`PlatformRef::writable_bytes`]) increases.
+    /// If the stream has been reset in the past, this function should return a reference to
+    /// the error that happened.
     ///
-    /// This function might not add data to the read buffer nor process the remote closing its
-    /// writing side, unless the read buffer has been emptied beforehand using
-    /// [`PlatformRef::advance_read_cursor`].
+    /// See the documentation of [`read_write`] for more information
     ///
-    /// In the specific situation where the reading side is closed and the writing side has been
-    /// closed using [`PlatformRef::close_send`], the API user must call this function before
-    /// dropping the `Stream` object. This makes it possible for the implementation to finish
-    /// cleaning up everything gracefully before the object is dropped.
-    ///
-    /// This function should also flush any outgoing data if necessary.
-    ///
-    /// In order to avoid race conditions, the state of the read buffer and the writable bytes
-    /// shouldn't be updated unless this function is called.
-    /// In other words, calling this function switches the stream from a state to another, and
-    /// this state transition should only happen when this function is called and not otherwise.
-    fn update_stream<'a>(&self, stream: &'a mut Self::Stream) -> Self::StreamUpdateFuture<'a>;
+    /// > **Note**: The `with_buffers` module provides a helper to more easily implement this
+    /// >           function.
+    fn read_write_access<'a>(
+        &self,
+        stream: Pin<&'a mut Self::Stream>,
+    ) -> Result<Self::ReadWriteAccess<'a>, Self::StreamErrorRef<'a>>;
 
-    /// Gives access to the content of the read buffer of the given stream.
-    fn read_buffer<'a>(&self, stream: &'a mut Self::Stream) -> ReadBuffer<'a>;
+    /// Returns a future that becomes ready when [`PlatformRef::read_write_access`] should be
+    /// called again on this stream.
+    ///
+    /// Must always returned immediately if [`PlatformRef::read_write_access`] has never been
+    /// called on this stream.
+    ///
+    /// See the documentation of [`read_write`] for more information.
+    ///
+    /// > **Note**: The `with_buffers` module provides a helper to more easily implement this
+    /// >           function.
+    fn wait_read_write_again<'a>(
+        &self,
+        stream: Pin<&'a mut Self::Stream>,
+    ) -> Self::StreamUpdateFuture<'a>;
+}
 
-    /// Discards the first `bytes` bytes of the read buffer of this stream.
-    ///
-    /// This makes it possible for more data to be received when [`PlatformRef::update_stream`] is
-    /// called.
-    ///
-    /// # Panic
-    ///
-    /// Panics if there aren't enough bytes to discard in the buffer.
-    ///
-    fn advance_read_cursor(&self, stream: &mut Self::Stream, bytes: usize);
-
-    /// Returns the maximum size of the buffer that can be passed to [`PlatformRef::send`].
-    ///
-    /// Must return 0 if [`PlatformRef::close_send`] has previously been called, or if the stream
-    /// has been reset by the remote.
-    ///
-    /// If [`PlatformRef::send`] is called, the number of writable bytes must decrease by exactly
-    /// the size of the buffer that was provided.
-    /// The number of writable bytes should never change unless [`PlatformRef::update_stream`] is
-    /// called.
-    fn writable_bytes(&self, stream: &mut Self::Stream) -> usize;
-
-    /// Queues the given bytes to be sent out on the given stream.
-    ///
-    /// > **Note**: In the case of [`MultiStreamAddress::WebRtc`], be aware that there
-    /// >           exists a limit to the amount of data to send in a single packet. The `data`
-    /// >           parameter is guaranteed to fit within that limit. Due to the existence of this
-    /// >           limit, the implementation of this function shouldn't attempt to save function
-    /// >           calls by performing internal buffering and batching multiple calls into one.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `data.is_empty()`.
-    /// Panics if `data.len()` is superior to the value returned by [`PlatformRef::writable_bytes`].
-    /// Panics if [`PlatformRef::close_send`] has been called before on this stream.
-    ///
-    fn send(&self, stream: &mut Self::Stream, data: &[u8]);
-
-    /// Closes the sending side of the given stream.
-    ///
-    /// > **Note**: In situations where this isn't possible, such as with the WebSocket protocol,
-    /// >           this is a no-op.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`PlatformRef::close_send`] has already been called on this stream.
-    ///
-    // TODO: consider not calling this function at all for WebSocket
-    fn close_send(&self, stream: &mut Self::Stream);
+/// Log level of a log entry.
+///
+/// See [`PlatformRef::log`].
+#[derive(Debug)]
+pub enum LogLevel {
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
 }
 
 /// Established multistream connection information. See [`PlatformRef::connect_multistream`].
@@ -251,9 +307,6 @@ pub struct MultiStreamWebRtcConnection<TConnection> {
     pub connection: TConnection,
     /// SHA256 hash of the TLS certificate used by the local node at the DTLS layer.
     pub local_tls_certificate_sha256: [u8; 32],
-    /// SHA256 hash of the TLS certificate used by the remote node at the DTLS layer.
-    // TODO: consider caching the information that was passed in the address instead of passing it back
-    pub remote_tls_certificate_sha256: [u8; 32],
 }
 
 /// Direction in which a substream has been opened. See [`PlatformRef::next_substream`].
@@ -336,7 +389,7 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
     }
 }
 
-impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
+impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
     fn from(address: &'a MultiStreamAddress) -> ConnectionType {
         match address {
             MultiStreamAddress::WebRtc {
@@ -405,7 +458,7 @@ pub enum Address<'a> {
 /// Address passed to [`PlatformRef::connect_multistream`].
 // TODO: we don't differentiate between Dns4 and Dns6
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum MultiStreamAddress {
+pub enum MultiStreamAddress<'a> {
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
@@ -418,12 +471,14 @@ pub enum MultiStreamAddress {
         /// UDP port to connect to.
         port: u16,
         /// SHA-256 hash of the target's WebRTC certificate.
-        // TODO: consider providing a reference here; right now there's some issues with multiaddr preventing that
-        remote_certificate_sha256: [u8; 32],
+        remote_certificate_sha256: &'a [u8; 32],
     },
 }
 
 /// Either an IPv4 or IPv6 address.
+///
+/// > **Note**: This enum is the same as `std::net::IpAddr`, but is copy-pasted here in order to
+/// >           be no-std-compatible.
 // TODO: replace this with `core::net::IpAddr` once it's stable: https://github.com/rust-lang/rust/issues/108443
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum IpAddr {
@@ -431,25 +486,75 @@ pub enum IpAddr {
     V6([u8; 16]),
 }
 
-/// Error potentially returned by [`PlatformRef::connect_stream`] or
-/// [`PlatformRef::connect_multistream`].
-pub struct ConnectError {
-    /// Human-readable error message.
-    pub message: String,
+// TODO: find a way to keep this private somehow?
+#[macro_export]
+macro_rules! log_inner {
+    () => {
+        core::iter::empty()
+    };
+    (,) => {
+        core::iter::empty()
+    };
+    ($key:ident = $value:expr) => {
+        $crate::log_inner!($key = $value,)
+    };
+    ($key:ident = ?$value:expr) => {
+        $crate::log_inner!($key = ?$value,)
+    };
+    ($key:ident) => {
+        $crate::log_inner!($key = $key,)
+    };
+    (?$key:ident) => {
+        $crate::log_inner!($key = ?$key,)
+    };
+    ($key:ident = $value:expr, $($rest:tt)*) => {
+        core::iter::once((stringify!($key), &$value as &dyn core::fmt::Display)).chain($crate::log_inner!($($rest)*))
+    };
+    ($key:ident = ?$value:expr, $($rest:tt)*) => {
+        core::iter::once((stringify!($key), &format_args!("{:?}", $value) as &dyn core::fmt::Display)).chain($crate::log_inner!($($rest)*))
+    };
+    ($key:ident, $($rest:tt)*) => {
+        $crate::log_inner!($key = $key, $($rest)*)
+    };
+    (?$key:ident, $($rest:tt)*) => {
+        $crate::log_inner!($key = ?$key, $($rest)*)
+    };
 }
 
-/// State of the read buffer, as returned by [`PlatformRef::read_buffer`].
-#[derive(Debug)]
-pub enum ReadBuffer<'a> {
-    /// Reading side of the stream is fully open. Contains the data waiting to be processed.
-    Open(&'a [u8]),
-
-    /// The reading side of the stream has been closed by the remote.
-    ///
-    /// Note that this is forbidden for connections of
-    /// type [`MultiStreamAddress::WebRtc`].
-    Closed,
-
-    /// The stream has been abruptly closed by the remote.
-    Reset,
+/// Helper macro for using the [`crate::platform::PlatformRef::log`] function.
+///
+/// This macro takes at least 4 parameters:
+///
+/// - A reference to an implementation of the [`crate::platform::PlatformRef`] trait.
+/// - A log level: `Error`, `Warn`, `Info`, `Debug`, or `Trace`. See [`crate::platform::LogLevel`].
+/// - A `&str` representing the target of the logging. This can be used in order to filter log
+/// entries belonging to a specific target.
+/// - An object that implements of `AsRef<str>` and that contains the log message itself.
+///
+/// In addition to these parameters, the macro accepts an unlimited number of extra
+/// (comma-separated) parameters.
+///
+/// Each parameter has one of these four syntaxes:
+///
+/// - `key = value`, where `key` is an identifier and `value` an expression that implements the
+/// `Display` trait.
+/// - `key = ?value`, where `key` is an identifier and `value` an expression that implements
+/// the `Debug` trait.
+/// - `key`, which is syntax sugar for `key = key`.
+/// - `?key`, which is syntax sugar for `key = ?key`.
+///
+#[macro_export]
+macro_rules! log {
+    ($plat:expr, $level:ident, $target:expr, $message:expr) => {
+        log!($plat, $level, $target, $message,)
+    };
+    ($plat:expr, $level:ident, $target:expr, $message:expr, $($params:tt)*) => {
+        $crate::platform::PlatformRef::log(
+            $plat,
+            $crate::platform::LogLevel::$level,
+            $target,
+            AsRef::<str>::as_ref(&$message),
+            $crate::log_inner!($($params)*)
+        )
+    };
 }

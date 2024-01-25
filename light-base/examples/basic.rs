@@ -16,9 +16,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::{iter, num::NonZeroU32};
+use futures_lite::FutureExt as _;
 
 fn main() {
-    // The `smoldot_light` library uses the `log` crate to emit logs.
+    // The `DefaultPlatform` that we use below uses the `log` crate to emit logs.
     // We need to register some kind of logs listener, in this example `env_logger`.
     // See also <https://docs.rs/log>.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -34,10 +35,10 @@ fn main() {
             env!("CARGO_PKG_VERSION").into(),
         ));
 
-    // Ask the client to connect to a chain.
+    // Ask the client to connect to Polkadot.
     let smoldot_light::AddChainSuccess {
-        chain_id,
-        json_rpc_responses,
+        chain_id: polkadot_chain_id,
+        json_rpc_responses: polkadot_json_rpc_responses,
     } = client
         .add_chain(smoldot_light::AddChainConfig {
             // The most important field of the configuration is the chain specification. This is a
@@ -81,32 +82,83 @@ fn main() {
             user_data: (),
         })
         .unwrap();
-
-    // The chain is now properly initialized.
+    // The Polkadot chain is now properly initialized.
 
     // `json_rpc_responses` can only be `None` if we had passed `json_rpc: Disabled` in the
     // configuration.
-    let mut json_rpc_responses = json_rpc_responses.unwrap();
+    let mut polkadot_json_rpc_responses = polkadot_json_rpc_responses.unwrap();
 
-    // Send a JSON-RPC request to the chain.
-    // The example here asks the client to send us notifications whenever the new best block has
-    // changed.
-    // Calling this function only queues the request. It is not processed immediately.
-    // An `Err` is returned immediately if and only if the request isn't a proper JSON-RPC request
-    // or if the channel of JSON-RPC responses is clogged.
+    // Ask the client to connect to Polkadot's Assethub, which is one of its parachains.
+    let smoldot_light::AddChainSuccess {
+        chain_id: assethub_chain_id,
+        json_rpc_responses: assethub_json_rpc_responses,
+    } = client
+        .add_chain(smoldot_light::AddChainConfig {
+            // These options are the same as above.
+            specification: include_str!("../../demo-chain-specs/polkadot-asset-hub.json"),
+            json_rpc: smoldot_light::AddChainConfigJsonRpc::Enabled {
+                max_pending_requests: NonZeroU32::new(128).unwrap(),
+                max_subscriptions: 1024,
+            },
+            database_content: "",
+            user_data: (),
+
+            // The chain specification of the asset hub parachain mentions that the identifier
+            // of its relay chain is `polkadot`. Because the `Client` might contain multiple different
+            // chains whose identifier is `polkadot`, we need to provide a list of all the chains
+            // that the `Client` should consider when searching for the relay chain. The `add_chain`
+            // function returns an error if there is no match or if there are multiple matches when
+            // searching for an appropriate relay chain within this list.
+            // The reason why this option exists is to allow multiple different API users to share
+            // usage of the same smoldot client without interfering with each other. If there is
+            // only one API user (like is the case here), passing the list of all chains that have
+            // previously been created is completely appropriate.
+            potential_relay_chains: [polkadot_chain_id].into_iter(),
+        })
+        .unwrap();
+    // The Assethub chain is now properly initialized.
+
+    // Just like above, we are guaranteed that `json_rpc_responses` is `Some`.
+    let mut assethub_json_rpc_responses = assethub_json_rpc_responses.unwrap();
+
+    // The example here asks the client to send us notifications whenever the new best block of
+    // Polkadot or the Assethub has changed.
+    // Calling the `json_rpc_request` function only queues the request. It is not processed
+    // immediately. An `Err` is returned immediately if and only if the channel of JSON-RPC
+    // responses is clogged, as configured through the `max_pending_requests` option that was
+    // passed to `addChain`.
     client
         .json_rpc_request(
             r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
-            chain_id,
+            polkadot_chain_id,
+        )
+        .unwrap();
+    client
+        .json_rpc_request(
+            r#"{"id":1,"jsonrpc":"2.0","method":"chain_subscribeNewHeads","params":[]}"#,
+            assethub_chain_id,
         )
         .unwrap();
 
-    // Now block the execution forever and print the responses received on the channel of
+    // Now block the execution forever and print the responses received on the channels of
     // JSON-RPC responses.
     smol::block_on(async move {
         loop {
-            let response = json_rpc_responses.next().await.unwrap();
-            println!("JSON-RPC response: {response}");
+            let (chain_name, response) = async {
+                (
+                    "Polkadot",
+                    polkadot_json_rpc_responses.next().await.unwrap(),
+                )
+            }
+            .or(async {
+                (
+                    "Assethub",
+                    assethub_json_rpc_responses.next().await.unwrap(),
+                )
+            })
+            .await;
+
+            println!("{chain_name} JSON-RPC response: {response}");
         }
-    })
+    });
 }

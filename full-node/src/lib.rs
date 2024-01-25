@@ -33,7 +33,7 @@ use smoldot::{
     },
     trie,
 };
-use std::{array, borrow::Cow, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{array, borrow::Cow, io, iter, mem, net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod consensus_service;
 mod database_thread;
@@ -52,8 +52,6 @@ pub struct Config<'a> {
     pub libp2p_key: Box<[u8; 32]>,
     /// List of addresses to listen on.
     pub listen_addresses: Vec<multiaddr::Multiaddr>,
-    /// Configuration of the JSON-RPC server. If `None`, no server is started.
-    pub json_rpc: Option<JsonRpcConfig>,
     /// Function that can be used to spawn background tasks.
     ///
     /// The tasks passed as parameter must be executed until they shut down.
@@ -64,8 +62,9 @@ pub struct Config<'a> {
     pub jaeger_agent: Option<SocketAddr>,
 }
 
-/// See [`Config::json_rpc`].
-pub struct JsonRpcConfig {
+/// See [`ChainConfig::json_rpc_listen`].
+#[derive(Debug, Clone)]
+pub struct JsonRpcListenConfig {
     /// Bind point of the JSON-RPC server.
     pub address: SocketAddr,
     /// Maximum number of JSON-RPC clients that can be connected at the same time.
@@ -115,12 +114,15 @@ pub struct ChainConfig<'a> {
     ///
     /// If `None`, no keys are stored in disk.
     pub keystore_path: Option<PathBuf>,
+    /// Configuration of the JSON-RPC server. If `None`, no TCP server is started.
+    pub json_rpc_listen: Option<JsonRpcListenConfig>,
 }
 
 /// Running client. As long as this object is alive, the client reads/writes the database and has
 /// a JSON-RPC server open.
 pub struct Client {
-    json_rpc_service: Option<json_rpc_service::JsonRpcService>,
+    json_rpc_service: json_rpc_service::JsonRpcService,
+    relay_chain_json_rpc_service: Option<json_rpc_service::JsonRpcService>,
     consensus_service: Arc<consensus_service::ConsensusService>,
     relay_chain_consensus_service: Option<Arc<consensus_service::ConsensusService>>,
     network_service: Arc<network_service::NetworkService>,
@@ -130,9 +132,20 @@ pub struct Client {
 impl Client {
     /// Returns the address the JSON-RPC server is listening on.
     ///
-    /// Returns `None` if and only if [`Config::json_rpc`] was `None`.
+    /// Returns `None` if and only if [`ChainConfig::json_rpc_listen`] was `None`
+    /// in [`Config::chain`].
     pub fn json_rpc_server_addr(&self) -> Option<SocketAddr> {
-        self.json_rpc_service.as_ref().map(|j| j.listen_addr())
+        self.json_rpc_service.listen_addr()
+    }
+
+    /// Returns the address the relay chain JSON-RPC server is listening on.
+    ///
+    /// Returns `None` if and only if [`Config::relay_chain`] was `None` or if
+    /// [`ChainConfig::json_rpc_listen`] was `None` in [`Config::relay_chain`].
+    pub fn relay_chain_json_rpc_server_addr(&self) -> Option<SocketAddr> {
+        self.relay_chain_json_rpc_service
+            .as_ref()
+            .and_then(|j| j.listen_addr())
     }
 
     /// Returns the best block according to the networking.
@@ -140,15 +153,16 @@ impl Client {
         *self.network_known_best.lock().await
     }
 
-    /// Returns the current number of peers of the client.
+    /// Returns the current total number of peers of the client.
+    // TODO: weird API
     pub async fn num_peers(&self) -> u64 {
-        u64::try_from(self.network_service.num_peers(0).await).unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_total_peers().await).unwrap_or(u64::max_value())
     }
 
-    /// Returns the current number of network connections of the client.
+    /// Returns the current total number of network connections of the client.
+    // TODO: weird API
     pub async fn num_network_connections(&self) -> u64 {
-        u64::try_from(self.network_service.num_established_connections().await)
-            .unwrap_or(u64::max_value())
+        u64::try_from(self.network_service.num_connections().await).unwrap_or(u64::max_value())
     }
 
     // TODO: not the best API
@@ -164,29 +178,163 @@ impl Client {
             None
         }
     }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint of the chain.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    pub fn send_json_rpc_request(&self, request: String) {
+        self.json_rpc_service.send_request(request)
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`Client::send_json_rpc_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    pub async fn next_json_rpc_response(&self) -> String {
+        self.json_rpc_service.next_response().await
+    }
+
+    /// Adds a JSON-RPC request to the queue of requests of the virtual endpoint of the
+    /// relay chain.
+    ///
+    /// The virtual endpoint doesn't have any limit.
+    pub fn relay_chain_send_json_rpc_request(
+        &self,
+        request: String,
+    ) -> Result<(), RelayChainSendJsonRpcRequestError> {
+        let Some(relay_chain_json_rpc_service) = &self.relay_chain_json_rpc_service else {
+            return Err(RelayChainSendJsonRpcRequestError::NoRelayChain);
+        };
+
+        relay_chain_json_rpc_service.send_request(request);
+        Ok(())
+    }
+
+    /// Returns the new JSON-RPC response or notification for requests sent using
+    /// [`Client::relay_chain_send_json_rpc_request`].
+    ///
+    /// If this function is called multiple times simultaneously, only one invocation will receive
+    /// each response. Which one is unspecified.
+    ///
+    /// If [`Config::relay_chain`] was `None`, this function waits indefinitely.
+    pub async fn relay_chain_next_json_rpc_response(&self) -> String {
+        if let Some(relay_chain_json_rpc_service) = &self.relay_chain_json_rpc_service {
+            relay_chain_json_rpc_service.next_response().await
+        } else {
+            future::pending().await
+        }
+    }
 }
 
-/// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
-/// detected.
-// TODO: should return an error if something bad happens instead of panicking
-pub async fn start(mut config: Config<'_>) -> Client {
+/// Error potentially returned by [`start`].
+#[derive(Debug, derive_more::Display)]
+pub enum StartError {
+    /// Failed to parse the chain specification.
+    ChainSpecParse(chain_spec::ParseError),
+    /// Error building the chain information of the genesis block.
+    InvalidGenesisInformation(chain_spec::FromGenesisStorageError),
+    /// Failed to parse the chain specification of the relay chain.
+    RelayChainSpecParse(chain_spec::ParseError),
+    /// Error building the chain information of the genesis block of the relay chain.
+    InvalidRelayGenesisInformation(chain_spec::FromGenesisStorageError),
+    /// Error initializing the networking service.
+    NetworkInit(network_service::InitError),
+    /// Error initializing the JSON-RPC service.
+    JsonRpcServiceInit(json_rpc_service::InitError),
+    /// Error initializing the JSON-RPC service of the relay chain.
+    RelayChainJsonRpcServiceInit(json_rpc_service::InitError),
+    ConsensusServiceInit(consensus_service::InitError),
+    RelayChainConsensusServiceInit(consensus_service::InitError),
+    /// Error initializing the keystore of the chain.
+    KeystoreInit(io::Error),
+    /// Error initializing the keystore of the relay chain.
+    RelayChainKeystoreInit(io::Error),
+    /// Error initializing the Jaeger service.
+    JaegerInit(io::Error),
+}
+
+/// Error potentially returned by [`Client::relay_chain_send_json_rpc_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum RelayChainSendJsonRpcRequestError {
+    /// There is no relay chain to send the JSON-RPC request to.
+    NoRelayChain,
+}
+
+/// Runs the node using the given configuration.
+// TODO: this function has several code paths that panic instead of returning an error; it is especially unclear what to do in case of database corruption, given that a database corruption would crash the node later on anyway
+pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     let chain_spec = {
-        smoldot::chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
-            .expect("Failed to decode chain specs")
+        chain_spec::ChainSpec::from_json_bytes(&config.chain.chain_spec)
+            .map_err(StartError::ChainSpecParse)?
     };
 
-    // TODO: don't unwrap?
-    let genesis_chain_information = chain_spec.to_chain_information().unwrap().0;
+    // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
+    let genesis_chain_information = chain_spec
+        .to_chain_information()
+        .map_err(StartError::InvalidGenesisInformation)?
+        .0;
 
-    let relay_chain_spec = config.relay_chain.as_ref().map(|rc| {
-        smoldot::chain_spec::ChainSpec::from_json_bytes(&rc.chain_spec)
-            .expect("Failed to decode relay chain chain specs")
-    });
+    let relay_chain_spec = match &config.relay_chain {
+        Some(cfg) => Some(
+            chain_spec::ChainSpec::from_json_bytes(&cfg.chain_spec)
+                .map_err(StartError::RelayChainSpecParse)?,
+        ),
+        None => None,
+    };
 
-    // TODO: don't unwrap?
-    let relay_genesis_chain_information = relay_chain_spec
-        .as_ref()
-        .map(|relay_chain_spec| relay_chain_spec.to_chain_information().unwrap().0);
+    // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
+    let relay_genesis_chain_information = match &relay_chain_spec {
+        Some(r) => Some(
+            r.to_chain_information()
+                .map_err(StartError::InvalidRelayGenesisInformation)?
+                .0,
+        ),
+        None => None,
+    };
+
+    // The `protocolId` field of chain specifications is deprecated. Print a warning.
+    if chain_spec.protocol_id().is_some() {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!("chain-spec-has-protocol-id; chain={}", chain_spec.id()),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.protocol_id().is_some() {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-protocol-id; chain={}",
+                    relay_chain_spec.id()
+                ),
+            );
+        }
+    }
+
+    // The `telemetryEndpoints` field of chain specifications isn't supported.
+    if chain_spec.telemetry_endpoints().count() != 0 {
+        config.log_callback.log(
+            LogLevel::Warn,
+            format!(
+                "chain-spec-has-telemetry-endpoints; chain={}",
+                chain_spec.id()
+            ),
+        );
+    }
+    if let Some(relay_chain_spec) = &relay_chain_spec {
+        if relay_chain_spec.telemetry_endpoints().count() != 0 {
+            config.log_callback.log(
+                LogLevel::Warn,
+                format!(
+                    "chain-spec-has-telemetry-endpoints; chain={}",
+                    relay_chain_spec.id()
+                ),
+            );
+        }
+    }
 
     // Printing the SQLite version number can be useful for debugging purposes for example in case
     // a query fails.
@@ -258,20 +406,34 @@ pub async fn start(mut config: Config<'_>) -> Client {
         jaeger_agent: config.jaeger_agent,
     })
     .await
-    .unwrap();
+    .map_err(StartError::JaegerInit)?;
 
-    let (network_service, network_events_receivers) =
+    let (network_service, network_service_chain_ids, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
             listen_addresses: config.listen_addresses,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
+                log_name: chain_spec.id().to_owned(),
                 fork_id: chain_spec.fork_id().map(|n| n.to_owned()),
                 block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
-                has_grandpa_protocol: matches!(
+                grandpa_protocol_finalized_block_height: if matches!(
                     genesis_chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                ),
+                ) {
+                    Some({
+                        let block_number_bytes = chain_spec.block_number_bytes();
+                        database
+                            .with_database(move |database| {
+                                let hash = database.finalized_block_hash().unwrap();
+                                let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                header::decode(&header, block_number_bytes.into(),).unwrap().number
+                            })
+                            .await
+                    })
+                } else {
+                    None
+                },
                 genesis_block_hash,
                 best_block: {
                     let block_number_bytes = chain_spec.block_number_bytes();
@@ -284,6 +446,8 @@ pub async fn start(mut config: Config<'_>) -> Client {
                         })
                         .await
                 },
+                max_in_peers: 25,
+                max_slots: 15,
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
                         chain_spec.boot_nodes().len() + config.chain.additional_bootnodes.len(),
@@ -292,14 +456,21 @@ pub async fn start(mut config: Config<'_>) -> Client {
                     for node in chain_spec.boot_nodes() {
                         match node {
                             chain_spec::Bootnode::UnrecognizedFormat(raw) => {
-                                panic!("Failed to parse bootnode in chain specification: {raw}")
+                                config.log_callback.log(
+                                    LogLevel::Warn,
+                                    format!("bootnode-unrecognized-addr; value={:?}", raw),
+                                );
                             }
                             chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
                                 let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
                                     Ok(a) => a,
-                                    Err(_) => panic!(
-                                        "Failed to parse bootnode in chain specification: {multiaddr}"
-                                    ),
+                                    Err(_) => {
+                                        config.log_callback.log(
+                                            LogLevel::Warn,
+                                            format!("bootnode-unrecognized-addr; value={:?}", multiaddr),
+                                        );
+                                        continue;
+                                    },
                                 };
                                 let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
                                 list.push((peer_id, multiaddr));
@@ -314,13 +485,29 @@ pub async fn start(mut config: Config<'_>) -> Client {
             .chain(
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
+                        log_name: relay_chains_specs.id().to_owned(),
                         fork_id: relay_chains_specs.fork_id().map(|n| n.to_owned()),
                         block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
-                        has_grandpa_protocol: matches!(
-                            relay_genesis_chain_information.as_ref().unwrap().as_ref().finality,
+                        grandpa_protocol_finalized_block_height: if matches!(
+                            genesis_chain_information.as_ref().finality,
                             chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
-                        ),
+                        ) {
+                            Some(relay_chain_database
+                                .as_ref()
+                                .unwrap()
+                                .with_database({
+                                    let block_number_bytes = chain_spec.block_number_bytes();
+                                    move |db| {
+                                        let hash = db.finalized_block_hash().unwrap();
+                                        let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                        header::decode(&header, block_number_bytes.into()).unwrap().number
+                                    }
+                                })
+                                .await)
+                        } else {
+                            None
+                        },
                         genesis_block_hash: relay_genesis_chain_information
                             .as_ref()
                             .unwrap()
@@ -339,20 +526,29 @@ pub async fn start(mut config: Config<'_>) -> Client {
                                 }
                             })
                             .await,
+                        max_in_peers: 25,
+                        max_slots: 15,
                         bootstrap_nodes: {
                             let mut list =
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
                             for node in relay_chains_specs.boot_nodes() {
                                 match node {
                                     chain_spec::Bootnode::UnrecognizedFormat(raw) => {
-                                        panic!("Failed to parse bootnode in chain specification: {raw}")
+                                        config.log_callback.log(
+                                            LogLevel::Warn,
+                                            format!("relay-chain-bootnode-unrecognized-addr; value={:?}", raw),
+                                        );
                                     }
                                     chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
                                         let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
                                             Ok(a) => a,
-                                            Err(_) => panic!(
-                                                "Failed to parse bootnode in chain specification: {multiaddr}"
-                                            ),
+                                            Err(_) => {
+                                                config.log_callback.log(
+                                                    LogLevel::Warn,
+                                                    format!("relay-chain-bootnode-unrecognized-addr; value={:?}", multiaddr),
+                                                );
+                                                continue;
+                                            }
                                         };
                                         let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
                                         list.push((peer_id, multiaddr));
@@ -378,14 +574,14 @@ pub async fn start(mut config: Config<'_>) -> Client {
             jaeger_service: jaeger_service.clone(),
         })
         .await
-        .unwrap();
+        .map_err(StartError::NetworkInit)?;
 
     let mut network_events_receivers = network_events_receivers.into_iter();
 
     let keystore = Arc::new({
         let mut keystore = keystore::Keystore::new(config.chain.keystore_path, rand::random())
             .await
-            .unwrap();
+            .map_err(StartError::KeystoreInit)?;
         for mut private_key in config.chain.keystore_memory {
             keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
             zeroize::Zeroize::zeroize(&mut *private_key);
@@ -401,16 +597,17 @@ pub async fn start(mut config: Config<'_>) -> Client {
         log_callback: config.log_callback.clone(),
         genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
-        network_service: (network_service.clone(), 0),
-        database,
+        network_service: (network_service.clone(), network_service_chain_ids[0]),
+        database: database.clone(),
         block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
         jaeger_service: jaeger_service.clone(),
         slot_duration_author_ratio: 43691_u16,
     })
-    .await;
+    .await
+    .map_err(StartError::ConsensusServiceInit)?;
 
-    let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
+    let relay_chain_consensus_service = if let Some(relay_chain_database) = &relay_chain_database {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: {
@@ -427,8 +624,8 @@ pub async fn start(mut config: Config<'_>) -> Client {
                         relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                     )),
                 network_events_receiver: network_events_receivers.next().unwrap(),
-                network_service: (network_service.clone(), 1),
-                database: relay_chain_database,
+                network_service: (network_service.clone(), network_service_chain_ids[1]),
+                database: relay_chain_database.clone(),
                 block_number_bytes: usize::from(
                     relay_chain_spec.as_ref().unwrap().block_number_bytes(),
                 ),
@@ -438,7 +635,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
                         rand::random(),
                     )
                     .await
-                    .unwrap();
+                    .map_err(StartError::RelayChainKeystoreInit)?;
                     for mut private_key in
                         mem::take(&mut config.relay_chain.as_mut().unwrap().keystore_memory)
                     {
@@ -450,7 +647,8 @@ pub async fn start(mut config: Config<'_>) -> Client {
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
             })
-            .await,
+            .await
+            .map_err(StartError::RelayChainConsensusServiceInit)?,
         )
     } else {
         None
@@ -459,24 +657,67 @@ pub async fn start(mut config: Config<'_>) -> Client {
     // Start the JSON-RPC service.
     // It only needs to be kept alive in order to function.
     //
-    // Note that initialization can panic if, for example, the port is already occupied. It is
+    // Note that initialization can fail if, for example, the port is already occupied. It is
     // preferable to fail to start the node altogether rather than make the user believe that they
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
-    let json_rpc_service = if let Some(json_rpc_config) = config.json_rpc {
-        let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-            tasks_executor: config.tasks_executor.clone(),
-            log_callback: config.log_callback.clone(),
-            bind_address: json_rpc_config.address,
-            max_parallel_requests: 32,
-            max_json_rpc_clients: json_rpc_config.max_json_rpc_clients,
-        })
-        .await;
+    let json_rpc_service = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+        tasks_executor: config.tasks_executor.clone(),
+        log_callback: config.log_callback.clone(),
+        database,
+        consensus_service: consensus_service.clone(),
+        network_service: (network_service.clone(), network_service_chain_ids[0]),
+        bind_address: config.chain.json_rpc_listen.as_ref().map(|cfg| cfg.address),
+        max_parallel_requests: 32,
+        max_json_rpc_clients: config
+            .chain
+            .json_rpc_listen
+            .map_or(0, |cfg| cfg.max_json_rpc_clients),
+        chain_name: chain_spec.name().to_owned(),
+        chain_type: chain_spec.chain_type().to_owned(),
+        chain_properties_json: chain_spec.properties().to_owned(),
+        chain_is_live: chain_spec.has_live_network(),
+        genesis_block_hash: genesis_chain_information
+            .as_ref()
+            .finalized_block_header
+            .hash(usize::from(chain_spec.block_number_bytes())),
+    })
+    .await
+    .map_err(StartError::JsonRpcServiceInit)?;
 
-        Some(match result {
-            Ok(service) => service,
-            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {err}"),
-        })
+    // Start the JSON-RPC service of the relay chain.
+    // See remarks above.
+    let relay_chain_json_rpc_service = if let Some(relay_chain_cfg) = config.relay_chain {
+        let relay_chain_spec = relay_chain_spec.as_ref().unwrap();
+        Some(
+            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+                tasks_executor: config.tasks_executor.clone(),
+                log_callback: config.log_callback.clone(),
+                database: relay_chain_database.clone().unwrap(),
+                consensus_service: relay_chain_consensus_service.clone().unwrap(),
+                network_service: (network_service.clone(), network_service_chain_ids[1]),
+                bind_address: relay_chain_cfg
+                    .json_rpc_listen
+                    .as_ref()
+                    .map(|cfg| cfg.address),
+                max_parallel_requests: 32,
+                max_json_rpc_clients: relay_chain_cfg
+                    .json_rpc_listen
+                    .map_or(0, |cfg| cfg.max_json_rpc_clients),
+                chain_name: relay_chain_spec.name().to_owned(),
+                chain_type: relay_chain_spec.chain_type().to_owned(),
+                chain_properties_json: relay_chain_spec.properties().to_owned(),
+                chain_is_live: relay_chain_spec.has_live_network(),
+                genesis_block_hash: relay_genesis_chain_information
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .finalized_block_header
+                    .hash(usize::from(relay_chain_spec.block_number_bytes())),
+            })
+            .await
+            .map_err(StartError::JsonRpcServiceInit)?,
+        )
     } else {
         None
     };
@@ -490,6 +731,7 @@ pub async fn start(mut config: Config<'_>) -> Client {
     let network_known_best = Arc::new(Mutex::new(None));
     (config.tasks_executor)(Box::pin({
         let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+        let network_service_chain_id = network_service_chain_ids[0];
         let network_known_best = network_known_best.clone();
 
         // TODO: shut down this task if the client stops?
@@ -500,10 +742,10 @@ pub async fn start(mut config: Config<'_>) -> Client {
 
                 match network_event {
                     network_service::Event::BlockAnnounce {
-                        chain_index: 0,
+                        chain_id,
                         scale_encoded_header,
                         ..
-                    } => match (
+                    } if chain_id == network_service_chain_id => match (
                         *network_known_best,
                         header::decode(
                             &scale_encoded_header,
@@ -518,10 +760,10 @@ pub async fn start(mut config: Config<'_>) -> Client {
                         }
                     },
                     network_service::Event::Connected {
-                        chain_index: 0,
+                        chain_id,
                         best_block_number,
                         ..
-                    } => match *network_known_best {
+                    } if chain_id == network_service_chain_id => match *network_known_best {
                         Some(n) if n >= best_block_number => {}
                         _ => *network_known_best = Some(best_block_number),
                     },
@@ -544,13 +786,14 @@ pub async fn start(mut config: Config<'_>) -> Client {
     );
 
     debug_assert!(network_events_receivers.next().is_none());
-    Client {
+    Ok(Client {
         consensus_service,
         relay_chain_consensus_service,
         json_rpc_service,
+        relay_chain_json_rpc_service,
         network_service,
         network_known_best,
-    }
+    })
 }
 
 /// Opens the database from the file system, or create a new database if none is found.
@@ -612,7 +855,7 @@ async fn open_database(
                     genesis_storage.value(b":heappages"),
                 )
                 .unwrap(),
-                exec_hint: executor::vm::ExecHint::Oneshot,
+                exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
                 allow_unresolved_imports: true,
             })
             .unwrap()
@@ -740,13 +983,9 @@ async fn open_database(
                         children_merkle_values: array::from_fn::<_, 16, _>(|n| {
                             let child_index =
                                 trie::Nibble::try_from(u8::try_from(n).unwrap()).unwrap();
-                            if let Some(mut child) = node_access.child(child_index) {
-                                Some(Cow::Owned(
-                                    child.user_data().1.as_ref().unwrap().as_ref().to_vec(),
-                                ))
-                            } else {
-                                None
-                            }
+                            node_access.child(child_index).map(|mut child| {
+                                Cow::Owned(child.user_data().1.as_ref().unwrap().as_ref().to_vec())
+                            })
                         }),
                         partial_key_nibbles: Cow::Owned(
                             node_access.partial_key().map(u8::from).collect::<Vec<_>>(),
@@ -758,12 +997,15 @@ async fn open_database(
             // no justification.
             let database = empty
                 .initialize(
-                    genesis_chain_information,
+                    &genesis_chain_information
+                        .finalized_block_header
+                        .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                     iter::empty(),
                     None,
-                    genesis_storage_full_trie,
-                    state_version,
                 )
+                .unwrap();
+            database
+                .insert_trie_nodes(genesis_storage_full_trie, state_version)
                 .unwrap();
             (database, false)
         }

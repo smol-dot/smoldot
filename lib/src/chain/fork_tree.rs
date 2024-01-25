@@ -242,9 +242,9 @@ impl<T> ForkTree<T> {
     /// Returns an iterator containing the removed elements.
     /// All elements are removed from the tree even if the returned iterator is dropped eagerly.
     ///
-    /// Elements are returned in an unspecified order. However, all the elements for which
-    /// [`PrunedNode::is_prune_target_ancestor`] is `true` are guaranteed to be returned from
-    /// child to parent.
+    /// Elements are returned in an unspecified order. However, each element yielded is guaranteed
+    /// to be yielded *before* its parent gets yielded.
+    /// This can be more or less called "reverse hierarchical order".
     ///
     /// In other words, doing `prune_ancestors(...).filter(|n| n.is_prune_target_ancestor)` is
     /// guaranteed to return the elements in the same order as [`ForkTree::node_to_root_path`]
@@ -407,7 +407,7 @@ impl<T> ForkTree<T> {
         (iter1, iter2)
     }
 
-    /// Enumerates all the nodes, starting from the the given node, to the root. Each element
+    /// Enumerates all the nodes, starting from the given node, to the root. Each element
     /// returned by the iterator is a parent of the previous one. The iterator does include the
     /// node itself.
     ///
@@ -675,6 +675,23 @@ pub struct PrunedNode<T> {
 /// Index of a node within a [`ForkTree`]. Never invalidated unless the node is removed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NodeIndex(usize);
+
+impl NodeIndex {
+    /// Returns the value that compares inferior or equal to any possible [`NodeIndex`̀].
+    pub fn min_value() -> Self {
+        NodeIndex(usize::min_value())
+    }
+
+    /// Returns the value that compares superior or equal to any possible [`NodeIndex`̀].
+    pub fn max_value() -> Self {
+        NodeIndex(usize::max_value())
+    }
+
+    /// Adds `1` to `self`. Returns `None` if this causes an overflow.
+    pub fn inc(self) -> Option<Self> {
+        self.0.checked_add(1).map(NodeIndex)
+    }
+}
 
 #[cfg(test)]
 mod tests {

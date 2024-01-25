@@ -31,31 +31,37 @@ use alloc::{
 use core::fmt;
 use hashbrown::HashMap;
 
-/// Parses a JSON call (usually received from a JSON-RPC server).
+/// Parses a JSON call (usually sent from a JSON-RPC client and received by a JSON-RPC server).
 ///
 /// On success, returns a JSON-encoded identifier for that request that must be passed back when
 /// emitting the response.
-pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseCallError> {
-    let call_def = parse::parse_call(message).map_err(ParseCallError::JsonRpcParse)?;
+pub fn parse_jsonrpc_client_to_server(
+    message: &str,
+) -> Result<(&str, MethodCall), ParseClientToServerError> {
+    let call_def = parse::parse_request(message).map_err(ParseClientToServerError::JsonRpcParse)?;
 
     // No notification is supported by this server. If the `id` field is missing in the request,
     // assuming that this is a notification and return an appropriate error.
     let request_id = match call_def.id_json {
         Some(id) => id,
-        None => return Err(ParseCallError::UnknownNotification(call_def.method)),
+        None => {
+            return Err(ParseClientToServerError::UnknownNotification(
+                call_def.method,
+            ))
+        }
     };
 
     let call = match MethodCall::from_defs(call_def.method, call_def.params_json) {
         Ok(c) => c,
-        Err(error) => return Err(ParseCallError::Method { request_id, error }),
+        Err(error) => return Err(ParseClientToServerError::Method { request_id, error }),
     };
 
     Ok((request_id, call))
 }
 
-/// Error produced by [`parse_json_call`].
+/// Error produced by [`parse_jsonrpc_client_to_server`].
 #[derive(Debug, derive_more::Display)]
-pub enum ParseCallError<'a> {
+pub enum ParseClientToServerError<'a> {
     /// Could not parse the body of the message as a valid JSON-RPC message.
     JsonRpcParse(parse::ParseError),
     /// Call concerns a notification that isn't recognized.
@@ -72,7 +78,7 @@ pub enum ParseCallError<'a> {
 
 /// Parses a JSON notification.
 pub fn parse_notification(message: &str) -> Result<ServerToClient, ParseNotificationError> {
-    let call_def = parse::parse_call(message).map_err(ParseNotificationError::JsonRpcParse)?;
+    let call_def = parse::parse_request(message).map_err(ParseNotificationError::JsonRpcParse)?;
     let call = ServerToClient::from_defs(call_def.method, call_def.params_json)
         .map_err(ParseNotificationError::Method)?;
     Ok(call)
@@ -96,10 +102,10 @@ pub enum ParseNotificationError<'a> {
 /// Panics if the `id_json` isn't valid JSON.
 ///
 pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
-    method.to_json_call_object_parameters(id_json)
+    method.to_json_request_object_parameters(id_json)
 }
 
-/// See [`ParseCallError::Method`] or [`ParseNotificationError::Method`].
+/// See [`ParseClientToServerError::Method`] or [`ParseNotificationError::Method`].
 #[derive(Debug, derive_more::Display)]
 pub enum MethodError<'a> {
     /// Call concerns a method that isn't recognized.
@@ -226,14 +232,14 @@ macro_rules! define_methods {
                 }
             }
 
-            /// Builds a JSON call, to send it to a JSON-RPC server.
+            /// Builds a JSON request, to send it to a JSON-RPC server.
             ///
             /// # Panic
             ///
             /// Panics if the `id_json` isn't valid JSON.
             ///
-            pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
-                parse::build_call(&parse::Call {
+            pub fn to_json_request_object_parameters(&self, id_json: Option<&str>) -> String {
+                parse::build_request(&parse::Request {
                     id_json,
                     method: self.name(),
                     // Note that we never skip the `params` field, even if empty. This is an
@@ -448,66 +454,58 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_body(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexString,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
-    ) -> Cow<'a, str>,
+        hash: HashHexString
+    ) -> ChainHeadBodyCallReturn<'a>,
     chainHead_unstable_call(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         function: Cow<'a, str>,
-        #[rename = "callParameters"] call_parameters: HexString,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
-    ) -> Cow<'a, str>,
+        #[rename = "callParameters"] call_parameters: HexString
+    ) -> ChainHeadBodyCallReturn<'a>,
     chainHead_unstable_follow(
         #[rename = "withRuntime"] with_runtime: bool
     ) -> Cow<'a, str>,
-    chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString
     ) -> Option<HexString>,
-    chainHead_unstable_stopBody(
-        subscription: Cow<'a, str>
-    ) -> (),
-    chainHead_unstable_stopCall(
-        subscription: Cow<'a, str>
-    ) -> (),
-    chainHead_unstable_stopStorage(
-        subscription: Cow<'a, str>
+    chainHead_unstable_stopOperation(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
     chainHead_unstable_storage(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
         hash: HashHexString,
         items: Vec<ChainHeadStorageRequestItem>,
-        #[rename = "childTrie"] child_trie: Option<HexString>,
-        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
-    ) -> Cow<'a, str>,
-    chainHead_unstable_storageContinue(
-        #[rename = "subscription"] subscription: Cow<'a, str>
+        #[rename = "childTrie"] child_trie: Option<HexString>
+    ) -> ChainHeadStorageReturn<'a>,
+    chainHead_unstable_continue(
+        #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
+        #[rename = "operationId"] operation_id: Cow<'a, str>
     ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>
     ) -> (),
     chainHead_unstable_unpin(
         #[rename = "followSubscription"] follow_subscription: Cow<'a, str>,
-        hash: HashHexStringSingleOrArray
+        #[rename = "hashOrHashes"] hash_or_hashes: HashHexStringSingleOrArray
     ) -> (),
 
-    chainSpec_unstable_chainName() -> Cow<'a, str>,
-    chainSpec_unstable_genesisHash() -> HashHexString,
-    chainSpec_unstable_properties() -> Box<serde_json::value::RawValue>,
+    chainSpec_v1_chainName() -> Cow<'a, str>,
+    chainSpec_v1_genesisHash() -> HashHexString,
+    chainSpec_v1_properties() -> Box<serde_json::value::RawValue>,
 
     sudo_unstable_p2pDiscover(multiaddr: Cow<'a, str>) -> (),
     sudo_unstable_version() -> Cow<'a, str>,
 
-    transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
-    transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
+    transactionWatch_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
+    transactionWatch_unstable_unwatch(subscription: Cow<'a, str>) -> (),
 
     // These functions are a custom addition in smoldot. As of the writing of this comment, there
     // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
     // <https://github.com/paritytech/smoldot/issues/2456>.
-    network_unstable_subscribeEvents() -> Cow<'a, str>,
-    network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
+    sudo_network_unstable_watch() -> Cow<'a, str>,
+    sudo_network_unstable_unwatch(subscription: Cow<'a, str>) -> (),
     chainHead_unstable_finalizedDatabase(#[rename = "maxSizeBytes"] max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
@@ -522,15 +520,12 @@ define_methods! {
     state_storage(subscription: Cow<'a, str>, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_bodyEvent(subscription: Cow<'a, str>, result: ChainHeadBodyEvent) -> (),
-    chainHead_unstable_callEvent(subscription: Cow<'a, str>, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
-    chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent<'a>) -> (),
-    transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+    transactionWatch_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 
     // This function is a custom addition in smoldot. As of the writing of this comment, there is
     // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
-    network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
+    sudo_networkState_event(subscription: Cow<'a, str>, result: NetworkEvent) -> (),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -712,32 +707,70 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "prunedBlockHashes")]
         pruned_blocks_hashes: Vec<HashHexString>,
     },
+    #[serde(rename = "operationBodyDone")]
+    OperationBodyDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        value: Vec<HexString>,
+    },
+    #[serde(rename = "operationCallDone")]
+    OperationCallDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        output: HexString,
+    },
+    #[serde(rename = "operationInaccessible")]
+    OperationInaccessible {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "operationStorageItems")]
+    OperationStorageItems {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        items: Vec<ChainHeadStorageResponseItem>,
+    },
+    #[serde(rename = "operationStorageDone")]
+    OperationStorageDone {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "operationWaitingForContinue")]
+    OperationWaitingForContinue,
+    #[serde(rename = "operationError")]
+    OperationError {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        error: Cow<'a, str>,
+    },
     #[serde(rename = "stop")]
     Stop {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadBodyEvent {
-    #[serde(rename = "done")]
-    Done { value: Vec<HexString> },
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "disjoint")]
-    Disjoint {},
+#[serde(tag = "result")]
+pub enum ChainHeadBodyCallReturn<'a> {
+    #[serde(rename = "started")]
+    Started {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+    },
+    #[serde(rename = "limitReached")]
+    LimitReached {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadCallEvent<'a> {
-    #[serde(rename = "done")]
-    Done { output: HexString },
-    #[serde(rename = "inaccessible")]
-    Inaccessible { error: Cow<'a, str> },
-    #[serde(rename = "error")]
-    Error { error: Cow<'a, str> },
-    #[serde(rename = "disjoint")]
-    Disjoint {},
+#[serde(tag = "result")]
+pub enum ChainHeadStorageReturn<'a> {
+    #[serde(rename = "started")]
+    Started {
+        #[serde(rename = "operationId")]
+        operation_id: Cow<'a, str>,
+        #[serde(rename = "discardedItems")]
+        discarded_items: usize,
+    },
+    #[serde(rename = "limitReached")]
+    LimitReached {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -755,7 +788,7 @@ pub struct ChainHeadStorageResponseItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<HexString>,
     #[serde(
-        rename = "closest-descendant-merkle-value",
+        rename = "closestDescendantMerkleValue",
         skip_serializing_if = "Option::is_none"
     )]
     pub closest_descendant_merkle_value: Option<HexString>,
@@ -767,31 +800,12 @@ pub enum ChainHeadStorageType {
     Value,
     #[serde(rename = "hash")]
     Hash,
-    #[serde(rename = "closest-descendant-merkle-value")]
+    #[serde(rename = "closestDescendantMerkleValue")]
     ClosestDescendantMerkleValue,
-    #[serde(rename = "descendants-values")]
+    #[serde(rename = "descendantsValues")]
     DescendantsValues,
-    #[serde(rename = "descendants-hashes")]
+    #[serde(rename = "descendantsHashes")]
     DescendantsHashes,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum ChainHeadStorageEvent<'a> {
-    #[serde(rename = "items")]
-    Items {
-        items: Vec<ChainHeadStorageResponseItem>,
-    },
-    #[serde(rename = "done")]
-    Done,
-    #[serde(rename = "waiting-for-continue")]
-    WaitingForContinue,
-    #[serde(rename = "inaccessible")]
-    Inaccessible {},
-    #[serde(rename = "error")]
-    Error { error: Cow<'a, str> },
-    #[serde(rename = "disjoint")]
-    Disjoint {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -828,123 +842,56 @@ pub enum TransactionWatchEvent<'a> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransactionWatchEventBlock {
     pub hash: HashHexString,
-    pub index: NumberAsString,
+    pub index: u32,
 }
 
 /// Unstable event.
 /// See <https://github.com/paritytech/smoldot/issues/2245>.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
-pub enum NetworkEvent<'a> {
-    #[serde(rename = "startConnect")]
-    StartConnect {
-        when: u64,
+pub enum NetworkEvent {
+    #[serde(rename = "connectionState")]
+    ConnectionState {
         #[serde(rename = "connectionId")]
         connection_id: u32,
-        multiaddr: Cow<'a, str>,
-    },
-    #[serde(rename = "connected")]
-    Connected {
+        #[serde(rename = "targetPeerId", skip_serializing_if = "Option::is_none")]
+        target_peer_id: Option<String>,
+        #[serde(rename = "targetMultiaddr")]
+        target_multiaddr: String,
+        status: NetworkEventStatus,
+        direction: NetworkEventDirection,
         when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
     },
-    #[serde(rename = "handshakeFinished")]
-    HandshakeFinished {
-        when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "stop")]
-    Stop {
-        when: u64,
-        #[serde(rename = "connectionId")]
-        connection_id: u32,
-        reason: Cow<'a, str>,
-    },
-    #[serde(rename = "out-slot-assign")]
-    OutSlotAssign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "out-slot-unassign")]
-    OutSlotUnassign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-assign")]
-    InSlotAssign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-unassign")]
-    InSlotUnassign {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "in-slot-to-out-slot")]
-    InSlotToOutSlot {
-        when: u64,
-        #[serde(rename = "peerId")]
-        peer_id: Cow<'a, str>,
-    },
-    #[serde(rename = "substream-out-open")]
-    SubstreamOutOpen {
-        when: u64,
+    #[serde(rename = "substreamState")]
+    SubstreamState {
         #[serde(rename = "connectionId")]
         connection_id: u32,
         #[serde(rename = "substreamId")]
         substream_id: u32,
+        status: NetworkEventStatus,
         #[serde(rename = "protocolName")]
-        protocol_name: Cow<'a, str>,
-    },
-    #[serde(rename = "substream-out-accept")]
-    SubstreamOutAccept {
+        protocol_name: String,
+        direction: NetworkEventDirection,
         when: u64,
-        #[serde(rename = "substreamId")]
-        substream_id: u32,
-    },
-    #[serde(rename = "substream-out-stop")]
-    SubstreamOutStop {
-        when: u64,
-        #[serde(rename = "substreamId")]
-        substream_id: u32,
-        reason: Cow<'a, str>,
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct NumberAsString(pub u32);
-
-impl serde::Serialize for NumberAsString {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.to_string().serialize(serializer)
-    }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NetworkEventStatus {
+    #[serde(rename = "connecting")]
+    Connecting,
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "closed")]
+    Close,
 }
 
-impl<'a> serde::Deserialize<'a> for NumberAsString {
-    fn deserialize<D>(deserializer: D) -> Result<NumberAsString, D::Error>
-    where
-        D: serde::Deserializer<'a>,
-    {
-        let string = String::deserialize(deserializer)?;
-        match string.parse() {
-            Ok(num) => Ok(NumberAsString(num)),
-            Err(_) => Err(<D::Error as serde::de::Error>::invalid_value(
-                serde::de::Unexpected::Other("invalid number string"),
-                &"a valid number",
-            )),
-        }
-    }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NetworkEventDirection {
+    #[serde(rename = "in")]
+    In,
+    #[serde(rename = "out")]
+    Out,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -955,7 +902,10 @@ pub struct Header {
     pub extrinsics_root: HashHexString,
     #[serde(rename = "stateRoot")]
     pub state_root: HashHexString,
-    #[serde(serialize_with = "hex_num")]
+    #[serde(
+        serialize_with = "hex_num_serialize",
+        deserialize_with = "hex_num_deserialize"
+    )]
     pub number: u64,
     pub digest: HeaderDigest,
 }
@@ -996,16 +946,6 @@ impl Header {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeaderDigest {
     pub logs: Vec<HexString>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct NetworkConfig {
-    #[serde(rename = "totalAttempts")]
-    pub total_attempts: u32,
-    #[serde(rename = "maxParallel")]
-    pub max_parallel: u32, // TODO: NonZeroU32?
-    #[serde(rename = "timeoutMs")]
-    pub timeout_ms: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1240,20 +1180,20 @@ impl serde::Serialize for RuntimeDispatchInfo {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerdeSystemHealth {
+    #[serde(rename = "isSyncing")]
+    is_syncing: bool,
+    peers: u64,
+    #[serde(rename = "shouldHavePeers")]
+    should_have_peers: bool,
+}
+
 impl serde::Serialize for SystemHealth {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        #[derive(serde::Serialize)]
-        struct SerdeSystemHealth {
-            #[serde(rename = "isSyncing")]
-            is_syncing: bool,
-            peers: u64,
-            #[serde(rename = "shouldHavePeers")]
-            should_have_peers: bool,
-        }
-
         SerdeSystemHealth {
             is_syncing: self.is_syncing,
             peers: self.peers,
@@ -1263,11 +1203,46 @@ impl serde::Serialize for SystemHealth {
     }
 }
 
-fn hex_num<S>(num: &u64, serializer: S) -> Result<S::Ok, S::Error>
+impl<'a> serde::Deserialize<'a> for SystemHealth {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let h: SerdeSystemHealth = serde::Deserialize::deserialize(deserializer)?;
+        Ok(SystemHealth {
+            is_syncing: h.is_syncing,
+            peers: h.peers,
+            should_have_peers: h.should_have_peers,
+        })
+    }
+}
+
+fn hex_num_serialize<S>(num: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     serde::Serialize::serialize(&format!("0x{:x}", *num), serializer)
+}
+
+fn hex_num_deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut string: String = serde::Deserialize::deserialize(deserializer)?;
+    if !string.starts_with("0x") {
+        return Err(serde::de::Error::custom("number doesn't start with 0x"));
+    }
+    if string.len() % 2 != 0 {
+        string.insert(2, '0');
+    }
+    let decoded = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
+    if decoded.len() > 8 {
+        return Err(serde::de::Error::custom("number overflow"));
+    }
+
+    let mut num = [0u8; 8];
+    num[..decoded.len()].copy_from_slice(&decoded);
+    Ok(u64::from_be_bytes(num))
 }
 
 #[cfg(test)]
@@ -1275,27 +1250,24 @@ mod tests {
     #[test]
     fn no_params_accepted() {
         // No `params` field in the request.
-        let (_, call) = super::parse_json_call(
-            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_unstable_chainName"}"#,
+        let (_, call) = super::parse_jsonrpc_client_to_server(
+            r#"{"jsonrpc":"2.0","id":2,"method":"chainSpec_v1_chainName"}"#,
         )
         .unwrap();
 
-        assert!(matches!(
-            call,
-            super::MethodCall::chainSpec_unstable_chainName {}
-        ));
+        assert!(matches!(call, super::MethodCall::chainSpec_v1_chainName {}));
     }
 
     #[test]
     fn no_params_refused() {
         // No `params` field in the request.
-        let err = super::parse_json_call(
+        let err = super::parse_jsonrpc_client_to_server(
             r#"{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_follow"}"#,
         );
 
         assert!(matches!(
             err,
-            Err(super::ParseCallError::Method {
+            Err(super::ParseClientToServerError::Method {
                 request_id: "2",
                 error: super::MethodError::MissingParameters {
                     rpc_method: "chainHead_unstable_follow"

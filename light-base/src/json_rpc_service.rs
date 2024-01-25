@@ -40,7 +40,8 @@
 mod background;
 
 use crate::{
-    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
+    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    transactions_service,
 };
 
 use alloc::{
@@ -49,14 +50,13 @@ use alloc::{
     sync::Arc,
 };
 use core::num::NonZeroU32;
-use smoldot::{
-    chain_spec,
-    json_rpc::{self, service},
-    libp2p::PeerId,
-};
+use smoldot::{chain_spec, json_rpc::service};
 
 /// Configuration for [`service()`].
-pub struct Config {
+pub struct Config<TPlat: PlatformRef> {
+    /// Access to the platform's capabilities.
+    pub platform: TPlat,
+
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -90,7 +90,7 @@ pub struct Config {
 /// be initialized using [`ServicePrototype::start`].
 ///
 /// Destroying the [`Frontend`] automatically shuts down the service.
-pub fn service(config: Config) -> (Frontend, ServicePrototype) {
+pub fn service<TPlat: PlatformRef>(config: Config<TPlat>) -> (Frontend<TPlat>, ServicePrototype) {
     let log_target = format!("json-rpc-{}", config.log_name);
 
     let (requests_processing_task, requests_responses_io) =
@@ -100,6 +100,7 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
         });
 
     let frontend = Frontend {
+        platform: config.platform,
         log_target: log_target.clone(),
         requests_responses_io: Arc::new(requests_responses_io),
     };
@@ -120,7 +121,10 @@ pub fn service(config: Config) -> (Frontend, ServicePrototype) {
 ///
 /// Destroying all the [`Frontend`]s automatically shuts down the associated service.
 #[derive(Clone)]
-pub struct Frontend {
+pub struct Frontend<TPlat> {
+    /// See [`Config::platform`].
+    platform: TPlat,
+
     /// Sending requests and receiving responses.
     ///
     /// Connected to the [`background`].
@@ -130,16 +134,15 @@ pub struct Frontend {
     log_target: String,
 }
 
-impl Frontend {
+impl<TPlat: PlatformRef> Frontend<TPlat> {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
     /// if the requests take a long time to process or if [`Frontend::next_json_rpc_response`]
-    /// isn't called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
-    /// JSON-RPC response to immediately send back to the user.
+    /// isn't called often enough.
     pub fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let log_friendly_request =
-            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
+            crate::util::truncated_str(json_rpc_request.chars().filter(|c| !c.is_control()), 250)
                 .to_string();
 
         match self
@@ -147,10 +150,12 @@ impl Frontend {
             .try_send_request(json_rpc_request)
         {
             Ok(()) => {
-                log::debug!(
-                    target: &self.log_target,
-                    "JSON-RPC => {}",
-                    log_friendly_request
+                log!(
+                    &self.platform,
+                    Debug,
+                    &self.log_target,
+                    "json-rpc-request-queued",
+                    request = log_friendly_request
                 );
                 Ok(())
             }
@@ -160,18 +165,6 @@ impl Frontend {
             }) => Err(HandleRpcError::TooManyPendingRequests {
                 json_rpc_request: request,
             }),
-            Err(service::TrySendRequestError {
-                cause: service::TrySendRequestErrorCause::MalformedJson(error),
-                ..
-            }) => {
-                // If the request isn't even a valid JSON-RPC request, we can't even send back a
-                // response. We have no choice but to immediately refuse the request.
-                log::warn!(
-                    target: &self.log_target,
-                    "Refused malformed JSON-RPC request: {}", error
-                );
-                Err(HandleRpcError::MalformedJsonRpc(error))
-            }
             Err(service::TrySendRequestError {
                 cause: service::TrySendRequestErrorCause::ClientMainTaskDestroyed,
                 ..
@@ -189,13 +182,13 @@ impl Frontend {
             Err(service::WaitNextResponseError::ClientMainTaskDestroyed) => unreachable!(),
         };
 
-        log::debug!(
-            target: &self.log_target,
-            "JSON-RPC <= {}",
-            crate::util::truncated_str(
-                message.chars().filter(|c| !c.is_control()),
-                100,
-            )
+        log!(
+            &self.platform,
+            Debug,
+            &self.log_target,
+            "json-rpc-response-yielded",
+            response =
+                crate::util::truncated_str(message.chars().filter(|c| !c.is_control()), 250,)
         );
 
         message
@@ -219,11 +212,12 @@ pub struct ServicePrototype {
 /// Configuration for a JSON-RPC service.
 pub struct StartConfig<'a, TPlat: PlatformRef> {
     /// Access to the platform's capabilities.
+    // TODO: redundant with Config above?
     pub platform: TPlat,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+    /// Access to the network, and identifier of the chain from the point of view of the network
+    /// service.
+    pub network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -236,9 +230,6 @@ pub struct StartConfig<'a, TPlat: PlatformRef> {
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
-
-    /// Network identity of the node.
-    pub peer_id: &'a PeerId,
 
     /// Value to return when the `system_name` RPC is called. Should be set to the name of the
     /// final executable.
@@ -291,31 +282,4 @@ pub enum HandleRpcError {
         /// Request that was being queued.
         json_rpc_request: String,
     },
-    /// The request isn't a valid JSON-RPC request.
-    #[display(fmt = "The request isn't a valid JSON-RPC request: {_0}")]
-    MalformedJsonRpc(json_rpc::parse::ParseError),
-}
-
-impl HandleRpcError {
-    /// Builds the JSON-RPC error string corresponding to this error.
-    ///
-    /// Returns `None` if the JSON-RPC requests isn't valid JSON-RPC or if the call was a
-    /// notification.
-    pub fn into_json_rpc_error(self) -> Option<String> {
-        let json_rpc_request = match self {
-            HandleRpcError::TooManyPendingRequests { json_rpc_request } => json_rpc_request,
-            HandleRpcError::MalformedJsonRpc(_) => return None,
-        };
-
-        match json_rpc::parse::parse_call(&json_rpc_request) {
-            Ok(json_rpc::parse::Call {
-                id_json: Some(id), ..
-            }) => Some(json_rpc::parse::build_error_response(
-                id,
-                json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
-                None,
-            )),
-            Ok(json_rpc::parse::Call { id_json: None, .. }) | Err(_) => None,
-        }
-    }
 }

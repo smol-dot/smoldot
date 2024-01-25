@@ -38,7 +38,7 @@ impl<T> NonFinalizedTree<T> {
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
     pub fn verify_header(
-        &mut self,
+        &self,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess, HeaderVerifyError> {
@@ -166,7 +166,7 @@ impl<T> NonFinalizedTree<T> {
                 }
             };
 
-            verify::header_only::verify(verify::header_only::Config {
+            match verify::header_only::verify(verify::header_only::Config {
                 consensus: consensus_config,
                 finality: match &parent_finality {
                     BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
@@ -181,9 +181,20 @@ impl<T> NonFinalizedTree<T> {
                     header::decode(parent_block_header, self.block_number_bytes)
                         .unwrap_or_else(|_| unreachable!())
                 },
-            })
-        }
-        .map_err(HeaderVerifyError::VerificationFailed)?;
+            }) {
+                Ok(s) => s,
+                Err(err) => {
+                    // The code in this module is meant to ensure that the chain is in an
+                    // appropriate state, therefore `is_invalid_chain_configuration` being `true`
+                    // would indicate a bug in the code somewhere.
+                    // We use a `debug_assert` rather than `assert` in order to avoid crashing,
+                    // as treating the header as invalid is an appropriate way to handle a bug
+                    // here.
+                    debug_assert!(!err.is_invalid_chain_configuration());
+                    return Err(HeaderVerifyError::VerificationFailed(err));
+                }
+            }
+        };
 
         // Updated consensus information for the block being verified.
         let (best_score_num_primary_slots, best_score_num_secondary_slots, consensus_update) =
@@ -196,7 +207,7 @@ impl<T> NonFinalizedTree<T> {
                 // No Aura epoch transition. Just a regular block.
                 (
                     verify::header_only::Success::Aura {
-                        authorities_change: false,
+                        authorities_change: None,
                     },
                     Some(BlockConsensus::Aura {
                         authorities_list: parent_authorities,
@@ -214,17 +225,18 @@ impl<T> NonFinalizedTree<T> {
                 // Aura epoch transition.
                 (
                     verify::header_only::Success::Aura {
-                        authorities_change: true,
+                        authorities_change: Some(new_authorities_list),
                     },
                     Some(BlockConsensus::Aura { .. }),
                     FinalizedConsensus::Aura { .. },
                     _,
-                ) => {
-                    todo!() // TODO: fetch from header
-                            /*BlockConsensus::Aura {
-                                authorities_list:
-                            }*/
-                }
+                ) => (
+                    parent_best_score.num_primary_slots + 1,
+                    parent_best_score.num_secondary_slots,
+                    BlockConsensus::Aura {
+                        authorities_list: Arc::new(new_authorities_list),
+                    },
+                ),
 
                 // No Babe epoch transition. Just a regular block.
                 (
@@ -455,6 +467,7 @@ impl<T> NonFinalizedTree<T> {
 
         Ok(HeaderVerifySuccess::Verified {
             verified_header: VerifiedHeader {
+                number: decoded_header.number,
                 scale_encoded_header,
                 consensus_update,
                 finality_update,
@@ -498,11 +511,23 @@ impl<T> NonFinalizedTree<T> {
             insertion_counter: self.blocks_insertion_counter,
         };
 
+        let prev_auth_change_trigger_number_if_trigger = if let BlockFinality::Grandpa {
+            prev_auth_change_trigger_number,
+            triggers_change: true,
+            ..
+        } = verified_header.finality_update
+        {
+            Some(prev_auth_change_trigger_number)
+        } else {
+            None
+        };
+
         let new_node_index = self.blocks.insert(
             parent_tree_index,
             Block {
                 header: verified_header.scale_encoded_header,
                 hash: verified_header.hash,
+                number: verified_header.number,
                 consensus: verified_header.consensus_update,
                 finality: verified_header.finality_update,
                 best_score,
@@ -518,6 +543,11 @@ impl<T> NonFinalizedTree<T> {
 
         self.blocks_by_best_score.insert(best_score, new_node_index);
 
+        if let Some(prev_auth_change_trigger_number) = prev_auth_change_trigger_number_if_trigger {
+            self.blocks_trigger_gp_change
+                .insert((prev_auth_change_trigger_number, new_node_index));
+        }
+
         // An overflow here would break the logic of the module. It is better to panic than to
         // continue running.
         self.blocks_insertion_counter = self.blocks_insertion_counter.checked_add(1).unwrap();
@@ -532,6 +562,7 @@ pub struct VerifiedHeader {
     best_score_num_primary_slots: u64,
     best_score_num_secondary_slots: u64,
     hash: [u8; 32],
+    number: u64,
 }
 
 impl VerifiedHeader {
@@ -570,6 +601,7 @@ pub enum HeaderVerifySuccess {
 }
 
 /// Error that can happen when verifying a block header.
+// TODO: some of these errors are redundant with verify::header_only::Error
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.

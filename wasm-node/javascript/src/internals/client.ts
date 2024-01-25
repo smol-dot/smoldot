@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, MalformedJsonRpcError, CrashError, SmoldotBytecode } from '../public-types.js';
+import { Client, ClientOptions, QueueFullError, AlreadyDestroyedError, AddChainError, AddChainOptions, Chain, JsonRpcDisabledError, CrashError, SmoldotBytecode } from '../public-types.js';
 import * as instance from './local-instance.js';
 import * as remote from './remote-instance.js';
 
@@ -25,6 +25,9 @@ import * as remote from './remote-instance.js';
 export interface PlatformBindings {
     /**
      * Tries to open a new connection using the given configuration.
+     * 
+     * In case of a multistream connection, `onMultistreamHandshakeInfo` should be called as soon
+     * as possible.
      *
      * @see Connection
      */
@@ -44,19 +47,14 @@ export interface PlatformBindings {
 /**
  * Connection to a remote node.
  *
- * At any time, a connection can be in one of the three following states:
+ * At any time, a connection can be in one of the following states:
  *
- * - `Opening` (initial state)
- * - `Open`
+ * - `Open` (initial state)
  * - `Reset`
  *
- * When in the `Opening` or `Open` state, the connection can transition to the `Reset` state
- * if the remote closes the connection or refuses the connection altogether. When that
- * happens, `config.onReset` is called. Once in the `Reset` state, the connection cannot
- * transition back to another state.
- *
- * Initially in the `Opening` state, the connection can transition to the `Open` state if the
- * remote accepts the connection. When that happens, `config.onOpen` is called.
+ * When in the `Open` state, the connection can transition to the `Reset` state if the remote
+ * closes the connection or refuses the connection altogether. When that happens, `config.onReset`
+ * is called. Once in the `Reset` state, the connection cannot transition back to `Open`.
  *
  * When in the `Open` state, the connection can receive messages. When a message is received,
  * `config.onMessage` is called.
@@ -93,7 +91,7 @@ export interface Connection {
      *
      * Must not be called after `closeSend` has been called.
      */
-    send(data: Uint8Array, streamId?: number): void;
+    send(data: Array<Uint8Array>, streamId?: number): void;
 
     /**
      * Closes the writing side of the given stream of the given connection.
@@ -139,19 +137,17 @@ export interface ConnectionConfig {
     address: instance.ParsedMultiaddr,
 
     /**
-     * Callback called when the connection transitions from the `Opening` to the `Open` state.
+     * Callback called when a multistream connection knows information about its handshake. Should
+     * be called as soon as possible.
+     *
+     * Can only happen while the connection is in the `Open` state.
      *
      * Must only be called once per connection.
      */
-    onOpen: (info:
+    onMultistreamHandshakeInfo: (info:
         {
-            type: 'single-stream', handshake: 'multistream-select-noise-yamux',
-            initialWritableBytes: number
-        } |
-        {
-            type: 'multi-stream', handshake: 'webrtc',
+            handshake: 'webrtc',
             localTlsCertificateSha256: Uint8Array,
-            remoteTlsCertificateSha256: Uint8Array,
         }
     ) => void;
 
@@ -167,7 +163,7 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound', initialWritableBytes: number) => void;
+    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void;
 
     /**
      * Callback called when a stream transitions to the `Reset` state.
@@ -176,21 +172,21 @@ export interface ConnectionConfig {
      *
      * This function must only be called for connections of type "multi-stream".
      */
-    onStreamReset: (streamId: number) => void;
+    onStreamReset: (streamId: number, message: string) => void;
 
     /**
      * Callback called when some data sent using {@link Connection.send} has effectively been
      * written on the stream, meaning that some buffer space is now free.
      *
      * Can only happen while the connection is in the `Open` state.
-     *
      * This callback must not be called after `closeSend` has been called.
+     * 
+     * The total of writable bytes must not go beyond reasonable values (e.g. a few megabytes). It
+     * is not legal to provide a dummy implementation that simply passes an exceedingly large
+     * value.
      *
      * The `streamId` parameter must be provided if and only if the connection is of type
      * "multi-stream".
-     *
-     * Only a number of bytes equal to the size of the data provided to {@link Connection.send}
-     * must be reported. In other words, the `initialWritableBytes` must never be exceeded.
      */
     onWritableBytes: (numExtra: number, streamId?: number) => void;
 
@@ -249,8 +245,11 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         // List of all active connections. Keys are IDs assigned by the instance.
         connections: Map<number, Connection>,
         // FIFO queue. When `addChain` is called, an entry is added to this queue. When the
-        // instance notifies that a chain creation has succeeded or failed, an entry is popped.
-        addChainResults: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
+        // instance notifies that a chainId has been allocated, an entry is popped.
+        addChainIdAllocations: Array<(outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
+        // After a chainId has been allocated, the entry from `addChainIdAllocations` is moved
+        // here.
+        addChainResults: Map<number, (outcome: { success: true, chainId: number } | { success: false, error: string }) => void>,
         /// Callback called when the `executor-shutdown` or `wasm-panic` event is received.
         onExecutorShutdownOrWasmPanic: () => void,
         // List of all active chains. Keys are chainIDs assigned by the instance.
@@ -263,8 +262,9 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
         instance: { status: "not-created" },
         chainIds: new WeakMap(),
         connections: new Map(),
-        addChainResults: [],
-        onExecutorShutdownOrWasmPanic: () => {},
+        addChainIdAllocations: [],
+        addChainResults: new Map(),
+        onExecutorShutdownOrWasmPanic: () => { },
         chains: new Map(),
     };
 
@@ -288,10 +288,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 state.connections.forEach((connec) => connec.reset());
                 state.connections.clear();
 
-                for (const addChainResult of state.addChainResults) {
+                for (const addChainResult of state.addChainIdAllocations) {
                     addChainResult({ success: false, error: "Smoldot has crashed" });
                 }
-                state.addChainResults = [];
+                state.addChainIdAllocations = [];
+                state.addChainResults.forEach((addChainResult) => {
+                    addChainResult({ success: false, error: "Smoldot has crashed" });
+                });
+                state.addChainResults.clear();
 
                 for (const chain of Array.from(state.chains.values())) {
                     for (const callback of chain.jsonRpcResponsesPromises) {
@@ -302,13 +306,13 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 state.chains.clear();
 
                 const cb = state.onExecutorShutdownOrWasmPanic;
-                state.onExecutorShutdownOrWasmPanic = () => {};
+                state.onExecutorShutdownOrWasmPanic = () => { };
                 cb();
                 break
             }
             case "executor-shutdown": {
                 const cb = state.onExecutorShutdownOrWasmPanic;
-                state.onExecutorShutdownOrWasmPanic = () => {};
+                state.onExecutorShutdownOrWasmPanic = () => { };
                 cb();
                 break;
             }
@@ -316,8 +320,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 logCallback(event.level, event.target, event.message)
                 break;
             }
+            case "add-chain-id-allocated": {
+                const callback = state.addChainIdAllocations.shift()!;
+                state.addChainResults.set(event.chainId, callback);
+                break;
+            }
             case "add-chain-result": {
-                (state.addChainResults.shift()!)(event);
+                (state.addChainResults.get(event.chainId)!)(event);
+                state.addChainResults.delete(event.chainId);
                 break;
             }
             case "json-rpc-responses-non-empty": {
@@ -343,25 +353,25 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                             throw new Error();
                         state.instance.instance.streamMessage(connectionId, message, streamId);
                     },
-                    onStreamOpened(streamId, direction, initialWritableBytes) {
+                    onStreamOpened(streamId, direction) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamOpened(connectionId, streamId, direction, initialWritableBytes);
+                        state.instance.instance.streamOpened(connectionId, streamId, direction);
                     },
-                    onOpen(info) {
+                    onMultistreamHandshakeInfo(info) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.connectionOpened(connectionId, info);
+                        state.instance.instance.connectionMultiStreamSetHandshakeInfo(connectionId, info);
                     },
                     onWritableBytes(numExtra, streamId) {
                         if (state.instance.status !== "ready")
                             throw new Error();
                         state.instance.instance.streamWritableBytes(connectionId, numExtra, streamId);
                     },
-                    onStreamReset(streamId) {
+                    onStreamReset(streamId, message) {
                         if (state.instance.status !== "ready")
                             throw new Error();
-                        state.instance.instance.streamReset(connectionId, streamId);
+                        state.instance.instance.streamReset(connectionId, streamId, message);
                     },
                 }));
                 break;
@@ -441,14 +451,14 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 portToServer: portToWorker,
                 eventCallback
             }).then((instance) => {
-                    // The Wasm instance might have been crashed before this callback is called.
-                    if (state.instance.status === "destroyed")
-                        return;
-                    state.instance = {
-                        status: "ready",
-                        instance,
-                    };
-                })
+                // The Wasm instance might have been crashed before this callback is called.
+                if (state.instance.status === "destroyed")
+                    return;
+                state.instance = {
+                    status: "ready",
+                    instance,
+                };
+            })
         };
     }
 
@@ -503,7 +513,7 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             if (options.databaseContent !== undefined && typeof options.databaseContent !== 'string')
                 throw new AddChainError("`databaseContent` is not a string");
 
-            const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainResults.push(resolve));
+            const promise = new Promise<{ success: true, chainId: number } | { success: false, error: string }>((resolve) => state.addChainIdAllocations.push(resolve));
 
             state.instance.instance.addChain(
                 options.chainSpec,
@@ -534,25 +544,20 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                         throw new AlreadyDestroyedError();
                     if (options.disableJsonRpc)
                         throw new JsonRpcDisabledError();
-                    if (request.length >= 64 * 1024 * 1024) {
-                        throw new MalformedJsonRpcError();
-                    };
 
                     const retVal = state.instance.instance.request(request, chainId);
                     switch (retVal) {
                         case 0: break;
-                        case 1: throw new MalformedJsonRpcError();
-                        case 2: throw new QueueFullError();
+                        case 1: throw new QueueFullError();
                         default: throw new Error("Internal error: unknown json_rpc_send error code: " + retVal)
                     }
                 },
                 nextJsonRpcResponse: async () => {
-                    if (!state.chains.has(chainId))
-                        throw new AlreadyDestroyedError();
-                    if (options.disableJsonRpc)
-                        return Promise.reject(new JsonRpcDisabledError());
-
                     while (true) {
+                        if (!state.chains.has(chainId))
+                            throw new AlreadyDestroyedError();
+                        if (options.disableJsonRpc)
+                            return Promise.reject(new JsonRpcDisabledError());
                         if (state.instance.status === "destroyed")
                             throw state.instance.error;
                         if (state.instance.status !== "ready")
@@ -597,13 +602,24 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
             if (state.instance.status !== "ready")
                 throw new Error(); // Internal error. Never supposed to happen.
             state.instance.instance.shutdownExecutor();
-            state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
+
+            // Wait for the `executor-shutdown` event to be generated.
+            await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
+
+            // In case the instance crashes while we were waiting, we don't want to overwrite
+            // the error.
+            if (state.instance.status === "ready")
+                state.instance = { status: "destroyed", error: new AlreadyDestroyedError() };
             state.connections.forEach((connec) => connec.reset());
             state.connections.clear();
-            for (const addChainResult of state.addChainResults) {
-                addChainResult({ success: false, error: "Smoldot has crashed" });
+            for (const addChainResult of state.addChainIdAllocations) {
+                addChainResult({ success: false, error: "Client.terminate() has been called" });
             }
-            state.addChainResults = [];
+            state.addChainIdAllocations = [];
+            state.addChainResults.forEach((addChainResult) => {
+                addChainResult({ success: false, error: "Client.terminate() has been called" });
+            });
+            state.addChainResults.clear();
             for (const chain of Array.from(state.chains.values())) {
                 for (const callback of chain.jsonRpcResponsesPromises) {
                     callback()
@@ -611,9 +627,6 @@ export function start(options: ClientOptions, wasmModule: SmoldotBytecode | Prom
                 chain.jsonRpcResponsesPromises = [];
             }
             state.chains.clear();
-
-            // Wait for the `executor-shutdown` event to be generated.
-            await new Promise<void>((resolve) => state.onExecutorShutdownOrWasmPanic = resolve);
         }
     }
 }

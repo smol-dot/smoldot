@@ -180,14 +180,14 @@ pub struct YamuxHeaderDecodeError {
 
 fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
     nom::sequence::preceded(
-        nom::bytes::complete::tag(&[0]),
+        nom::bytes::streaming::tag(&[0]),
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::tuple((
-                    nom::bytes::complete::tag(&[0]),
+                    nom::bytes::streaming::tag(&[0]),
                     flags,
-                    nom::combinator::map_opt(nom::number::complete::be_u32, NonZeroU32::new),
-                    nom::number::complete::be_u32,
+                    nom::combinator::map_opt(nom::number::streaming::be_u32, NonZeroU32::new),
+                    nom::number::streaming::be_u32,
                 )),
                 |(_, (syn, ack, fin, rst), stream_id, length)| DecodedYamuxHeader::Data {
                     syn,
@@ -200,10 +200,10 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
             ),
             nom::combinator::map(
                 nom::sequence::tuple((
-                    nom::bytes::complete::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1]),
                     flags,
-                    nom::combinator::map_opt(nom::number::complete::be_u32, NonZeroU32::new),
-                    nom::number::complete::be_u32,
+                    nom::combinator::map_opt(nom::number::streaming::be_u32, NonZeroU32::new),
+                    nom::number::streaming::be_u32,
                 )),
                 |(_, (syn, ack, fin, rst), stream_id, length)| DecodedYamuxHeader::Window {
                     syn,
@@ -216,37 +216,40 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
             ),
             nom::combinator::map(
                 nom::sequence::tuple((
-                    nom::bytes::complete::tag(&[2]),
-                    nom::bytes::complete::tag(&[0x0, 0x1]),
-                    nom::bytes::complete::tag(&[0, 0, 0, 0]),
-                    nom::number::complete::be_u32,
+                    nom::bytes::streaming::tag(&[2]),
+                    nom::bytes::streaming::tag(&[0x0, 0x1]),
+                    nom::bytes::streaming::tag(&[0, 0, 0, 0]),
+                    nom::number::streaming::be_u32,
                 )),
                 |(_, _, _, opaque_value)| DecodedYamuxHeader::PingRequest { opaque_value },
             ),
             nom::combinator::map(
                 nom::sequence::tuple((
-                    nom::bytes::complete::tag(&[2]),
-                    nom::bytes::complete::tag(&[0x0, 0x2]),
-                    nom::bytes::complete::tag(&[0, 0, 0, 0]),
-                    nom::number::complete::be_u32,
+                    nom::bytes::streaming::tag(&[2]),
+                    nom::bytes::streaming::tag(&[0x0, 0x2]),
+                    nom::bytes::streaming::tag(&[0, 0, 0, 0]),
+                    nom::number::streaming::be_u32,
                 )),
                 |(_, _, _, opaque_value)| DecodedYamuxHeader::PingResponse { opaque_value },
             ),
             nom::combinator::map(
                 nom::sequence::tuple((
-                    nom::bytes::complete::tag(&[3]),
-                    nom::bytes::complete::tag(&[0, 0]),
-                    nom::bytes::complete::tag(&[0, 0, 0, 0]),
+                    nom::bytes::streaming::tag(&[3]),
+                    nom::bytes::streaming::tag(&[0, 0]),
+                    nom::bytes::streaming::tag(&[0, 0, 0, 0]),
                     nom::branch::alt((
-                        nom::combinator::map(nom::bytes::complete::tag(0u32.to_be_bytes()), |_| {
-                            GoAwayErrorCode::NormalTermination
-                        }),
-                        nom::combinator::map(nom::bytes::complete::tag(1u32.to_be_bytes()), |_| {
-                            GoAwayErrorCode::ProtocolError
-                        }),
-                        nom::combinator::map(nom::bytes::complete::tag(2u32.to_be_bytes()), |_| {
-                            GoAwayErrorCode::InternalError
-                        }),
+                        nom::combinator::map(
+                            nom::bytes::streaming::tag(0u32.to_be_bytes()),
+                            |_| GoAwayErrorCode::NormalTermination,
+                        ),
+                        nom::combinator::map(
+                            nom::bytes::streaming::tag(1u32.to_be_bytes()),
+                            |_| GoAwayErrorCode::ProtocolError,
+                        ),
+                        nom::combinator::map(
+                            nom::bytes::streaming::tag(2u32.to_be_bytes()),
+                            |_| GoAwayErrorCode::InternalError,
+                        ),
                     )),
                 )),
                 |(_, _, _, error_code)| DecodedYamuxHeader::GoAway { error_code },
@@ -256,7 +259,7 @@ fn decode(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], DecodedYamuxHeader> {
 }
 
 fn flags(bytes: &'_ [u8]) -> nom::IResult<&'_ [u8], (bool, bool, bool, bool)> {
-    nom::combinator::map_opt(nom::number::complete::be_u16, |flags| {
+    nom::combinator::map_opt(nom::number::streaming::be_u16, |flags| {
         let syn = (flags & 0x1) != 0;
         let ack = (flags & 0x2) != 0;
         let fin = (flags & 0x4) != 0;

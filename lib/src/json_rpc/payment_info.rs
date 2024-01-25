@@ -70,7 +70,7 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
         nom::sequence::tuple((
             move |bytes| {
                 if is_api_v2 {
-                    nom::number::complete::le_u64(bytes)
+                    nom::number::streaming::le_u64(bytes)
                 } else {
                     nom::combinator::map(
                         nom::sequence::tuple((
@@ -81,7 +81,7 @@ fn nom_decode_payment_info<'a, E: nom::error::ParseError<&'a [u8]>>(
                     )(bytes)
                 }
             },
-            nom::combinator::map_opt(nom::number::complete::u8, |n| match n {
+            nom::combinator::map_opt(nom::number::streaming::u8, |n| match n {
                 0 => Some(methods::DispatchClass::Normal),
                 1 => Some(methods::DispatchClass::Operational),
                 2 => Some(methods::DispatchClass::Mandatory),

@@ -48,15 +48,15 @@
 mod tests;
 
 use crate::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_call},
     header, util,
     verify::inherents,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, mem};
 
-pub use runtime_host::{
+pub use runtime_call::{
     Nibble, StorageChanges, TrieChange, TrieChangeStorageValue, TrieEntryVersion,
 };
 
@@ -123,8 +123,6 @@ pub struct Success {
     /// State trie version indicated by the runtime. All the storage changes indicated by
     /// [`Success::storage_changes`] should store this version alongside with them.
     pub state_trie_version: TrieEntryVersion,
-    /// Concatenation of all the log messages printed by the runtime.
-    pub logs: String,
 }
 
 /// Error that can happen during the block production.
@@ -132,7 +130,7 @@ pub struct Success {
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
     #[display(fmt = "{_0}")]
-    WasmVm(runtime_host::ErrorDetail),
+    WasmVm(runtime_call::ErrorDetail),
     /// Error while initializing the Wasm virtual machine.
     #[display(fmt = "{_0}")]
     VmInit(host::StartErr),
@@ -164,7 +162,7 @@ pub enum Error {
 
 /// Start a block building process.
 pub fn build_block(config: Config) -> BlockBuild {
-    let init_result = runtime_host::run(runtime_host::Config {
+    let init_result = runtime_call::run(runtime_call::Config {
         function_to_call: "Core_initialize_block",
         parameter: {
             // The `Core_initialize_block` function expects a SCALE-encoded partially-initialized
@@ -204,7 +202,6 @@ pub fn build_block(config: Config) -> BlockBuild {
     let shared = Shared {
         stage: Stage::InitializeBlock,
         block_body: Vec::with_capacity(config.block_body_capacity),
-        logs: String::new(),
         max_log_level: config.max_log_level,
         calculate_trie_changes: config.calculate_trie_changes,
     };
@@ -262,41 +259,39 @@ pub enum BlockBuild {
 }
 
 impl BlockBuild {
-    fn from_inner(inner: runtime_host::RuntimeHostVm, mut shared: Shared) -> Self {
+    fn from_inner(inner: runtime_call::RuntimeCall, mut shared: Shared) -> Self {
         enum Inner {
-            Runtime(runtime_host::RuntimeHostVm),
-            Transition(runtime_host::Success),
+            Runtime(runtime_call::RuntimeCall),
+            Transition(runtime_call::Success),
         }
 
         let mut inner = Inner::Runtime(inner);
 
         loop {
             match (inner, &mut shared.stage) {
-                (Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Err(err))), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::Finished(Err(err))), _) => {
                     return BlockBuild::Finished(Err((Error::WasmVm(err.detail), err.prototype)));
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::StorageGet(inner)), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::StorageGet(inner)), _) => {
                     return BlockBuild::StorageGet(StorageGet(inner, shared))
                 }
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
-                        inner,
-                    )),
+                    Inner::Runtime(runtime_call::RuntimeCall::ClosestDescendantMerkleValue(inner)),
                     _,
                 ) => {
                     return BlockBuild::ClosestDescendantMerkleValue(ClosestDescendantMerkleValue(
                         inner, shared,
                     ))
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::NextKey(inner)), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::NextKey(inner)), _) => {
                     return BlockBuild::NextKey(NextKey(inner, shared))
                 }
-                (Inner::Runtime(runtime_host::RuntimeHostVm::OffchainStorageSet(inner)), _) => {
+                (Inner::Runtime(runtime_call::RuntimeCall::OffchainStorageSet(inner)), _) => {
                     return BlockBuild::OffchainStorageSet(OffchainStorageSet(inner, shared))
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::InitializeBlock,
                 ) => {
                     if !success.virtual_machine.value().as_ref().is_empty() {
@@ -306,7 +301,6 @@ impl BlockBuild {
                         )));
                     }
 
-                    shared.logs.push_str(&success.logs);
                     shared.stage = Stage::InherentExtrinsics;
 
                     return BlockBuild::InherentExtrinsics(InherentExtrinsics {
@@ -317,7 +311,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::InherentExtrinsics,
                 ) => {
                     let parse_result =
@@ -333,7 +327,6 @@ impl BlockBuild {
                     };
 
                     shared.block_body.reserve(extrinsics.len());
-                    shared.logs.push_str(&success.logs);
                     shared.stage = Stage::ApplyInherentExtrinsic { extrinsics };
                     inner = Inner::Transition(success);
                 }
@@ -343,7 +336,7 @@ impl BlockBuild {
                 {
                     let extrinsic = &extrinsics[0];
 
-                    let init_result = runtime_host::run(runtime_host::Config {
+                    let init_result = runtime_call::run(runtime_call::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
                         parameter: iter::once(extrinsic),
@@ -369,7 +362,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::ApplyInherentExtrinsic { .. },
                 ) => {
                     let (extrinsic, new_stage) = match shared.stage {
@@ -415,7 +408,7 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::ApplyExtrinsic(_),
                 ) => {
                     let parse_result =
@@ -452,10 +445,9 @@ impl BlockBuild {
                 }
 
                 (
-                    Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
+                    Inner::Runtime(runtime_call::RuntimeCall::Finished(Ok(success))),
                     Stage::FinalizeBlock,
                 ) => {
-                    shared.logs.push_str(&success.logs);
                     let scale_encoded_header = success.virtual_machine.value().as_ref().to_owned();
                     return BlockBuild::Finished(Ok(Success {
                         scale_encoded_header,
@@ -463,25 +455,23 @@ impl BlockBuild {
                         parent_runtime: success.virtual_machine.into_prototype(),
                         storage_changes: success.storage_changes,
                         state_trie_version: success.state_trie_version,
-                        logs: shared.logs,
                     }));
                 }
 
+                // TODO: what about SignatureVerification and EmitLog? at the time of writing of this comment, it's not worth fixing as this code would get removed by <https://github.com/smol-dot/smoldot/issues/1517>
                 (_, s) => unreachable!("{:?}", s),
             }
         }
     }
 }
 
-/// Extra information maintained in parallel of the [`runtime_host::RuntimeHostVm`].
+/// Extra information maintained in parallel of the [`runtime_call::RuntimeCall`].
 #[derive(Debug)]
 struct Shared {
     /// The block building process is separated into multiple stages.
     stage: Stage,
     /// Body of the block under construction. Items are added as construction progresses.
     block_body: Vec<Vec<u8>>,
-    /// Concatenation of all logs produced by the multiple calls.
-    logs: String,
     /// Value provided by [`Config::max_log_level`].
     max_log_level: u32,
     /// Value provided by [`Config::calculate_trie_changes`].
@@ -528,7 +518,7 @@ impl InherentExtrinsics {
     ) -> BlockBuild {
         debug_assert!(matches!(self.shared.stage, Stage::InherentExtrinsics));
 
-        let init_result = runtime_host::run(runtime_host::Config {
+        let init_result = runtime_call::run(runtime_call::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_inherent_extrinsics",
             parameter: {
@@ -576,7 +566,7 @@ impl ApplyExtrinsic {
     ///
     /// See the module-level documentation for more information.
     pub fn add_extrinsic(mut self, extrinsic: Vec<u8>) -> BlockBuild {
-        let init_result = runtime_host::run(runtime_host::Config {
+        let init_result = runtime_call::run(runtime_call::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
             parameter: iter::once(&extrinsic),
@@ -599,7 +589,7 @@ impl ApplyExtrinsic {
     pub fn finish(mut self) -> BlockBuild {
         self.shared.stage = Stage::FinalizeBlock;
 
-        let init_result = runtime_host::run(runtime_host::Config {
+        let init_result = runtime_call::run(runtime_call::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_finalize_block",
             parameter: iter::empty::<&[u8]>(),
@@ -619,7 +609,7 @@ impl ApplyExtrinsic {
 
 /// Loading a storage value from the parent storage is required in order to continue.
 #[must_use]
-pub struct StorageGet(runtime_host::StorageGet, Shared);
+pub struct StorageGet(runtime_call::StorageGet, Shared);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -644,7 +634,7 @@ impl StorageGet {
 /// Obtaining the Merkle value of the closest descendant of a trie node is required in order
 /// to continue.
 #[must_use]
-pub struct ClosestDescendantMerkleValue(runtime_host::ClosestDescendantMerkleValue, Shared);
+pub struct ClosestDescendantMerkleValue(runtime_call::ClosestDescendantMerkleValue, Shared);
 
 impl ClosestDescendantMerkleValue {
     /// Returns the key whose closest descendant Merkle value must be passed to
@@ -678,7 +668,7 @@ impl ClosestDescendantMerkleValue {
 /// Fetching the key that follows a given one in the parent storage is required in order to
 /// continue.
 #[must_use]
-pub struct NextKey(runtime_host::NextKey, Shared);
+pub struct NextKey(runtime_call::NextKey, Shared);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
@@ -722,7 +712,7 @@ impl NextKey {
 
 /// Setting the value of an offchain storage value is required.
 #[must_use]
-pub struct OffchainStorageSet(runtime_host::OffchainStorageSet, Shared);
+pub struct OffchainStorageSet(runtime_call::OffchainStorageSet, Shared);
 
 impl OffchainStorageSet {
     /// Returns the key whose value must be set.
@@ -762,7 +752,7 @@ fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error
                 nom::combinator::map(
                     nom::combinator::recognize(nom::combinator::flat_map(
                         crate::util::nom_scale_compact_usize,
-                        nom::bytes::complete::take,
+                        nom::bytes::streaming::take,
                     )),
                     |v: &[u8]| v.to_vec(),
                 ),
@@ -871,12 +861,12 @@ fn apply_extrinsic_result(
         "apply extrinsic result",
         nom::branch::alt((
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[0]), dispatch_outcome),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), dispatch_outcome),
                 Ok,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[1]),
+                    nom::bytes::streaming::tag(&[1]),
                     transaction_validity_error,
                 ),
                 Err,
@@ -889,9 +879,9 @@ fn dispatch_outcome(bytes: &[u8]) -> nom::IResult<&[u8], Result<(), DispatchErro
     nom::error::context(
         "dispatch outcome",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| Ok(())),
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| Ok(())),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), dispatch_error),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), dispatch_error),
                 Err,
             ),
         )),
@@ -902,16 +892,16 @@ fn dispatch_error(bytes: &[u8]) -> nom::IResult<&[u8], DispatchError> {
     nom::error::context(
         "dispatch error",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                 DispatchError::CannotLookup
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                 DispatchError::BadOrigin
             }),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
-                    nom::sequence::tuple((nom::number::complete::u8, nom::number::complete::u8)),
+                    nom::bytes::streaming::tag(&[2]),
+                    nom::sequence::tuple((nom::number::streaming::u8, nom::number::streaming::u8)),
                 ),
                 |(index, error)| DispatchError::Module { index, error },
             ),
@@ -924,11 +914,11 @@ fn transaction_validity_error(bytes: &[u8]) -> nom::IResult<&[u8], TransactionVa
         "transaction validity error",
         nom::branch::alt((
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[0]), invalid_transaction),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[0]), invalid_transaction),
                 TransactionValidityError::Invalid,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), unknown_transaction),
+                nom::sequence::preceded(nom::bytes::streaming::tag(&[1]), unknown_transaction),
                 TransactionValidityError::Unknown,
             ),
         )),
@@ -939,38 +929,38 @@ fn invalid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], InvalidTransaction> 
     nom::error::context(
         "invalid transaction",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                 InvalidTransaction::Call
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                 InvalidTransaction::Payment
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[2]), |_| {
                 InvalidTransaction::Future
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[3]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[3]), |_| {
                 InvalidTransaction::Stale
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[4]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[4]), |_| {
                 InvalidTransaction::BadProof
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[5]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[5]), |_| {
                 InvalidTransaction::AncientBirthBlock
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[6]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[6]), |_| {
                 InvalidTransaction::ExhaustsResources
             }),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[7]),
-                    nom::bytes::complete::take(1u32),
+                    nom::bytes::streaming::tag(&[7]),
+                    nom::bytes::streaming::take(1u32),
                 ),
                 |n: &[u8]| InvalidTransaction::Custom(n[0]),
             ),
-            nom::combinator::map(nom::bytes::complete::tag(&[8]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[8]), |_| {
                 InvalidTransaction::BadMandatory
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[9]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[9]), |_| {
                 InvalidTransaction::MandatoryDispatch
             }),
         )),
@@ -981,16 +971,16 @@ fn unknown_transaction(bytes: &[u8]) -> nom::IResult<&[u8], UnknownTransaction> 
     nom::error::context(
         "unknown transaction",
         nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[0]), |_| {
                 UnknownTransaction::CannotLookup
             }),
-            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+            nom::combinator::map(nom::bytes::streaming::tag(&[1]), |_| {
                 UnknownTransaction::NoUnsignedValidator
             }),
             nom::combinator::map(
                 nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[2]),
-                    nom::bytes::complete::take(1u32),
+                    nom::bytes::streaming::tag(&[2]),
+                    nom::bytes::streaming::take(1u32),
                 ),
                 |n: &[u8]| UnknownTransaction::Custom(n[0]),
             ),
