@@ -1364,22 +1364,28 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                             sender,
                         );
 
-                        // TODO: don't print for consensusenginemismatch?
-                        log!(
-                            &self.platform,
-                            Warn,
-                            &self.log_target,
-                            format!("Error while verifying justification: {error}")
-                        );
+                        // Errors of type `JustificationEngineMismatch` indicate that the chain
+                        // uses a finality engine that smoldot doesn't recognize. This is a benign
+                        // error that shouldn't lead to a ban.
+                        if !matches!(
+                            error,
+                            all::JustificationVerifyError::JustificationEngineMismatch
+                        ) {
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                format!("Error while verifying justification: {error}")
+                            );
 
-                        // TODO: don't ban for consensusenginemismatch?
-                        self.network_service
-                            .ban_and_disconnect(
-                                sender,
-                                network_service::BanSeverity::High,
-                                "bad-justification",
-                            )
-                            .await;
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender,
+                                    network_service::BanSeverity::High,
+                                    "bad-justification",
+                                )
+                                .await;
+                        }
                     }
 
                     (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {

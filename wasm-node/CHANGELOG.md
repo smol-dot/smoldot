@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Non-Grandpa justifications are now silently ignored, instead of leading to a ban of the peer that sent the justification. This makes smoldot work better on chains that use BEEFY. ([#1614](https://github.com/smol-dot/smoldot/pull/1614))
+
 ## 2.0.18 - 2024-01-24
 
 ### Changed
