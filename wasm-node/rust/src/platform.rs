@@ -44,6 +44,9 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
+/// Total number of microseconds that all the tasks have spent executing. A `u64` will overflow
+/// after 584 542 years.
+pub static TOTAL_CPU_USAGE_US: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
 
@@ -136,6 +139,10 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                 let out = this.future.poll(cx);
                 let poll_duration = Duration::from_micros(
                     unsafe { bindings::monotonic_clock_us() } - before_polling,
+                );
+                TOTAL_CPU_USAGE_US.fetch_add(
+                    u64::try_from(poll_duration.as_micros()).unwrap_or(u64::max_value()),
+                    Ordering::Relaxed,
                 );
 
                 unsafe {
