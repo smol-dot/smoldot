@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "0.15.1"
+version = "0.15.0"
 dependencies = [
  "async-channel",
  "async-lock 3.3.0",
