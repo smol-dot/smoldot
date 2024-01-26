@@ -2950,14 +2950,22 @@ impl SyncBackground {
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                        self.network_service
-                            .ban_and_disconnect(
-                                sender.clone(),
-                                self.network_chain_id,
-                                network_service::BanSeverity::High,
-                                "bad-warp-sync-fragment",
-                            )
-                            .await;
+                        // Errors of type `JustificationEngineMismatch` indicate that the chain
+                        // uses a finality engine that smoldot doesn't recognize. This is a benign
+                        // error that shouldn't lead to a ban.
+                        if !matches!(
+                            error,
+                            all::JustificationVerifyError::JustificationEngineMismatch
+                        ) {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender.clone(),
+                                    self.network_chain_id,
+                                    network_service::BanSeverity::High,
+                                    "bad-warp-sync-fragment",
+                                )
+                                .await;
+                        }
                         self.log_callback.log(
                             LogLevel::Warn,
                             format!(

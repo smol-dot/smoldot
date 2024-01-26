@@ -48,6 +48,7 @@ use core::{
 };
 
 pub use crate::executor::vm::ExecHint;
+pub use blocks_tree::{CommitVerifyError, JustificationVerifyError};
 pub use warp_sync::{
     BuildChainInformationError as WarpSyncBuildChainInformationError,
     BuildRuntimeError as WarpSyncBuildRuntimeError, ConfigCodeTrieNodeHint, VerifyFragmentError,
@@ -2046,9 +2047,9 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     /// GrandPa commit cannot be verified yet and has been stored for later.
     GrandpaCommitPending,
     /// Problem while verifying justification.
-    JustificationError(blocks_tree::JustificationVerifyError),
+    JustificationError(JustificationVerifyError),
     /// Problem while verifying GrandPa commit.
-    GrandpaCommitError(blocks_tree::CommitVerifyError),
+    GrandpaCommitError(CommitVerifyError),
 }
 
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
