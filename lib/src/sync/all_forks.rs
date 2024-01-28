@@ -201,8 +201,8 @@ struct Source<TSrc> {
     /// source isn't malicious, we will able to make *some* progress in the finality.
     unverified_finality_proofs: SourcePendingJustificationProofs,
 
-    /// Height of the highest finalized block according to that source. `None` if unknown.
-    finalized_block_number: Option<u64>,
+    /// Height of the highest finalized block according to that source. `0` if unknown.
+    finalized_block_number: u64,
 
     /// Similar to [`Source::unverified_finality_proofs`]. Contains proofs that have been checked
     /// and have been determined to not be verifiable right now.
@@ -719,9 +719,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                             // We assume that all sources have the same finalized blocks and thus
                             // don't check hashes.
                             self.inner.blocks[*s].unverified_finality_proofs.is_none()
-                                && self.inner.blocks[*s]
-                                    .finalized_block_number
-                                    .map_or(false, |n| n >= block_height)
+                                && self.inner.blocks[*s].finalized_block_number >= block_height
                         })
                         .map(move |source_id| {
                             (
@@ -949,13 +947,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         finalized_block_height: u64,
     ) {
         let source = &mut self.inner.blocks[source_id];
-        source.finalized_block_number = Some(
-            source
-                .finalized_block_number
-                .map_or(finalized_block_height, |b| {
-                    cmp::max(b, finalized_block_height)
-                }),
-        );
+        source.finalized_block_number =
+            cmp::max(source.finalized_block_number, finalized_block_height);
     }
 
     /// Update the state machine with a Grandpa commit message received from the network.
@@ -984,11 +977,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         // The finalized block number of the source is increased even if the commit message
         // isn't known to be valid yet.
-        source.finalized_block_number = Some(
-            source
-                .finalized_block_number
-                .map_or(block_number, |b| cmp::max(b, block_number)),
-        );
+        source.finalized_block_number = cmp::max(source.finalized_block_number, block_number);
 
         source.unverified_finality_proofs.insert(
             block_number,
@@ -1805,7 +1794,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceOldBlock<'a, TBl, TRq, TSrc> {
             Source {
                 user_data: source_user_data,
                 unverified_finality_proofs: SourcePendingJustificationProofs::None,
-                finalized_block_number: None,
+                finalized_block_number: 0,
                 pending_finality_proofs: SourcePendingJustificationProofs::None,
             },
             self.best_block_number,
@@ -1852,7 +1841,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
             Source {
                 user_data: source_user_data,
                 unverified_finality_proofs: SourcePendingJustificationProofs::None,
-                finalized_block_number: None,
+                finalized_block_number: 0,
                 pending_finality_proofs: SourcePendingJustificationProofs::None,
             },
             self.best_block_number,
@@ -1888,7 +1877,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             Source {
                 user_data: source_user_data,
                 unverified_finality_proofs: SourcePendingJustificationProofs::None,
-                finalized_block_number: None,
+                finalized_block_number: 0,
                 pending_finality_proofs: SourcePendingJustificationProofs::None,
             },
             self.best_block_number,

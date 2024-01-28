@@ -748,6 +748,18 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         *stored_height = finalized_block_height;
     }
 
+    /// Gets the finalized block height of the given source.
+    ///
+    /// Equal to 0 if [`WarpSync::set_source_finality_state`] hasn't been called.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn source_finality_state(&self, source_id: SourceId) -> u64 {
+        self.sources[source_id.0].finalized_block_height
+    }
+
     /// Returns a list of requests that should be started in order to drive the warp syncing
     /// process to completion.
     ///

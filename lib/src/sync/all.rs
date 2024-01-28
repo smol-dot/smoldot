@@ -953,7 +953,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }
                 };
 
-                // TODO: also provide finality information
+                new_all_forks.update_source_finality_state(
+                    new_inner_source_id,
+                    warp_sync.source_finality_state(warp_sync_source_id),
+                );
 
                 self.shared.sources[outer_source_id.0].all_forks = new_inner_source_id;
             }
