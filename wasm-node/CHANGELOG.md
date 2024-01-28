@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix "Justification targets block not in the chain" errors, leading to peers being erroneously banned.
+- Fix "Justification targets block not in the chain" errors, leading to peers being erroneously banned. ([#1618](https://github.com/smol-dot/smoldot/pull/1618))
 
 ## 2.0.19 - 2024-01-26
 
