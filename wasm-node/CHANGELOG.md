@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix "Justification targets block not in the chain" errors, leading to peers being erroneously banned.
+
 ## 2.0.19 - 2024-01-26
 
 ### Fixed
