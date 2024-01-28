@@ -1003,13 +1003,30 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
     pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
+        // Try to find a block to verify.
+        // All blocks are always verified before verifying justifications, in order to guarantee
+        // that the block that a justification targets has already been verified.
+        // TODO: revisit that ^ as advancing finality should have priority over advancing the chain
+        let block_to_verify = self.inner.blocks.unverified_leaves().find(|block| {
+            block.parent_block_hash == self.chain.finalized_block_hash()
+                || self
+                    .chain
+                    .contains_non_finalized_block(&block.parent_block_hash)
+        });
+        if let Some(block) = block_to_verify {
+            return ProcessOne::BlockVerify(BlockVerify {
+                parent: self,
+                block_to_verify: block,
+            });
+        }
+
+        // Try to find a justification to verify.
         // TODO: O(n)
         let source_id_with_finality_proof = self
             .inner
             .blocks
             .sources()
             .find(|id| !self.inner.blocks[*id].unverified_finality_proofs.is_none());
-
         if let Some(source_id_with_finality_proof) = source_id_with_finality_proof {
             let finality_proof_to_verify = self.inner.blocks[source_id_with_finality_proof]
                 .unverified_finality_proofs
@@ -1022,21 +1039,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             });
         }
 
-        let block = self.inner.blocks.unverified_leaves().find(|block| {
-            block.parent_block_hash == self.chain.finalized_block_hash()
-                || self
-                    .chain
-                    .contains_non_finalized_block(&block.parent_block_hash)
-        });
-
-        if let Some(block) = block {
-            ProcessOne::BlockVerify(BlockVerify {
-                parent: self,
-                block_to_verify: block,
-            })
-        } else {
-            ProcessOne::AllSync { sync: self }
-        }
+        ProcessOne::AllSync { sync: self }
     }
 }
 
