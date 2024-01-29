@@ -59,7 +59,7 @@ use crate::{log, network_service, platform::PlatformRef, sync_service};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
@@ -808,7 +808,7 @@ async fn run_background<TPlat: PlatformRef>(
             best_near_head_of_chain: config.sync_service.is_near_head_of_chain_heuristic().await,
             tree,
             runtimes: slab::Slab::with_capacity(2),
-            pending_subscriptions: Vec::with_capacity(8),
+            pending_subscriptions: VecDeque::with_capacity(8),
             blocks_stream: None,
             runtime_downloads: stream::FuturesUnordered::new(),
             progress_runtime_call_requests: stream::FuturesUnordered::new(),
@@ -825,7 +825,7 @@ async fn run_background<TPlat: PlatformRef>(
             StartDownload(async_tree::AsyncOpId, async_tree::NodeIndex),
             TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
             TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
-            StartPendingSubscribeAll,
+            StartPendingSubscribeAll(ToBackgroundSubscribeAll<TPlat>),
             Notification(Option<sync_service::Notification>),
             ToBackground(ToBackground<TPlat>),
             ForegroundClosed,
@@ -850,8 +850,13 @@ async fn run_background<TPlat: PlatformRef>(
                 matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. });
             let num_runtime_downloads = background.runtime_downloads.len();
             async {
-                if !background.pending_subscriptions.is_empty() && finalized_block_known {
-                    WakeUpReason::StartPendingSubscribeAll
+                if finalized_block_known {
+                    if let Some(pending_subscription) = background.pending_subscriptions.pop_front()
+                    {
+                        WakeUpReason::StartPendingSubscribeAll(pending_subscription)
+                    } else {
+                        future::pending().await
+                    }
                 } else {
                     future::pending().await
                 }
@@ -1559,8 +1564,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
 
-            // TODO: consider refactor a bit to start one subscription at a time per loop
-            WakeUpReason::StartPendingSubscribeAll => {
+            WakeUpReason::StartPendingSubscribeAll(pending_subscription) => {
                 // A subscription is waiting to be started.
 
                 // Extract the components of the `FinalizedBlockRuntimeKnown`.
@@ -1580,137 +1584,135 @@ async fn run_background<TPlat: PlatformRef>(
                         _ => unreachable!(),
                     };
 
-                for pending_subscription in background.pending_subscriptions.drain(..) {
-                    let (tx, new_blocks_channel) =
-                        async_channel::bounded(pending_subscription.buffer_size);
-                    let subscription_id = background.next_subscription_id;
-                    debug_assert_eq!(
-                        pinned_blocks
-                            .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
-                            .count(),
-                        0
-                    );
-                    background.next_subscription_id += 1;
+                let (tx, new_blocks_channel) =
+                    async_channel::bounded(pending_subscription.buffer_size);
+                let subscription_id = background.next_subscription_id;
+                debug_assert_eq!(
+                    pinned_blocks
+                        .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
+                        .count(),
+                    0
+                );
+                background.next_subscription_id += 1;
 
-                    log!(
-                        &background.platform,
-                        Trace,
-                        &background.log_target,
-                        "pending-runtime-service-subscriptions-process",
-                        subscription_id
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "pending-runtime-service-subscriptions-process",
+                    subscription_id
+                );
+
+                let decoded_finalized_block = header::decode(
+                    &finalized_block.scale_encoded_header,
+                    background.sync_service.block_number_bytes(),
+                )
+                .unwrap();
+
+                let _prev_value = pinned_blocks.insert(
+                    (subscription_id, finalized_block.hash),
+                    PinnedBlock {
+                        runtime: tree.output_finalized_async_user_data().clone(),
+                        state_trie_root_hash: *decoded_finalized_block.state_root,
+                        block_number: decoded_finalized_block.number,
+                        block_ignores_limit: false,
+                    },
+                );
+                debug_assert!(_prev_value.is_none());
+
+                let mut non_finalized_blocks_ancestry_order =
+                    Vec::with_capacity(tree.num_input_non_finalized_blocks());
+                for block in tree.input_output_iter_ancestry_order() {
+                    let runtime = match block.async_op_user_data {
+                        Some(rt) => rt.clone(),
+                        None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
+                    };
+
+                    let block_hash = block.user_data.hash;
+                    let parent_runtime = tree.parent(block.id).map_or(
+                        tree.output_finalized_async_user_data().clone(),
+                        |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
                     );
 
-                    let decoded_finalized_block = header::decode(
-                        &finalized_block.scale_encoded_header,
+                    let parent_hash = *header::decode(
+                        &block.user_data.scale_encoded_header,
+                        background.sync_service.block_number_bytes(),
+                    )
+                    .unwrap()
+                    .parent_hash; // TODO: correct? if yes, document
+                    debug_assert!(
+                        parent_hash == finalized_block.hash
+                            || tree
+                                .input_output_iter_ancestry_order()
+                                .any(|b| parent_hash == b.user_data.hash
+                                    && b.async_op_user_data.is_some())
+                    );
+
+                    let decoded_header = header::decode(
+                        &block.user_data.scale_encoded_header,
                         background.sync_service.block_number_bytes(),
                     )
                     .unwrap();
 
                     let _prev_value = pinned_blocks.insert(
-                        (subscription_id, finalized_block.hash),
+                        (subscription_id, block_hash),
                         PinnedBlock {
-                            runtime: tree.output_finalized_async_user_data().clone(),
-                            state_trie_root_hash: *decoded_finalized_block.state_root,
-                            block_number: decoded_finalized_block.number,
-                            block_ignores_limit: false,
+                            runtime: runtime.clone(),
+                            state_trie_root_hash: *decoded_header.state_root,
+                            block_number: decoded_header.number,
+                            block_ignores_limit: true,
                         },
                     );
                     debug_assert!(_prev_value.is_none());
 
-                    let mut non_finalized_blocks_ancestry_order =
-                        Vec::with_capacity(tree.num_input_non_finalized_blocks());
-                    for block in tree.input_output_iter_ancestry_order() {
-                        let runtime = match block.async_op_user_data {
-                            Some(rt) => rt.clone(),
-                            None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
-                        };
-
-                        let block_hash = block.user_data.hash;
-                        let parent_runtime = tree.parent(block.id).map_or(
-                            tree.output_finalized_async_user_data().clone(),
-                            |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
-                        );
-
-                        let parent_hash = *header::decode(
-                            &block.user_data.scale_encoded_header,
-                            background.sync_service.block_number_bytes(),
-                        )
-                        .unwrap()
-                        .parent_hash; // TODO: correct? if yes, document
-                        debug_assert!(
-                            parent_hash == finalized_block.hash
-                                || tree
-                                    .input_output_iter_ancestry_order()
-                                    .any(|b| parent_hash == b.user_data.hash
-                                        && b.async_op_user_data.is_some())
-                        );
-
-                        let decoded_header = header::decode(
-                            &block.user_data.scale_encoded_header,
-                            background.sync_service.block_number_bytes(),
-                        )
-                        .unwrap();
-
-                        let _prev_value = pinned_blocks.insert(
-                            (subscription_id, block_hash),
-                            PinnedBlock {
-                                runtime: runtime.clone(),
-                                state_trie_root_hash: *decoded_header.state_root,
-                                block_number: decoded_header.number,
-                                block_ignores_limit: true,
-                            },
-                        );
-                        debug_assert!(_prev_value.is_none());
-
-                        non_finalized_blocks_ancestry_order.push(BlockNotification {
-                            is_new_best: block.is_output_best,
-                            parent_hash,
-                            scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                            new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
-                                Some(
-                                    runtime
-                                        .runtime
-                                        .as_ref()
-                                        .map(|rt| rt.runtime_version().clone())
-                                        .map_err(|err| err.clone()),
-                                )
-                            } else {
-                                None
-                            },
-                        });
-                    }
-
-                    debug_assert!(matches!(
-                        non_finalized_blocks_ancestry_order
-                            .iter()
-                            .filter(|b| b.is_new_best)
-                            .count(),
-                        0 | 1
-                    ));
-
-                    all_blocks_subscriptions.insert(
-                        subscription_id,
-                        (tx, pending_subscription.max_pinned_blocks.get() - 1),
-                    );
-
-                    let _ = pending_subscription.result_tx.send(SubscribeAll {
-                        finalized_block_scale_encoded_header: finalized_block
-                            .scale_encoded_header
-                            .clone(),
-                        finalized_block_runtime: tree
-                            .output_finalized_async_user_data()
-                            .runtime
-                            .as_ref()
-                            .map(|rt| rt.runtime_version().clone())
-                            .map_err(|err| err.clone()),
-                        non_finalized_blocks_ancestry_order,
-                        new_blocks: Subscription {
-                            subscription_id,
-                            channel: Box::pin(new_blocks_channel),
-                            to_background: background.to_background_tx.upgrade().unwrap(),
+                    non_finalized_blocks_ancestry_order.push(BlockNotification {
+                        is_new_best: block.is_output_best,
+                        parent_hash,
+                        scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                        new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
+                            Some(
+                                runtime
+                                    .runtime
+                                    .as_ref()
+                                    .map(|rt| rt.runtime_version().clone())
+                                    .map_err(|err| err.clone()),
+                            )
+                        } else {
+                            None
                         },
                     });
                 }
+
+                debug_assert!(matches!(
+                    non_finalized_blocks_ancestry_order
+                        .iter()
+                        .filter(|b| b.is_new_best)
+                        .count(),
+                    0 | 1
+                ));
+
+                all_blocks_subscriptions.insert(
+                    subscription_id,
+                    (tx, pending_subscription.max_pinned_blocks.get() - 1),
+                );
+
+                let _ = pending_subscription.result_tx.send(SubscribeAll {
+                    finalized_block_scale_encoded_header: finalized_block
+                        .scale_encoded_header
+                        .clone(),
+                    finalized_block_runtime: tree
+                        .output_finalized_async_user_data()
+                        .runtime
+                        .as_ref()
+                        .map(|rt| rt.runtime_version().clone())
+                        .map_err(|err| err.clone()),
+                    non_finalized_blocks_ancestry_order,
+                    new_blocks: Subscription {
+                        subscription_id,
+                        channel: Box::pin(new_blocks_channel),
+                        to_background: background.to_background_tx.upgrade().unwrap(),
+                    },
+                });
             }
 
             WakeUpReason::Notification(None) => {
@@ -1751,7 +1753,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background
                     .pending_subscriptions
                     .retain(|s| !s.result_tx.is_canceled());
-                background.pending_subscriptions.push(msg);
+                background.pending_subscriptions.push_back(msg);
             }
 
             WakeUpReason::ToBackground(ToBackground::CompileAndPinRuntime {
@@ -2923,7 +2925,7 @@ struct Background<TPlat: PlatformRef> {
     /// When in the [`Tree::FinalizedBlockRuntimeKnown`] state, a [`SubscribeAll`] is constructed
     /// and sent back for each of these senders.
     /// When in the [`Tree::FinalizedBlockRuntimeUnknown`] state, the senders patiently wait here.
-    pending_subscriptions: Vec<ToBackgroundSubscribeAll<TPlat>>,
+    pending_subscriptions: VecDeque<ToBackgroundSubscribeAll<TPlat>>,
 
     /// Stream of notifications coming from the sync service. `None` if not subscribed yet.
     blocks_stream: Option<Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>>,
