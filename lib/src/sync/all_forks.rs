@@ -799,9 +799,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// This state machine doesn't differentiate between successful or failed requests. If a
     /// request has failed, call this function and immediately call [`FinishRequest::finish`].
-    ///
-    /// This method takes ownership of the [`AllForksSync`] and puts it in a mode where the blocks
-    /// of the response can be added one by one.
+    /// Additionally, it is allow to insert fewer blocks than the number indicated in
+    /// [`RequestParams::num_blocks`].
     ///
     /// The added blocks are expected to be sorted in decreasing order. The first block should be
     /// the block with the hash that was referred by [`RequestParams::first_block_hash`]. Each
@@ -811,7 +810,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(mut self, request_id: RequestId) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
+    pub fn finish_request(
+        &mut self,
+        request_id: RequestId,
+    ) -> (TRq, FinishRequest<TBl, TRq, TSrc>) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
@@ -1065,8 +1067,8 @@ impl<'a, TBl, TRq, TSrc> ops::IndexMut<(u64, &'a [u8; 32])> for AllForksSync<TBl
 }
 
 /// See [`AllForksSync::finish_request`].
-pub struct FinishRequest<TBl, TRq, TSrc> {
-    inner: AllForksSync<TBl, TRq, TSrc>,
+pub struct FinishRequest<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
 
     /// Source that has sent the request that is being answered.
     source_id: SourceId,
@@ -1088,7 +1090,7 @@ pub struct FinishRequest<TBl, TRq, TSrc> {
     expected_next_height: u64,
 }
 
-impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
+impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
     /// Adds a block coming from the response that the source has provided.
     ///
     /// On success, the [`FinishRequest`] is turned into an [`AddBlock`]. The block is
@@ -1104,24 +1106,18 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
         scale_encoded_header: &[u8],
         scale_encoded_extrinsics: Vec<Vec<u8>>,
         scale_encoded_justifications: impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
-    ) -> Result<AddBlock<TBl, TRq, TSrc>, (AncestrySearchResponseError, AllForksSync<TBl, TRq, TSrc>)>
-    {
+    ) -> Result<AddBlock<'a, TBl, TRq, TSrc>, AncestrySearchResponseError> {
         // Compare expected with actual hash.
         // This ensure that each header being processed is the parent of the previous one.
         if self.expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {
-            return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
+            return Err(AncestrySearchResponseError::UnexpectedBlock);
         }
 
         // Invalid headers are erroneous.
         let decoded_header =
             match header::decode(scale_encoded_header, self.inner.chain.block_number_bytes()) {
                 Ok(h) => h,
-                Err(err) => {
-                    return Err((
-                        AncestrySearchResponseError::InvalidHeader(err),
-                        self.finish(),
-                    ))
-                }
+                Err(err) => return Err(AncestrySearchResponseError::InvalidHeader(err)),
             };
 
         // Also compare the block numbers.
@@ -1130,7 +1126,7 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
         // hash and number, checking both the hash and number might prevent malicious sources
         // from introducing state inconsistenties, even though it's unclear how that could happen.
         if self.expected_next_height != decoded_header.number {
-            return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
+            return Err(AncestrySearchResponseError::UnexpectedBlock);
         }
 
         // Check whether the SCALE-encoded extrinsics match the extrinsics root found in
@@ -1138,10 +1134,7 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
         if self.inner.inner.blocks.downloading_bodies() {
             let calculated = header::extrinsics_root(&scale_encoded_extrinsics);
             if calculated != *decoded_header.extrinsics_root {
-                return Err((
-                    AncestrySearchResponseError::ExtrinsicsRootMismatch,
-                    self.finish(),
-                ));
+                return Err(AncestrySearchResponseError::ExtrinsicsRootMismatch);
             }
         }
 
@@ -1155,7 +1148,7 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
         if decoded_header.number <= self.inner.chain.finalized_block_header().number {
-            return Err((AncestrySearchResponseError::TooOld, self.finish()));
+            return Err(AncestrySearchResponseError::TooOld);
         }
 
         // Convert the justifications in an "owned" format, because we're likely going to store
@@ -1202,7 +1195,7 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
             let error = AncestrySearchResponseError::NotFinalizedChain {
                 discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
             };
-            return Err((error, self.finish()));
+            return Err(error);
         }
 
         // At this point, we have excluded blocks that are already part of the chain or too old.
@@ -1264,7 +1257,13 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
     /// > **Note**: Network protocols have a limit to the size of their response, meaning that all
     /// >           the requested blocks might not fit in a single response. For this reason, it
     /// >           is legal for a response to be shorter than expected.
-    pub fn finish(mut self) -> AllForksSync<TBl, TRq, TSrc> {
+    pub fn finish(self) {
+        drop(self);
+    }
+}
+
+impl<'a, TBl, TRq, TSrc> Drop for FinishRequest<'a, TBl, TRq, TSrc> {
+    fn drop(&mut self) {
         // If this is reached, then none of the blocks the source has sent back were useful.
         if !self.any_progress {
             // Assume that the source doesn't know this block, as it is apparently unable to
@@ -1276,34 +1275,32 @@ impl<TBl, TRq, TSrc> FinishRequest<TBl, TRq, TSrc> {
                 &self.requested_block_hash,
             );
         }
-
-        self.inner
     }
 }
 
 /// Result of calling [`FinishRequest::add_block`].
-pub enum AddBlock<TBl, TRq, TSrc> {
+pub enum AddBlock<'a, TBl, TRq, TSrc> {
     /// The block is already in the list of unverified blocks.
-    AlreadyPending(AddBlockOccupied<TBl, TRq, TSrc>),
+    AlreadyPending(AddBlockOccupied<'a, TBl, TRq, TSrc>),
 
     /// The block hasn't been heard of before.
-    UnknownBlock(AddBlockVacant<TBl, TRq, TSrc>),
+    UnknownBlock(AddBlockVacant<'a, TBl, TRq, TSrc>),
 
     /// The block is already in the list of verified blocks.
     ///
     /// This can happen for example if a block announce or different ancestry search response has
     /// been processed in between the request and response.
-    AlreadyInChain(AddBlockOccupied<TBl, TRq, TSrc>),
+    AlreadyInChain(AddBlockOccupied<'a, TBl, TRq, TSrc>),
 }
 
 /// See [`FinishRequest::add_block`] and [`AddBlock`].
-pub struct AddBlockOccupied<TBl, TRq, TSrc> {
-    inner: FinishRequest<TBl, TRq, TSrc>,
+pub struct AddBlockOccupied<'a, TBl, TRq, TSrc> {
+    inner: FinishRequest<'a, TBl, TRq, TSrc>,
     decoded_header: header::Header,
     is_verified: bool,
 }
 
-impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
+impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
     /// Gives access to the user data of the block.
     pub fn user_data_mut(&mut self) -> &mut TBl {
         if self.is_verified {
@@ -1331,7 +1328,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     ///
     /// Returns an object that allows continuing inserting blocks, plus the former user data that
     /// was overwritten by the new one.
-    pub fn replace(mut self, user_data: TBl) -> (FinishRequest<TBl, TRq, TSrc>, TBl) {
+    pub fn replace(mut self, user_data: TBl) -> (FinishRequest<'a, TBl, TRq, TSrc>, TBl) {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1393,25 +1390,19 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
         self.inner.index_in_response += 1;
         (self.inner, former_user_data)
     }
-
-    /// Do not update the state machine with this block. Equivalent to calling
-    /// [`FinishRequest::finish`].
-    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
-        self.inner.inner
-    }
 }
 
 /// See [`FinishRequest::add_block`] and [`AddBlock`].
-pub struct AddBlockVacant<TBl, TRq, TSrc> {
-    inner: FinishRequest<TBl, TRq, TSrc>,
+pub struct AddBlockVacant<'a, TBl, TRq, TSrc> {
+    inner: FinishRequest<'a, TBl, TRq, TSrc>,
     decoded_header: header::Header,
     justifications: Vec<([u8; 4], Vec<u8>)>,
     scale_encoded_extrinsics: Vec<Vec<u8>>,
 }
 
-impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
+impl<'a, TBl, TRq, TSrc> AddBlockVacant<'a, TBl, TRq, TSrc> {
     /// Insert the block in the state machine, with the given user data.
-    pub fn insert(mut self, user_data: TBl) -> FinishRequest<TBl, TRq, TSrc> {
+    pub fn insert(mut self, user_data: TBl) -> FinishRequest<'a, TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1492,12 +1483,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         self.inner.expected_next_height -= 1;
         self.inner.index_in_response += 1;
         self.inner
-    }
-
-    /// Do not update the state machine with this block. Equivalent to calling
-    /// [`FinishRequest::finish`].
-    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
-        self.inner.inner
     }
 }
 

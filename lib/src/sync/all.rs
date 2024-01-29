@@ -1141,7 +1141,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
             let mut all_forks_blocks_append = if let Some(all_forks_request_id) = request.all_forks
             {
-                let Some(all_forks) = self.all_forks.take() else {
+                let Some(all_forks) = self.all_forks.as_mut() else {
                     unreachable!()
                 };
                 let (_, blocks_append) = all_forks.finish_request(all_forks_request_id);
@@ -1164,9 +1164,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             };
                             // TODO: report source misbehaviour
                             warp_sync.remove_request(warp_sync_request_id);
-                        }
-                        if let Some(all_forks_blocks_append) = all_forks_blocks_append {
-                            self.all_forks = Some(all_forks_blocks_append.finish());
                         }
                         break ResponseOutcome::Queued;
                     }
@@ -1200,26 +1197,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             all_forks_blocks_append = Some(ba.replace(Some(block.user_data)).0)
                         }
                         Ok(all_forks::AddBlock::AlreadyInChain(ba)) if is_first_block => {
-                            self.all_forks = Some(ba.cancel());
                             break ResponseOutcome::AllAlreadyInChain;
                         }
                         Ok(all_forks::AddBlock::AlreadyInChain(ba)) => {
-                            self.all_forks = Some(ba.cancel());
                             break ResponseOutcome::Queued;
                         }
-                        Err((
-                            all_forks::AncestrySearchResponseError::NotFinalizedChain {
-                                discarded_unverified_block_headers,
-                            },
-                            sync,
-                        )) => {
-                            self.all_forks = Some(sync);
+                        Err(all_forks::AncestrySearchResponseError::NotFinalizedChain {
+                            discarded_unverified_block_headers,
+                        }) => {
                             break ResponseOutcome::NotFinalizedChain {
                                 discarded_unverified_block_headers,
                             };
                         }
-                        Err((_, sync)) => {
-                            self.all_forks = Some(sync);
+                        Err(_) => {
                             break ResponseOutcome::Queued;
                         }
                     }
@@ -1231,11 +1221,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (request.user_data, outcome)
         } else {
             if let Some(all_forks_request_id) = request.all_forks {
-                let Some(all_forks) = self.all_forks.take() else {
+                let Some(all_forks) = self.all_forks.as_mut() else {
                     unreachable!()
                 };
                 let (_, finish_request) = all_forks.finish_request(all_forks_request_id);
-                self.all_forks = Some(finish_request.finish());
             }
 
             if let Some(warp_sync_request_id) = request.warp_sync {
