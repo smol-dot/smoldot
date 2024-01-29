@@ -965,12 +965,15 @@ async fn run_background<TPlat: PlatformRef>(
                 );
 
                 // Dispatches a runtime download task to `runtime_downloads`.
-                background.runtime_downloads.push(download_runtime(
-                    download_id,
-                    background.sync_service.clone(),
-                    block.hash,
-                    &block.scale_encoded_header,
-                ));
+                background.runtime_downloads.push(Box::pin({
+                    let future = download_runtime(
+                        background.sync_service.clone(),
+                        block.hash,
+                        &block.scale_encoded_header,
+                    );
+
+                    async move { (download_id, future.await) }
+                }));
             }
 
             WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Finalized {
@@ -3032,125 +3035,110 @@ fn same_runtime_as_parent(header: &[u8], block_number_bytes: usize) -> bool {
 }
 
 fn download_runtime<TPlat: PlatformRef>(
-    download_id: async_tree::AsyncOpId, // TODO: sketchy parameter
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     block_hash: [u8; 32],
     scale_encoded_header: &[u8],
-) -> Pin<
-    Box<
-        dyn future::Future<
-                Output = (
-                    async_tree::AsyncOpId,
-                    Result<
-                        (
-                            Option<Vec<u8>>,
-                            Option<Vec<u8>>,
-                            Option<Vec<u8>>,
-                            Option<Vec<Nibble>>,
-                        ),
-                        RuntimeDownloadError,
-                    >,
-                ),
-            > + Send,
+) -> impl future::Future<
+    Output = Result<
+        (
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<Nibble>>,
+        ),
+        RuntimeDownloadError,
     >,
 > {
     // In order to perform the download, we need to known the state root hash of the
     // block in question, which requires decoding the block. If the decoding fails,
     // we report that the asynchronous operation has failed with the hope that this
     // block gets pruned in the future.
-    match header::decode(scale_encoded_header, sync_service.block_number_bytes()) {
-        Ok(decoded_header) => {
-            let state_root = *decoded_header.state_root;
-            let block_number = decoded_header.number;
+    let block_info = match header::decode(scale_encoded_header, sync_service.block_number_bytes()) {
+        Ok(decoded_header) => Ok((*decoded_header.state_root, decoded_header.number)),
+        Err(error) => Err(RuntimeDownloadError::InvalidHeader(error)),
+    };
 
-            Box::pin(async move {
-                let result = {
-                    let mut storage_code = None;
-                    let mut storage_heap_pages = None;
-                    let mut code_merkle_value = None;
-                    let mut code_closest_ancestor_excluding = None;
+    async move {
+        let (state_root, block_number) = block_info?;
 
-                    let mut query = sync_service
-                            .clone()
-                            .storage_query(
-                                block_number,
-                                block_hash,
-                                state_root,
-                                [
-                                    sync_service::StorageRequestItem {
-                                        key: b":code".to_vec(),
-                                        ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-                                    },
-                                    sync_service::StorageRequestItem {
-                                        key: b":code".to_vec(),
-                                        ty: sync_service::StorageRequestItemTy::Value,
-                                    },
-                                    sync_service::StorageRequestItem {
-                                        key: b":heappages".to_vec(),
-                                        ty: sync_service::StorageRequestItemTy::Value,
-                                    },
-                                ]
-                                .into_iter(),
-                                3,
-                                Duration::from_secs(20),
-                                NonZeroU32::new(3).unwrap(),
-                            )
-                            .advance()
-                            .await;
+        let mut storage_code = None;
+        let mut storage_heap_pages = None;
+        let mut code_merkle_value = None;
+        let mut code_closest_ancestor_excluding = None;
 
-                    loop {
-                        match query {
-                            sync_service::StorageQueryProgress::Finished => {
-                                break Ok((
-                                    storage_code,
-                                    storage_heap_pages,
-                                    code_merkle_value,
-                                    code_closest_ancestor_excluding,
-                                ))
-                            }
-                            sync_service::StorageQueryProgress::Progress {
-                                request_index: 0,
-                                item:
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                                        closest_descendant_merkle_value,
-                                        found_closest_ancestor_excluding,
-                                        ..
-                                    },
-                                query: next,
-                            } => {
-                                code_merkle_value = closest_descendant_merkle_value;
-                                code_closest_ancestor_excluding = found_closest_ancestor_excluding;
-                                query = next.advance().await;
-                            }
-                            sync_service::StorageQueryProgress::Progress {
-                                request_index: 1,
-                                item: sync_service::StorageResultItem::Value { value, .. },
-                                query: next,
-                            } => {
-                                storage_code = value;
-                                query = next.advance().await;
-                            }
-                            sync_service::StorageQueryProgress::Progress {
-                                request_index: 2,
-                                item: sync_service::StorageResultItem::Value { value, .. },
-                                query: next,
-                            } => {
-                                storage_heap_pages = value;
-                                query = next.advance().await;
-                            }
-                            sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
-                            sync_service::StorageQueryProgress::Error(error) => {
-                                break Err(RuntimeDownloadError::StorageQuery(error))
-                            }
-                        }
-                    }
-                };
+        let mut query = sync_service
+            .clone()
+            .storage_query(
+                block_number,
+                block_hash,
+                state_root,
+                [
+                    sync_service::StorageRequestItem {
+                        key: b":code".to_vec(),
+                        ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                    },
+                    sync_service::StorageRequestItem {
+                        key: b":code".to_vec(),
+                        ty: sync_service::StorageRequestItemTy::Value,
+                    },
+                    sync_service::StorageRequestItem {
+                        key: b":heappages".to_vec(),
+                        ty: sync_service::StorageRequestItemTy::Value,
+                    },
+                ]
+                .into_iter(),
+                3,
+                Duration::from_secs(20),
+                NonZeroU32::new(3).unwrap(),
+            )
+            .advance()
+            .await;
 
-                (download_id, result)
-            })
-        }
-        Err(error) => {
-            Box::pin(async move { (download_id, Err(RuntimeDownloadError::InvalidHeader(error))) })
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    break Ok((
+                        storage_code,
+                        storage_heap_pages,
+                        code_merkle_value,
+                        code_closest_ancestor_excluding,
+                    ))
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    request_index: 0,
+                    item:
+                        sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                            closest_descendant_merkle_value,
+                            found_closest_ancestor_excluding,
+                            ..
+                        },
+                    query: next,
+                } => {
+                    code_merkle_value = closest_descendant_merkle_value;
+                    code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    request_index: 1,
+                    item: sync_service::StorageResultItem::Value { value, .. },
+                    query: next,
+                } => {
+                    storage_code = value;
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    request_index: 2,
+                    item: sync_service::StorageResultItem::Value { value, .. },
+                    query: next,
+                } => {
+                    storage_heap_pages = value;
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    break Err(RuntimeDownloadError::StorageQuery(error))
+                }
+            }
         }
     }
 }
