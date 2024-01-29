@@ -2259,17 +2259,37 @@ async fn run_background<TPlat: PlatformRef>(
             WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
                 // Sync service has reported a new block.
 
-                log!(
-                    &background.platform,
-                    Debug,
-                    &background.log_target,
-                    "input-chain-new-block",
-                    block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
-                        &new_block.scale_encoded_header
-                    )),
-                    parent_block_hash = HashDisplay(&new_block.parent_hash),
-                    is_new_best = new_block.is_new_best
+                let same_runtime_as_parent = same_runtime_as_parent(
+                    &new_block.scale_encoded_header,
+                    background.sync_service.block_number_bytes(),
                 );
+
+                if same_runtime_as_parent {
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "input-chain-new-block",
+                        block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                            &new_block.scale_encoded_header
+                        )),
+                        parent_block_hash = HashDisplay(&new_block.parent_hash),
+                        is_new_best = new_block.is_new_best,
+                        same_runtime_as_parent = true
+                    );
+                } else {
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "input-chain-new-block-runtime-upgrade",
+                        block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                            &new_block.scale_encoded_header
+                        )),
+                        parent_block_hash = HashDisplay(&new_block.parent_hash),
+                        is_new_best = new_block.is_new_best
+                    );
+                }
 
                 let near_head_of_chain = background
                     .sync_service
@@ -2281,11 +2301,6 @@ async fn run_background<TPlat: PlatformRef>(
                     background.best_near_head_of_chain = near_head_of_chain;
                 }
 
-                let same_runtime_as_parent = same_runtime_as_parent(
-                    &new_block.scale_encoded_header,
-                    background.sync_service.block_number_bytes(),
-                );
-
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
                         tree,
@@ -2296,6 +2311,7 @@ async fn run_background<TPlat: PlatformRef>(
                             None
                         } else {
                             Some(
+                                // TODO: O(n)
                                 tree.input_output_iter_unordered()
                                     .find(|block| block.user_data.hash == new_block.parent_hash)
                                     .unwrap()
@@ -2316,6 +2332,7 @@ async fn run_background<TPlat: PlatformRef>(
                         );
                     }
                     Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        // TODO: O(n)
                         let parent_index = tree
                             .input_output_iter_unordered()
                             .find(|block| block.user_data.hash == new_block.parent_hash)
