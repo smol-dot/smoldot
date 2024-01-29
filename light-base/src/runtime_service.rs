@@ -139,15 +139,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         // Spawns a task that runs in the background and updates the content of the mutex.
         let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
-            let platform = config.platform.clone();
             let (tx, rx) = async_channel::bounded(16);
             let tx_weak = tx.downgrade();
             to_background = tx;
             let background_task_config = background_task_config.clone();
-            async move {
-                run_background(background_task_config, rx, tx_weak).await;
-                log!(&platform, Debug, &log_target, "shutdown");
-            }
+            run_background(background_task_config, rx, tx_weak)
         });
 
         RuntimeService {
@@ -959,7 +955,7 @@ async fn run_background<TPlat: PlatformRef>(
                     &background.platform,
                     Debug,
                     &background.log_target,
-                    "block-runtime-download-started",
+                    "block-runtime-download-start",
                     block_hash = HashDisplay(&block.hash)
                 );
 
@@ -1105,11 +1101,12 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-finalized",
                     block_hash = HashDisplay(&finalized_block.hash),
-                    best_block_hash = HashDisplay(&best_block_hash)
+                    best_block_hash = HashDisplay(&best_block_hash),
+                    num_subscribers = all_blocks_subscriptions.len()
                 );
 
                 // The finalization might cause some runtimes in the list of runtimes
@@ -1199,11 +1196,12 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-new-block",
                     block_hash = HashDisplay(&tree[block_index].hash),
-                    is_new_best
+                    is_new_best,
+                    num_subscribers = all_blocks_subscriptions.len()
                 );
 
                 let notif = Notification::Block(BlockNotification {
@@ -1273,10 +1271,11 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-best-block-update",
                     block_hash = HashDisplay(&hash),
+                    num_subscribers = all_blocks_subscriptions.len()
                 );
 
                 let notif = Notification::BestBlockChanged { hash };
@@ -1325,7 +1324,7 @@ async fn run_background<TPlat: PlatformRef>(
                     best_block_index.map_or(new_finalized.hash, |idx| tree[idx].hash);
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-initialized",
                     finalized_block_hash = HashDisplay(&new_finalized.hash),
@@ -1370,9 +1369,9 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
-                    "sync-service-subscription-started",
+                    "sync-service-subscribed",
                     finalized_block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                         &subscription.finalized_block_scale_encoded_header
                     )),
@@ -1526,6 +1525,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 tree.input_finalize(node_index, node_index);
 
                                 for block in subscription.non_finalized_blocks_ancestry_order {
+                                    // TODO: O(n)
                                     let parent_index = tree
                                         .input_output_iter_unordered()
                                         .find(|b| b.user_data.hash == block.parent_hash)
@@ -1559,6 +1559,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
 
+            // TODO: consider refactor a bit to start one subscription at a time per loop
             WakeUpReason::StartPendingSubscribeAll => {
                 // A subscription is waiting to be started.
 
@@ -1576,7 +1577,7 @@ async fn run_background<TPlat: PlatformRef>(
                             pinned_blocks,
                             all_blocks_subscriptions,
                         ),
-                        _ => continue,
+                        _ => unreachable!(),
                     };
 
                 for pending_subscription in background.pending_subscriptions.drain(..) {
@@ -1590,6 +1591,14 @@ async fn run_background<TPlat: PlatformRef>(
                         0
                     );
                     background.next_subscription_id += 1;
+
+                    log!(
+                        &background.platform,
+                        Trace,
+                        &background.log_target,
+                        "pending-runtime-service-subscriptions-process",
+                        subscription_id
+                    );
 
                     let decoded_finalized_block = header::decode(
                         &finalized_block.scale_encoded_header,
@@ -1706,16 +1715,35 @@ async fn run_background<TPlat: PlatformRef>(
 
             WakeUpReason::Notification(None) => {
                 // The sync service has reset the subscription.
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "sync-subscription-reset"
+                );
                 background.blocks_stream = None;
             }
 
             WakeUpReason::ForegroundClosed => {
                 // Frontend and all subscriptions have shut down.
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "graceful-shutdown"
+                );
                 return;
             }
 
             WakeUpReason::ToBackground(ToBackground::SubscribeAll(msg)) => {
                 // Foreground wants to subscribe.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "runtime-service-subscription-requested"
+                );
 
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
                 // remove senders that are closed. This is `O(n)`, but we expect this list to
@@ -1747,9 +1775,9 @@ async fn run_background<TPlat: PlatformRef>(
                 let runtime = if let Some(existing_runtime) = existing_runtime {
                     log!(
                         &background.platform,
-                        Debug,
+                        Trace,
                         &background.log_target,
-                        "compile-and-pin-runtime-cache-hit"
+                        "foreground-compile-and-pin-runtime-cache-hit"
                     );
                     existing_runtime
                 } else {
@@ -1766,7 +1794,7 @@ async fn run_background<TPlat: PlatformRef>(
                         &background.platform,
                         Debug,
                         &background.log_target,
-                        "compile-and-pin-runtime-cache-miss",
+                        "foreground-compile-and-pin-runtime-cache-miss",
                         ?compilation_duration,
                         compilation_success = runtime.is_ok()
                     );
@@ -1788,6 +1816,14 @@ async fn run_background<TPlat: PlatformRef>(
                 result_tx,
             }) => {
                 // Foreground wants the finalized runtime storage Merkle values.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-finalized-runtime-storage-merkle-values"
+                );
+
                 let _ = result_tx.send(
                     if let Tree::FinalizedBlockRuntimeKnown { tree, .. } = &background.tree {
                         let runtime = &tree.output_finalized_async_user_data();
@@ -1804,6 +1840,13 @@ async fn run_background<TPlat: PlatformRef>(
 
             WakeUpReason::ToBackground(ToBackground::IsNearHeadOfChainHeuristic { result_tx }) => {
                 // Foreground wants to query whether we are at the head of the chain.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-is-near-head-of-chain-heuristic"
+                );
 
                 // The runtime service adds a delay between the moment a best block is reported by
                 // the sync service and the moment it is reported by the runtime service.
@@ -1834,6 +1877,15 @@ async fn run_background<TPlat: PlatformRef>(
                 block_hash,
             }) => {
                 // Foreground wants a block unpinned.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-unpin-block",
+                    subscription_id = subscription_id.0,
+                    block_hash = HashDisplay(&block_hash)
+                );
 
                 if let Tree::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions,
@@ -1875,6 +1927,15 @@ async fn run_background<TPlat: PlatformRef>(
                 block_hash,
             }) => {
                 // Foreground wants to pin the runtime of a pinned block.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-pin-pinned-block-runtime",
+                    subscription_id = subscription_id.0,
+                    block_hash = HashDisplay(&block_hash)
+                );
 
                 let pinned_block = {
                     if let Tree::FinalizedBlockRuntimeKnown {
@@ -1929,11 +1990,35 @@ async fn run_background<TPlat: PlatformRef>(
             }) => {
                 // Foreground wants to perform a runtime call.
 
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "foreground-runtime-call-start",
+                    block_hash = HashDisplay(&block_hash),
+                    block_number,
+                    block_state_trie_root_hash = HashDisplay(&block_state_trie_root_hash),
+                    function_name,
+                    ?required_api_version,
+                    parameters_vectored = HashDisplay(&parameters_vectored),
+                    total_attempts,
+                    ?timeout_per_request,
+                    error = "invalid-runtime"
+                );
+
                 let runtime = match &pinned_runtime.runtime {
                     Ok(rt) => rt.clone(),
                     Err(error) => {
                         // The runtime call can't succeed because smoldot was incapable of
                         // compiling the runtime.
+                        log!(
+                            &background.platform,
+                            Trace,
+                            &background.log_target,
+                            "foreground-runtime-call-abort",
+                            block_hash = HashDisplay(&block_hash),
+                            error = "invalid-runtime"
+                        );
                         let _ =
                             result_tx.send(Err(RuntimeCallError::InvalidRuntime(error.clone())));
                         continue;
@@ -1942,24 +2027,27 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let api_version =
                     if let Some((api_name, api_version_required)) = required_api_version {
-                        let Some(api_version) = runtime
+                        let api_version_if_fulfilled = runtime
                             .runtime_version()
                             .decode()
                             .apis
                             .find_version(&api_name)
-                        else {
+                            .filter(|api_version| api_version_required.contains(&api_version));
+
+                        let Some(api_version) = api_version_if_fulfilled else {
                             // API version required by caller isn't fulfilled.
+                            log!(
+                                &background.platform,
+                                Trace,
+                                &background.log_target,
+                                "foreground-runtime-call-abort",
+                                block_hash = HashDisplay(&block_hash),
+                                error = "api-version-requirement-unfulfilled"
+                            );
                             let _ = result_tx
                                 .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
                             continue;
                         };
-
-                        if !api_version_required.contains(&api_version) {
-                            // API version required by caller isn't fulfilled.
-                            let _ = result_tx
-                                .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
-                            continue;
-                        }
 
                         Some(api_version)
                     } else {
@@ -2001,6 +2089,19 @@ async fn run_background<TPlat: PlatformRef>(
                         mut operation,
                         call_proof_sender,
                     } => {
+                        log!(
+                            &background.platform,
+                            Trace,
+                            &background.log_target,
+                            "foreground-runtime-call-progress-fail",
+                            block_hash = HashDisplay(&operation.block_hash),
+                            function_name = operation.function_name,
+                            parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                            remaining_attempts = usize::try_from(operation.total_attempts).unwrap()
+                                - operation.inaccessible_errors.len()
+                                - 1,
+                            ?error
+                        );
                         operation
                             .inaccessible_errors
                             .push(RuntimeCallInaccessibleError::Network(error));
@@ -2016,6 +2117,13 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 };
 
+                // If the foreground is no longer interested in the result, abort now in order to
+                // save resources.
+                if operation.result_tx.is_canceled() {
+                    continue;
+                }
+
+                // Process the call proof.
                 if let Some((call_proof, call_proof_sender)) = call_proof_and_sender {
                     // Try to decode the proof. Succeed just means that the proof has the correct
                     // encoding, and doesn't guarantee that the proof has all the necessary
@@ -2068,6 +2176,17 @@ async fn run_background<TPlat: PlatformRef>(
                                 // Execution finished successfully.
                                 // This is the happy path.
                                 let output = finished.virtual_machine.value().as_ref().to_owned();
+                                log!(
+                                    &background.platform,
+                                    Trace,
+                                    &background.log_target,
+                                    "foreground-runtime-call-success",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    output = HashDisplay(&output),
+                                );
                                 let _ = operation.result_tx.send(Ok(RuntimeCallSuccess {
                                     output,
                                     api_version: operation.api_version,
@@ -2076,9 +2195,21 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
                                 // Execution finished with an error.
-                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
-                                    RuntimeCallExecutionError::Execution(error.detail),
-                                )));
+                                let error = RuntimeCallExecutionError::Execution(error.detail);
+                                log!(
+                                    &background.platform,
+                                    Trace,
+                                    &background.log_target,
+                                    "foreground-runtime-call-fail",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    error = ?error
+                                );
+                                let _ = operation
+                                    .result_tx
+                                    .send(Err(RuntimeCallError::Execution(error)));
                                 continue 'background_main_loop;
                             }
                             executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
@@ -2101,6 +2232,17 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::Offchain(_) => {
                                 // Forbidden host function called.
+                                log!(
+                                    &background.platform,
+                                    Trace,
+                                    &background.log_target,
+                                    "foreground-runtime-call-fail",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    error = ?RuntimeCallExecutionError::ForbiddenHostFunction
+                                );
                                 let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
                                     RuntimeCallExecutionError::ForbiddenHostFunction,
                                 )));
@@ -2184,6 +2326,19 @@ async fn run_background<TPlat: PlatformRef>(
                     };
 
                     // This path is reached only if the call proof was invalid.
+                    log!(
+                        &background.platform,
+                        Trace,
+                        &background.log_target,
+                        "foreground-runtime-call-progress-invalid-call-proof",
+                        block_hash = HashDisplay(&operation.block_hash),
+                        function_name = operation.function_name,
+                        parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                        remaining_attempts = usize::try_from(operation.total_attempts).unwrap()
+                            - operation.inaccessible_errors.len()
+                            - 1,
+                        ?error
+                    );
                     operation.inaccessible_errors.push(error);
                     background
                         .network_service
@@ -2200,6 +2355,7 @@ async fn run_background<TPlat: PlatformRef>(
                 if u32::try_from(operation.inaccessible_errors.len()).unwrap_or(u32::MAX)
                     >= operation.total_attempts
                 {
+                    // No log line is printed here because one is already printed earlier.
                     let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
                         operation.inaccessible_errors,
                     )));
@@ -2224,13 +2380,35 @@ async fn run_background<TPlat: PlatformRef>(
                     }))
                 else {
                     // No peer knows this block. Returning with a failure.
+                    log!(
+                        &background.platform,
+                        Trace,
+                        &background.log_target,
+                        "foreground-runtime-call-request-fail",
+                        block_hash = HashDisplay(&operation.block_hash),
+                        function_name = operation.function_name,
+                        parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                        error = "no-peer-for-call-request"
+                    );
                     let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
                         operation.inaccessible_errors,
                     )));
                     continue 'background_main_loop;
                 };
 
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-runtime-call-request-start",
+                    block_hash = HashDisplay(&operation.block_hash),
+                    function_name = operation.function_name,
+                    parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                    call_proof_target,
+                );
+
                 // Start the request.
+                // TODO: cancel request immediately if result_tx closes
                 background.progress_runtime_call_requests.push(Box::pin({
                     let call_proof_request_future =
                         background.network_service.clone().call_proof_request(
@@ -2267,7 +2445,7 @@ async fn run_background<TPlat: PlatformRef>(
                 if same_runtime_as_parent {
                     log!(
                         &background.platform,
-                        Debug,
+                        Trace,
                         &background.log_target,
                         "input-chain-new-block",
                         block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
@@ -2361,7 +2539,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "input-chain-finalized",
                     block_hash = HashDisplay(&hash),
@@ -2410,7 +2588,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "input-chain-best-block-update",
                     block_hash = HashDisplay(&hash)
@@ -2463,6 +2641,17 @@ async fn run_background<TPlat: PlatformRef>(
             ) => {
                 // A runtime has successfully finished downloading.
 
+                let concerned_blocks = match &background.tree {
+                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        either::Left(tree.async_op_blocks(async_op_id))
+                    }
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        either::Right(tree.async_op_blocks(async_op_id))
+                    }
+                }
+                .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
+                .to_string();
+
                 // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
                 background.best_near_head_of_chain = true;
 
@@ -2483,7 +2672,8 @@ async fn run_background<TPlat: PlatformRef>(
                         &background.platform,
                         Debug,
                         &background.log_target,
-                        "new-runtime-cache-hit"
+                        "runtime-download-finish-compilation-cache-hit",
+                        block_hashes = concerned_blocks,
                     );
                     existing_runtime
                 } else {
@@ -2499,9 +2689,10 @@ async fn run_background<TPlat: PlatformRef>(
                         &background.platform,
                         Debug,
                         &background.log_target,
-                        "new-runtime-cache-miss",
+                        "runtime-download-finish-compilation-cache-miss",
                         ?compilation_duration,
-                        compilation_success = runtime.is_ok()
+                        compilation_success = runtime.is_ok(),
+                        block_hashes = concerned_blocks,
                     );
                     match &runtime {
                         Ok(runtime) => {
