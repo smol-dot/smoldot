@@ -1196,10 +1196,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             // TODO: replacing the user data entirely is very opinionated, instead the API of the AllSync should be changed
                             all_forks_blocks_append = Some(ba.replace(Some(block.user_data)).0)
                         }
-                        Ok(all_forks::AddBlock::AlreadyInChain(ba)) if is_first_block => {
+                        Ok(all_forks::AddBlock::AlreadyInChain(_)) if is_first_block => {
                             break ResponseOutcome::AllAlreadyInChain;
                         }
-                        Ok(all_forks::AddBlock::AlreadyInChain(ba)) => {
+                        Ok(all_forks::AddBlock::AlreadyInChain(_)) => {
                             break ResponseOutcome::Queued;
                         }
                         Err(all_forks::AncestrySearchResponseError::NotFinalizedChain {
@@ -1224,7 +1224,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let Some(all_forks) = self.all_forks.as_mut() else {
                     unreachable!()
                 };
-                let (_, finish_request) = all_forks.finish_request(all_forks_request_id);
+                let (_, _) = all_forks.finish_request(all_forks_request_id);
             }
 
             if let Some(warp_sync_request_id) = request.warp_sync {
