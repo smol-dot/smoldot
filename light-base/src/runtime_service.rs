@@ -2002,8 +2002,7 @@ async fn run_background<TPlat: PlatformRef>(
                     ?required_api_version,
                     parameters_vectored = HashDisplay(&parameters_vectored),
                     total_attempts,
-                    ?timeout_per_request,
-                    error = "invalid-runtime"
+                    ?timeout_per_request
                 );
 
                 let runtime = match &pinned_runtime.runtime {
