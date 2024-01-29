@@ -59,7 +59,7 @@ use crate::{log, network_service, platform::PlatformRef, sync_service};
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     format,
     string::{String, ToString as _},
     sync::{Arc, Weak},
@@ -139,15 +139,11 @@ impl<TPlat: PlatformRef> RuntimeService<TPlat> {
         // Spawns a task that runs in the background and updates the content of the mutex.
         let to_background;
         config.platform.spawn_task(log_target.clone().into(), {
-            let platform = config.platform.clone();
             let (tx, rx) = async_channel::bounded(16);
             let tx_weak = tx.downgrade();
             to_background = tx;
             let background_task_config = background_task_config.clone();
-            async move {
-                run_background(background_task_config, rx, tx_weak).await;
-                log!(&platform, Debug, &log_target, "shutdown");
-            }
+            run_background(background_task_config, rx, tx_weak)
         });
 
         RuntimeService {
@@ -812,10 +808,8 @@ async fn run_background<TPlat: PlatformRef>(
             best_near_head_of_chain: config.sync_service.is_near_head_of_chain_heuristic().await,
             tree,
             runtimes: slab::Slab::with_capacity(2),
-            pending_subscriptions: Vec::with_capacity(8),
+            pending_subscriptions: VecDeque::with_capacity(8),
             blocks_stream: None,
-            // Initialized to `ready` so that the downloads immediately start.
-            wake_up_new_necessary_download: Box::pin(future::ready(())),
             runtime_downloads: stream::FuturesUnordered::new(),
             progress_runtime_call_requests: stream::FuturesUnordered::new(),
         }
@@ -831,7 +825,7 @@ async fn run_background<TPlat: PlatformRef>(
             StartDownload(async_tree::AsyncOpId, async_tree::NodeIndex),
             TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
             TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
-            StartPendingSubscribeAll,
+            StartPendingSubscribeAll(ToBackgroundSubscribeAll<TPlat>),
             Notification(Option<sync_service::Notification>),
             ToBackground(ToBackground<TPlat>),
             ForegroundClosed,
@@ -856,8 +850,13 @@ async fn run_background<TPlat: PlatformRef>(
                 matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. });
             let num_runtime_downloads = background.runtime_downloads.len();
             async {
-                if !background.pending_subscriptions.is_empty() && finalized_block_known {
-                    WakeUpReason::StartPendingSubscribeAll
+                if finalized_block_known {
+                    if let Some(pending_subscription) = background.pending_subscriptions.pop_front()
+                    {
+                        WakeUpReason::StartPendingSubscribeAll(pending_subscription)
+                    } else {
+                        future::pending().await
+                    }
                 } else {
                     future::pending().await
                 }
@@ -961,130 +960,20 @@ async fn run_background<TPlat: PlatformRef>(
                     &background.platform,
                     Debug,
                     &background.log_target,
-                    "block-runtime-download-started",
+                    "block-runtime-download-start",
                     block_hash = HashDisplay(&block.hash)
                 );
 
                 // Dispatches a runtime download task to `runtime_downloads`.
-                background.runtime_downloads.push({
-                    // In order to perform the download, we need to known the state root hash of the
-                    // block in question, which requires decoding the block. If the decoding fails,
-                    // we report that the asynchronous operation has failed with the hope that this
-                    // block gets pruned in the future.
-                    match header::decode(
+                background.runtime_downloads.push(Box::pin({
+                    let future = download_runtime(
+                        background.sync_service.clone(),
+                        block.hash,
                         &block.scale_encoded_header,
-                        background.sync_service.block_number_bytes(),
-                    ) {
-                        Ok(decoded_header) => {
-                            let sync_service = background.sync_service.clone();
-                            let block_hash = block.hash;
-                            let state_root = *decoded_header.state_root;
-                            let block_number = decoded_header.number;
+                    );
 
-                            Box::pin(async move {
-                                let result = {
-                                    let mut storage_code = None;
-                                    let mut storage_heap_pages = None;
-                                    let mut code_merkle_value = None;
-                                    let mut code_closest_ancestor_excluding = None;
-
-                                    let mut query = sync_service
-                                        .clone()
-                                        .storage_query(
-                                            block_number,
-                                            block_hash,
-                                            state_root,
-                                            [
-                                                sync_service::StorageRequestItem {
-                                                    key: b":code".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
-                                                },
-                                                sync_service::StorageRequestItem {
-                                                    key: b":code".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::Value,
-                                                },
-                                                sync_service::StorageRequestItem {
-                                                    key: b":heappages".to_vec(),
-                                                    ty: sync_service::StorageRequestItemTy::Value,
-                                                },
-                                            ]
-                                            .into_iter(),
-                                            3,
-                                            Duration::from_secs(20),
-                                            NonZeroU32::new(3).unwrap(),
-                                        )
-                                        .advance()
-                                        .await;
-
-                                    loop {
-                                        match query {
-                                            sync_service::StorageQueryProgress::Finished => {
-                                                break Ok((
-                                                    storage_code,
-                                                    storage_heap_pages,
-                                                    code_merkle_value,
-                                                    code_closest_ancestor_excluding,
-                                                ))
-                                            }
-                                            sync_service::StorageQueryProgress::Progress {
-                                                request_index: 0,
-                                                item:
-                                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                                                        closest_descendant_merkle_value,
-                                                        found_closest_ancestor_excluding,
-                                                        ..
-                                                    },
-                                                query: next,
-                                            } => {
-                                                code_merkle_value = closest_descendant_merkle_value;
-                                                code_closest_ancestor_excluding = found_closest_ancestor_excluding;
-                                                query = next.advance().await;
-                                            }
-                                            sync_service::StorageQueryProgress::Progress {
-                                                request_index: 1,
-                                                item: sync_service::StorageResultItem::Value { value, .. },
-                                                query: next,
-                                            } => {
-                                                storage_code = value;
-                                                query = next.advance().await;
-                                            }
-                                            sync_service::StorageQueryProgress::Progress {
-                                                request_index: 2,
-                                                item: sync_service::StorageResultItem::Value { value, .. },
-                                                query: next,
-                                            } => {
-                                                storage_heap_pages = value;
-                                                query = next.advance().await;
-                                            }
-                                            sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
-                                            sync_service::StorageQueryProgress::Error(error) => {
-                                                break  Err(RuntimeDownloadError::StorageQuery(error))
-                                            }
-                                        }
-                                    }
-                                };
-
-                                (download_id, result)
-                            })
-                        }
-                        Err(error) => {
-                            // TODO: move log somewhere else
-                            log!(
-                                &background.platform,
-                                Warn,
-                                &background.log_target,
-                                format!("Failed to decode header from sync service: {}", error)
-                            );
-
-                            Box::pin(async move {
-                                (download_id, Err(RuntimeDownloadError::InvalidHeader(error)))
-                            })
-                        }
-                    }
-                });
-
-                // There might be other downloads to start.
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
+                    async move { (download_id, future.await) }
+                }));
             }
 
             WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Finalized {
@@ -1110,11 +999,12 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-finalized",
                     block_hash = HashDisplay(&finalized_block.hash),
-                    best_block_hash = HashDisplay(&best_block_hash)
+                    best_block_hash = HashDisplay(&best_block_hash),
+                    num_subscribers = all_blocks_subscriptions.len()
                 );
 
                 // The finalization might cause some runtimes in the list of runtimes
@@ -1204,11 +1094,12 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-new-block",
                     block_hash = HashDisplay(&tree[block_index].hash),
-                    is_new_best
+                    is_new_best,
+                    num_subscribers = all_blocks_subscriptions.len()
                 );
 
                 let notif = Notification::Block(BlockNotification {
@@ -1278,10 +1169,11 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-best-block-update",
                     block_hash = HashDisplay(&hash),
+                    num_subscribers = all_blocks_subscriptions.len()
                 );
 
                 let notif = Notification::BestBlockChanged { hash };
@@ -1330,7 +1222,7 @@ async fn run_background<TPlat: PlatformRef>(
                     best_block_index.map_or(new_finalized.hash, |idx| tree[idx].hash);
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "output-chain-initialized",
                     finalized_block_hash = HashDisplay(&new_finalized.hash),
@@ -1375,9 +1267,9 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
-                    "sync-service-subscription-started",
+                    "sync-service-subscribed",
                     finalized_block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
                         &subscription.finalized_block_scale_encoded_header
                     )),
@@ -1531,6 +1423,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 tree.input_finalize(node_index, node_index);
 
                                 for block in subscription.non_finalized_blocks_ancestry_order {
+                                    // TODO: O(n)
                                     let parent_index = tree
                                         .input_output_iter_unordered()
                                         .find(|b| b.user_data.hash == block.parent_hash)
@@ -1561,11 +1454,10 @@ async fn run_background<TPlat: PlatformRef>(
                 }
 
                 background.blocks_stream = Some(Box::pin(subscription.new_blocks));
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
 
-            WakeUpReason::StartPendingSubscribeAll => {
+            WakeUpReason::StartPendingSubscribeAll(pending_subscription) => {
                 // A subscription is waiting to be started.
 
                 // Extract the components of the `FinalizedBlockRuntimeKnown`.
@@ -1582,146 +1474,171 @@ async fn run_background<TPlat: PlatformRef>(
                             pinned_blocks,
                             all_blocks_subscriptions,
                         ),
-                        _ => continue,
+                        _ => unreachable!(),
                     };
 
-                for pending_subscription in background.pending_subscriptions.drain(..) {
-                    let (tx, new_blocks_channel) =
-                        async_channel::bounded(pending_subscription.buffer_size);
-                    let subscription_id = background.next_subscription_id;
-                    debug_assert_eq!(
-                        pinned_blocks
-                            .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
-                            .count(),
-                        0
-                    );
-                    background.next_subscription_id += 1;
+                let (tx, new_blocks_channel) =
+                    async_channel::bounded(pending_subscription.buffer_size);
+                let subscription_id = background.next_subscription_id;
+                debug_assert_eq!(
+                    pinned_blocks
+                        .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
+                        .count(),
+                    0
+                );
+                background.next_subscription_id += 1;
 
-                    let decoded_finalized_block = header::decode(
-                        &finalized_block.scale_encoded_header,
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "pending-runtime-service-subscriptions-process",
+                    subscription_id
+                );
+
+                let decoded_finalized_block = header::decode(
+                    &finalized_block.scale_encoded_header,
+                    background.sync_service.block_number_bytes(),
+                )
+                .unwrap();
+
+                let _prev_value = pinned_blocks.insert(
+                    (subscription_id, finalized_block.hash),
+                    PinnedBlock {
+                        runtime: tree.output_finalized_async_user_data().clone(),
+                        state_trie_root_hash: *decoded_finalized_block.state_root,
+                        block_number: decoded_finalized_block.number,
+                        block_ignores_limit: false,
+                    },
+                );
+                debug_assert!(_prev_value.is_none());
+
+                let mut non_finalized_blocks_ancestry_order =
+                    Vec::with_capacity(tree.num_input_non_finalized_blocks());
+                for block in tree.input_output_iter_ancestry_order() {
+                    let runtime = match block.async_op_user_data {
+                        Some(rt) => rt.clone(),
+                        None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
+                    };
+
+                    let block_hash = block.user_data.hash;
+                    let parent_runtime = tree.parent(block.id).map_or(
+                        tree.output_finalized_async_user_data().clone(),
+                        |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
+                    );
+
+                    let parent_hash = *header::decode(
+                        &block.user_data.scale_encoded_header,
+                        background.sync_service.block_number_bytes(),
+                    )
+                    .unwrap()
+                    .parent_hash; // TODO: correct? if yes, document
+                    debug_assert!(
+                        parent_hash == finalized_block.hash
+                            || tree
+                                .input_output_iter_ancestry_order()
+                                .any(|b| parent_hash == b.user_data.hash
+                                    && b.async_op_user_data.is_some())
+                    );
+
+                    let decoded_header = header::decode(
+                        &block.user_data.scale_encoded_header,
                         background.sync_service.block_number_bytes(),
                     )
                     .unwrap();
 
                     let _prev_value = pinned_blocks.insert(
-                        (subscription_id, finalized_block.hash),
+                        (subscription_id, block_hash),
                         PinnedBlock {
-                            runtime: tree.output_finalized_async_user_data().clone(),
-                            state_trie_root_hash: *decoded_finalized_block.state_root,
-                            block_number: decoded_finalized_block.number,
-                            block_ignores_limit: false,
+                            runtime: runtime.clone(),
+                            state_trie_root_hash: *decoded_header.state_root,
+                            block_number: decoded_header.number,
+                            block_ignores_limit: true,
                         },
                     );
                     debug_assert!(_prev_value.is_none());
 
-                    let mut non_finalized_blocks_ancestry_order =
-                        Vec::with_capacity(tree.num_input_non_finalized_blocks());
-                    for block in tree.input_output_iter_ancestry_order() {
-                        let runtime = match block.async_op_user_data {
-                            Some(rt) => rt.clone(),
-                            None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
-                        };
-
-                        let block_hash = block.user_data.hash;
-                        let parent_runtime = tree.parent(block.id).map_or(
-                            tree.output_finalized_async_user_data().clone(),
-                            |parent_idx| tree.block_async_user_data(parent_idx).unwrap().clone(),
-                        );
-
-                        let parent_hash = *header::decode(
-                            &block.user_data.scale_encoded_header,
-                            background.sync_service.block_number_bytes(),
-                        )
-                        .unwrap()
-                        .parent_hash; // TODO: correct? if yes, document
-                        debug_assert!(
-                            parent_hash == finalized_block.hash
-                                || tree
-                                    .input_output_iter_ancestry_order()
-                                    .any(|b| parent_hash == b.user_data.hash
-                                        && b.async_op_user_data.is_some())
-                        );
-
-                        let decoded_header = header::decode(
-                            &block.user_data.scale_encoded_header,
-                            background.sync_service.block_number_bytes(),
-                        )
-                        .unwrap();
-
-                        let _prev_value = pinned_blocks.insert(
-                            (subscription_id, block_hash),
-                            PinnedBlock {
-                                runtime: runtime.clone(),
-                                state_trie_root_hash: *decoded_header.state_root,
-                                block_number: decoded_header.number,
-                                block_ignores_limit: true,
-                            },
-                        );
-                        debug_assert!(_prev_value.is_none());
-
-                        non_finalized_blocks_ancestry_order.push(BlockNotification {
-                            is_new_best: block.is_output_best,
-                            parent_hash,
-                            scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                            new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
-                                Some(
-                                    runtime
-                                        .runtime
-                                        .as_ref()
-                                        .map(|rt| rt.runtime_version().clone())
-                                        .map_err(|err| err.clone()),
-                                )
-                            } else {
-                                None
-                            },
-                        });
-                    }
-
-                    debug_assert!(matches!(
-                        non_finalized_blocks_ancestry_order
-                            .iter()
-                            .filter(|b| b.is_new_best)
-                            .count(),
-                        0 | 1
-                    ));
-
-                    all_blocks_subscriptions.insert(
-                        subscription_id,
-                        (tx, pending_subscription.max_pinned_blocks.get() - 1),
-                    );
-
-                    let _ = pending_subscription.result_tx.send(SubscribeAll {
-                        finalized_block_scale_encoded_header: finalized_block
-                            .scale_encoded_header
-                            .clone(),
-                        finalized_block_runtime: tree
-                            .output_finalized_async_user_data()
-                            .runtime
-                            .as_ref()
-                            .map(|rt| rt.runtime_version().clone())
-                            .map_err(|err| err.clone()),
-                        non_finalized_blocks_ancestry_order,
-                        new_blocks: Subscription {
-                            subscription_id,
-                            channel: Box::pin(new_blocks_channel),
-                            to_background: background.to_background_tx.upgrade().unwrap(),
+                    non_finalized_blocks_ancestry_order.push(BlockNotification {
+                        is_new_best: block.is_output_best,
+                        parent_hash,
+                        scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                        new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
+                            Some(
+                                runtime
+                                    .runtime
+                                    .as_ref()
+                                    .map(|rt| rt.runtime_version().clone())
+                                    .map_err(|err| err.clone()),
+                            )
+                        } else {
+                            None
                         },
                     });
                 }
+
+                debug_assert!(matches!(
+                    non_finalized_blocks_ancestry_order
+                        .iter()
+                        .filter(|b| b.is_new_best)
+                        .count(),
+                    0 | 1
+                ));
+
+                all_blocks_subscriptions.insert(
+                    subscription_id,
+                    (tx, pending_subscription.max_pinned_blocks.get() - 1),
+                );
+
+                let _ = pending_subscription.result_tx.send(SubscribeAll {
+                    finalized_block_scale_encoded_header: finalized_block
+                        .scale_encoded_header
+                        .clone(),
+                    finalized_block_runtime: tree
+                        .output_finalized_async_user_data()
+                        .runtime
+                        .as_ref()
+                        .map(|rt| rt.runtime_version().clone())
+                        .map_err(|err| err.clone()),
+                    non_finalized_blocks_ancestry_order,
+                    new_blocks: Subscription {
+                        subscription_id,
+                        channel: Box::pin(new_blocks_channel),
+                        to_background: background.to_background_tx.upgrade().unwrap(),
+                    },
+                });
             }
 
             WakeUpReason::Notification(None) => {
                 // The sync service has reset the subscription.
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "sync-subscription-reset"
+                );
                 background.blocks_stream = None;
             }
 
             WakeUpReason::ForegroundClosed => {
                 // Frontend and all subscriptions have shut down.
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "graceful-shutdown"
+                );
                 return;
             }
 
             WakeUpReason::ToBackground(ToBackground::SubscribeAll(msg)) => {
                 // Foreground wants to subscribe.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "runtime-service-subscription-requested"
+                );
 
                 // In order to avoid potentially growing `pending_subscriptions` forever, we
                 // remove senders that are closed. This is `O(n)`, but we expect this list to
@@ -1729,7 +1646,7 @@ async fn run_background<TPlat: PlatformRef>(
                 background
                     .pending_subscriptions
                     .retain(|s| !s.result_tx.is_canceled());
-                background.pending_subscriptions.push(msg);
+                background.pending_subscriptions.push_back(msg);
             }
 
             WakeUpReason::ToBackground(ToBackground::CompileAndPinRuntime {
@@ -1751,16 +1668,31 @@ async fn run_background<TPlat: PlatformRef>(
                     });
 
                 let runtime = if let Some(existing_runtime) = existing_runtime {
+                    log!(
+                        &background.platform,
+                        Trace,
+                        &background.log_target,
+                        "foreground-compile-and-pin-runtime-cache-hit"
+                    );
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
+                    let before_compilation = background.platform.now();
                     let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
                         &storage_heap_pages,
-                    )
-                    .await;
+                    );
+                    let compilation_duration = background.platform.now() - before_compilation;
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "foreground-compile-and-pin-runtime-cache-miss",
+                        ?compilation_duration,
+                        compilation_success = runtime.is_ok()
+                    );
                     let runtime = Arc::new(Runtime {
                         heap_pages: storage_heap_pages,
                         runtime_code: storage_code,
@@ -1779,6 +1711,14 @@ async fn run_background<TPlat: PlatformRef>(
                 result_tx,
             }) => {
                 // Foreground wants the finalized runtime storage Merkle values.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-finalized-runtime-storage-merkle-values"
+                );
+
                 let _ = result_tx.send(
                     if let Tree::FinalizedBlockRuntimeKnown { tree, .. } = &background.tree {
                         let runtime = &tree.output_finalized_async_user_data();
@@ -1795,6 +1735,13 @@ async fn run_background<TPlat: PlatformRef>(
 
             WakeUpReason::ToBackground(ToBackground::IsNearHeadOfChainHeuristic { result_tx }) => {
                 // Foreground wants to query whether we are at the head of the chain.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-is-near-head-of-chain-heuristic"
+                );
 
                 // The runtime service adds a delay between the moment a best block is reported by
                 // the sync service and the moment it is reported by the runtime service.
@@ -1825,6 +1772,15 @@ async fn run_background<TPlat: PlatformRef>(
                 block_hash,
             }) => {
                 // Foreground wants a block unpinned.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-unpin-block",
+                    subscription_id = subscription_id.0,
+                    block_hash = HashDisplay(&block_hash)
+                );
 
                 if let Tree::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions,
@@ -1866,6 +1822,15 @@ async fn run_background<TPlat: PlatformRef>(
                 block_hash,
             }) => {
                 // Foreground wants to pin the runtime of a pinned block.
+
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-pin-pinned-block-runtime",
+                    subscription_id = subscription_id.0,
+                    block_hash = HashDisplay(&block_hash)
+                );
 
                 let pinned_block = {
                     if let Tree::FinalizedBlockRuntimeKnown {
@@ -1920,11 +1885,34 @@ async fn run_background<TPlat: PlatformRef>(
             }) => {
                 // Foreground wants to perform a runtime call.
 
+                log!(
+                    &background.platform,
+                    Debug,
+                    &background.log_target,
+                    "foreground-runtime-call-start",
+                    block_hash = HashDisplay(&block_hash),
+                    block_number,
+                    block_state_trie_root_hash = HashDisplay(&block_state_trie_root_hash),
+                    function_name,
+                    ?required_api_version,
+                    parameters_vectored = HashDisplay(&parameters_vectored),
+                    total_attempts,
+                    ?timeout_per_request
+                );
+
                 let runtime = match &pinned_runtime.runtime {
                     Ok(rt) => rt.clone(),
                     Err(error) => {
                         // The runtime call can't succeed because smoldot was incapable of
                         // compiling the runtime.
+                        log!(
+                            &background.platform,
+                            Trace,
+                            &background.log_target,
+                            "foreground-runtime-call-abort",
+                            block_hash = HashDisplay(&block_hash),
+                            error = "invalid-runtime"
+                        );
                         let _ =
                             result_tx.send(Err(RuntimeCallError::InvalidRuntime(error.clone())));
                         continue;
@@ -1933,24 +1921,27 @@ async fn run_background<TPlat: PlatformRef>(
 
                 let api_version =
                     if let Some((api_name, api_version_required)) = required_api_version {
-                        let Some(api_version) = runtime
+                        let api_version_if_fulfilled = runtime
                             .runtime_version()
                             .decode()
                             .apis
                             .find_version(&api_name)
-                        else {
+                            .filter(|api_version| api_version_required.contains(&api_version));
+
+                        let Some(api_version) = api_version_if_fulfilled else {
                             // API version required by caller isn't fulfilled.
+                            log!(
+                                &background.platform,
+                                Trace,
+                                &background.log_target,
+                                "foreground-runtime-call-abort",
+                                block_hash = HashDisplay(&block_hash),
+                                error = "api-version-requirement-unfulfilled"
+                            );
                             let _ = result_tx
                                 .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
                             continue;
                         };
-
-                        if !api_version_required.contains(&api_version) {
-                            // API version required by caller isn't fulfilled.
-                            let _ = result_tx
-                                .send(Err(RuntimeCallError::ApiVersionRequirementUnfulfilled));
-                            continue;
-                        }
 
                         Some(api_version)
                     } else {
@@ -1992,6 +1983,19 @@ async fn run_background<TPlat: PlatformRef>(
                         mut operation,
                         call_proof_sender,
                     } => {
+                        log!(
+                            &background.platform,
+                            Trace,
+                            &background.log_target,
+                            "foreground-runtime-call-progress-fail",
+                            block_hash = HashDisplay(&operation.block_hash),
+                            function_name = operation.function_name,
+                            parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                            remaining_attempts = usize::try_from(operation.total_attempts).unwrap()
+                                - operation.inaccessible_errors.len()
+                                - 1,
+                            ?error
+                        );
                         operation
                             .inaccessible_errors
                             .push(RuntimeCallInaccessibleError::Network(error));
@@ -2007,6 +2011,13 @@ async fn run_background<TPlat: PlatformRef>(
                     }
                 };
 
+                // If the foreground is no longer interested in the result, abort now in order to
+                // save resources.
+                if operation.result_tx.is_canceled() {
+                    continue;
+                }
+
+                // Process the call proof.
                 if let Some((call_proof, call_proof_sender)) = call_proof_and_sender {
                     // Try to decode the proof. Succeed just means that the proof has the correct
                     // encoding, and doesn't guarantee that the proof has all the necessary
@@ -2016,8 +2027,13 @@ async fn run_background<TPlat: PlatformRef>(
                             proof: call_proof.decode(),
                         });
 
+                    // Keep track of the total time taken by the runtime call attempt.
+                    let mut virtual_machine_call_duration = Duration::new(0, 0);
+                    let mut proof_access_duration = Duration::new(0, 0);
+
                     // Attempt the runtime call.
                     // If the call succeed, we interrupt the flow and `continue`.
+                    let runtime_call_duration_before = background.platform.now();
                     let mut call =
                         match executor::runtime_call::run(executor::runtime_call::Config {
                             virtual_machine: operation.runtime.clone(),
@@ -2033,12 +2049,26 @@ async fn run_background<TPlat: PlatformRef>(
                                 // call cannot possibly succeed.
                                 // This can happen for example because the requested function
                                 // doesn't exist.
-                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
-                                    RuntimeCallExecutionError::Start(error),
-                                )));
+                                let error = RuntimeCallExecutionError::Start(error);
+                                log!(
+                                    &background.platform,
+                                    Debug,
+                                    &background.log_target,
+                                    "foreground-runtime-call-fail",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    error = ?error,
+                                );
+                                let _ = operation
+                                    .result_tx
+                                    .send(Err(RuntimeCallError::Execution(error)));
                                 continue 'background_main_loop;
                             }
                         };
+                    virtual_machine_call_duration +=
+                        background.platform.now() - runtime_call_duration_before;
 
                     let error = loop {
                         let call_proof = match &call_proof {
@@ -2059,6 +2089,19 @@ async fn run_background<TPlat: PlatformRef>(
                                 // Execution finished successfully.
                                 // This is the happy path.
                                 let output = finished.virtual_machine.value().as_ref().to_owned();
+                                log!(
+                                    &background.platform,
+                                    Debug,
+                                    &background.log_target,
+                                    "foreground-runtime-call-success",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    output = HashDisplay(&output),
+                                    ?virtual_machine_call_duration,
+                                    ?proof_access_duration,
+                                );
                                 let _ = operation.result_tx.send(Ok(RuntimeCallSuccess {
                                     output,
                                     api_version: operation.api_version,
@@ -2067,9 +2110,23 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::Finished(Err(error)) => {
                                 // Execution finished with an error.
-                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
-                                    RuntimeCallExecutionError::Execution(error.detail),
-                                )));
+                                let error = RuntimeCallExecutionError::Execution(error.detail);
+                                log!(
+                                    &background.platform,
+                                    Debug,
+                                    &background.log_target,
+                                    "foreground-runtime-call-fail",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    error = ?error,
+                                    ?virtual_machine_call_duration,
+                                    ?proof_access_duration,
+                                );
+                                let _ = operation
+                                    .result_tx
+                                    .send(Err(RuntimeCallError::Execution(error)));
                                 continue 'background_main_loop;
                             }
                             executor::runtime_call::RuntimeCall::StorageGet(ref get) => {
@@ -2082,16 +2139,35 @@ async fn run_background<TPlat: PlatformRef>(
                                 nk.child_trie().map(|c| c.as_ref().to_owned()) // TODO: overhead
                             }
                             executor::runtime_call::RuntimeCall::SignatureVerification(r) => {
+                                let runtime_call_duration_before = background.platform.now();
                                 call = r.verify_and_resume();
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                                 continue;
                             }
                             executor::runtime_call::RuntimeCall::LogEmit(r) => {
                                 // Logs are ignored.
+                                let runtime_call_duration_before = background.platform.now();
                                 call = r.resume();
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                                 continue;
                             }
                             executor::runtime_call::RuntimeCall::Offchain(_) => {
                                 // Forbidden host function called.
+                                log!(
+                                    &background.platform,
+                                    Debug,
+                                    &background.log_target,
+                                    "foreground-runtime-call-fail",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    error = ?RuntimeCallExecutionError::ForbiddenHostFunction,
+                                    ?virtual_machine_call_duration,
+                                    ?proof_access_duration,
+                                );
                                 let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
                                     RuntimeCallExecutionError::ForbiddenHostFunction,
                                 )));
@@ -2099,11 +2175,15 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::OffchainStorageSet(r) => {
                                 // Ignore offchain storage writes.
+                                let runtime_call_duration_before = background.platform.now();
                                 call = r.resume();
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                                 continue;
                             }
                         };
 
+                        let proof_access_duration_before = background.platform.now();
                         let trie_root = if let Some(child_trie) = child_trie {
                             // TODO: allocation here, but probably not problematic
                             const PREFIX: &[u8] = b":child_storage:default:";
@@ -2136,9 +2216,15 @@ async fn run_background<TPlat: PlatformRef>(
                                 let Ok(storage_value) = storage_value else {
                                     break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
+                                proof_access_duration +=
+                                    background.platform.now() - proof_access_duration_before;
+
+                                let runtime_call_duration_before = background.platform.now();
                                 call = get.inject_value(
                                     storage_value.map(|(val, vers)| (iter::once(val), vers)),
                                 );
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                             }
                             executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
                                 mv,
@@ -2151,7 +2237,13 @@ async fn run_background<TPlat: PlatformRef>(
                                 let Ok(merkle_value) = merkle_value else {
                                     break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
+                                proof_access_duration +=
+                                    background.platform.now() - proof_access_duration_before;
+
+                                let runtime_call_duration_before = background.platform.now();
                                 call = mv.inject_merkle_value(merkle_value);
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                             }
                             executor::runtime_call::RuntimeCall::NextKey(nk) => {
                                 let next_key = if let Some(trie_root) = trie_root {
@@ -2168,13 +2260,34 @@ async fn run_background<TPlat: PlatformRef>(
                                 let Ok(next_key) = next_key else {
                                     break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
+                                proof_access_duration +=
+                                    background.platform.now() - proof_access_duration_before;
+
+                                let runtime_call_duration_before = background.platform.now();
                                 call = nk.inject_key(next_key);
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                             }
                             _ => unreachable!(),
                         }
                     };
 
                     // This path is reached only if the call proof was invalid.
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "foreground-runtime-call-progress-invalid-call-proof",
+                        block_hash = HashDisplay(&operation.block_hash),
+                        function_name = operation.function_name,
+                        parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                        remaining_attempts = usize::try_from(operation.total_attempts).unwrap()
+                            - operation.inaccessible_errors.len()
+                            - 1,
+                        ?error,
+                        ?virtual_machine_call_duration,
+                        ?proof_access_duration,
+                    );
                     operation.inaccessible_errors.push(error);
                     background
                         .network_service
@@ -2191,6 +2304,7 @@ async fn run_background<TPlat: PlatformRef>(
                 if u32::try_from(operation.inaccessible_errors.len()).unwrap_or(u32::MAX)
                     >= operation.total_attempts
                 {
+                    // No log line is printed here because one is already printed earlier.
                     let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
                         operation.inaccessible_errors,
                     )));
@@ -2215,13 +2329,35 @@ async fn run_background<TPlat: PlatformRef>(
                     }))
                 else {
                     // No peer knows this block. Returning with a failure.
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "foreground-runtime-call-request-fail",
+                        block_hash = HashDisplay(&operation.block_hash),
+                        function_name = operation.function_name,
+                        parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                        error = "no-peer-for-call-request"
+                    );
                     let _ = operation.result_tx.send(Err(RuntimeCallError::Inaccessible(
                         operation.inaccessible_errors,
                     )));
                     continue 'background_main_loop;
                 };
 
+                log!(
+                    &background.platform,
+                    Trace,
+                    &background.log_target,
+                    "foreground-runtime-call-request-start",
+                    block_hash = HashDisplay(&operation.block_hash),
+                    function_name = operation.function_name,
+                    parameters_vectored = HashDisplay(&operation.parameters_vectored),
+                    call_proof_target,
+                );
+
                 // Start the request.
+                // TODO: cancel request immediately if result_tx closes
                 background.progress_runtime_call_requests.push(Box::pin({
                     let call_proof_request_future =
                         background.network_service.clone().call_proof_request(
@@ -2250,17 +2386,37 @@ async fn run_background<TPlat: PlatformRef>(
             WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
                 // Sync service has reported a new block.
 
-                log!(
-                    &background.platform,
-                    Debug,
-                    &background.log_target,
-                    "input-chain-new-block",
-                    block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
-                        &new_block.scale_encoded_header
-                    )),
-                    parent_block_hash = HashDisplay(&new_block.parent_hash),
-                    is_new_best = new_block.is_new_best
+                let same_runtime_as_parent = same_runtime_as_parent(
+                    &new_block.scale_encoded_header,
+                    background.sync_service.block_number_bytes(),
                 );
+
+                if same_runtime_as_parent {
+                    log!(
+                        &background.platform,
+                        Trace,
+                        &background.log_target,
+                        "input-chain-new-block",
+                        block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                            &new_block.scale_encoded_header
+                        )),
+                        parent_block_hash = HashDisplay(&new_block.parent_hash),
+                        is_new_best = new_block.is_new_best,
+                        same_runtime_as_parent = true
+                    );
+                } else {
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "input-chain-new-block-runtime-upgrade",
+                        block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                            &new_block.scale_encoded_header
+                        )),
+                        parent_block_hash = HashDisplay(&new_block.parent_hash),
+                        is_new_best = new_block.is_new_best
+                    );
+                }
 
                 let near_head_of_chain = background
                     .sync_service
@@ -2272,11 +2428,6 @@ async fn run_background<TPlat: PlatformRef>(
                     background.best_near_head_of_chain = near_head_of_chain;
                 }
 
-                let same_runtime_as_parent = same_runtime_as_parent(
-                    &new_block.scale_encoded_header,
-                    background.sync_service.block_number_bytes(),
-                );
-
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
                         tree,
@@ -2287,6 +2438,7 @@ async fn run_background<TPlat: PlatformRef>(
                             None
                         } else {
                             Some(
+                                // TODO: O(n)
                                 tree.input_output_iter_unordered()
                                     .find(|block| block.user_data.hash == new_block.parent_hash)
                                     .unwrap()
@@ -2307,6 +2459,7 @@ async fn run_background<TPlat: PlatformRef>(
                         );
                     }
                     Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        // TODO: O(n)
                         let parent_index = tree
                             .input_output_iter_unordered()
                             .find(|block| block.user_data.hash == new_block.parent_hash)
@@ -2325,8 +2478,6 @@ async fn run_background<TPlat: PlatformRef>(
                         );
                     }
                 }
-
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::Notification(Some(sync_service::Notification::Finalized {
@@ -2337,14 +2488,12 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "input-chain-finalized",
                     block_hash = HashDisplay(&hash),
                     best_block_hash = HashDisplay(&best_block_hash)
                 );
-
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
 
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
@@ -2388,7 +2537,7 @@ async fn run_background<TPlat: PlatformRef>(
 
                 log!(
                     &background.platform,
-                    Debug,
+                    Trace,
                     &background.log_target,
                     "input-chain-best-block-update",
                     block_hash = HashDisplay(&hash)
@@ -2428,8 +2577,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_set_best_block(Some(idx));
                     }
                 }
-
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::RuntimeDownloadFinished(
@@ -2442,6 +2589,17 @@ async fn run_background<TPlat: PlatformRef>(
                 )),
             ) => {
                 // A runtime has successfully finished downloading.
+
+                let concerned_blocks = match &background.tree {
+                    Tree::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        either::Left(tree.async_op_blocks(async_op_id))
+                    }
+                    Tree::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                        either::Right(tree.async_op_blocks(async_op_id))
+                    }
+                }
+                .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
+                .to_string();
 
                 // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
                 background.best_near_head_of_chain = true;
@@ -2459,15 +2617,32 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // If no identical runtime was found, try compiling the runtime.
                 let runtime = if let Some(existing_runtime) = existing_runtime {
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "runtime-download-finish-compilation-cache-hit",
+                        block_hashes = concerned_blocks,
+                    );
                     existing_runtime
                 } else {
+                    let before_compilation = background.platform.now();
                     let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
                         &storage_heap_pages,
-                    )
-                    .await;
+                    );
+                    let compilation_duration = background.platform.now() - before_compilation;
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "runtime-download-finish-compilation-cache-miss",
+                        ?compilation_duration,
+                        compilation_success = runtime.is_ok(),
+                        block_hashes = concerned_blocks,
+                    );
                     match &runtime {
                         Ok(runtime) => {
                             log!(
@@ -2525,10 +2700,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_finished(async_op_id, Some(runtime));
                     }
                 }
-
-                // Because runtime downloads are clamped to a maximum, when a download is finished
-                // we should try to start new downloads.
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::RuntimeDownloadFinished(async_op_id, Err(error)) => {
@@ -2573,10 +2744,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_failure(async_op_id, &background.platform.now());
                     }
                 }
-
-                // Because runtime downloads are clamped to a maximum, when a download is finished
-                // we should try to start new downloads.
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
         }
     }
@@ -2651,7 +2818,7 @@ struct Background<TPlat: PlatformRef> {
     /// When in the [`Tree::FinalizedBlockRuntimeKnown`] state, a [`SubscribeAll`] is constructed
     /// and sent back for each of these senders.
     /// When in the [`Tree::FinalizedBlockRuntimeUnknown`] state, the senders patiently wait here.
-    pending_subscriptions: Vec<ToBackgroundSubscribeAll<TPlat>>,
+    pending_subscriptions: VecDeque<ToBackgroundSubscribeAll<TPlat>>,
 
     /// Stream of notifications coming from the sync service. `None` if not subscribed yet.
     blocks_stream: Option<Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>>,
@@ -2659,6 +2826,7 @@ struct Background<TPlat: PlatformRef> {
     /// List of runtimes currently being downloaded from the network.
     /// For each item, the download id, storage value of `:code`, storage value of `:heappages`,
     /// and Merkle value and closest ancestor of `:code`.
+    // TODO: use struct
     runtime_downloads: stream::FuturesUnordered<
         future::BoxFuture<
             'static,
@@ -2680,9 +2848,6 @@ struct Background<TPlat: PlatformRef> {
     /// List of actions to perform to progress runtime calls requested by the frontend.
     progress_runtime_call_requests:
         stream::FuturesUnordered<future::BoxFuture<'static, ProgressRuntimeCallRequest>>,
-
-    /// Future that wakes up when a new download to start is potentially ready.
-    wake_up_new_necessary_download: future::BoxFuture<'static, ()>,
 }
 
 enum Tree<TPlat: PlatformRef> {
@@ -2796,15 +2961,12 @@ struct Runtime {
     heap_pages: Option<Vec<u8>>,
 }
 
-async fn compile_runtime<TPlat: PlatformRef>(
+fn compile_runtime<TPlat: PlatformRef>(
     platform: &TPlat,
     log_target: &str,
     code: &Option<Vec<u8>>,
     heap_pages: &Option<Vec<u8>>,
 ) -> Result<executor::host::HostVmPrototype, RuntimeError> {
-    // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-    futures_lite::future::yield_now().await;
-
     // Parameters for `HostVmPrototype::new`.
     let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
     let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
@@ -2869,5 +3031,114 @@ fn same_runtime_as_parent(header: &[u8], block_number_bytes: usize) -> bool {
     match header::decode(header, block_number_bytes) {
         Ok(h) => !h.digest.has_runtime_environment_updated(),
         Err(_) => false,
+    }
+}
+
+fn download_runtime<TPlat: PlatformRef>(
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
+    block_hash: [u8; 32],
+    scale_encoded_header: &[u8],
+) -> impl future::Future<
+    Output = Result<
+        (
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<Nibble>>,
+        ),
+        RuntimeDownloadError,
+    >,
+> {
+    // In order to perform the download, we need to known the state root hash of the
+    // block in question, which requires decoding the block. If the decoding fails,
+    // we report that the asynchronous operation has failed with the hope that this
+    // block gets pruned in the future.
+    let block_info = match header::decode(scale_encoded_header, sync_service.block_number_bytes()) {
+        Ok(decoded_header) => Ok((*decoded_header.state_root, decoded_header.number)),
+        Err(error) => Err(RuntimeDownloadError::InvalidHeader(error)),
+    };
+
+    async move {
+        let (state_root, block_number) = block_info?;
+
+        let mut storage_code = None;
+        let mut storage_heap_pages = None;
+        let mut code_merkle_value = None;
+        let mut code_closest_ancestor_excluding = None;
+
+        let mut query = sync_service
+            .clone()
+            .storage_query(
+                block_number,
+                block_hash,
+                state_root,
+                [
+                    sync_service::StorageRequestItem {
+                        key: b":code".to_vec(),
+                        ty: sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue,
+                    },
+                    sync_service::StorageRequestItem {
+                        key: b":code".to_vec(),
+                        ty: sync_service::StorageRequestItemTy::Value,
+                    },
+                    sync_service::StorageRequestItem {
+                        key: b":heappages".to_vec(),
+                        ty: sync_service::StorageRequestItemTy::Value,
+                    },
+                ]
+                .into_iter(),
+                3,
+                Duration::from_secs(20),
+                NonZeroU32::new(3).unwrap(),
+            )
+            .advance()
+            .await;
+
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Finished => {
+                    break Ok((
+                        storage_code,
+                        storage_heap_pages,
+                        code_merkle_value,
+                        code_closest_ancestor_excluding,
+                    ))
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    request_index: 0,
+                    item:
+                        sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                            closest_descendant_merkle_value,
+                            found_closest_ancestor_excluding,
+                            ..
+                        },
+                    query: next,
+                } => {
+                    code_merkle_value = closest_descendant_merkle_value;
+                    code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    request_index: 1,
+                    item: sync_service::StorageResultItem::Value { value, .. },
+                    query: next,
+                } => {
+                    storage_code = value;
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress {
+                    request_index: 2,
+                    item: sync_service::StorageResultItem::Value { value, .. },
+                    query: next,
+                } => {
+                    storage_heap_pages = value;
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    break Err(RuntimeDownloadError::StorageQuery(error))
+                }
+            }
+        }
     }
 }
