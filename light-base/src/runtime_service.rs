@@ -1751,16 +1751,31 @@ async fn run_background<TPlat: PlatformRef>(
                     });
 
                 let runtime = if let Some(existing_runtime) = existing_runtime {
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "compile-and-pin-runtime-cache-hit"
+                    );
                     existing_runtime
                 } else {
                     // No identical runtime was found. Try compiling the new runtime.
+                    let before_compilation = background.platform.now();
                     let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
                         &storage_heap_pages,
-                    )
-                    .await;
+                    );
+                    let compilation_duration = background.platform.now() - before_compilation;
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "compile-and-pin-runtime-cache-miss",
+                        ?compilation_duration,
+                        compilation_success = runtime.is_ok()
+                    );
                     let runtime = Arc::new(Runtime {
                         heap_pages: storage_heap_pages,
                         runtime_code: storage_code,
@@ -2459,15 +2474,30 @@ async fn run_background<TPlat: PlatformRef>(
 
                 // If no identical runtime was found, try compiling the runtime.
                 let runtime = if let Some(existing_runtime) = existing_runtime {
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "new-runtime-cache-hit"
+                    );
                     existing_runtime
                 } else {
+                    let before_compilation = background.platform.now();
                     let runtime = compile_runtime(
                         &background.platform,
                         &background.log_target,
                         &storage_code,
                         &storage_heap_pages,
-                    )
-                    .await;
+                    );
+                    let compilation_duration = background.platform.now() - before_compilation;
+                    log!(
+                        &background.platform,
+                        Debug,
+                        &background.log_target,
+                        "new-runtime-cache-miss",
+                        ?compilation_duration,
+                        compilation_success = runtime.is_ok()
+                    );
                     match &runtime {
                         Ok(runtime) => {
                             log!(
@@ -2796,15 +2826,12 @@ struct Runtime {
     heap_pages: Option<Vec<u8>>,
 }
 
-async fn compile_runtime<TPlat: PlatformRef>(
+fn compile_runtime<TPlat: PlatformRef>(
     platform: &TPlat,
     log_target: &str,
     code: &Option<Vec<u8>>,
     heap_pages: &Option<Vec<u8>>,
 ) -> Result<executor::host::HostVmPrototype, RuntimeError> {
-    // Since compiling the runtime is a CPU-intensive operation, we yield once before.
-    futures_lite::future::yield_now().await;
-
     // Parameters for `HostVmPrototype::new`.
     let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
     let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
