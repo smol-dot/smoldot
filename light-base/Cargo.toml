@@ -26,7 +26,7 @@ futures-lite = { version = "2.0.0", default-features = false, features = ["alloc
 futures-util = { version = "0.3.27", default-features = false, features = ["alloc", "sink"] }  # TODO: slim down these features and consider removing this dependency altogether
 hashbrown = { version = "0.14.0", default-features = false }
 hex = { version = "0.4.3", default-features = false }
-itertools = { version = "0.12.0", default-features = false, features = ["use_alloc"] }
+itertools = { version = "0.12.1", default-features = false, features = ["use_alloc"] }
 lru = { version = "0.12.0", default-features = false, features = ["hashbrown"] } # The `hashbrown` feature brings no-std compatibility.
 no-std-net = { version = "0.6.0", default-features = false }
 pin-project = "1.1.4"
