@@ -814,8 +814,6 @@ async fn run_background<TPlat: PlatformRef>(
             runtimes: slab::Slab::with_capacity(2),
             pending_subscriptions: Vec::with_capacity(8),
             blocks_stream: None,
-            // Initialized to `ready` so that the downloads immediately start.
-            wake_up_new_necessary_download: Box::pin(future::ready(())),
             runtime_downloads: stream::FuturesUnordered::new(),
             progress_runtime_call_requests: stream::FuturesUnordered::new(),
         }
@@ -1082,9 +1080,6 @@ async fn run_background<TPlat: PlatformRef>(
                         }
                     }
                 });
-
-                // There might be other downloads to start.
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::TreeAdvanceFinalizedKnown(async_tree::OutputUpdate::Finalized {
@@ -1561,7 +1556,6 @@ async fn run_background<TPlat: PlatformRef>(
                 }
 
                 background.blocks_stream = Some(Box::pin(subscription.new_blocks));
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
                 background.runtime_downloads = stream::FuturesUnordered::new();
             }
 
@@ -2340,8 +2334,6 @@ async fn run_background<TPlat: PlatformRef>(
                         );
                     }
                 }
-
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::Notification(Some(sync_service::Notification::Finalized {
@@ -2358,8 +2350,6 @@ async fn run_background<TPlat: PlatformRef>(
                     block_hash = HashDisplay(&hash),
                     best_block_hash = HashDisplay(&best_block_hash)
                 );
-
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
 
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
@@ -2443,8 +2433,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.input_set_best_block(Some(idx));
                     }
                 }
-
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::RuntimeDownloadFinished(
@@ -2555,10 +2543,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_finished(async_op_id, Some(runtime));
                     }
                 }
-
-                // Because runtime downloads are clamped to a maximum, when a download is finished
-                // we should try to start new downloads.
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
 
             WakeUpReason::RuntimeDownloadFinished(async_op_id, Err(error)) => {
@@ -2603,10 +2587,6 @@ async fn run_background<TPlat: PlatformRef>(
                         tree.async_op_failure(async_op_id, &background.platform.now());
                     }
                 }
-
-                // Because runtime downloads are clamped to a maximum, when a download is finished
-                // we should try to start new downloads.
-                background.wake_up_new_necessary_download = Box::pin(future::ready(()));
             }
         }
     }
@@ -2710,9 +2690,6 @@ struct Background<TPlat: PlatformRef> {
     /// List of actions to perform to progress runtime calls requested by the frontend.
     progress_runtime_call_requests:
         stream::FuturesUnordered<future::BoxFuture<'static, ProgressRuntimeCallRequest>>,
-
-    /// Future that wakes up when a new download to start is potentially ready.
-    wake_up_new_necessary_download: future::BoxFuture<'static, ()>,
 }
 
 enum Tree<TPlat: PlatformRef> {
