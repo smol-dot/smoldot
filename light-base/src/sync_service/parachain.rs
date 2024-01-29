@@ -206,6 +206,9 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: PlatformRef> {
 impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
     async fn run(mut self) {
         loop {
+            // Yield at every loop in order to provide better tasks granularity.
+            futures_lite::future::yield_now().await;
+
             // Wait until something interesting happens.
             enum WakeUpReason<TPlat: PlatformRef> {
                 ForegroundClosed,

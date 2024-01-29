@@ -53,6 +53,9 @@ pub(super) async fn single_stream_connection_task<TPlat: PlatformRef>(
     let mut connection_task = Some(connection_task);
 
     loop {
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
+
         // Because only one message should be sent to the coordinator at a time, and that
         // processing the socket might generate a message, we only process the socket if no
         // message is currently being sent.

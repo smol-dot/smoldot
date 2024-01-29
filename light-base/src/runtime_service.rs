@@ -823,6 +823,9 @@ async fn run_background<TPlat: PlatformRef>(
 
     // Inner loop. Process incoming events.
     'background_main_loop: loop {
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
+
         enum WakeUpReason<TPlat: PlatformRef> {
             MustSubscribe,
             StartDownload(async_tree::AsyncOpId, async_tree::NodeIndex),
