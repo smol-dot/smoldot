@@ -1502,7 +1502,6 @@ impl SyncBackground {
                         all::DesiredRequest::BlocksRequest {
                             first_block_hash,
                             first_block_height,
-                            ascending,
                             num_blocks,
                             request_headers,
                             request_bodies,
@@ -1536,11 +1535,9 @@ impl SyncBackground {
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                             )
                             .unwrap(),
-                            direction: if ascending {
-                                network::codec::BlocksRequestDirection::Ascending
-                            } else {
-                                network::codec::BlocksRequestDirection::Descending
-                            },
+                            // The direction is hardcoded based on the documentation of the syncing
+                            // state machine.
+                            direction: network::codec::BlocksRequestDirection::Descending,
                             fields: network::codec::BlocksRequestFields {
                                 header: true, // TODO: always set to true due to unwrapping the header when the response comes
                                 body: request_bodies,
@@ -1554,7 +1551,6 @@ impl SyncBackground {
                         all::DesiredRequest::BlocksRequest {
                             first_block_hash,
                             first_block_height,
-                            ascending,
                             num_blocks,
                             request_headers,
                             request_bodies,

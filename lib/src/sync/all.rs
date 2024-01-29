@@ -648,7 +648,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             } => DesiredRequest::BlocksRequest {
                                 first_block_height: block_number,
                                 first_block_hash: Some(block_hash),
-                                ascending: true,
                                 num_blocks: NonZeroU64::new(1).unwrap(),
                                 request_headers: false,
                                 request_bodies: true,
@@ -719,8 +718,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             RequestDetail::BlocksRequest {
                 first_block_height,
                 first_block_hash: Some(first_block_hash),
-                // TODO: remove ascending field altogether?
-                ascending: false,
                 num_blocks,
                 request_headers: true,
                 request_bodies,
@@ -1121,6 +1118,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Inject a response to a previously-emitted blocks request.
     ///
+    /// The blocks should be provided in decreasing number, with `first_block_hash` as the highest
+    /// number.
+    ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
@@ -1447,16 +1447,14 @@ impl<'a, TRq, TSrc, TBl> ops::IndexMut<(u64, &'a [u8; 32])> for AllSync<TRq, TSr
 #[must_use]
 pub enum DesiredRequest {
     /// Requesting blocks from the source is requested.
+    ///
+    /// The blocks should be provided in decreasing number, with `first_block_hash` as the highest
+    /// number.
     BlocksRequest {
         /// Height of the first block to request.
         first_block_height: u64,
         /// Hash of the first block to request. `None` if not known.
         first_block_hash: Option<[u8; 32]>,
-        /// `True` if the `first_block_hash` is the response should contain blocks in an
-        /// increasing number, starting from `first_block_hash` with the lowest number. If `false`,
-        /// the blocks should be in decreasing number, with `first_block_hash` as the highest
-        /// number.
-        ascending: bool,
         /// Number of blocks the request should return.
         ///
         /// Note that this is only an indication, and the source is free to give fewer blocks
@@ -1510,11 +1508,6 @@ pub enum RequestDetail {
         first_block_height: u64,
         /// Hash of the first block to request. `None` if not known.
         first_block_hash: Option<[u8; 32]>,
-        /// `True` if the `first_block_hash` is the response should contain blocks in an
-        /// increasing number, starting from `first_block_hash` with the lowest number. If `false`,
-        /// the blocks should be in decreasing number, with `first_block_hash` as the highest
-        /// number.
-        ascending: bool,
         /// Number of blocks the request should return.
         ///
         /// Note that this is only an indication, and the source is free to give fewer blocks
@@ -1562,7 +1555,6 @@ impl From<DesiredRequest> for RequestDetail {
             DesiredRequest::BlocksRequest {
                 first_block_height,
                 first_block_hash,
-                ascending,
                 num_blocks,
                 request_headers,
                 request_bodies,
@@ -1570,7 +1562,6 @@ impl From<DesiredRequest> for RequestDetail {
             } => RequestDetail::BlocksRequest {
                 first_block_height,
                 first_block_hash,
-                ascending,
                 num_blocks,
                 request_headers,
                 request_bodies,
@@ -2234,7 +2225,6 @@ fn all_forks_request_convert(
     download_body: bool,
 ) -> DesiredRequest {
     DesiredRequest::BlocksRequest {
-        ascending: false, // Hardcoded based on the logic of the all-forks syncing.
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
         num_blocks: rq_params.num_blocks,
