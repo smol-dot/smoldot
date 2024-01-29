@@ -1067,14 +1067,6 @@ async fn run_background<TPlat: PlatformRef>(
                             })
                         }
                         Err(error) => {
-                            // TODO: move log somewhere else
-                            log!(
-                                &background.platform,
-                                Warn,
-                                &background.log_target,
-                                format!("Failed to decode header from sync service: {}", error)
-                            );
-
                             Box::pin(async move {
                                 (download_id, Err(RuntimeDownloadError::InvalidHeader(error)))
                             })
