@@ -2132,8 +2132,13 @@ async fn run_background<TPlat: PlatformRef>(
                             proof: call_proof.decode(),
                         });
 
+                    // Keep track of the total time taken by the runtime call attempt.
+                    let mut virtual_machine_call_duration = Duration::new(0, 0);
+                    let mut proof_access_duration = Duration::new(0, 0);
+
                     // Attempt the runtime call.
                     // If the call succeed, we interrupt the flow and `continue`.
+                    let runtime_call_duration_before = background.platform.now();
                     let mut call =
                         match executor::runtime_call::run(executor::runtime_call::Config {
                             virtual_machine: operation.runtime.clone(),
@@ -2149,12 +2154,26 @@ async fn run_background<TPlat: PlatformRef>(
                                 // call cannot possibly succeed.
                                 // This can happen for example because the requested function
                                 // doesn't exist.
-                                let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
-                                    RuntimeCallExecutionError::Start(error),
-                                )));
+                                let error = RuntimeCallExecutionError::Start(error);
+                                log!(
+                                    &background.platform,
+                                    Debug,
+                                    &background.log_target,
+                                    "foreground-runtime-call-fail",
+                                    block_hash = HashDisplay(&operation.block_hash),
+                                    function_name = operation.function_name,
+                                    parameters_vectored =
+                                        HashDisplay(&operation.parameters_vectored),
+                                    error = ?error,
+                                );
+                                let _ = operation
+                                    .result_tx
+                                    .send(Err(RuntimeCallError::Execution(error)));
                                 continue 'background_main_loop;
                             }
                         };
+                    virtual_machine_call_duration +=
+                        background.platform.now() - runtime_call_duration_before;
 
                     let error = loop {
                         let call_proof = match &call_proof {
@@ -2185,6 +2204,8 @@ async fn run_background<TPlat: PlatformRef>(
                                     parameters_vectored =
                                         HashDisplay(&operation.parameters_vectored),
                                     output = HashDisplay(&output),
+                                    ?virtual_machine_call_duration,
+                                    ?proof_access_duration,
                                 );
                                 let _ = operation.result_tx.send(Ok(RuntimeCallSuccess {
                                     output,
@@ -2204,7 +2225,9 @@ async fn run_background<TPlat: PlatformRef>(
                                     function_name = operation.function_name,
                                     parameters_vectored =
                                         HashDisplay(&operation.parameters_vectored),
-                                    error = ?error
+                                    error = ?error,
+                                    ?virtual_machine_call_duration,
+                                    ?proof_access_duration,
                                 );
                                 let _ = operation
                                     .result_tx
@@ -2221,12 +2244,18 @@ async fn run_background<TPlat: PlatformRef>(
                                 nk.child_trie().map(|c| c.as_ref().to_owned()) // TODO: overhead
                             }
                             executor::runtime_call::RuntimeCall::SignatureVerification(r) => {
+                                let runtime_call_duration_before = background.platform.now();
                                 call = r.verify_and_resume();
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                                 continue;
                             }
                             executor::runtime_call::RuntimeCall::LogEmit(r) => {
                                 // Logs are ignored.
+                                let runtime_call_duration_before = background.platform.now();
                                 call = r.resume();
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                                 continue;
                             }
                             executor::runtime_call::RuntimeCall::Offchain(_) => {
@@ -2240,7 +2269,9 @@ async fn run_background<TPlat: PlatformRef>(
                                     function_name = operation.function_name,
                                     parameters_vectored =
                                         HashDisplay(&operation.parameters_vectored),
-                                    error = ?RuntimeCallExecutionError::ForbiddenHostFunction
+                                    error = ?RuntimeCallExecutionError::ForbiddenHostFunction,
+                                    ?virtual_machine_call_duration,
+                                    ?proof_access_duration,
                                 );
                                 let _ = operation.result_tx.send(Err(RuntimeCallError::Execution(
                                     RuntimeCallExecutionError::ForbiddenHostFunction,
@@ -2249,11 +2280,15 @@ async fn run_background<TPlat: PlatformRef>(
                             }
                             executor::runtime_call::RuntimeCall::OffchainStorageSet(r) => {
                                 // Ignore offchain storage writes.
+                                let runtime_call_duration_before = background.platform.now();
                                 call = r.resume();
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                                 continue;
                             }
                         };
 
+                        let proof_access_duration_before = background.platform.now();
                         let trie_root = if let Some(child_trie) = child_trie {
                             // TODO: allocation here, but probably not problematic
                             const PREFIX: &[u8] = b":child_storage:default:";
@@ -2286,9 +2321,15 @@ async fn run_background<TPlat: PlatformRef>(
                                 let Ok(storage_value) = storage_value else {
                                     break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
+                                proof_access_duration +=
+                                    background.platform.now() - proof_access_duration_before;
+
+                                let runtime_call_duration_before = background.platform.now();
                                 call = get.inject_value(
                                     storage_value.map(|(val, vers)| (iter::once(val), vers)),
                                 );
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                             }
                             executor::runtime_call::RuntimeCall::ClosestDescendantMerkleValue(
                                 mv,
@@ -2301,7 +2342,13 @@ async fn run_background<TPlat: PlatformRef>(
                                 let Ok(merkle_value) = merkle_value else {
                                     break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
+                                proof_access_duration +=
+                                    background.platform.now() - proof_access_duration_before;
+
+                                let runtime_call_duration_before = background.platform.now();
                                 call = mv.inject_merkle_value(merkle_value);
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                             }
                             executor::runtime_call::RuntimeCall::NextKey(nk) => {
                                 let next_key = if let Some(trie_root) = trie_root {
@@ -2318,7 +2365,13 @@ async fn run_background<TPlat: PlatformRef>(
                                 let Ok(next_key) = next_key else {
                                     break RuntimeCallInaccessibleError::MissingProofEntry;
                                 };
+                                proof_access_duration +=
+                                    background.platform.now() - proof_access_duration_before;
+
+                                let runtime_call_duration_before = background.platform.now();
                                 call = nk.inject_key(next_key);
+                                virtual_machine_call_duration +=
+                                    background.platform.now() - runtime_call_duration_before;
                             }
                             _ => unreachable!(),
                         }
@@ -2336,7 +2389,9 @@ async fn run_background<TPlat: PlatformRef>(
                         remaining_attempts = usize::try_from(operation.total_attempts).unwrap()
                             - operation.inaccessible_errors.len()
                             - 1,
-                        ?error
+                        ?error,
+                        ?virtual_machine_call_duration,
+                        ?proof_access_duration,
                     );
                     operation.inaccessible_errors.push(error);
                     background
