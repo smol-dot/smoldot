@@ -2178,7 +2178,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 let output = finished.virtual_machine.value().as_ref().to_owned();
                                 log!(
                                     &background.platform,
-                                    Trace,
+                                    Debug,
                                     &background.log_target,
                                     "foreground-runtime-call-success",
                                     block_hash = HashDisplay(&operation.block_hash),
@@ -2198,7 +2198,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 let error = RuntimeCallExecutionError::Execution(error.detail);
                                 log!(
                                     &background.platform,
-                                    Trace,
+                                    Debug,
                                     &background.log_target,
                                     "foreground-runtime-call-fail",
                                     block_hash = HashDisplay(&operation.block_hash),
@@ -2234,7 +2234,7 @@ async fn run_background<TPlat: PlatformRef>(
                                 // Forbidden host function called.
                                 log!(
                                     &background.platform,
-                                    Trace,
+                                    Debug,
                                     &background.log_target,
                                     "foreground-runtime-call-fail",
                                     block_hash = HashDisplay(&operation.block_hash),
@@ -2328,7 +2328,7 @@ async fn run_background<TPlat: PlatformRef>(
                     // This path is reached only if the call proof was invalid.
                     log!(
                         &background.platform,
-                        Trace,
+                        Debug,
                         &background.log_target,
                         "foreground-runtime-call-progress-invalid-call-proof",
                         block_hash = HashDisplay(&operation.block_hash),
@@ -2382,7 +2382,7 @@ async fn run_background<TPlat: PlatformRef>(
                     // No peer knows this block. Returning with a failure.
                     log!(
                         &background.platform,
-                        Trace,
+                        Debug,
                         &background.log_target,
                         "foreground-runtime-call-request-fail",
                         block_hash = HashDisplay(&operation.block_hash),
