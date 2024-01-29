@@ -555,6 +555,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         mut messages_rx: service::DeliverReceiver<service::RequestProcess>,
     ) {
         loop {
+            // Yield at every loop in order to provide better tasks granularity.
+            futures_lite::future::yield_now().await;
+
             enum WakeUpReason {
                 SubscriptionDead,
                 NotificationWithRuntime(runtime_service::Notification),

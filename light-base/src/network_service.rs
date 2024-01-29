@@ -871,6 +871,9 @@ struct OpenGossipLinkState {
 
 async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
     loop {
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
+
         enum WakeUpReason<TPlat: PlatformRef> {
             ForegroundClosed,
             Message(ToBackground<TPlat>),

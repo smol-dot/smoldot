@@ -769,6 +769,9 @@ async fn background_task<TPlat: PlatformRef>(
                 }
             }
 
+            // Yield at every loop in order to provide better tasks granularity.
+            futures_lite::future::yield_now().await;
+
             enum WakeUpReason {
                 Notification(Option<runtime_service::Notification>),
                 BlockDownloadFinished([u8; 32], Result<Vec<Vec<u8>>, ()>),

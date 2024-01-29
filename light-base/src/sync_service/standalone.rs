@@ -135,8 +135,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // which case we will loop again as soon as possible.
         // TODO: integrate this within WakeUpReason, see https://github.com/smol-dot/smoldot/issues/1382 this is however complicated because process_one() moves out from sync, and that sync doesn't impl Sync, a refactor of AllSync might be necessary
         let queue_empty = {
-            let mut queue_empty = true;
-
             // TODO: handle obsolete requests
 
             // The sync state machine can be in a few various states. At the time of writing:
@@ -146,16 +144,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             // and set ̀`queue_empty` to `false`.
             let (task_update, has_done_verif) = task.process_one_verification_queue().await;
             task = task_update;
-
-            if has_done_verif {
-                queue_empty = false;
-
-                // Yield after a CPU-intensive operation. This helps provide a better granularity.
-                futures_lite::future::yield_now().await;
-            }
-
-            queue_empty
+            !has_done_verif
         };
+
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.

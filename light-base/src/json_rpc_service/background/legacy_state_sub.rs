@@ -593,6 +593,9 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             }
         }
 
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
+
         enum WakeUpReason<'a, TPlat: PlatformRef> {
             SubscriptionNotification {
                 notification: runtime_service::Notification,

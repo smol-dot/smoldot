@@ -173,6 +173,9 @@ pub(super) fn start<TPlat: PlatformRef>(
             let me = me.clone();
             async move {
                 loop {
+                    // Yield at every loop in order to provide better tasks granularity.
+                    futures_lite::future::yield_now().await;
+
                     match requests_processing_task.run_until_event().await {
                         service::Event::HandleRequest {
                             task,
@@ -240,6 +243,9 @@ pub(super) fn start<TPlat: PlatformRef>(
                 let rx = rx.clone();
                 async move {
                     loop {
+                        // Yield at every loop in order to provide better tasks granularity.
+                        futures_lite::future::yield_now().await;
+
                         match rx.recv().await {
                             Ok(either::Left(request_process)) => {
                                 me.handle_request(request_process).await;
