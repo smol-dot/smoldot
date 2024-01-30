@@ -1730,21 +1730,8 @@ pub struct Block<TBl> {
     /// Hash of the block.
     pub block_hash: [u8; 32],
 
-    /// SCALE-encoded justifications of this block, if any.
-    pub justifications: Vec<([u8; 4], Vec<u8>)>,
-
     /// User data associated to the block.
     pub user_data: TBl,
-
-    /// Extra fields for full block verifications.
-    pub full: Option<BlockFull>,
-}
-
-// TODO: doc
-#[derive(Debug, Clone)]
-pub struct BlockFull {
-    /// List of SCALE-encoded extrinsics that form the block's body.
-    pub body: Vec<Vec<u8>>,
 }
 
 pub struct BlockVerify<TRq, TSrc, TBl> {
@@ -1975,10 +1962,8 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                     finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
                         .into_iter()
                         .map(|b| Block {
-                            full: None, // TODO: wrong
                             header: b.scale_encoded_header,
                             block_hash: b.block_hash,
-                            justifications: Vec::new(), // TODO: wrong
                             user_data: b.user_data.unwrap(),
                         })
                         .collect(),
