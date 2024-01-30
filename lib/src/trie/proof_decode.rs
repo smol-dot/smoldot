@@ -328,7 +328,8 @@ where
                             // If the node value of the child is less than 32 bytes long, it should
                             // have been inlined instead of given separately.
                             if child_entry_range.end - child_entry_range.start < 32 {
-                                return Err(Error::UnexpectedHashedNode);
+                                entries.truncate(num_entries_before_current_trie_root);
+                                break;
                             }
 
                             visited_proof_entries_during_trie.push(child_position);
@@ -1399,16 +1400,10 @@ impl<'a> fmt::Debug for StorageValue<'a> {
 pub enum Error {
     /// Proof is in an invalid format.
     InvalidFormat,
-    /// One of the node values in the proof has an invalid format.
-    #[display(fmt = "A node of the proof has an invalid format: {_0}")]
-    InvalidNodeValue(trie_node::Error),
     /// One of the entries of the proof is disconnected from the root node.
     UnusedProofEntry,
     /// The same entry has been found multiple times in the proof.
     DuplicateProofEntry,
-    /// A node has been passed separately and referred to by its hash, while its length is inferior
-    /// to 32 bytes.
-    UnexpectedHashedNode,
 }
 
 pub struct EntryKeyIter<'a, T> {
