@@ -102,7 +102,7 @@ criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 tempfile = "3.7.1"
-wat = "1.0.84"
+wat = "1.0.85"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
