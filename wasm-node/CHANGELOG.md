@@ -7,6 +7,7 @@
 - Fix "Justification targets block not in the chain" errors, leading to peers being erroneously banned. ([#1618](https://github.com/smol-dot/smoldot/pull/1618))
 - Revert wasmi version to v0.31 due to performance issues with the experimental v0.32. The WebAssembly runtime is no longer compiled lazily as was the same since smoldot v2.0.17. ([#1642](https://github.com/smol-dot/smoldot/pull/1624))
 - Fix blocks not being marked as bad when they are downloaded in an unusual order. ([#1631](https://github.com/smol-dot/smoldot/pull/1631))
+- Fix some Merkle proofs being considered as invalid due to nodes having an invalid format when they are in reality storage nodes. ([#1634](https://github.com/smol-dot/smoldot/pull/1634))
 
 ## 2.0.19 - 2024-01-26
 
