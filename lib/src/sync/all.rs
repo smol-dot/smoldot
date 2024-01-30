@@ -1182,7 +1182,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 if let Some(blocks_append) = all_forks_blocks_append {
                     // TODO: many of the errors don't properly translate here, needs some refactoring
                     match blocks_append.add_block(
-                        &block.scale_encoded_header,
+                        block.scale_encoded_header,
                         block.scale_encoded_extrinsics,
                         block
                             .scale_encoded_justifications
@@ -1768,7 +1768,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
-    pub fn scale_encoded_header(&self) -> Vec<u8> {
+    pub fn scale_encoded_header(&self) -> &[u8] {
         self.inner.scale_encoded_header()
     }
 

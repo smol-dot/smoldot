@@ -181,7 +181,7 @@ struct Inner<TBl, TRq, TSrc> {
 }
 
 struct PendingBlock<TBl> {
-    header: Option<header::Header>,
+    header: Option<Vec<u8>>,
     /// SCALE-encoded extrinsics of the block. `None` if unknown. Only ever filled
     /// if [`Config::download_bodies`] was `true`.
     body: Option<Vec<Vec<u8>>>,
@@ -899,7 +899,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_hash,
                 announced_header_number,
                 announced_header_parent_hash,
-                announced_header_encoded: announced_header.into(),
+                announced_header_encoded: announced_scale_encoded_header,
                 source_id,
                 is_in_chain: true,
                 is_best,
@@ -919,7 +919,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_hash,
                 announced_header_number,
                 announced_header_parent_hash,
-                announced_header_encoded: announced_header.into(),
+                announced_header_encoded: announced_scale_encoded_header,
                 source_id,
                 is_best,
             })
@@ -929,7 +929,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_hash,
                 announced_header_number,
                 announced_header_parent_hash,
-                announced_header_encoded: announced_header.into(),
+                announced_header_encoded: announced_scale_encoded_header,
                 is_in_chain: false,
                 source_id,
                 is_best,
@@ -1103,19 +1103,20 @@ impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
     /// is ignored.
     pub fn add_block(
         mut self,
-        scale_encoded_header: &[u8],
+        scale_encoded_header: Vec<u8>,
         scale_encoded_extrinsics: Vec<Vec<u8>>,
         scale_encoded_justifications: impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
     ) -> Result<AddBlock<'a, TBl, TRq, TSrc>, AncestrySearchResponseError> {
         // Compare expected with actual hash.
         // This ensure that each header being processed is the parent of the previous one.
-        if self.expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {
+        if self.expected_next_hash != header::hash_from_scale_encoded_header(&scale_encoded_header)
+        {
             return Err(AncestrySearchResponseError::UnexpectedBlock);
         }
 
         // Invalid headers are erroneous.
         let decoded_header =
-            match header::decode(scale_encoded_header, self.inner.chain.block_number_bytes()) {
+            match header::decode(&scale_encoded_header, self.inner.chain.block_number_bytes()) {
                 Ok(h) => h,
                 Err(err) => return Err(AncestrySearchResponseError::InvalidHeader(err)),
             };
@@ -1176,7 +1177,9 @@ impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
 
             return Ok(AddBlock::AlreadyInChain(AddBlockOccupied {
                 inner: self,
-                decoded_header: decoded_header.into(),
+                block_number: decoded_header.number,
+                block_parent_hash: *decoded_header.parent_hash,
+                block_header: scale_encoded_header,
                 is_verified: true,
             }));
         }
@@ -1209,7 +1212,9 @@ impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
         {
             Ok(AddBlock::UnknownBlock(AddBlockVacant {
                 inner: self,
-                decoded_header: decoded_header.into(),
+                block_number: decoded_header.number,
+                block_parent_hash: *decoded_header.parent_hash,
+                block_header: scale_encoded_header,
                 scale_encoded_extrinsics,
                 justifications,
             }))
@@ -1241,7 +1246,9 @@ impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
 
             Ok(AddBlock::AlreadyPending(AddBlockOccupied {
                 inner: self,
-                decoded_header: decoded_header.into(),
+                block_number: decoded_header.number,
+                block_parent_hash: *decoded_header.parent_hash,
+                block_header: scale_encoded_header,
                 is_verified: false,
             }))
         }
@@ -1296,7 +1303,9 @@ pub enum AddBlock<'a, TBl, TRq, TSrc> {
 /// See [`FinishRequest::add_block`] and [`AddBlock`].
 pub struct AddBlockOccupied<'a, TBl, TRq, TSrc> {
     inner: FinishRequest<'a, TBl, TRq, TSrc>,
-    decoded_header: header::Header,
+    block_header: Vec<u8>,
+    block_number: u64,
+    block_parent_hash: [u8; 32],
     is_verified: bool,
 }
 
@@ -1316,10 +1325,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
                 .inner
                 .inner
                 .blocks
-                .unverified_block_user_data_mut(
-                    self.decoded_header.number,
-                    &self.inner.expected_next_hash,
-                )
+                .unverified_block_user_data_mut(self.block_number, &self.inner.expected_next_hash)
                 .user_data
         }
     }
@@ -1332,7 +1338,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
-            self.decoded_header.number,
+            self.block_number,
             self.inner.expected_next_hash,
         );
 
@@ -1340,8 +1346,8 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
         // TODO: do this for the entire chain of blocks if it is known locally?
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
-            self.decoded_header.number - 1,
-            self.decoded_header.parent_hash,
+            self.block_number - 1,
+            self.block_parent_hash,
         );
 
         let former_user_data = if self.is_verified {
@@ -1360,9 +1366,9 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
                 .inner
                 .blocks
                 .set_unverified_block_header_known(
-                    self.decoded_header.number,
+                    self.block_number,
                     &self.inner.expected_next_hash,
-                    self.decoded_header.parent_hash,
+                    self.block_parent_hash,
                 );
 
             let block_user_data = self
@@ -1370,12 +1376,9 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
                 .inner
                 .inner
                 .blocks
-                .unverified_block_user_data_mut(
-                    self.decoded_header.number,
-                    &self.inner.expected_next_hash,
-                );
+                .unverified_block_user_data_mut(self.block_number, &self.inner.expected_next_hash);
             if block_user_data.header.is_none() {
-                block_user_data.header = Some(self.decoded_header.clone());
+                block_user_data.header = Some(self.block_header);
                 // TODO: copying bytes :-/
             }
 
@@ -1385,7 +1388,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
         // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
-        self.inner.expected_next_hash = self.decoded_header.parent_hash;
+        self.inner.expected_next_hash = self.block_parent_hash;
         self.inner.expected_next_height -= 1;
         self.inner.index_in_response += 1;
         (self.inner, former_user_data)
@@ -1395,7 +1398,9 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
 /// See [`FinishRequest::add_block`] and [`AddBlock`].
 pub struct AddBlockVacant<'a, TBl, TRq, TSrc> {
     inner: FinishRequest<'a, TBl, TRq, TSrc>,
-    decoded_header: header::Header,
+    block_header: Vec<u8>,
+    block_number: u64,
+    block_parent_hash: [u8; 32],
     justifications: Vec<([u8; 4], Vec<u8>)>,
     scale_encoded_extrinsics: Vec<Vec<u8>>,
 }
@@ -1406,7 +1411,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockVacant<'a, TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
-            self.decoded_header.number,
+            self.block_number,
             self.inner.expected_next_hash,
         );
 
@@ -1414,24 +1419,24 @@ impl<'a, TBl, TRq, TSrc> AddBlockVacant<'a, TBl, TRq, TSrc> {
         // TODO: do this for the entire chain of blocks if it is known locally?
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
-            self.decoded_header.number - 1,
-            self.decoded_header.parent_hash,
+            self.block_number - 1,
+            self.block_parent_hash,
         );
 
         self.inner.inner.inner.blocks.insert_unverified_block(
-            self.decoded_header.number,
+            self.block_number,
             self.inner.expected_next_hash,
             if self.inner.inner.inner.blocks.downloading_bodies() {
                 pending_blocks::UnverifiedBlockState::HeaderBody {
-                    parent_hash: self.decoded_header.parent_hash,
+                    parent_hash: self.block_parent_hash,
                 }
             } else {
                 pending_blocks::UnverifiedBlockState::Header {
-                    parent_hash: self.decoded_header.parent_hash,
+                    parent_hash: self.block_parent_hash,
                 }
             },
             PendingBlock {
-                header: Some(self.decoded_header.clone()),
+                header: Some(self.block_header),
                 body: Some(self.scale_encoded_extrinsics),
                 user_data,
             },
@@ -1441,7 +1446,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockVacant<'a, TBl, TRq, TSrc> {
             self.inner.inner.inner.blocks[self.inner.source_id]
                 .unverified_finality_proofs
                 .insert(
-                    self.decoded_header.number,
+                    self.block_number,
                     FinalityProofs::Justifications(self.justifications),
                 );
         }
@@ -1479,7 +1484,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockVacant<'a, TBl, TRq, TSrc> {
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
         // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
-        self.inner.expected_next_hash = self.decoded_header.parent_hash;
+        self.inner.expected_next_hash = self.block_parent_hash;
         self.inner.expected_next_height -= 1;
         self.inner.index_in_response += 1;
         self.inner
@@ -1525,7 +1530,7 @@ pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     announced_header_hash: [u8; 32],
     announced_header_parent_hash: [u8; 32],
     announced_header_number: u64,
-    announced_header_encoded: header::Header,
+    announced_header_encoded: Vec<u8>,
     is_in_chain: bool,
     is_best: bool,
     source_id: SourceId,
@@ -1620,7 +1625,7 @@ pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     announced_header_hash: [u8; 32],
     announced_header_parent_hash: [u8; 32],
     announced_header_number: u64,
-    announced_header_encoded: header::Header,
+    announced_header_encoded: Vec<u8>,
     is_best: bool,
     source_id: SourceId,
 }
@@ -1927,7 +1932,7 @@ impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
-    pub fn scale_encoded_header(&self) -> Vec<u8> {
+    pub fn scale_encoded_header(&self) -> &[u8] {
         self.parent
             .inner
             .blocks
@@ -1938,7 +1943,6 @@ impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
             .header
             .as_ref()
             .unwrap()
-            .scale_encoding_vec(self.parent.chain.block_number_bytes())
     }
 
     /// Perform the verification.
@@ -1946,7 +1950,7 @@ impl<TBl, TRq, TSrc> BlockVerify<TBl, TRq, TSrc> {
         mut self,
         now_from_unix_epoch: Duration,
     ) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
-        let to_verify_scale_encoded_header = self.scale_encoded_header();
+        let to_verify_scale_encoded_header = self.scale_encoded_header().to_owned(); // TODO: overhead
 
         let result = match self
             .parent
