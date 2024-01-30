@@ -2394,7 +2394,7 @@ pub struct RemovedBlock<TBl> {
     pub block_hash: [u8; 32],
     /// Height of the block.
     pub block_number: u64,
-    /// User data that was associated with that block in the [`NonFinalizedTree`].
+    /// User data that was associated with that block.
     pub user_data: TBl,
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
