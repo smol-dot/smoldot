@@ -1318,10 +1318,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.network_up_to_date_finalized = false;
                         // Invalidate the cache of the runtime of the finalized blocks if any
                         // of the finalized blocks indicates that a runtime update happened.
-                        if finalized_blocks_newest_to_oldest
-                            .iter()
-                            .any(|b| b.header.digest.has_runtime_environment_updated())
-                        {
+                        if finalized_blocks_newest_to_oldest.iter().any(|b| {
+                            header::decode(&b.header, self.sync.block_number_bytes())
+                                .unwrap()
+                                .digest
+                                .has_runtime_environment_updated()
+                        }) {
                             self.known_finalized_runtime = None;
                         }
                         self.dispatch_all_subscribers(Notification::Finalized {

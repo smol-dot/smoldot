@@ -2866,8 +2866,7 @@ impl SyncBackground {
                         let new_finalized_hash = finalized_blocks_newest_to_oldest
                             .first()
                             .unwrap()
-                            .header
-                            .hash(self.sync.block_number_bytes());
+                            .block_hash;
                         self.log_callback.log(
                             LogLevel::Debug,
                             format!(
@@ -2901,7 +2900,7 @@ impl SyncBackground {
                         self.pending_notification = Some(Notification::Finalized {
                             finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
                                 .iter()
-                                .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                .map(|b| b.block_hash)
                                 .collect::<Vec<_>>(),
                             pruned_blocks_hashes: pruned_blocks.clone(),
                             best_block_hash: self.sync.best_block_hash(),
