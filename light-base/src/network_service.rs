@@ -608,6 +608,7 @@ pub enum LowLevelEvent {
     TransportConnecting {
         connection_id: ConnectionId,
         expected_peer_id: PeerId,
+        target_multiaddr: Vec<u8>,
     },
     TransportConnectingAbort {
         connection_id: ConnectionId,
@@ -1757,6 +1758,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 .insert_address(&peer_id, addr.into_bytes(), 10);
                         // TODO: constant
                     }
+
+                    // TODO: code here is very incomplete and should DRY with Kademlia find node responses
                 }
             }
             WakeUpReason::MessageForChain(
@@ -1849,10 +1852,12 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
             WakeUpReason::NetworkEvent(service::Event::HandshakeFinished {
                 peer_id,
                 expected_peer_id,
-                id,
+                id: connection_id,
             }) => {
                 let remote_addr =
-                    Multiaddr::from_bytes(task.network.connection_remote_addr(id)).unwrap(); // TODO: review this unwrap
+                    Multiaddr::from_bytes(task.network.connection_remote_addr(connection_id))
+                        .unwrap(); // TODO: review this unwrap
+
                 if let Some(expected_peer_id) = expected_peer_id.as_ref().filter(|p| **p != peer_id)
                 {
                     log!(
@@ -1877,6 +1882,48 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         remote_addr.into_bytes().to_vec(),
                         10,
                     );
+
+                    for &chain_id in task.peering_strategy.peer_chains_unordered(&peer_id) {
+                        if !task
+                            .peering_strategy
+                            .peer_in_chain(&expected_peer_id, &chain_id)
+                        {
+                            task.events_pending_send.push_back((
+                                chain_id,
+                                LowLevelEvent::TransportConnecting {
+                                    connection_id,
+                                    expected_peer_id: peer_id.clone(),
+                                    target_multiaddr: task
+                                        .network
+                                        .connection_remote_addr(connection_id)
+                                        .to_owned(),
+                                },
+                            ));
+                        }
+
+                        task.events_pending_send.push_back((
+                            chain_id,
+                            LowLevelEvent::TransportConnected {
+                                connection_id,
+                                peer_id: peer_id.clone(),
+                            },
+                        ));
+                    }
+
+                    for &chain_id in task
+                        .peering_strategy
+                        .peer_chains_unordered(&expected_peer_id)
+                    {
+                        if !task.peering_strategy.peer_in_chain(&peer_id, &chain_id) {
+                            task.events_pending_send.push_back((
+                                chain_id,
+                                LowLevelEvent::TransportConnectingAbort {
+                                    connection_id,
+                                    expected_peer_id: expected_peer_id.clone(),
+                                },
+                            ));
+                        }
+                    }
                 } else {
                     log!(
                         &task.platform,
@@ -1886,13 +1933,26 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                         remote_addr,
                         peer_id
                     );
+
+                    for &chain_id in task.peering_strategy.peer_chains_unordered(&peer_id) {
+                        task.events_pending_send.push_back((
+                            chain_id,
+                            LowLevelEvent::TransportConnected {
+                                connection_id,
+                                peer_id: peer_id.clone(),
+                            },
+                        ));
+                    }
                 }
             }
             WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
+                id: connection_id,
                 expected_peer_id: Some(_),
                 ..
             })
-            | WakeUpReason::NetworkEvent(service::Event::Disconnected { .. }) => {
+            | WakeUpReason::NetworkEvent(service::Event::Disconnected {
+                id: connection_id, ..
+            }) => {
                 let (address, peer_id, handshake_finished) = match wake_up_reason {
                     WakeUpReason::NetworkEvent(service::Event::PreHandshakeDisconnected {
                         address,
@@ -1920,6 +1980,23 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     address,
                     ?handshake_finished
                 );
+
+                for &chain_id in task.peering_strategy.peer_chains_unordered(&peer_id) {
+                    task.events_pending_send.push_back((
+                        chain_id,
+                        if handshake_finished {
+                            LowLevelEvent::TransportDisconnected {
+                                connection_id,
+                                peer_id: peer_id.clone(),
+                            }
+                        } else {
+                            LowLevelEvent::TransportConnectingAbort {
+                                connection_id,
+                                expected_peer_id: peer_id.clone(),
+                            }
+                        },
+                    ));
+                }
 
                 // Ban the peer in order to avoid trying over and over again the same address(es).
                 // Even if the handshake was finished, it is possible that the peer simply shuts
@@ -2420,6 +2497,29 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                     chain = &task.network[chain_id].log_name,
                                     peer_id = peer_removed,
                                 );
+
+                                for connection_id in
+                                    task.network.potential_connections(&peer_removed)
+                                {
+                                    task.events_pending_send.push_back((
+                                        chain_id,
+                                        LowLevelEvent::TransportConnectingAbort {
+                                            connection_id,
+                                            expected_peer_id: peer_removed.clone(),
+                                        },
+                                    ));
+                                }
+                                for connection_id in
+                                    task.network.established_connections(&peer_removed)
+                                {
+                                    task.events_pending_send.push_back((
+                                        chain_id,
+                                        LowLevelEvent::TransportDisconnected {
+                                            connection_id,
+                                            peer_id: peer_removed.clone(),
+                                        },
+                                    ));
+                                }
                             }
 
                             log!(
@@ -2432,6 +2532,40 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 addrs = ?valid_addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), // TODO: better formatting?
                                 obtained_from = requestee_peer_id
                             );
+
+                            for connection_id in task.network.established_connections(&peer_id) {
+                                task.events_pending_send.push_back((
+                                    chain_id,
+                                    LowLevelEvent::TransportConnecting {
+                                        connection_id,
+                                        target_multiaddr: task
+                                            .network
+                                            .connection_remote_addr(connection_id)
+                                            .to_owned(),
+                                        expected_peer_id: peer_id.clone(),
+                                    },
+                                ));
+                                task.events_pending_send.push_back((
+                                    chain_id,
+                                    LowLevelEvent::TransportConnected {
+                                        connection_id,
+                                        peer_id: peer_id.clone(),
+                                    },
+                                ));
+                            }
+                            for connection_id in task.network.potential_connections(&peer_id) {
+                                task.events_pending_send.push_back((
+                                    chain_id,
+                                    LowLevelEvent::TransportConnecting {
+                                        connection_id,
+                                        target_multiaddr: task
+                                            .network
+                                            .connection_remote_addr(connection_id)
+                                            .to_owned(),
+                                        expected_peer_id: peer_id.clone(),
+                                    },
+                                ));
+                            }
                         }
                     }
 
@@ -2665,7 +2799,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     task.num_recent_connection_opening.saturating_sub(1);
             }
             WakeUpReason::CanStartConnect(expected_peer_id) => {
-                let Some(multiaddr) = task
+                let Some(multiaddr_bytes) = task
                     .peering_strategy
                     .pick_address_and_add_connection(&expected_peer_id)
                 else {
@@ -2698,7 +2832,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     continue;
                 };
 
-                let multiaddr = match multiaddr::Multiaddr::from_bytes(multiaddr.to_owned()) {
+                let multiaddr = match multiaddr::Multiaddr::from_bytes(multiaddr_bytes.to_owned()) {
                     Ok(a) => a,
                     Err((multiaddr::FromBytesError, addr)) => {
                         // Address is in an invalid format.
@@ -2765,7 +2899,7 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                     async_channel::bounded(8);
                 let task_name = format!("connection-{}", multiaddr);
 
-                match address {
+                let connection_id = match address {
                     address_parse::AddressOrMultiStreamAddress::Address(address) => {
                         // As documented in the `PlatformRef` trait, `connect_stream` must
                         // return as soon as possible.
@@ -2795,6 +2929,8 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.tasks_messages_tx.clone(),
                             ),
                         );
+
+                        connection_id
                     }
                     address_parse::AddressOrMultiStreamAddress::MultiStreamAddress(
                         platform::MultiStreamAddress::WebRtc {
@@ -2852,7 +2988,25 @@ async fn background_task<TPlat: PlatformRef>(mut task: BackgroundTask<TPlat>) {
                                 task.tasks_messages_tx.clone(),
                             ),
                         );
+
+                        connection_id
                     }
+                };
+
+                // Notify susbcribers of the new connection.
+                let multiaddr = multiaddr_bytes.to_owned();
+                for &chain_id in task
+                    .peering_strategy
+                    .peer_chains_unordered(&expected_peer_id)
+                {
+                    task.events_pending_send.push_back((
+                        chain_id,
+                        LowLevelEvent::TransportConnecting {
+                            connection_id,
+                            target_multiaddr: multiaddr.clone(),
+                            expected_peer_id: expected_peer_id.clone(),
+                        },
+                    ));
                 }
             }
             WakeUpReason::CanOpenGossip(peer_id, chain_id) => {

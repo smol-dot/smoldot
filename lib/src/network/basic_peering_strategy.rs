@@ -434,6 +434,43 @@ where
         }
     }
 
+    /// Returns `true` if the peer belongs to the given chain.
+    ///
+    /// Also returns `true` if the peer is banned.s
+    pub fn peer_in_chain(&self, peer_id: &PeerId, chain_id: &TChainId) -> bool {
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            // If the `PeerId` is unknown, it means it doesn't belong to any chain.
+            return false;
+        };
+
+        let Some(&chain_index) = self.chains_indices.get(chain_id) else {
+            // If the `TChainId` is unknown, it means that it doesn't have any peer.
+            return false;
+        };
+
+        self.peers_chains
+            .contains_key(&(peer_id_index, chain_index))
+    }
+
+    /// Returns the list of chains that the given peer belongs to.
+    ///
+    /// Includes chains where the peer is banned.
+    pub fn peer_chains_unordered(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = &'_ TChainId> + '_ {
+        let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
+            // If the `PeerId` is unknown, it means it doesn't belong to any chain.
+            return either::Right(iter::empty());
+        };
+
+        either::Left(
+            self.peers_chains
+                .range((peer_id_index, usize::MIN)..(peer_id_index + 1, usize::MIN))
+                .map(|((_, chain_index), _)| &self.chains[*chain_index]),
+        )
+    }
+
     /// Returns the list of all addresses that have been inserted for the given peer.
     pub fn peer_addresses(&'_ self, peer_id: &PeerId) -> impl Iterator<Item = &'_ [u8]> + '_ {
         let Some(&peer_id_index) = self.peer_ids_indices.get(peer_id) else {
