@@ -2175,8 +2175,6 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
         AllForksSync<TBl, TRq, TSrc>,
         FinalityProofVerifyOutcome<TBl>,
     ) {
-        let block_number_bytes = self.parent.chain.block_number_bytes();
-
         let finality_apply = match self.finality_proof_to_verify {
             FinalityProof::GrandpaCommit(scale_encoded_commit) => {
                 match self
@@ -2267,21 +2265,29 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
         let updates_best_block = finalized_blocks_iter.updates_best_block();
         let mut finalized_blocks = Vec::new();
         let mut pruned_blocks = Vec::new();
+        // TODO: a bit weird to perform a conversion here
         for block in finalized_blocks_iter {
-            let header = header::Header::from(
-                header::decode(&block.scale_encoded_header, block_number_bytes).unwrap(),
-            );
             if matches!(block.ty, blocks_tree::RemovedBlockType::Finalized) {
-                finalized_blocks.push((header, block.user_data));
+                finalized_blocks.push(RemovedBlock {
+                    block_hash: block.block_hash,
+                    block_number: block.block_number,
+                    user_data: block.user_data,
+                    scale_encoded_header: block.scale_encoded_header,
+                });
             } else {
-                pruned_blocks.push((header, block.user_data));
+                pruned_blocks.push(RemovedBlock {
+                    block_hash: block.block_hash,
+                    block_number: block.block_number,
+                    user_data: block.user_data,
+                    scale_encoded_header: block.scale_encoded_header,
+                });
             }
         }
         let _finalized_blocks = self
             .parent
             .inner
             .blocks
-            .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+            .set_finalized_block_height(finalized_blocks.last().unwrap().block_number);
 
         (
             self.parent,
@@ -2363,10 +2369,9 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     /// Verification successful. The block and all its ancestors is now finalized.
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
-        // TODO: use `Vec<u8>` instead of `Header`?
-        finalized_blocks_newest_to_oldest: Vec<(header::Header, TBl)>,
+        finalized_blocks_newest_to_oldest: Vec<RemovedBlock<TBl>>,
         /// List of blocks that aren't descendant of the latest finalized block, in an unspecified order.
-        pruned_blocks: Vec<(header::Header, TBl)>,
+        pruned_blocks: Vec<RemovedBlock<TBl>>,
         /// If `true`, this operation modifies the best block of the non-finalized chain.
         /// This can happen if the previous best block isn't a descendant of the now finalized
         /// block.
@@ -2380,4 +2385,17 @@ pub enum FinalityProofVerifyOutcome<TBl> {
     JustificationError(blocks_tree::JustificationVerifyError),
     /// Problem while verifying GrandPa commit.
     GrandpaCommitError(blocks_tree::CommitVerifyError),
+}
+
+/// See [`FinalityProofVerifyOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RemovedBlock<TBl> {
+    /// Hash of the block.
+    pub block_hash: [u8; 32],
+    /// Height of the block.
+    pub block_number: u64,
+    /// User data that was associated with that block in the [`NonFinalizedTree`].
+    pub user_data: TBl,
+    /// SCALE-encoded header of the block.
+    pub scale_encoded_header: Vec<u8>,
 }

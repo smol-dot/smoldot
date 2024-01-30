@@ -1725,7 +1725,10 @@ pub enum GrandpaCommitMessageOutcome {
 #[derive(Debug, Clone)]
 pub struct Block<TBl> {
     /// Header of the block.
-    pub header: header::Header,
+    pub header: Vec<u8>,
+
+    /// Hash of the block.
+    pub block_hash: [u8; 32],
 
     /// SCALE-encoded justifications of this block, if any.
     pub justifications: Vec<([u8; 4], Vec<u8>)>,
@@ -1967,20 +1970,19 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                 },
             ) => (
                 sync,
+                // TODO: weird conversions
                 FinalityProofVerifyOutcome::NewFinalized {
                     finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
                         .into_iter()
                         .map(|b| Block {
                             full: None, // TODO: wrong
-                            header: b.0,
+                            header: b.scale_encoded_header,
+                            block_hash: b.block_hash,
                             justifications: Vec::new(), // TODO: wrong
-                            user_data: b.1.unwrap(),
+                            user_data: b.user_data.unwrap(),
                         })
                         .collect(),
-                    pruned_blocks: pruned_blocks
-                        .into_iter()
-                        .map(|b| b.0.hash(self.shared.block_number_bytes))
-                        .collect(),
+                    pruned_blocks: pruned_blocks.into_iter().map(|b| b.block_hash).collect(),
                     updates_best_block,
                 },
             ),

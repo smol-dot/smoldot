@@ -591,6 +591,7 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
 
         Some(RemovedBlock {
             block_hash: pruned.user_data.hash,
+            block_number: pruned.user_data.number,
             scale_encoded_header: pruned.user_data.header,
             user_data: pruned.user_data.user_data,
             ty: if pruned.is_prune_target_ancestor {
@@ -625,6 +626,8 @@ pub enum SetFinalizedError {
 pub struct RemovedBlock<T> {
     /// Hash of the block.
     pub block_hash: [u8; 32],
+    /// Height of the block.
+    pub block_number: u64,
     /// User data that was associated with that block in the [`NonFinalizedTree`].
     pub user_data: T,
     /// Reason why the block was removed.
