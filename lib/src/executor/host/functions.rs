@@ -154,6 +154,7 @@ host_functions! {
     ext_allocator_free_version_1,
     ext_logging_log_version_1,
     ext_logging_max_level_version_1,
+    ext_panic_handler_abort_on_panic_version_1,
 }
 
 impl HostFunction {
@@ -447,6 +448,9 @@ impl HostFunction {
             }
             HostFunction::ext_logging_max_level_version_1 => {
                 crate::signature!(() => vm::ValueType::I32)
+            }
+            HostFunction::ext_panic_handler_abort_on_panic_version_1 => {
+                crate::signature!((vm::ValueType::I64) => ())
             }
         }
     }

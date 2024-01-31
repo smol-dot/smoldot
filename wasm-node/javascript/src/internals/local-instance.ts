@@ -55,8 +55,9 @@ export interface Config {
 }
 
 export type Event =
-    { ty: "add-chain-result", success: true, chainId: number } |
-    { ty: "add-chain-result", success: false, error: string } |
+    { ty: "add-chain-id-allocated", chainId: number } |
+    { ty: "add-chain-result", chainId: number, success: true } |
+    { ty: "add-chain-result", chainId: number, success: false, error: string } |
     { ty: "log", level: number, target: string, message: string } |
     { ty: "json-rpc-responses-non-empty", chainId: number } |
     // Smoldot has crashed. Note that the public API of the instance can technically still be
@@ -80,6 +81,15 @@ export type ParsedMultiaddr =
 export interface Instance {
     request: (request: string, chainId: number) => number,
     peekJsonRpcResponse: (chainId: number) => string | null,
+    /**
+     * Later generates a `add-chain-id-allocated` event.
+     * If this function is called multiple times, the `add-chain-id-allocated` events are generated
+     * in the same order as the function calls.
+     *
+     * Then, later and asynchronously, a `add-chain-result` event is generated in order to
+     * indicate whether the initialization was actually successful. If `success` is `false`, then
+     * the `chainId` becomes unallocated.
+     */
     addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number) => void,
     removeChain: (chainId: number) => void,
     /**
@@ -144,6 +154,21 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             state.onShutdownExecutorOrWasmPanic();
             state.onShutdownExecutorOrWasmPanic = () => { };
             throw new Error();
+        },
+
+        chain_initialized: (chainId: number, errorMsgPtr: number, errorMsgLen: number) => {
+            const instance = state.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+
+            errorMsgPtr >>>= 0;
+            errorMsgLen >>>= 0;
+
+            if (errorMsgPtr === 0) {
+                eventCallback({ ty: "add-chain-result", chainId, success: true });
+            } else {
+                const errorMsg = buffer.utf8BytesToString(mem, errorMsgPtr, errorMsgLen);
+                eventCallback({ ty: "add-chain-result", chainId, success: false, error: errorMsg });
+            }
         },
 
         random_get: (ptr: number, len: number) => {
@@ -502,7 +527,8 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
 
         addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean, jsonRpcMaxPendingRequests: number, jsonRpcMaxSubscriptions: number) => {
             if (!state.instance) {
-                eventCallback({ ty: "add-chain-result", success: false, error: "Smoldot has crashed" });
+                eventCallback({ ty: "add-chain-id-allocated", chainId: 0 });
+                eventCallback({ ty: "add-chain-result", chainId: 0, success: false, error: "Smoldot has crashed" });
                 return;
             }
 
@@ -528,15 +554,7 @@ export async function startLocalInstance(config: Config, wasmModule: WebAssembly
             delete state.bufferIndices[1]
             delete state.bufferIndices[2]
 
-            if (state.instance.exports.chain_is_ok(chainId) != 0) {
-                eventCallback({ ty: "add-chain-result", success: true, chainId });
-            } else {
-                const errorMsgLen = state.instance.exports.chain_error_len(chainId) >>> 0;
-                const errorMsgPtr = state.instance.exports.chain_error_ptr(chainId) >>> 0;
-                const errorMsg = buffer.utf8BytesToString(new Uint8Array(state.instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
-                state.instance.exports.remove_chain(chainId);
-                eventCallback({ ty: "add-chain-result", success: false, error: errorMsg });
-            }
+            eventCallback({ ty: "add-chain-id-allocated", chainId });
         },
 
         removeChain: (chainId: number): void => {

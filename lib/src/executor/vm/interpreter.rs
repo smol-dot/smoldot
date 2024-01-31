@@ -25,6 +25,13 @@ use super::{
 use alloc::{borrow::ToOwned as _, string::ToString as _, sync::Arc, vec::Vec};
 use core::fmt;
 
+// TODO: this enum is a small hack. It mimics the `CompilationMode` enum of wasmi 0.32 so that we don't have to change the API of this module when upgrading to 0.32
+// TODO: when upgrading: `pub use wasmi::CompilationMode;`
+pub enum CompilationMode {
+    Eager,
+    Lazy,
+}
+
 /// See [`super::VirtualMachinePrototype`].
 pub struct InterpreterPrototype {
     /// Base components that can be used to recreate a prototype later if desired.
@@ -52,6 +59,7 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module_bytes: &[u8],
+        _compilation_mode: CompilationMode,
         symbols: &mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let engine = {
@@ -66,6 +74,7 @@ impl InterpreterPrototype {
             config.wasm_mutable_global(false);
             config.wasm_saturating_float_to_int(false);
             config.wasm_tail_call(false);
+            // TODO: when updating to wasmi 0.32: config.compilation_mode(compilation_mode);
 
             wasmi::Engine::new(&config)
         };
@@ -129,6 +138,7 @@ impl InterpreterPrototype {
                         &mut store,
                         func_type.clone(),
                         move |_caller, parameters, _ret| {
+                            // TODO: in wasmi v0.32, this is `wasmi::Error::host``
                             Err(wasmi::core::Trap::from(InterruptedTrap {
                                 function_index,
                                 parameters: parameters

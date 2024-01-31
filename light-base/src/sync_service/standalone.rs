@@ -19,11 +19,12 @@ use super::{
     BlockNotification, ConfigRelayChainRuntimeCodeHint, FinalizedBlockRuntime, Notification,
     SubscribeAll, ToBackground,
 };
-use crate::{network_service, platform::PlatformRef, util};
+use crate::{log, network_service, platform::PlatformRef, util};
 
 use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
+    format,
     string::String,
     sync::Arc,
     vec::Vec,
@@ -91,6 +92,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 NonZeroU32::new(5000).unwrap()
             },
             download_bodies: false,
+            download_all_chain_information_storage_proofs: false,
             code_trie_node_hint: runtime_code_hint.map(|hint| all::ConfigCodeTrieNodeHint {
                 merkle_value: hint.merkle_value,
                 storage_value: hint.storage_value,
@@ -133,8 +135,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // which case we will loop again as soon as possible.
         // TODO: integrate this within WakeUpReason, see https://github.com/smol-dot/smoldot/issues/1382 this is however complicated because process_one() moves out from sync, and that sync doesn't impl Sync, a refactor of AllSync might be necessary
         let queue_empty = {
-            let mut queue_empty = true;
-
             // TODO: handle obsolete requests
 
             // The sync state machine can be in a few various states. At the time of writing:
@@ -144,16 +144,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             // and set ̀`queue_empty` to `false`.
             let (task_update, has_done_verif) = task.process_one_verification_queue().await;
             task = task_update;
-
-            if has_done_verif {
-                queue_empty = false;
-
-                // Yield after a CPU-intensive operation. This helps provide a better granularity.
-                futures_lite::future::yield_now().await;
-            }
-
-            queue_empty
+            !has_done_verif
         };
+
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
 
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
@@ -286,102 +281,25 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
-                match header::decode(decoded.scale_encoded_header, task.sync.block_number_bytes()) {
-                    Ok(decoded_header) => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                            HashDisplay(decoded_header.parent_hash)
-                        );
-                    }
-                    Err(error) => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
-                            peer_id,
-                            HashDisplay(&header::hash_from_scale_encoded_header(decoded.scale_encoded_header)),
-                            decoded.is_best,
-                        );
-
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => InvalidBlockHeader(error={})",
-                            error
-                        );
-
-                        log::warn!(
-                            target: &task.log_target,
-                            "Failed to decode header in block announce received from {}. Error: {}",
-                            peer_id, error,
-                        );
-                    }
-                }
+                // TODO: improve the logging here, requires some modifications to block_announce()
+                log!(
+                    &task.platform,
+                    Debug,
+                    &task.log_target,
+                    "block-announce",
+                    sender = peer_id,
+                    hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                        decoded.scale_encoded_header
+                    )),
+                    is_best = decoded.is_best,
+                );
 
                 match task.sync.block_announce(
                     sync_source_id,
                     decoded.scale_encoded_header.to_owned(),
                     decoded.is_best,
                 ) {
-                    all::BlockAnnounceOutcome::HeaderVerify
-                    | all::BlockAnnounceOutcome::AlreadyInChain => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => Ok"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::Discarded => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => Discarded"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::StoredForLater {} => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => StoredForLater"
-                        );
-                    }
-                    all::BlockAnnounceOutcome::TooOld {
-                        announce_block_height,
-                        ..
-                    } => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => TooOld"
-                        );
-
-                        log::warn!(
-                            target: &task.log_target,
-                            "Block announce header height (#{}) from {} is below finalized block",
-                            announce_block_height,
-                            peer_id
-                        );
-
-                        task.network_service
-                            .ban_and_disconnect(
-                                peer_id,
-                                network_service::BanSeverity::Low,
-                                "announced-block-below-known-finalized",
-                            )
-                            .await;
-                    }
-                    all::BlockAnnounceOutcome::NotFinalizedChain => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync => NotFinalized"
-                        );
-
-                        log::warn!(
-                            target: &task.log_target,
-                            "Block announce from {} isn't part of finalized chain",
-                            peer_id
-                        );
-                    }
                     all::BlockAnnounceOutcome::InvalidHeader(_) => {
-                        // Log messages are already printed above.
                         task.network_service
                             .ban_and_disconnect(
                                 peer_id,
@@ -390,6 +308,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             )
                             .await;
                     }
+                    _ => {}
                 }
             }
 
@@ -413,15 +332,21 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 {
                     all::GrandpaCommitMessageOutcome::Queued => {
                         // TODO: print more details?
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= QueuedGrandpaCommit"
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "grandpa-commit-message-queued",
+                            sender = peer_id
                         );
                     }
                     all::GrandpaCommitMessageOutcome::Discarded => {
-                        log::debug!(
-                            target: &task.log_target,
-                            "Sync <= IgnoredGrandpaCommit"
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "grandpa-commit-message-ignored",
+                            sender = peer_id
                         );
                     }
                 }
@@ -701,7 +626,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 all::DesiredRequest::BlocksRequest {
                     first_block_hash,
                     first_block_height,
-                    ascending,
                     num_blocks,
                     request_headers,
                     request_bodies,
@@ -729,11 +653,9 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                         )
                         .unwrap(),
-                        direction: if ascending {
-                            network::codec::BlocksRequestDirection::Ascending
-                        } else {
-                            network::codec::BlocksRequestDirection::Descending
-                        },
+                        // The direction is hardcoded based on the documentation of the syncing
+                        // state machine.
+                        direction: network::codec::BlocksRequestDirection::Descending,
                         fields: network::codec::BlocksRequestFields {
                             header: request_headers,
                             body: request_bodies,
@@ -749,7 +671,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     all::RequestDetail::BlocksRequest {
                         first_block_hash,
                         first_block_height,
-                        ascending,
                         num_blocks,
                         request_headers,
                         request_bodies,
@@ -899,11 +820,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         finalized_block_hash,
                         finalized_block_number,
                     } => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "GrandPa warp sync idle at block #{} (0x{})",
-                            finalized_block_number,
-                            HashDisplay(&finalized_block_hash),
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "GrandPa warp sync idle at block #{} (0x{})",
+                                finalized_block_number,
+                                HashDisplay(&finalized_block_hash)
+                            ),
                         );
                     }
                     all::Status::WarpSyncFragments {
@@ -915,11 +840,15 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         finalized_block_hash,
                         finalized_block_number,
                     } => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "GrandPa warp sync in progress. Block: #{} (0x{}).",
-                            finalized_block_number,
-                            HashDisplay(&finalized_block_hash)
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "GrandPa warp sync in progress. Block: #{} (0x{}).",
+                                finalized_block_number,
+                                HashDisplay(&finalized_block_hash)
+                            )
                         );
                     }
                 };
@@ -1008,20 +937,41 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 // Warp syncing compiles the runtime. The compiled runtime will later be yielded
                 // in the `WarpSyncFinished` variant, which is then provided as an event.
                 let before_instant = self.platform.now();
-                let (new_sync, error) = req.build(all::ExecHint::CompileAheadOfTime, true);
+                // Because the runtime being compiled has been validated by 2/3rds of the
+                // validators of the chain, we can assume that it is valid. Doing so significantly
+                // increases the compilation speed.
+                let (new_sync, error) =
+                    req.build(all::ExecHint::CompileWithNonDeterministicValidation, true);
                 let elapsed = self.platform.now() - before_instant;
                 match error {
                     Ok(()) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => WarpSyncRuntimeBuild(success=true, duration={:?})",
-                            elapsed
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-runtime-build-success",
+                            success = ?true,
+                            duration = ?elapsed
                         );
                     }
-                    Err(err) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncRuntimeBuild(error={})", err);
-                        if !matches!(err, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
-                            log::warn!(target: &self.log_target, "Failed to compile runtime during warp syncing process: {}", err);
+                    Err(error) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-runtime-build-error",
+                            ?error
+                        );
+                        if !matches!(error, all::WarpSyncBuildRuntimeError::SourceMisbehavior(_)) {
+                            log!(
+                                &self.platform,
+                                Debug,
+                                &self.log_target,
+                                format!(
+                                    "Failed to compile runtime during warp syncing process: {}",
+                                    error
+                                )
+                            );
                         }
                     }
                 };
@@ -1032,15 +982,31 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 let (new_sync, error) = req.build();
                 match error {
                     Ok(()) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(success=true)")
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-chain-information-build-success"
+                        );
                     }
-                    Err(err) => {
-                        log::debug!(target: &self.log_target, "Sync => WarpSyncBuildChainInformation(error={})", err);
+                    Err(error) => {
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-chain-information-build-error",
+                            ?error
+                        );
                         if !matches!(
-                            err,
+                            error,
                             all::WarpSyncBuildChainInformationError::SourceMisbehavior(_)
                         ) {
-                            log::warn!(target: &self.log_target, "Failed to build the chain information during warp syncing process: {}", err);
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                format!("Failed to build the chain information during warp syncing process: {}", error)
+                            );
                         }
                     }
                 };
@@ -1059,11 +1025,15 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 self.sync = sync;
 
                 let finalized_header = self.sync.finalized_block_header();
-                log::info!(
-                    target: &self.log_target,
-                    "GrandPa warp sync finished to #{} ({})",
-                    finalized_header.number,
-                    HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                log!(
+                    &self.platform,
+                    Debug,
+                    &self.log_target,
+                    format!(
+                        "GrandPa warp sync finished to #{} ({})",
+                        finalized_header.number,
+                        HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                    )
                 );
 
                 self.warp_sync_taking_long_time_warning =
@@ -1101,24 +1071,39 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                 match result {
                     Ok((fragment_hash, fragment_number)) => {
                         // TODO: must call `set_local_grandpa_state` and `set_local_best_block` so that other peers notify us of neighbor packets
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => WarpSyncFragmentVerified(sender={}, verified_hash={}, verified_height={fragment_number})",
-                            sender_if_still_connected.as_ref().map(|p| Cow::Owned(p.to_base58())).unwrap_or(Cow::Borrowed("<disconnected>")),
-                            HashDisplay(&fragment_hash)
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "warp-sync-fragment-verify-success",
+                            sender = sender_if_still_connected
+                                .as_ref()
+                                .map(|p| Cow::Owned(p.to_base58()))
+                                .unwrap_or(Cow::Borrowed("<disconnected>")),
+                            verified_hash = HashDisplay(&fragment_hash),
+                            verified_height = fragment_number
                         );
                     }
                     Err(err) => {
-                        log::warn!(
-                            target: &self.log_target,
-                            "Failed to verify warp sync fragment from {}: {}{}",
-                            sender_if_still_connected.as_ref().map(|p| Cow::Owned(p.to_base58())).unwrap_or(Cow::Borrowed("<disconnected>")),
-                            err,
-                            if matches!(err, all::VerifyFragmentError::JustificationVerify(_)) {
-                                ". This might be caused by a forced GrandPa authorities change having \
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            format!(
+                                "Failed to verify warp sync fragment from {}: {}{}",
+                                sender_if_still_connected
+                                    .as_ref()
+                                    .map(|p| Cow::Owned(p.to_base58()))
+                                    .unwrap_or(Cow::Borrowed("<disconnected>")),
+                                err,
+                                if matches!(err, all::VerifyFragmentError::JustificationVerify(_)) {
+                                    ". This might be caused by a forced GrandPa authorities change having \
                                 been enacted on the chain. If this is the case, please update the \
                                 chain specification with a checkpoint past this forced change."
-                            } else { "" }
+                                } else {
+                                    ""
+                                }
+                            )
                         );
                         if let Some(sender_if_still_connected) = sender_if_still_connected {
                             self.network_service
@@ -1145,11 +1130,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         let verified_height = success.height();
                         self.sync = success.finish(());
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => HeaderVerified(hash={}, new_best={})",
-                            HashDisplay(&verified_hash),
-                            if is_new_best { "yes" } else { "no" }
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "header-verify-success",
+                            hash = HashDisplay(&verified_hash),
+                            is_new_best = if is_new_best { "yes" } else { "no" }
                         );
 
                         if is_new_best {
@@ -1222,11 +1209,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                                 .await
                                 .is_ok()
                             {
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Network <= BlockAnnounce(peer_id={}, hash={})",
-                                    source_peer_id,
-                                    HashDisplay(&verified_hash)
+                                log!(
+                                    &self.platform,
+                                    Debug,
+                                    &self.log_target,
+                                    "block-announce-received",
+                                    peer_id = source_peer_id,
+                                    block_hash = HashDisplay(&verified_hash)
                                 );
 
                                 // Update the sync state machine with the fact that the target of
@@ -1262,18 +1251,24 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.sync = sync;
 
                         // TODO: print which peer sent the header
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => HeaderVerifyError(hash={}, error={:?})",
-                            HashDisplay(&verified_hash),
-                            error
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "header-verify-error",
+                            hash = HashDisplay(&verified_hash),
+                            ?error
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying header {}: {}",
-                            HashDisplay(&verified_hash),
-                            error
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!(
+                                "Error while verifying header {}: {}",
+                                HashDisplay(&verified_hash),
+                                error
+                            )
                         );
 
                         // TODO: ban peers that have announced the block
@@ -1308,10 +1303,13 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     ) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => FinalityProofVerified(finalized_blocks={}, sender={sender})",
-                            finalized_blocks_newest_to_oldest.len(),
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-success",
+                            finalized_blocks = finalized_blocks_newest_to_oldest.len(),
+                            sender
                         );
 
                         if updates_best_block {
@@ -1320,10 +1318,12 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                         self.network_up_to_date_finalized = false;
                         // Invalidate the cache of the runtime of the finalized blocks if any
                         // of the finalized blocks indicates that a runtime update happened.
-                        if finalized_blocks_newest_to_oldest
-                            .iter()
-                            .any(|b| b.header.digest.has_runtime_environment_updated())
-                        {
+                        if finalized_blocks_newest_to_oldest.iter().any(|b| {
+                            header::decode(&b.header, self.sync.block_number_bytes())
+                                .unwrap()
+                                .digest
+                                .has_runtime_environment_updated()
+                        }) {
                             self.known_finalized_runtime = None;
                         }
                         self.dispatch_all_subscribers(Notification::Finalized {
@@ -1346,39 +1346,56 @@ impl<TPlat: PlatformRef> Task<TPlat> {
                     (sync, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => JustificationVerificationError(error={error:?}, sender={sender})",
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-error",
+                            ?error,
+                            sender,
                         );
 
-                        // TODO: don't print for consensusenginemismatch?
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying justification: {error}"
-                        );
+                        // Errors of type `JustificationEngineMismatch` indicate that the chain
+                        // uses a finality engine that smoldot doesn't recognize. This is a benign
+                        // error that shouldn't lead to a ban.
+                        if !matches!(
+                            error,
+                            all::JustificationVerifyError::JustificationEngineMismatch
+                        ) {
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                format!("Error while verifying justification: {error}")
+                            );
 
-                        // TODO: don't ban for consensusenginemismatch?
-                        self.network_service
-                            .ban_and_disconnect(
-                                sender,
-                                network_service::BanSeverity::High,
-                                "bad-justification",
-                            )
-                            .await;
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender,
+                                    network_service::BanSeverity::High,
+                                    "bad-justification",
+                                )
+                                .await;
+                        }
                     }
 
                     (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
                         self.sync = sync;
 
-                        log::debug!(
-                            target: &self.log_target,
-                            "Sync => GrandpaCommitVerificationError(error={error:?}, sender={sender})",
+                        log!(
+                            &self.platform,
+                            Debug,
+                            &self.log_target,
+                            "finality-proof-verify-error",
+                            ?error,
+                            sender,
                         );
 
-                        log::warn!(
-                            target: &self.log_target,
-                            "Error while verifying GrandPa commit: {}",
-                            error
+                        log!(
+                            &self.platform,
+                            Warn,
+                            &self.log_target,
+                            format!("Error while verifying GrandPa commit: {}", error)
                         );
 
                         self.network_service

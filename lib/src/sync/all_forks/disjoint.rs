@@ -100,6 +100,12 @@ impl<TBl> DisjointBlocks<TBl> {
     /// is immediately marked as bad as well.
     ///
     /// Returns the previous user data associated to this block, if any.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block was already in the collection but with a different `parent_hash` than
+    /// provided.
+    ///
     pub fn insert(
         &mut self,
         height: u64,
@@ -107,38 +113,33 @@ impl<TBl> DisjointBlocks<TBl> {
         parent_hash: Option<[u8; 32]>,
         user_data: TBl,
     ) -> Option<TBl> {
-        let parent_is_bad = match (height.checked_sub(1), parent_hash) {
-            (Some(parent_height), Some(parent_hash)) => self
-                .blocks
-                .get(&(parent_height, parent_hash))
-                .map_or(false, |b| b.bad),
-            _ => false,
-        };
-
-        // Insertion is done "manually" in order to not override the value of `bad` if the block
-        // is already in the collection.
-        match self.blocks.entry((height, hash)) {
+        let previous_user_data = match self.blocks.entry((height, hash)) {
             Entry::Occupied(entry) => {
                 let entry = entry.into_mut();
 
                 match (parent_hash, &mut entry.parent_hash) {
-                    (Some(parent_hash), &mut Some(ph)) => debug_assert_eq!(ph, parent_hash),
-                    (Some(parent_hash), ph @ &mut None) => *ph = Some(parent_hash),
-                    (None, _) => {}
+                    (Some(parent_hash), &mut Some(ph)) if ph != parent_hash => panic!(),
+                    _ => {}
                 }
 
                 Some(mem::replace(&mut entry.user_data, user_data))
             }
             Entry::Vacant(entry) => {
                 entry.insert(Block {
-                    parent_hash,
-                    bad: parent_is_bad,
+                    parent_hash: None,
+                    bad: false,
                     user_data,
                 });
 
                 None
             }
+        };
+
+        if let Some(parent_hash) = parent_hash {
+            self.set_parent_hash(height, &hash, parent_hash);
         }
+
+        previous_user_data
     }
 
     /// Removes the block from the collection.
@@ -480,5 +481,24 @@ mod tests {
         // Control sample.
         collection.insert(1, [0x80; 32], Some([0; 32]), ());
         assert_eq!(collection.unknown_blocks().count(), 1);
+    }
+
+    #[test]
+    fn insert_filling_gap_updates_bad() {
+        // Block 1 is known bad. Block 2 is unknown. Block 3 is known. Inserting block 2 should
+        // mark block 3 as bad.
+
+        let mut collection = super::DisjointBlocks::new();
+
+        collection.insert(1, [1; 32], Some([0; 32]), ());
+        collection.set_block_bad(1, &[1; 32]);
+        assert!(collection.is_bad(1, &[1; 32]).unwrap());
+
+        collection.insert(3, [3; 32], Some([2; 32]), ());
+        assert!(!collection.is_bad(3, &[3; 32]).unwrap());
+
+        collection.insert(2, [2; 32], Some([1; 32]), ());
+        assert!(collection.is_bad(2, &[2; 32]).unwrap());
+        assert!(collection.is_bad(3, &[3; 32]).unwrap());
     }
 }

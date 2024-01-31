@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    network_service, platform::PlatformRef, runtime_service, sync_service, transactions_service,
-    util,
+    log, network_service, platform::PlatformRef, runtime_service, sync_service,
+    transactions_service, util,
 };
 
 use super::StartConfig;
@@ -27,6 +27,7 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::Arc,
+    vec,
     vec::Vec,
 };
 use async_lock::Mutex;
@@ -39,7 +40,6 @@ use core::{
 };
 use futures_channel::oneshot;
 use smoldot::{
-    executor::{host, runtime_host},
     json_rpc::{self, methods, service},
     libp2p::{multiaddr, PeerId},
 };
@@ -83,7 +83,7 @@ struct Background<TPlat: PlatformRef> {
 
     /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
     /// a dedicated task.
-    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message<TPlat>>>,
+    to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message>>,
 
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
@@ -173,6 +173,9 @@ pub(super) fn start<TPlat: PlatformRef>(
             let me = me.clone();
             async move {
                 loop {
+                    // Yield at every loop in order to provide better tasks granularity.
+                    futures_lite::future::yield_now().await;
+
                     match requests_processing_task.run_until_event().await {
                         service::Event::HandleRequest {
                             task,
@@ -240,6 +243,9 @@ pub(super) fn start<TPlat: PlatformRef>(
                 let rx = rx.clone();
                 async move {
                     loop {
+                        // Yield at every loop in order to provide better tasks granularity.
+                        futures_lite::future::yield_now().await;
+
                         match rx.recv().await {
                             Ok(either::Left(request_process)) => {
                                 me.handle_request(request_process).await;
@@ -325,16 +331,20 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     .printed_legacy_json_rpc_warning
                     .swap(true, atomic::Ordering::Relaxed)
                 {
-                    log::warn!(
-                        target: &self.log_target,
-                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
-                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
-                        cannot be properly implemented on a light client. You are encouraged to \
-                        use the new JSON-RPC API \
-                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
-                        legacy JSON-RPC API functions will be deprecated and removed in the \
-                        distant future.",
-                        request.request().name()
+                    log!(
+                        &self.platform,
+                        Warn,
+                        &self.log_target,
+                        format!(
+                            "The JSON-RPC client has just called a JSON-RPC function from \
+                            the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
+                            loose semantics and cannot be properly implemented on a light \
+                            client. You are encouraged to use the new JSON-RPC API \
+                            <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                            legacy JSON-RPC API functions will be deprecated and removed in the \
+                            distant future.",
+                            request.request().name()
+                        )
                     )
                 }
             }
@@ -353,10 +363,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::rpc_methods { .. }
             | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
             | methods::MethodCall::sudo_unstable_version { .. }
-            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
-            | methods::MethodCall::transaction_unstable_unwatch { .. }
-            | methods::MethodCall::network_unstable_subscribeEvents { .. }
-            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
+            | methods::MethodCall::sudo_network_unstable_watch { .. }
+            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
             | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
         }
 
@@ -503,7 +513,12 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
-                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!("JSON-RPC call not supported yet: {:?}", _method)
+                );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
                     "Not implemented in smoldot yet",
@@ -520,12 +535,6 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request: service::SubscriptionStartProcess,
     ) {
         // TODO: restore some form of logging
-        /*log::debug!(target: &self.log_target, "PendingRequestsQueue => {}",
-            crate::util::truncated_str(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-        );*/
 
         // Print a warning for legacy JSON-RPC functions.
         match request.request() {
@@ -593,16 +602,20 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     .printed_legacy_json_rpc_warning
                     .swap(true, atomic::Ordering::Relaxed)
                 {
-                    log::warn!(
-                        target: &self.log_target,
-                        "The JSON-RPC client has just called a JSON-RPC function from the legacy \
-                        JSON-RPC API ({}). Legacy JSON-RPC functions have loose semantics and \
-                        cannot be properly implemented on a light client. You are encouraged to \
-                        use the new JSON-RPC API \
-                        <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
-                        legacy JSON-RPC API functions will be deprecated and removed in the \
-                        distant future.",
-                        request.request().name()
+                    log!(
+                        &self.platform,
+                        Warn,
+                        &self.log_target,
+                        format!(
+                            "The JSON-RPC client has just called a JSON-RPC function from \
+                            the legacy JSON-RPC API ({}). Legacy JSON-RPC functions have \
+                            loose semantics and cannot be properly implemented on a light \
+                            client. You are encouraged to use the new JSON-RPC API \
+                            <https://github.com/paritytech/json-rpc-interface-spec/> instead. The \
+                            legacy JSON-RPC API functions will be deprecated and removed in the \
+                            distant future.",
+                            request.request().name()
+                        )
                     )
                 }
             }
@@ -621,10 +634,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             | methods::MethodCall::rpc_methods { .. }
             | methods::MethodCall::sudo_unstable_p2pDiscover { .. }
             | methods::MethodCall::sudo_unstable_version { .. }
-            | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
-            | methods::MethodCall::transaction_unstable_unwatch { .. }
-            | methods::MethodCall::network_unstable_subscribeEvents { .. }
-            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }
+            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+            | methods::MethodCall::transactionWatch_unstable_unwatch { .. }
+            | methods::MethodCall::sudo_network_unstable_watch { .. }
+            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
             | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {}
         }
 
@@ -644,13 +657,18 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             methods::MethodCall::chainHead_unstable_follow { .. } => {
                 self.chain_head_follow(request).await;
             }
-            methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
+            methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
                 self.submit_and_watch_transaction(request).await
             }
 
-            _method @ methods::MethodCall::network_unstable_subscribeEvents { .. } => {
+            _method @ methods::MethodCall::sudo_network_unstable_watch { .. } => {
                 // TODO: implement the ones that make sense to implement ^
-                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
+                    format!("JSON-RPC call not supported yet: {:?}", _method)
+                );
                 request.fail(json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
                     "Not implemented in smoldot yet",
@@ -727,13 +745,16 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             }
         };
 
-        let result = self
+        // TODO: weird that keys is an iterator; revisit
+        let mut results = vec![None; keys.clone().count()];
+
+        let mut query = self
             .sync_service
             .clone()
             .storage_query(
                 block_number,
-                hash,
-                &state_trie_root_hash,
+                *hash,
+                state_trie_root_hash,
                 keys.clone().map(|key| sync_service::StorageRequestItem {
                     key: key.as_ref().to_vec(), // TODO: overhead
                     ty: sync_service::StorageRequestItemTy::Value,
@@ -742,42 +763,44 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 timeout_per_request,
                 max_parallel,
             )
-            .await
-            .map_err(StorageQueryError::StorageRetrieval)?;
+            .advance()
+            .await;
 
-        let result = keys
-            .map(|key| {
-                result
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::Value { key: k, value }
-                            if k == key.as_ref() =>
-                        {
-                            Some(value.clone()) // TODO: overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap()
-            })
-            .collect();
-
-        Ok(result)
+        loop {
+            match query {
+                sync_service::StorageQueryProgress::Progress {
+                    query: next,
+                    request_index,
+                    item: sync_service::StorageResultItem::Value { value, .. },
+                    ..
+                } => {
+                    results[request_index] = value.clone();
+                    query = next.advance().await;
+                }
+                sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                sync_service::StorageQueryProgress::Error(error) => {
+                    return Err(StorageQueryError::StorageRetrieval(error))
+                }
+                sync_service::StorageQueryProgress::Finished => return Ok(results),
+            }
+        }
     }
 
-    /// Obtain a lock to the runtime of the given block against the runtime service.
+    /// Obtain a pin of the runtime of the given block against the runtime service, plus the
+    /// block hash and number.
     // TODO: return better error?
-    async fn runtime_access(
+    async fn pinned_runtime_and_block_info(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-    ) -> Result<runtime_service::RuntimeAccess<TPlat>, RuntimeCallError> {
+    ) -> Result<(runtime_service::PinnedRuntime, [u8; 32], u64), RuntimeCallError> {
         // Try to find the block in the cache of recent blocks. Most of the time, the call target
         // should be in there.
-        if let Some(runtime_access) = {
+        if let Some((pinned_runtime, state_trie_root_hash, block_number)) = {
             let (tx, rx) = oneshot::channel();
             self.to_legacy
                 .lock()
                 .await
-                .send(legacy_state_sub::Message::RecentBlockRuntimeAccess {
+                .send(legacy_state_sub::Message::RecentBlockPinnedRuntime {
                     block_hash: *block_hash,
                     result_tx: tx,
                 })
@@ -785,7 +808,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                 .unwrap();
             rx.await.unwrap()
         } {
-            return Ok(runtime_access);
+            return Ok((pinned_runtime, state_trie_root_hash, block_number));
         };
 
         // Second situation: the block is not in the cache of recent blocks. This isn't great.
@@ -818,13 +841,18 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         // Download the runtime of this block. This takes a long time as the runtime is rather
         // big (around 1MiB in general).
         let (storage_code, storage_heap_pages, code_merkle_value, code_closest_ancestor_excluding) = {
-            let entries = self
+            let mut storage_code = None;
+            let mut storage_heap_pages = None;
+            let mut code_merkle_value = None;
+            let mut code_closest_ancestor_excluding = None;
+
+            let mut query = self
                 .sync_service
                 .clone()
                 .storage_query(
                     block_number,
-                    block_hash,
-                    &state_trie_root_hash,
+                    *block_hash,
+                    state_trie_root_hash,
                     [
                         sync_service::StorageRequestItem {
                             key: b":code".to_vec(),
@@ -844,62 +872,60 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                     Duration::from_secs(20),
                     NonZeroU32::new(1).unwrap(),
                 )
-                .await
-                .map_err(runtime_service::RuntimeCallError::StorageQuery)
-                .map_err(RuntimeCallError::Call)?;
-            // TODO: not elegant
-            let heap_pages = entries
-                .iter()
-                .find_map(|entry| match entry {
-                    sync_service::StorageResultItem::Value { key, value }
-                        if key == b":heappages" =>
-                    {
-                        Some(value.clone()) // TODO: overhead
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            let code = entries
-                .iter()
-                .find_map(|entry| match entry {
-                    sync_service::StorageResultItem::Value { key, value } if key == b":code" => {
-                        Some(value.clone()) // TODO: overhead
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            let (code_merkle_value, code_closest_ancestor_excluding) = if code.is_some() {
-                entries
-                    .iter()
-                    .find_map(|entry| match entry {
-                        sync_service::StorageResultItem::ClosestDescendantMerkleValue {
-                            requested_key,
-                            closest_descendant_merkle_value,
-                            found_closest_ancestor_excluding,
-                        } if requested_key == b":code" => {
-                            Some((
-                                closest_descendant_merkle_value.clone(),
-                                found_closest_ancestor_excluding.clone(),
-                            )) // TODO overhead
-                        }
-                        _ => None,
-                    })
-                    .unwrap()
-            } else {
-                (None, None)
-            };
+                .advance()
+                .await;
 
-            (
-                code,
-                heap_pages,
-                code_merkle_value,
-                code_closest_ancestor_excluding,
-            )
+            loop {
+                match query {
+                    sync_service::StorageQueryProgress::Finished => {
+                        break (
+                            storage_code,
+                            storage_heap_pages,
+                            code_merkle_value,
+                            code_closest_ancestor_excluding,
+                        )
+                    }
+                    sync_service::StorageQueryProgress::Progress {
+                        request_index: 0,
+                        item:
+                            sync_service::StorageResultItem::ClosestDescendantMerkleValue {
+                                closest_descendant_merkle_value,
+                                found_closest_ancestor_excluding,
+                                ..
+                            },
+                        query: next,
+                    } => {
+                        code_merkle_value = closest_descendant_merkle_value;
+                        code_closest_ancestor_excluding = found_closest_ancestor_excluding;
+                        query = next.advance().await;
+                    }
+                    sync_service::StorageQueryProgress::Progress {
+                        request_index: 1,
+                        item: sync_service::StorageResultItem::Value { value, .. },
+                        query: next,
+                    } => {
+                        storage_code = value;
+                        query = next.advance().await;
+                    }
+                    sync_service::StorageQueryProgress::Progress {
+                        request_index: 2,
+                        item: sync_service::StorageResultItem::Value { value, .. },
+                        query: next,
+                    } => {
+                        storage_heap_pages = value;
+                        query = next.advance().await;
+                    }
+                    sync_service::StorageQueryProgress::Progress { .. } => unreachable!(),
+                    sync_service::StorageQueryProgress::Error(error) => {
+                        return Err(RuntimeCallError::StorageQuery(error))
+                    }
+                }
+            }
         };
 
         // Give the code and heap pages to the runtime service. The runtime service will
         // try to find any similar runtime it might have, and if not will compile it.
-        let pinned_runtime_id = self
+        let pinned_runtime = self
             .runtime_service
             .compile_and_pin_runtime(
                 storage_code,
@@ -910,34 +936,22 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             .await
             .map_err(|err| match err {
                 runtime_service::CompileAndPinRuntimeError::Crash => {
-                    RuntimeCallError::RuntimeServiceCrash
+                    RuntimeCallError::Call(runtime_service::RuntimeCallError::Crash)
                 }
             })?;
 
-        let precall = self
-            .runtime_service
-            .pinned_runtime_access(
-                pinned_runtime_id.clone(),
-                *block_hash,
-                block_number,
-                state_trie_root_hash,
-            )
-            .await;
-
         // TODO: consider keeping pinned runtimes in a cache instead
-        self.runtime_service.unpin_runtime(pinned_runtime_id).await;
-
-        Ok(precall)
+        Ok((pinned_runtime, state_trie_root_hash, block_number))
     }
 
     /// Performs a runtime call to a random block.
     async fn runtime_call(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-        runtime_api: &str,
-        required_api_version_range: impl ops::RangeBounds<u32>,
-        function_to_call: &str,
-        call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        runtime_api: String,
+        required_api_version: ops::RangeInclusive<u32>,
+        function_to_call: String,
+        call_parameters: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
@@ -945,7 +959,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let (return_value, api_version) = self
             .runtime_call_inner(
                 block_hash,
-                Some((runtime_api, required_api_version_range)),
+                Some((runtime_api, required_api_version)),
                 function_to_call,
                 call_parameters,
                 total_attempts,
@@ -965,8 +979,8 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     async fn runtime_call_no_api_check(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-        function_to_call: &str,
-        call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        function_to_call: String,
+        call_parameters: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
@@ -974,7 +988,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         let (return_value, _api_version) = self
             .runtime_call_inner(
                 block_hash,
-                None::<(&str, ops::RangeFull)>,
+                None,
                 function_to_call,
                 call_parameters,
                 total_attempts,
@@ -990,157 +1004,37 @@ impl<TPlat: PlatformRef> Background<TPlat> {
     async fn runtime_call_inner(
         self: &Arc<Self>,
         block_hash: &[u8; 32],
-        runtime_api_check: Option<(&str, impl ops::RangeBounds<u32>)>,
-        function_to_call: &str,
-        call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        runtime_api_check: Option<(String, ops::RangeInclusive<u32>)>,
+        function_to_call: String,
+        parameters_vectored: Vec<u8>,
         total_attempts: u32,
         timeout_per_request: Duration,
         max_parallel: NonZeroU32,
     ) -> Result<(Vec<u8>, Option<u32>), RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
-        let precall = self.runtime_access(block_hash).await?;
+        let (pinned_runtime, block_state_trie_root_hash, block_number) =
+            self.pinned_runtime_and_block_info(block_hash).await?;
 
-        let (runtime_call_lock, virtual_machine) = precall
-            .start(
+        match self
+            .runtime_service
+            .runtime_call(
+                pinned_runtime,
+                *block_hash,
+                block_number,
+                block_state_trie_root_hash,
                 function_to_call,
-                call_parameters.clone(),
+                runtime_api_check,
+                parameters_vectored,
                 total_attempts,
                 timeout_per_request,
                 max_parallel,
             )
             .await
-            .unwrap(); // TODO: don't unwrap
-
-        // Check that the runtime version is correct.
-        let runtime_api_version = if let Some((api_name, version_range)) = runtime_api_check {
-            let version = virtual_machine
-                .runtime_version()
-                .decode()
-                .apis
-                .find_version(api_name);
-            match version {
-                None => {
-                    runtime_call_lock.unlock(virtual_machine);
-                    return Err(RuntimeCallError::ApiNotFound);
-                }
-                Some(v) if version_range.contains(&v) => Some(v),
-                Some(v) => {
-                    runtime_call_lock.unlock(virtual_machine);
-                    return Err(RuntimeCallError::ApiVersionUnknown { actual_version: v });
-                }
-            }
-        } else {
-            None
-        };
-
-        // Now that we have obtained the virtual machine, we can perform the call.
-        // This is a CPU-only operation that executes the virtual machine.
-        // The virtual machine might access the storage.
-        // TODO: finish doc
-
-        let mut runtime_call = match runtime_host::run(runtime_host::Config {
-            virtual_machine,
-            function_to_call,
-            parameter: call_parameters,
-            storage_main_trie_changes: Default::default(),
-            max_log_level: 0,
-            calculate_trie_changes: false,
-        }) {
-            Ok(vm) => vm,
-            Err((err, prototype)) => {
-                runtime_call_lock.unlock(prototype);
-                return Err(RuntimeCallError::StartError(err));
-            }
-        };
-
-        loop {
-            match runtime_call {
-                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                    let output = success.virtual_machine.value().as_ref().to_vec();
-                    runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                    break Ok((output, runtime_api_version));
-                }
-                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                    runtime_call_lock.unlock(error.prototype);
-                    break Err(RuntimeCallError::RuntimeError(error.detail));
-                }
-                runtime_host::RuntimeHostVm::StorageGet(get) => {
-                    let storage_value = {
-                        let child_trie = get.child_trie();
-                        runtime_call_lock.storage_entry(
-                            child_trie.as_ref().map(|c| c.as_ref()),
-                            get.key().as_ref(),
-                        )
-                    };
-                    let storage_value = match storage_value {
-                        Ok(v) => v,
-                        Err(err) => {
-                            runtime_call_lock.unlock(
-                                runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
-                            );
-                            break Err(RuntimeCallError::Call(err));
-                        }
-                    };
-                    runtime_call =
-                        get.inject_value(storage_value.map(|(val, vers)| (iter::once(val), vers)));
-                }
-                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                    let merkle_value = {
-                        let child_trie = mv.child_trie();
-                        runtime_call_lock.closest_descendant_merkle_value(
-                            child_trie.as_ref().map(|c| c.as_ref()),
-                            mv.key(),
-                        )
-                    };
-                    let merkle_value = match merkle_value {
-                        Ok(v) => v,
-                        Err(err) => {
-                            runtime_call_lock.unlock(
-                                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv)
-                                    .into_prototype(),
-                            );
-                            break Err(RuntimeCallError::Call(err));
-                        }
-                    };
-                    runtime_call = mv.inject_merkle_value(merkle_value);
-                }
-                runtime_host::RuntimeHostVm::NextKey(nk) => {
-                    let next_key = {
-                        let child_trie = nk.child_trie();
-                        runtime_call_lock.next_key(
-                            child_trie.as_ref().map(|c| c.as_ref()),
-                            nk.key(),
-                            nk.or_equal(),
-                            nk.prefix(),
-                            nk.branch_nodes(),
-                        )
-                    };
-                    let next_key = match next_key {
-                        Ok(v) => v,
-                        Err(err) => {
-                            runtime_call_lock
-                                .unlock(runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                            break Err(RuntimeCallError::Call(err));
-                        }
-                    };
-                    runtime_call = nk.inject_key(next_key);
-                }
-                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
-                    runtime_call = req.resume();
-                }
-                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
-                    runtime_call = sig.verify_and_resume();
-                }
-                runtime_host::RuntimeHostVm::Offchain(ctx) => {
-                    runtime_call_lock
-                        .unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
-                    break Err(RuntimeCallError::ForbiddenHostCall);
-                }
-                runtime_host::RuntimeHostVm::LogEmit(log) => {
-                    // Logs are ignored.
-                    runtime_call = log.resume();
-                }
+        {
+            Ok(output) => Ok((output.output, output.api_version)),
+            Err(error) => {
+                return Err(RuntimeCallError::Call(error));
             }
         }
     }
@@ -1162,25 +1056,10 @@ enum RuntimeCallError {
     /// Error while finding the storage root hash of the requested block.
     #[display(fmt = "Failed to obtain block state trie root: {_0}")]
     FindStorageRootHashError(legacy_state_sub::StateTrieRootHashError),
+    /// Error while downloading the runtime from the network.
+    StorageQuery(sync_service::StorageQueryError),
     #[display(fmt = "{_0}")]
     Call(runtime_service::RuntimeCallError),
-    #[display(fmt = "{_0}")]
-    StartError(host::StartErr),
-    #[display(fmt = "{_0}")]
-    RuntimeError(runtime_host::ErrorDetail),
-    /// Required runtime API isn't supported by the runtime.
-    #[display(fmt = "Required runtime API isn't supported by the runtime")]
-    ApiNotFound,
-    /// Version requirement of runtime API isn't supported.
-    #[display(fmt = "Version {actual_version} of the runtime API not supported")]
-    ApiVersionUnknown {
-        /// Version that the runtime supports.
-        actual_version: u32,
-    },
-    /// Runtime called a forbidden host function.
-    ForbiddenHostCall,
-    /// Runtime service has crashed while compiling the runtime.
-    RuntimeServiceCrash,
 }
 
 #[derive(Debug)]

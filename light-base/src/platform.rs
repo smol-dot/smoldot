@@ -29,9 +29,13 @@ pub use smoldot::libp2p::with_buffers;
 pub mod address_parse;
 pub mod default;
 
+mod with_prefix;
+
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use default::DefaultPlatform;
+
+pub use with_prefix::WithPrefix;
 
 /// Access to a platform's capabilities.
 ///
@@ -146,6 +150,27 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
         &self,
         task_name: Cow<str>,
         task: impl future::Future<Output = ()> + Send + 'static,
+    );
+
+    /// Emit a log line.
+    ///
+    /// The `log_level` and `log_target` can be used in order to filter desired log lines.
+    ///
+    /// The `message` is typically a short constant message indicating the nature of the log line.
+    /// The `key_values` are a list of keys and values that are the parameters of the log message.
+    ///
+    /// For example, `message` can be `"block-announce-received"` and `key_values` can contain
+    /// the entries `("block_hash", ...)` and `("sender", ...)`.
+    ///
+    /// At the time of writing of this comment, `message` can also be a message written in plain
+    /// english and destined to the user of the library. This might disappear in the future.
+    // TODO: act on this last sentence ^
+    fn log<'a>(
+        &self,
+        log_level: LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
     );
 
     /// Value returned when a JSON-RPC client requests the name of the client, or when a peer
@@ -263,6 +288,18 @@ pub trait PlatformRef: UnwindSafe + Clone + Send + Sync + 'static {
     ) -> Self::StreamUpdateFuture<'a>;
 }
 
+/// Log level of a log entry.
+///
+/// See [`PlatformRef::log`].
+#[derive(Debug)]
+pub enum LogLevel {
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
+}
+
 /// Established multistream connection information. See [`PlatformRef::connect_multistream`].
 #[derive(Debug)]
 pub struct MultiStreamWebRtcConnection<TConnection> {
@@ -352,7 +389,7 @@ impl<'a> From<&'a Address<'a>> for ConnectionType {
     }
 }
 
-impl<'a> From<&'a MultiStreamAddress> for ConnectionType {
+impl<'a> From<&'a MultiStreamAddress<'a>> for ConnectionType {
     fn from(address: &'a MultiStreamAddress) -> ConnectionType {
         match address {
             MultiStreamAddress::WebRtc {
@@ -421,7 +458,7 @@ pub enum Address<'a> {
 /// Address passed to [`PlatformRef::connect_multistream`].
 // TODO: we don't differentiate between Dns4 and Dns6
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum MultiStreamAddress {
+pub enum MultiStreamAddress<'a> {
     /// Libp2p-specific WebRTC flavour.
     ///
     /// The implementation the [`PlatformRef`] trait is responsible for opening the SCTP
@@ -434,8 +471,7 @@ pub enum MultiStreamAddress {
         /// UDP port to connect to.
         port: u16,
         /// SHA-256 hash of the target's WebRTC certificate.
-        // TODO: consider providing a reference here; right now there's some issues with multiaddr preventing that
-        remote_certificate_sha256: [u8; 32],
+        remote_certificate_sha256: &'a [u8; 32],
     },
 }
 
@@ -448,4 +484,77 @@ pub enum MultiStreamAddress {
 pub enum IpAddr {
     V4([u8; 4]),
     V6([u8; 16]),
+}
+
+// TODO: find a way to keep this private somehow?
+#[macro_export]
+macro_rules! log_inner {
+    () => {
+        core::iter::empty()
+    };
+    (,) => {
+        core::iter::empty()
+    };
+    ($key:ident = $value:expr) => {
+        $crate::log_inner!($key = $value,)
+    };
+    ($key:ident = ?$value:expr) => {
+        $crate::log_inner!($key = ?$value,)
+    };
+    ($key:ident) => {
+        $crate::log_inner!($key = $key,)
+    };
+    (?$key:ident) => {
+        $crate::log_inner!($key = ?$key,)
+    };
+    ($key:ident = $value:expr, $($rest:tt)*) => {
+        core::iter::once((stringify!($key), &$value as &dyn core::fmt::Display)).chain($crate::log_inner!($($rest)*))
+    };
+    ($key:ident = ?$value:expr, $($rest:tt)*) => {
+        core::iter::once((stringify!($key), &format_args!("{:?}", $value) as &dyn core::fmt::Display)).chain($crate::log_inner!($($rest)*))
+    };
+    ($key:ident, $($rest:tt)*) => {
+        $crate::log_inner!($key = $key, $($rest)*)
+    };
+    (?$key:ident, $($rest:tt)*) => {
+        $crate::log_inner!($key = ?$key, $($rest)*)
+    };
+}
+
+/// Helper macro for using the [`crate::platform::PlatformRef::log`] function.
+///
+/// This macro takes at least 4 parameters:
+///
+/// - A reference to an implementation of the [`crate::platform::PlatformRef`] trait.
+/// - A log level: `Error`, `Warn`, `Info`, `Debug`, or `Trace`. See [`crate::platform::LogLevel`].
+/// - A `&str` representing the target of the logging. This can be used in order to filter log
+/// entries belonging to a specific target.
+/// - An object that implements of `AsRef<str>` and that contains the log message itself.
+///
+/// In addition to these parameters, the macro accepts an unlimited number of extra
+/// (comma-separated) parameters.
+///
+/// Each parameter has one of these four syntaxes:
+///
+/// - `key = value`, where `key` is an identifier and `value` an expression that implements the
+/// `Display` trait.
+/// - `key = ?value`, where `key` is an identifier and `value` an expression that implements
+/// the `Debug` trait.
+/// - `key`, which is syntax sugar for `key = key`.
+/// - `?key`, which is syntax sugar for `key = ?key`.
+///
+#[macro_export]
+macro_rules! log {
+    ($plat:expr, $level:ident, $target:expr, $message:expr) => {
+        log!($plat, $level, $target, $message,)
+    };
+    ($plat:expr, $level:ident, $target:expr, $message:expr, $($params:tt)*) => {
+        $crate::platform::PlatformRef::log(
+            $plat,
+            $crate::platform::LogLevel::$level,
+            $target,
+            AsRef::<str>::as_ref(&$message),
+            $crate::log_inner!($($params)*)
+        )
+    };
 }

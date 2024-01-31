@@ -19,7 +19,7 @@
 
 use super::Background;
 
-use crate::{platform::PlatformRef, runtime_service, sync_service};
+use crate::{log, platform::PlatformRef, runtime_service, sync_service};
 
 use alloc::{
     borrow::ToOwned as _,
@@ -40,8 +40,7 @@ use futures_util::{FutureExt as _, StreamExt as _};
 use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
-    executor::{self, runtime_host},
-    header,
+    executor, header,
     json_rpc::{self, methods, service},
     network::codec,
 };
@@ -93,8 +92,10 @@ impl<TPlat: PlatformRef> Background<TPlat> {
             // JSON-RPC client implementations are made aware of this limit. This number of 2 might
             // be relaxed and/or configurable in the future.
             if lock.len() >= 2 {
-                log::warn!(
-                    target: &self.log_target,
+                log!(
+                    &self.platform,
+                    Warn,
+                    &self.log_target,
                     "Rejected `chainHead_unstable_follow` subscription due to limit reached."
                 );
                 request.fail(json_rpc::parse::ErrorResponse::ApplicationDefined(
@@ -554,6 +555,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         mut messages_rx: service::DeliverReceiver<service::RequestProcess>,
     ) {
         loop {
+            // Yield at every loop in order to provide better tasks granularity.
+            futures_lite::future::yield_now().await;
+
             enum WakeUpReason {
                 SubscriptionDead,
                 NotificationWithRuntime(runtime_service::Notification),
@@ -1031,8 +1035,10 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                 -32000,
                 "Child key storage queries not supported yet",
             ));
-            log::warn!(
-                target: &self.log_target,
+            log!(
+                &self.platform,
+                Warn,
+                &self.log_target,
                 "chainHead_unstable_storage has been called with a non-null childTrie. \
                 This isn't supported by smoldot yet."
             );
@@ -1086,7 +1092,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         };
 
         let interrupt = event_listener::Event::new();
-        let on_interrupt = interrupt.listen();
+        let mut on_interrupt = interrupt.listen();
 
         let _was_in = self.operations_in_progress.insert(
             operation_id.clone(),
@@ -1125,128 +1131,147 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
                         }
                     };
 
-                    // Perform some API conversions.
-                    let queries = items
-                        .into_iter()
-                        .map(|item| sync_service::StorageRequestItem {
-                            key: item.key.0,
-                            ty: match item.ty {
-                                methods::ChainHeadStorageType::Value => {
-                                    sync_service::StorageRequestItemTy::Value
-                                }
-                                methods::ChainHeadStorageType::Hash => {
-                                    sync_service::StorageRequestItemTy::Hash
-                                }
-                                methods::ChainHeadStorageType::ClosestDescendantMerkleValue => {
-                                    sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue
-                                }
-                                methods::ChainHeadStorageType::DescendantsValues => {
-                                    sync_service::StorageRequestItemTy::DescendantsValues
-                                }
-                                methods::ChainHeadStorageType::DescendantsHashes => {
-                                    sync_service::StorageRequestItemTy::DescendantsHashes
-                                }
-                            },
-                        })
-                        .collect::<Vec<_>>();
-
-                    let future = sync_service.clone().storage_query(
+                    let mut next_step = sync_service.clone().storage_query(
                         decoded_header.number,
-                        &hash.0,
-                        decoded_header.state_root,
-                        queries.into_iter(),
+                        hash.0,
+                        *decoded_header.state_root,
+                        items
+                            .into_iter()
+                            .map(|item| sync_service::StorageRequestItem {
+                                key: item.key.0,
+                                ty: match item.ty {
+                                    methods::ChainHeadStorageType::Value => {
+                                        sync_service::StorageRequestItemTy::Value
+                                    }
+                                    methods::ChainHeadStorageType::Hash => {
+                                        sync_service::StorageRequestItemTy::Hash
+                                    }
+                                    methods::ChainHeadStorageType::ClosestDescendantMerkleValue => {
+                                        sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue
+                                    }
+                                    methods::ChainHeadStorageType::DescendantsValues => {
+                                        sync_service::StorageRequestItemTy::DescendantsValues
+                                    }
+                                    methods::ChainHeadStorageType::DescendantsHashes => {
+                                        sync_service::StorageRequestItemTy::DescendantsHashes
+                                    }
+                                },
+                            }),
                         3,
                         Duration::from_secs(20),
                         NonZeroU32::new(2).unwrap(),
-                    );
+                    ).advance();
 
-                    // Drive the future, but cancel execution if the JSON-RPC client
-                    // unsubscribes.
-                    let outcome = match future
-                        .map(Some)
-                        .or(on_interrupt.map(|()| None))
-                        .await
-                    {
-                        Some(v) => v,
-                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
-                    };
+                    loop {
+                        // Drive the future, but cancel execution if the JSON-RPC client
+                        // unsubscribes.
+                        let outcome = match next_step
+                            .map(Some)
+                            .or((&mut on_interrupt).map(|()| None))
+                            .await
+                        {
+                            Some(v) => v,
+                            None => return, // JSON-RPC client has unsubscribed in the meanwhile.
+                        };
 
-                    match outcome {
-                        Ok(entries) => {
-                            // Perform some API conversions.
-                            let items = entries
-                                .into_iter()
-                                .filter_map(|item| match item {
-                                    sync_service::StorageResultItem::Value { key, value } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: Some(methods::HexString(value?)),
-                                            hash: None,
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::Hash { key, hash } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: None,
-                                            hash: Some(methods::HexString(hash?.to_vec())),
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: Some(methods::HexString(value)),
-                                            hash: None,
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(key),
-                                            value: None,
-                                            hash: Some(methods::HexString(hash.to_vec())),
-                                            closest_descendant_merkle_value: None,
-                                        })
-                                    }
-                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: merkle_value, .. } => {
-                                        Some(methods::ChainHeadStorageResponseItem {
-                                            key: methods::HexString(requested_key),
-                                            value: None,
-                                            hash: None,
-                                            closest_descendant_merkle_value: Some(methods::HexString(merkle_value?)),
-                                        })
-                                    }
-                                })
-                                .collect::<Vec<_>>();
+                        match outcome {
+                            sync_service::StorageQueryProgress::Progress { request_index, item, mut query } => {
+                                let mut items_chunk = Vec::with_capacity(16);
 
-                            if !items.is_empty() {
+                                for (_, item) in iter::once((request_index, item)).chain(iter::from_fn(|| query.try_advance())) {
+                                    // Perform some API conversion.
+                                    let item = match item {
+                                        sync_service::StorageResultItem::Value { key, value: Some(value) } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: Some(methods::HexString(value)),
+                                                hash: None,
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::Value { value: None, .. } => {
+                                            None
+                                        }
+                                        sync_service::StorageResultItem::Hash { key, hash: Some(hash) } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: None,
+                                                hash: Some(methods::HexString(hash.to_vec())),
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::Hash { hash: None, .. } => {
+                                            None
+                                        }
+                                        sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: Some(methods::HexString(value)),
+                                                hash: None,
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(key),
+                                                value: None,
+                                                hash: Some(methods::HexString(hash.to_vec())),
+                                                closest_descendant_merkle_value: None,
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: Some(merkle_value), .. } => {
+                                            Some(methods::ChainHeadStorageResponseItem {
+                                                key: methods::HexString(requested_key),
+                                                value: None,
+                                                hash: None,
+                                                closest_descendant_merkle_value: Some(methods::HexString(merkle_value)),
+                                            })
+                                        }
+                                        sync_service::StorageResultItem::ClosestDescendantMerkleValue { closest_descendant_merkle_value: None, .. } => {
+                                            None
+                                        }
+                                    };
+
+                                    if let Some(item) = item {
+                                        items_chunk.push(item);
+                                    }
+                                }
+
+                                if !items_chunk.is_empty() {
+                                    let _ = to_main_task.send(OperationEvent {
+                                        operation_id: operation_id.clone(),
+                                        is_done: false,
+                                        notification: methods::FollowEvent::OperationStorageItems {
+                                            operation_id: operation_id.clone().into(),
+                                            items: items_chunk
+                                        }
+                                    }).await;
+                                }
+
+                                // TODO: generate a waitingForContinue here and wait for user to continue
+
+                                next_step = query.advance();
+                            }
+                            sync_service::StorageQueryProgress::Finished => {
                                 let _ = to_main_task.send(OperationEvent {
                                     operation_id: operation_id.clone(),
-                                    is_done: false,
-                                    notification: methods::FollowEvent::OperationStorageItems {
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationStorageDone {
                                         operation_id: operation_id.clone().into(),
-                                        items
                                     }
                                 }).await;
+                                break;
                             }
-
-                            let _ = to_main_task.send(OperationEvent {
-                                operation_id: operation_id.clone(),
-                                is_done: true,
-                                notification: methods::FollowEvent::OperationStorageDone {
-                                    operation_id: operation_id.clone().into(),
-                                }
-                            }).await;
-                        }
-                        Err(_) => {
-                            let _ = to_main_task.send(OperationEvent {
-                                operation_id: operation_id.clone(),
-                                is_done: true,
-                                notification: methods::FollowEvent::OperationInaccessible {
-                                    operation_id: operation_id.clone().into(),
-                                }
-                            }).await;
+                            sync_service::StorageQueryProgress::Error(_) => {
+                                let _ = to_main_task.send(OperationEvent {
+                                    operation_id: operation_id.clone(),
+                                    is_done: true,
+                                    notification: methods::FollowEvent::OperationInaccessible {
+                                        operation_id: operation_id.clone().into(),
+                                    }
+                                }).await;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1279,8 +1304,9 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
             }
         };
 
-        // Determine whether the requested block hash is valid and start the call.
-        let pre_runtime_call = match self.subscription {
+        // Determine whether the requested block hash is valid and create a future of the call.
+        // This is done immediately is order to guarantee that the block is still pinned.
+        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self.subscription {
             Subscription::WithRuntime {
                 subscription_id, ..
             } => {
@@ -1292,11 +1318,14 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
                 match self
                     .runtime_service
-                    .pinned_block_runtime_access(subscription_id, hash.0)
+                    .pin_pinned_block_runtime(subscription_id, hash.0)
                     .await
                 {
-                    Ok(c) => c,
-                    Err(runtime_service::PinnedBlockRuntimeAccessError::ObsoleteSubscription) => {
+                    Ok(r) => r,
+                    Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                        unreachable!()
+                    }
+                    Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
                         // The runtime service subscription is dead.
                         request.respond(methods::Response::chainHead_unstable_call(
                             methods::ChainHeadBodyCallReturn::LimitReached {},
@@ -1318,6 +1347,7 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
 
         let interrupt = event_listener::Event::new();
         let on_interrupt = interrupt.listen();
+        let runtime_service = self.runtime_service.clone();
 
         let _was_in = self.operations_in_progress.insert(
             operation_id.clone(),
@@ -1335,252 +1365,129 @@ impl<TPlat: PlatformRef> ChainHeadFollowTask<TPlat> {
         ));
 
         // Finish the call asynchronously.
-        self.platform
-            .spawn_task(format!("{}-chain-head-call", self.log_target).into(), {
+        self.platform.spawn_task(
+            format!("{}-chain-head-call", self.log_target).into(),
             async move {
-                let pre_runtime_call = {
-                    let call_future = pre_runtime_call.start(
-                        &function_to_call,
-                        iter::once(&call_parameters),
+                // Perform the execution, but cancel if the JSON-RPC client unsubscribes.
+                let runtime_call_result = {
+                    let runtime_call = runtime_service.runtime_call(
+                        pinned_runtime,
+                        hash.0,
+                        block_number,
+                        block_state_trie_root_hash,
+                        function_to_call,
+                        None,
+                        call_parameters,
                         3,
                         Duration::from_secs(20),
                         NonZeroU32::new(2).unwrap(),
                     );
 
-                    // Drive the future, but cancel execution if the JSON-RPC client unsubscribes.
-                    match call_future.map(Some).or(on_interrupt.map(|()| None)).await {
+                    match runtime_call.map(Some).or(on_interrupt.map(|()| None)).await {
                         Some(v) => v,
-                        None => return  // JSON-RPC client has unsubscribed in the meanwhile.
+                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
                     }
                 };
 
-                match pre_runtime_call {
-                    Ok((runtime_call_lock, virtual_machine)) => {
-                        match runtime_host::run(runtime_host::Config {
-                            virtual_machine,
-                            function_to_call: &function_to_call,
-                            parameter: iter::once(&call_parameters),
-                            storage_main_trie_changes: Default::default(),
-                            max_log_level: 0,
-                            calculate_trie_changes: false,
-                        }) {
-                            Err((error, prototype)) => {
-                                runtime_call_lock.unlock(prototype);
-                                let _ = to_main_task.send(OperationEvent {
-                                    operation_id: operation_id.clone(),
-                                    is_done: true,
-                                    notification: methods::FollowEvent::OperationError {
+                match runtime_call_result {
+                    Ok(success) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationCallDone {
                                     operation_id: operation_id.clone().into(),
-                                    error: error.to_string().into(),
-                                }}).await;
-                            }
-                            Ok(mut runtime_call) => {
-                                loop {
-                                    match runtime_call {
-                                        runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                                            let output =
-                                                success.virtual_machine.value().as_ref().to_owned();
-                                            runtime_call_lock
-                                                .unlock(success.virtual_machine.into_prototype());
-                                            let _ = to_main_task.send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationCallDone {
-                                                operation_id: operation_id.clone().into(),
-                                                output: methods::HexString(output),
-                                            }}).await;
-                                            break;
-                                        }
-                                        runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                                            runtime_call_lock.unlock(error.prototype);
-                                            let _ = to_main_task.send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                operation_id: operation_id.clone().into(),
-                                                error: error.detail.to_string().into(),
-                                            }}).await;
-                                            break;
-                                        }
-                                        runtime_host::RuntimeHostVm::StorageGet(get) => {
-                                            // TODO: what if the remote lied to us?
-                                            let storage_value = {
-                                                let child_trie = get.child_trie();
-                                                runtime_call_lock.storage_entry(child_trie.as_ref().map(|c| c.as_ref()), get.key().as_ref())
-                                            };
-                                            let storage_value = match storage_value {
-                                                Ok(v) => v,
-                                                Err(_) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::StorageGet(
-                                                            get,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    let _ = to_main_task.send(OperationEvent {
-                                                        operation_id: operation_id.clone(),
-                                                        is_done: true,
-                                                        notification: methods::FollowEvent::OperationInaccessible {
-                                                        operation_id: operation_id.clone().into(),
-                                                    }}).await;
-                                                    break;
-                                                }
-                                            };
-                                            runtime_call = get.inject_value(
-                                                storage_value
-                                                    .map(|(val, vers)| (iter::once(val), vers)),
-                                            );
-                                        }
-                                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(mv) => {
-                                            // TODO: what if the remote lied to us?
-                                            let merkle_value = {
-                                                let child_trie = mv.child_trie();
-                                                runtime_call_lock
-                                                    .closest_descendant_merkle_value(child_trie.as_ref().map(|c| c.as_ref()), mv.key())
-                                            };
-                                            let merkle_value = match merkle_value {
-                                                Ok(v) => v,
-                                                Err(_) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(
-                                                            mv,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    let _ = to_main_task.send(OperationEvent {
-                                                        operation_id: operation_id.clone(),
-                                                        is_done: true,
-                                                        notification: methods::FollowEvent::OperationInaccessible {
-                                                            operation_id: operation_id.clone().into(),
-                                                        }
-                                                    }).await;
-                                                    break;
-                                                }
-                                            };
-                                            runtime_call = mv.inject_merkle_value(merkle_value);
-                                        }
-                                        runtime_host::RuntimeHostVm::NextKey(nk) => {
-                                            // TODO: what if the remote lied to us?
-                                            let next_key = {
-                                                let child_trie = nk.child_trie();
-                                                runtime_call_lock.next_key(
-                                                    child_trie.as_ref().map(|c| c.as_ref()),
-                                                    nk.key(),
-                                                    nk.or_equal(),
-                                                    nk.prefix(),
-                                                    nk.branch_nodes(),
-                                                )
-                                            };
-                                            let next_key = match next_key {
-                                                Ok(v) => v,
-                                                Err(_) => {
-                                                    runtime_call_lock.unlock(
-                                                        runtime_host::RuntimeHostVm::NextKey(
-                                                            nk,
-                                                        )
-                                                        .into_prototype(),
-                                                    );
-                                                    let _ = to_main_task.send(OperationEvent {
-                                                        operation_id: operation_id.clone(),
-                                                        is_done: true,
-                                                        notification: methods::FollowEvent::OperationInaccessible {
-                                                            operation_id: operation_id.clone().into(),
-                                                        }
-                                                    }).await;
-                                                    break;
-                                                }
-                                            };
-                                            runtime_call = nk.inject_key(next_key);
-                                        }
-                                        runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
-                                            runtime_call = req.resume();
-                                        }
-                                        runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
-                                            runtime_call = sig.verify_and_resume();
-                                        }
-                                        runtime_host::RuntimeHostVm::Offchain(ctx) => {
-                                            runtime_call_lock.unlock(runtime_host::RuntimeHostVm::Offchain(ctx).into_prototype());
-                                            let _ = to_main_task.send(OperationEvent {
-                                                operation_id: operation_id.clone(),
-                                                is_done: true,
-                                                notification: methods::FollowEvent::OperationError {
-                                                    operation_id: operation_id.clone().into(),
-                                                    error: "Runtime has called an offchain host function".to_string().into(),
-                                                }
-                                            }).await;
-                                            break;
-                                        }
-                                        runtime_host::RuntimeHostVm::LogEmit(log) => {
-                                            // Logs are ignored. 
-                                            runtime_call = log.resume();
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                                    output: methods::HexString(success.output),
+                                },
+                            })
+                            .await;
                     }
                     Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            }
-                        }).await;
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: error.to_string().into(),
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::RuntimeCallError::StorageRetrieval(error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            }
-                        }).await;
+                    Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+                        // We pass `None` for the API requirement, thus this error can never
+                        // happen.
+                        unreachable!()
                     }
-                    Err(runtime_service::RuntimeCallError::MissingProofEntry(_error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: "incomplete call proof".into(),
-                            }
-                        }).await;
+                    Err(runtime_service::RuntimeCallError::Crash) => {
+                        // TODO: is this the appropriate error?
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationInaccessible {
+                                    operation_id: operation_id.clone().into(),
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::RuntimeCallError::InvalidChildTrieRoot) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: "invalid call proof".into(),
-                            }
-                        }).await;
+                    Err(runtime_service::RuntimeCallError::Execution(
+                        runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
+                    )) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: "Runtime has called an offchain host function"
+                                        .to_string()
+                                        .into(),
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::RuntimeCallError::CallProof(error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: error.to_string().into(),
-                            }
-                        }).await;
+                    Err(runtime_service::RuntimeCallError::Execution(
+                        runtime_service::RuntimeCallExecutionError::Start(error),
+                    )) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: error.to_string().into(),
+                                },
+                            })
+                            .await;
                     }
-                    Err(runtime_service::RuntimeCallError::StorageQuery(error)) => {
-                        let _ = to_main_task.send(OperationEvent {
-                            operation_id: operation_id.clone(),
-                            is_done: true,
-                            notification: methods::FollowEvent::OperationError {
-                                operation_id: operation_id.clone().into(),
-                                error: format!("failed to fetch call proof: {error}").into(),
-                            }
-                        }).await;
+                    Err(runtime_service::RuntimeCallError::Execution(
+                        runtime_service::RuntimeCallExecutionError::Execution(error),
+                    )) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationError {
+                                    operation_id: operation_id.clone().into(),
+                                    error: error.to_string().into(),
+                                },
+                            })
+                            .await;
+                    }
+                    Err(runtime_service::RuntimeCallError::Inaccessible(_)) => {
+                        let _ = to_main_task
+                            .send(OperationEvent {
+                                operation_id: operation_id.clone(),
+                                is_done: true,
+                                notification: methods::FollowEvent::OperationInaccessible {
+                                    operation_id: operation_id.clone().into(),
+                                },
+                            })
+                            .await;
                     }
                 }
-            }
-        });
+            },
+        );
     }
 }

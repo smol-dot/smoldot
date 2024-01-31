@@ -163,6 +163,11 @@ pub struct Config {
     /// finishes.
     /// Determines whether [`RuntimeInformation::finalized_body`] is `Some`.
     pub download_block_body: bool,
+
+    /// If `true`, all the storage proofs and call proofs necessary in order to compute the chain
+    /// information of the warp synced block will be downloaded. If `false`, the finality
+    /// information of the warp synced block is inferred from the warp sync fragments instead.
+    pub download_all_chain_information_storage_proofs: bool,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -242,6 +247,8 @@ pub fn start_warp_sync<TSrc, TRq>(
         num_download_ahead_fragments: config.num_download_ahead_fragments,
         warp_sync_minimum_gap: config.warp_sync_minimum_gap,
         block_number_bytes: config.block_number_bytes,
+        download_all_chain_information_storage_proofs: config
+            .download_all_chain_information_storage_proofs,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
@@ -279,22 +286,6 @@ impl SourceId {
     pub fn min_value() -> Self {
         SourceId(usize::min_value())
     }
-}
-
-/// A [`WarpSync`] that has been deconstructed.
-// TODO: consider removing this entirely
-pub struct Deconstructed<TSrc, TRq> {
-    /// The synced chain information.
-    pub chain_information: ValidChainInformation,
-
-    /// The list of sources that were added to the state machine, with their finalized block
-    /// height and user data.
-    /// The list is ordered by [`SourceId`].
-    // TODO: use a struct?
-    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
-
-    /// The list of requests that were added to the state machine.
-    pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
 }
 
 // TODO: consider removing this entirely
@@ -360,6 +351,8 @@ pub struct WarpSync<TSrc, TRq> {
     warp_sync_minimum_gap: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
+    /// See [`Config::download_all_chain_information_storage_proofs`].
+    download_all_chain_information_storage_proofs: bool,
     /// List of requests that have been added using [`WarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
     /// Subset of the entries as [`WarpSync::sources`] whose [`Source::finalized_block_height`]
@@ -591,26 +584,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         }
     }
 
-    pub fn deconstruct(mut self) -> Deconstructed<TSrc, TRq> {
-        Deconstructed {
-            chain_information: self.verified_chain_information,
-            sources_ordered: mem::take(&mut self.sources)
-                .into_iter()
-                .map(|(id, source)| {
-                    (
-                        SourceId(id),
-                        source.finalized_block_height,
-                        source.user_data,
-                    )
-                })
-                .collect(),
-            in_progress_requests: mem::take(&mut self.in_progress_requests)
-                .into_iter()
-                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
-                .collect(),
-        }
-    }
-
     /// Returns a list of all known sources stored in the state machine.
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
         self.sources.iter().map(|(id, _)| SourceId(id))
@@ -773,6 +746,18 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         debug_assert!(_inserted);
 
         *stored_height = finalized_block_height;
+    }
+
+    /// Gets the finalized block height of the given source.
+    ///
+    /// Equal to 0 if [`WarpSync::set_source_finality_state`] hasn't been called.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn source_finality_state(&self, source_id: SourceId) -> u64 {
+        self.sources[source_id.0].finalized_block_height
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
@@ -2046,7 +2031,11 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             chain_information::build::Config {
                 finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
                     scale_encoded_header: self.inner.warped_header.clone(),
-                    known_finality: Some(self.inner.warped_finality.clone()),
+                    known_finality: if self.inner.download_all_chain_information_storage_proofs {
+                        None
+                    } else {
+                        Some(self.inner.warped_finality.clone())
+                    },
                 },
                 block_number_bytes: self.inner.block_number_bytes,
                 runtime,
