@@ -1487,12 +1487,12 @@ impl SyncBackground {
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(
                         request_id,
-                        Ok(iter::once(all::BlockRequestSuccessBlock {
+                        iter::once(all::BlockRequestSuccessBlock {
                             scale_encoded_header,
                             scale_encoded_extrinsics,
                             scale_encoded_justifications: Vec::new(),
                             user_data: NonFinalizedBlock::NotVerified,
-                        })),
+                        }),
                     );
                 }
 
@@ -1768,7 +1768,7 @@ impl SyncBackground {
 
                     let _ = self.sync.blocks_request_response(
                         request_id,
-                        Ok(blocks
+                        blocks
                             .into_iter()
                             .map(|block| all::BlockRequestSuccessBlock {
                                 scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
@@ -1783,7 +1783,7 @@ impl SyncBackground {
                                     })
                                     .collect(),
                                 user_data: NonFinalizedBlock::NotVerified,
-                            })),
+                            }),
                     );
 
                     // If the source was actually disconnected and has no other request in
@@ -1831,9 +1831,7 @@ impl SyncBackground {
                         )
                         .await;
 
-                    let _ = self
-                        .sync
-                        .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+                    let _ = self.sync.remove_request(request_id);
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -1878,7 +1876,7 @@ impl SyncBackground {
                             scale_encoded_justification: f.scale_encoded_justification.to_vec(),
                         })
                         .collect();
-                    let _ = self.sync.grandpa_warp_sync_response_ok(
+                    let _ = self.sync.grandpa_warp_sync_response(
                         request_id,
                         fragments,
                         decoded.is_finished,
@@ -1929,7 +1927,7 @@ impl SyncBackground {
                         )
                         .await;
 
-                    let _ = self.sync.grandpa_warp_sync_response_err(request_id);
+                    let _ = self.sync.remove_request(request_id);
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -2030,9 +2028,14 @@ impl SyncBackground {
                             .await;
                     }
 
-                    let _ = self
-                        .sync
-                        .storage_get_response(request_id, result.map(|r| r.decode().to_owned()));
+                    if let Ok(result) = result {
+                        // TODO: to_owned overhead
+                        let _ = self
+                            .sync
+                            .storage_get_response(request_id, result.decode().to_owned());
+                    } else {
+                        let _ = self.sync.remove_request(request_id);
+                    }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -2134,9 +2137,13 @@ impl SyncBackground {
                             .await;
                     }
 
-                    self.sync
-                        .call_proof_response(request_id, result.map(|r| r.decode().to_owned()));
-                    // TODO: need help from networking service to avoid this to_owned
+                    if let Ok(result) = result {
+                        self.sync
+                            .call_proof_response(request_id, result.decode().to_owned());
+                        // TODO: need help from networking service to avoid this to_owned
+                    } else {
+                        self.sync.remove_request(request_id);
+                    }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
