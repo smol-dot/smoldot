@@ -201,25 +201,23 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             .or({
                 let sync = &mut task.sync;
                 async move {
+                    // `desired_requests()` returns, in decreasing order of priority, the requests
+                    // that should be started in order for the syncing to proceed. The fact that
+                    // multiple requests are returned could be used to filter out undesired one. We
+                    // use this filtering to enforce a maximum of one ongoing request per source.
+                    let Some(s) = &sync else { unreachable!() };
+                    if let Some((source_id, _, request_detail)) = s
+                        .desired_requests()
+                        .find(|(source_id, _, _)| s.source_num_ongoing_requests(*source_id) == 0)
+                    {
+                        return WakeUpReason::StartRequest(source_id, request_detail);
+                    }
+
                     // TODO: eventually, process_one() shouldn't take ownership of the AllForks
                     match sync.take().unwrap_or_else(|| unreachable!()).process_one() {
-                        all::ProcessOne::AllSync(s) => {
-                            // `desired_requests()` returns, in decreasing order of priority, the requests
-                            // that should be started in order for the syncing to proceed. The fact that
-                            // multiple requests are returned could be used to filter out undesired one. We
-                            // use this filtering to enforce a maximum of one ongoing request per source.
-                            let desired_request = s
-                                .desired_requests()
-                                .find(|(source_id, _, _)| {
-                                    s.source_num_ongoing_requests(*source_id) == 0
-                                })
-                                .map(|(source_id, _, request_detail)| (source_id, request_detail));
-                            *sync = Some(s);
-                            if let Some((source_id, request_detail)) = desired_request {
-                                WakeUpReason::StartRequest(source_id, request_detail)
-                            } else {
-                                future::pending().await
-                            }
+                        all::ProcessOne::AllSync(idle) => {
+                            *sync = Some(idle);
+                            future::pending().await
                         }
                         other => WakeUpReason::SyncProcess(other),
                     }
