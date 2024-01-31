@@ -2204,6 +2204,13 @@ impl ReadyToRun {
                     },
                 }
             }
+            HostFunction::ext_transaction_index_index_version_1
+            | HostFunction::ext_transaction_index_renew_version_1 => {
+                HostVm::ReadyToRun(ReadyToRun {
+                    inner: self.inner,
+                    resume_value: None,
+                })
+            }
         }
     }
 }
