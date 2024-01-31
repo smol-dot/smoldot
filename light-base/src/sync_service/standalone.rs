@@ -1027,7 +1027,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     .unwrap_or_else(|| unreachable!())
                     .blocks_request_response(
                         request_id,
-                        Ok(v.into_iter().filter_map(|block| {
+                        v.into_iter().filter_map(|block| {
                             Some(all::BlockRequestSuccessBlock {
                                 scale_encoded_header: block.header?,
                                 scale_encoded_justifications: block
@@ -1042,7 +1042,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                                 scale_encoded_extrinsics: Vec::new(),
                                 user_data: (),
                             })
-                        })),
+                        }),
                     );
             }
 
@@ -1062,7 +1062,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     )
                     .await;
 
-                sync.blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+                sync.remove_request(request_id);
             }
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Ok(result)))) => {
@@ -1079,7 +1079,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 task.sync
                     .as_mut()
                     .unwrap_or_else(|| unreachable!())
-                    .grandpa_warp_sync_response_ok(request_id, fragments, decoded.is_finished);
+                    .grandpa_warp_sync_response(request_id, fragments, decoded.is_finished);
             }
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::WarpSync(Err(_)))) => {
@@ -1096,26 +1096,33 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     )
                     .await;
 
-                sync.grandpa_warp_sync_response_err(request_id);
+                sync.remove_request(request_id);
             }
 
-            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(r))) => {
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(Ok(r)))) => {
                 // Storage proof request.
                 let Some(sync) = &mut task.sync else {
                     unreachable!()
                 };
 
-                if r.is_err() {
-                    task.network_service
-                        .ban_and_disconnect(
-                            sync[sync.request_source_id(request_id)].0.clone(),
-                            network_service::BanSeverity::Low,
-                            "failed-storage-request",
-                        )
-                        .await;
-                }
-
                 sync.storage_get_response(request_id, r);
+            }
+
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::Storage(Err(_)))) => {
+                // Storage proof request.
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                task.network_service
+                    .ban_and_disconnect(
+                        sync[sync.request_source_id(request_id)].0.clone(),
+                        network_service::BanSeverity::Low,
+                        "failed-storage-request",
+                    )
+                    .await;
+
+                sync.remove_request(request_id);
             }
 
             WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Ok(r)))) => {
@@ -1123,11 +1130,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 task.sync
                     .as_mut()
                     .unwrap_or_else(|| unreachable!())
-                    .call_proof_response(request_id, Ok(r.decode().to_owned()));
+                    .call_proof_response(request_id, r.decode().to_owned());
                 // TODO: need help from networking service to avoid this to_owned
             }
 
-            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(err)))) => {
+            WakeUpReason::RequestFinished(request_id, Ok(RequestOutcome::CallProof(Err(_)))) => {
                 // Failed call proof request.
                 let Some(sync) = &mut task.sync else {
                     unreachable!()
@@ -1141,7 +1148,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     )
                     .await;
 
-                sync.call_proof_response(request_id, Err(err));
+                sync.remove_request(request_id);
             }
 
             WakeUpReason::StartRequest(

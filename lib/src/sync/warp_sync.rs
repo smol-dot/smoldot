@@ -1132,7 +1132,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         self.in_progress_requests[request_id.0].0
     }
 
-    /// Injects a successful body download and removes the given request from the state machine.
+    /// Injects a body download and removes the given request from the state machine.
     /// Returns the user data that was associated to it.
     ///
     /// # Panic
@@ -1140,7 +1140,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a body download request.
     ///
-    pub fn body_download_success(&mut self, id: RequestId, body: Vec<Vec<u8>>) -> TRq {
+    pub fn body_download_response(&mut self, id: RequestId, body: Vec<Vec<u8>>) -> TRq {
         // Remove the request from the list, obtaining its user data.
         // If the request corresponds to the runtime parameters we're looking for, the function
         // continues below, otherwise we return early.
@@ -1179,7 +1179,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Injects a successful Merkle proof and removes the given request from the state machine.
+    /// Injects a Merkle proof and removes the given request from the state machine.
     /// Returns the user data that was associated to it.
     ///
     /// # Panic
@@ -1187,7 +1187,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a storage get request.
     ///
-    pub fn storage_get_success(&mut self, id: RequestId, merkle_proof: Vec<u8>) -> TRq {
+    pub fn storage_get_response(&mut self, id: RequestId, merkle_proof: Vec<u8>) -> TRq {
         // Remove the request from the list, obtaining its user data.
         // If the request corresponds to the runtime parameters we're looking for, the function
         // continues below, otherwise we return early.
@@ -1231,7 +1231,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// Injects a response and removes the given request from the state machine. Returns
     /// the user data that was associated to it.
     ///
     /// # Panic
@@ -1239,7 +1239,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a runtime Merkle call proof request.
     ///
-    pub fn runtime_call_merkle_proof_success(
+    pub fn runtime_call_merkle_proof_response(
         &mut self,
         request_id: RequestId,
         response: Vec<u8>,
@@ -1269,7 +1269,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// Injects a response and removes the given request from the state machine. Returns
     /// the user data that was associated to it.
     ///
     /// If the header of the last fragment of the response is decodable, this function updates
@@ -1281,7 +1281,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] doesn't correspond to a warp sync request.
     ///
     // TODO: more zero cost API w.r.t. the fragments
-    pub fn warp_sync_request_success(
+    pub fn warp_sync_request_response(
         &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,

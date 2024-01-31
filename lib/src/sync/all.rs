@@ -816,6 +816,39 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         outer_request_id
     }
 
+    /// Removes the given request from the state machine. Returns the user data that was associated
+    /// to it.
+    ///
+    /// > **Note**: The state machine might want to re-start the same request again. It is out of
+    /// >           the scope of this module to keep track of requests that don't succeed.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn remove_request(&mut self, request_id: RequestId) -> TRq {
+        debug_assert!(self.shared.requests.contains(request_id.0));
+        let request = self.shared.requests.remove(request_id.0);
+
+        self.shared.sources[request.source_id.0].num_requests -= 1;
+
+        if let Some(all_forks_request_id) = request.all_forks {
+            let Some(all_forks) = self.all_forks.as_mut() else {
+                unreachable!()
+            };
+            let (_, _) = all_forks.finish_request(all_forks_request_id);
+        }
+
+        if let Some(warp_sync_request_id) = request.warp_sync {
+            let Some(warp_sync) = &mut self.warp_sync else {
+                unreachable!()
+            };
+            warp_sync.remove_request(warp_sync_request_id);
+        }
+
+        request.user_data
+    }
+
     /// Returns a list of requests that are considered obsolete and can be removed using
     /// [`AllSync::blocks_request_response`] or similar.
     ///
@@ -1129,149 +1162,107 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn blocks_request_response(
         &mut self,
         request_id: RequestId,
-        blocks: Result<impl Iterator<Item = BlockRequestSuccessBlock<TBl>>, ()>,
+        blocks: impl Iterator<Item = BlockRequestSuccessBlock<TBl>>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
 
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
-        if let Ok(blocks) = blocks {
-            let mut blocks_iter = blocks.into_iter();
+        let mut blocks_iter = blocks.into_iter();
 
-            let mut all_forks_blocks_append = if let Some(all_forks_request_id) = request.all_forks
-            {
-                let Some(all_forks) = self.all_forks.as_mut() else {
-                    unreachable!()
-                };
-                let (_, blocks_append) = all_forks.finish_request(all_forks_request_id);
-                Some(blocks_append)
-            } else {
-                None
+        let mut all_forks_blocks_append = if let Some(all_forks_request_id) = request.all_forks {
+            let Some(all_forks) = self.all_forks.as_mut() else {
+                unreachable!()
+            };
+            let (_, blocks_append) = all_forks.finish_request(all_forks_request_id);
+            Some(blocks_append)
+        } else {
+            None
+        };
+
+        let mut is_first_block = true;
+
+        let outcome = loop {
+            let block = match blocks_iter.next() {
+                Some(v) => v,
+                None => {
+                    if let (true, Some(warp_sync_request_id)) = (is_first_block, request.warp_sync)
+                    {
+                        let Some(warp_sync) = self.warp_sync.as_mut() else {
+                            unreachable!()
+                        };
+                        // TODO: report source misbehaviour
+                        warp_sync.remove_request(warp_sync_request_id);
+                    }
+                    break ResponseOutcome::Queued;
+                }
             };
 
-            let mut is_first_block = true;
+            if let (true, Some(warp_sync_request_id)) = (is_first_block, request.warp_sync) {
+                let Some(warp_sync) = self.warp_sync.as_mut() else {
+                    unreachable!()
+                };
+                warp_sync.body_download_response(
+                    warp_sync_request_id,
+                    block.scale_encoded_extrinsics.clone(), // TODO: clone?
+                );
+            }
 
-            let outcome = loop {
-                let block = match blocks_iter.next() {
-                    Some(v) => v,
-                    None => {
-                        if let (true, Some(warp_sync_request_id)) =
-                            (is_first_block, request.warp_sync)
-                        {
-                            let Some(warp_sync) = self.warp_sync.as_mut() else {
-                                unreachable!()
-                            };
-                            // TODO: report source misbehaviour
-                            warp_sync.remove_request(warp_sync_request_id);
-                        }
+            if let Some(blocks_append) = all_forks_blocks_append {
+                // TODO: many of the errors don't properly translate here, needs some refactoring
+                match blocks_append.add_block(
+                    block.scale_encoded_header,
+                    block.scale_encoded_extrinsics,
+                    block
+                        .scale_encoded_justifications
+                        .into_iter()
+                        .map(|j| (j.engine_id, j.justification)),
+                ) {
+                    Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
+                        all_forks_blocks_append = Some(ba.insert(Some(block.user_data)))
+                    }
+                    Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
+                        // TODO: replacing the user data entirely is very opinionated, instead the API of the AllSync should be changed
+                        all_forks_blocks_append = Some(ba.replace(Some(block.user_data)).0)
+                    }
+                    Ok(all_forks::AddBlock::AlreadyInChain(_)) if is_first_block => {
+                        break ResponseOutcome::AllAlreadyInChain;
+                    }
+                    Ok(all_forks::AddBlock::AlreadyInChain(_)) => {
                         break ResponseOutcome::Queued;
                     }
-                };
-
-                if let (true, Some(warp_sync_request_id)) = (is_first_block, request.warp_sync) {
-                    let Some(warp_sync) = self.warp_sync.as_mut() else {
-                        unreachable!()
-                    };
-                    warp_sync.body_download_success(
-                        warp_sync_request_id,
-                        block.scale_encoded_extrinsics.clone(), // TODO: clone?
-                    );
-                }
-
-                if let Some(blocks_append) = all_forks_blocks_append {
-                    // TODO: many of the errors don't properly translate here, needs some refactoring
-                    match blocks_append.add_block(
-                        block.scale_encoded_header,
-                        block.scale_encoded_extrinsics,
-                        block
-                            .scale_encoded_justifications
-                            .into_iter()
-                            .map(|j| (j.engine_id, j.justification)),
-                    ) {
-                        Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
-                            all_forks_blocks_append = Some(ba.insert(Some(block.user_data)))
-                        }
-                        Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
-                            // TODO: replacing the user data entirely is very opinionated, instead the API of the AllSync should be changed
-                            all_forks_blocks_append = Some(ba.replace(Some(block.user_data)).0)
-                        }
-                        Ok(all_forks::AddBlock::AlreadyInChain(_)) if is_first_block => {
-                            break ResponseOutcome::AllAlreadyInChain;
-                        }
-                        Ok(all_forks::AddBlock::AlreadyInChain(_)) => {
-                            break ResponseOutcome::Queued;
-                        }
-                        Err(all_forks::AncestrySearchResponseError::NotFinalizedChain {
+                    Err(all_forks::AncestrySearchResponseError::NotFinalizedChain {
+                        discarded_unverified_block_headers,
+                    }) => {
+                        break ResponseOutcome::NotFinalizedChain {
                             discarded_unverified_block_headers,
-                        }) => {
-                            break ResponseOutcome::NotFinalizedChain {
-                                discarded_unverified_block_headers,
-                            };
-                        }
-                        Err(_) => {
-                            break ResponseOutcome::Queued;
-                        }
+                        };
+                    }
+                    Err(_) => {
+                        break ResponseOutcome::Queued;
                     }
                 }
-
-                is_first_block = false;
-            };
-
-            (request.user_data, outcome)
-        } else {
-            if let Some(all_forks_request_id) = request.all_forks {
-                let Some(all_forks) = self.all_forks.as_mut() else {
-                    unreachable!()
-                };
-                let (_, _) = all_forks.finish_request(all_forks_request_id);
             }
 
-            if let Some(warp_sync_request_id) = request.warp_sync {
-                let Some(warp_sync) = &mut self.warp_sync else {
-                    unreachable!()
-                };
-                warp_sync.remove_request(warp_sync_request_id);
-            }
+            is_first_block = false;
+        };
 
-            (request.user_data, ResponseOutcome::Outdated)
-        }
+        (request.user_data, outcome)
     }
 
-    /// Inject a successful response to a previously-emitted GrandPa warp sync request.
+    /// Inject a response to a previously-emitted GrandPa warp sync request.
     ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
-    pub fn grandpa_warp_sync_response_ok(
+    pub fn grandpa_warp_sync_response(
         &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,
         is_finished: bool,
-    ) -> (TRq, ResponseOutcome) {
-        self.grandpa_warp_sync_response_inner(request_id, Some((fragments, is_finished)))
-    }
-
-    /// Inject a failure to a previously-emitted GrandPa warp sync request.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
-    /// of a different type.
-    ///
-    pub fn grandpa_warp_sync_response_err(
-        &mut self,
-        request_id: RequestId,
-    ) -> (TRq, ResponseOutcome) {
-        self.grandpa_warp_sync_response_inner(request_id, None)
-    }
-
-    fn grandpa_warp_sync_response_inner(
-        &mut self,
-        request_id: RequestId,
-        response: Option<(Vec<WarpSyncFragment>, bool)>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
 
@@ -1280,18 +1271,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
-            if let Some((fragments, is_finished)) = response {
-                self.warp_sync.as_mut().unwrap().warp_sync_request_success(
-                    warp_sync_request_id,
-                    fragments,
-                    is_finished,
-                );
-            } else {
-                self.warp_sync
-                    .as_mut()
-                    .unwrap()
-                    .remove_request(warp_sync_request_id);
-            }
+            self.warp_sync.as_mut().unwrap().warp_sync_request_response(
+                warp_sync_request_id,
+                fragments,
+                is_finished,
+            );
         }
 
         // TODO: type of request not always verified
@@ -1307,13 +1291,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
-    /// Panics if the number of items in the response doesn't match the number of keys that have
-    /// been requested.
-    ///
     pub fn storage_get_response(
         &mut self,
         request_id: RequestId,
-        response: Result<Vec<u8>, ()>,
+        response: Vec<u8>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
 
@@ -1322,17 +1303,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
-            if let Ok(response) = response {
-                self.warp_sync
-                    .as_mut()
-                    .unwrap()
-                    .storage_get_success(warp_sync_request_id, response);
-            } else {
-                self.warp_sync
-                    .as_mut()
-                    .unwrap()
-                    .remove_request(warp_sync_request_id);
-            }
+            self.warp_sync
+                .as_mut()
+                .unwrap()
+                .storage_get_response(warp_sync_request_id, response);
         }
 
         // TODO: type of request not always verified
@@ -1354,7 +1328,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn call_proof_response(
         &mut self,
         request_id: RequestId,
-        response: Result<Vec<u8>, ()>,
+        response: Vec<u8>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
 
@@ -1363,17 +1337,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         self.shared.sources[request.source_id.0].num_requests -= 1;
 
         if let Some(warp_sync_request_id) = request.warp_sync {
-            if let Ok(response) = response {
-                self.warp_sync
-                    .as_mut()
-                    .unwrap()
-                    .runtime_call_merkle_proof_success(warp_sync_request_id, response);
-            } else {
-                self.warp_sync
-                    .as_mut()
-                    .unwrap()
-                    .remove_request(warp_sync_request_id);
-            }
+            self.warp_sync
+                .as_mut()
+                .unwrap()
+                .runtime_call_merkle_proof_response(warp_sync_request_id, response);
         }
 
         // TODO: type of request not always verified
