@@ -773,6 +773,16 @@ async fn run_background<TPlat: PlatformRef>(
     to_background: async_channel::Receiver<ToBackground<TPlat>>,
     to_background_tx: async_channel::WeakSender<ToBackground<TPlat>>,
 ) {
+    log!(
+        &config.platform,
+        Trace,
+        &config.log_target,
+        "start",
+        genesis_block_hash = HashDisplay(&header::hash_from_scale_encoded_header(
+            &config.genesis_block_scale_encoded_header
+        ))
+    );
+
     // State machine containing all the state that will be manipulated below.
     let mut background = {
         let tree = {
