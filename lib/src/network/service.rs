@@ -1118,6 +1118,53 @@ where
         &self.inner[id].address
     }
 
+    /// Returns the list of fully-established connections (i.e. whose handshake has finished)
+    /// with the given peer.
+    pub fn established_connections(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = ConnectionId> + '_ {
+        let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
+            return either::Right(iter::empty());
+        };
+
+        either::Left(
+            self.connections_by_peer_id
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .filter(|(_, connection_id)| {
+                    // TODO: what about shutting_down?
+                    self.inner.connection_state(*connection_id).established
+                })
+                .map(|&(_, connection_id)| connection_id),
+        )
+    }
+
+    /// Returns the list of connections that are still in their handshaking phase but are expected
+    /// to reach the given peer.
+    pub fn potential_connections(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = ConnectionId> + '_ {
+        let Some(&peer_index) = self.peers_by_peer_id.get(peer_id) else {
+            return either::Right(iter::empty());
+        };
+
+        either::Left(
+            self.connections_by_peer_id
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .filter(|(_, connection_id)| {
+                    !self.inner.connection_state(*connection_id).established
+                })
+                .map(|&(_, connection_id)| connection_id),
+        )
+    }
+
     /// Returns the number of connections with the given peer.
     ///
     /// Both connections that have and have not finished their handshaking phase are considered.

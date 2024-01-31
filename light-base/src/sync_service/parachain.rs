@@ -110,7 +110,7 @@ struct ParachainBackgroundTask<TPlat: PlatformRef> {
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
     /// Events coming from the networking service. `None` if not subscribed yet.
-    from_network_service: Option<Pin<Box<async_channel::Receiver<network_service::Event>>>>,
+    from_network_service: Option<Pin<Box<network_service::HighLevelEventsReceiver<TPlat>>>>,
 
     /// Runtime service of the relay chain.
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
@@ -222,7 +222,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 Notification(runtime_service::Notification),
                 SubscriptionDead,
                 MustSubscribeNetworkEvents,
-                NetworkEvent(network_service::Event),
+                NetworkEvent(network_service::HighLevelEvent),
                 AdvanceSyncTree,
             }
 
@@ -274,7 +274,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 .or(async {
                     if is_relaychain_subscribed {
                         if let Some(from_network_service) = self.from_network_service.as_mut() {
-                            match from_network_service.next().await {
+                            match from_network_service.as_mut().next().await {
                                 Some(ev) => WakeUpReason::NetworkEvent(ev),
                                 None => {
                                     self.from_network_service = None;
@@ -1275,7 +1275,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
-                    WakeUpReason::NetworkEvent(network_service::Event::Connected {
+                    WakeUpReason::NetworkEvent(network_service::HighLevelEvent::Connected {
                         peer_id,
                         role,
                         best_block_number,
@@ -1292,7 +1292,9 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
-                    WakeUpReason::NetworkEvent(network_service::Event::Disconnected { peer_id }),
+                    WakeUpReason::NetworkEvent(network_service::HighLevelEvent::Disconnected {
+                        peer_id,
+                    }),
                     _,
                 ) => {
                     let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
@@ -1301,7 +1303,7 @@ impl<TPlat: PlatformRef> ParachainBackgroundTask<TPlat> {
                 }
 
                 (
-                    WakeUpReason::NetworkEvent(network_service::Event::BlockAnnounce {
+                    WakeUpReason::NetworkEvent(network_service::HighLevelEvent::BlockAnnounce {
                         peer_id,
                         announce,
                     }),
