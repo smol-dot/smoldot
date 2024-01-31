@@ -36,7 +36,9 @@ jobs:
     permissions:
       contents: read
     steps:
-    - run: brew install docker docker-machine
+    - run: |
+        brew install docker docker-machine
+        brew services start docker-machine
       if: ${{ matrix.platform == 'linux/arm64' }}
     - uses: docker/setup-qemu-action@v3
     - uses: docker/setup-buildx-action@v3
