@@ -38,6 +38,7 @@ jobs:
     steps:
     - run: |
         brew install docker colima
+        brew reinstall -f --force-bottle qemu    # TODO: Fix attempt for <https://github.com/lima-vm/lima/issues/1742>
         colima start
       if: ${{ matrix.platform == 'linux/arm64' }}
     - uses: docker/setup-buildx-action@v3
