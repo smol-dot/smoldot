@@ -199,37 +199,29 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 WakeUpReason::WarpSyncTakingLongTimeWarning
             })
             .or({
-                // TODO: eventually, process_one() shouldn't take ownership of the AllForks
-                let wake_up_reason = match task
-                    .sync
-                    .take()
-                    .unwrap_or_else(|| unreachable!())
-                    .process_one()
-                {
-                    all::ProcessOne::AllSync(sync) => {
-                        // `desired_requests()` returns, in decreasing order of priority, the requests
-                        // that should be started in order for the syncing to proceed. The fact that
-                        // multiple requests are returned could be used to filter out undesired one. We
-                        // use this filtering to enforce a maximum of one ongoing request per source.
-                        let rq = sync
-                            .desired_requests()
-                            .find(|(source_id, _, _)| {
-                                sync.source_num_ongoing_requests(*source_id) == 0
-                            })
-                            .map(|(source_id, _, request_detail)| {
-                                WakeUpReason::StartRequest(source_id, request_detail)
-                            });
-                        task.sync = Some(sync);
-                        rq
-                    }
-                    process => Some(WakeUpReason::SyncProcess(process)),
-                };
-
+                let sync = &mut task.sync;
                 async move {
-                    if let Some(wake_up_reason) = wake_up_reason {
-                        wake_up_reason
-                    } else {
-                        future::pending().await
+                    // TODO: eventually, process_one() shouldn't take ownership of the AllForks
+                    match sync.take().unwrap_or_else(|| unreachable!()).process_one() {
+                        all::ProcessOne::AllSync(s) => {
+                            // `desired_requests()` returns, in decreasing order of priority, the requests
+                            // that should be started in order for the syncing to proceed. The fact that
+                            // multiple requests are returned could be used to filter out undesired one. We
+                            // use this filtering to enforce a maximum of one ongoing request per source.
+                            let desired_request = s
+                                .desired_requests()
+                                .find(|(source_id, _, _)| {
+                                    s.source_num_ongoing_requests(*source_id) == 0
+                                })
+                                .map(|(source_id, _, request_detail)| (source_id, request_detail));
+                            *sync = Some(s);
+                            if let Some((source_id, request_detail)) = desired_request {
+                                WakeUpReason::StartRequest(source_id, request_detail)
+                            } else {
+                                future::pending().await
+                            }
+                        }
+                        other => WakeUpReason::SyncProcess(other),
                     }
                 }
             })
