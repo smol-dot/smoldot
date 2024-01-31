@@ -38,6 +38,8 @@ jobs:
     steps:
     - run: brew install docker docker-machine
       if: ${{ matrix.platform == 'linux/arm64' }}
+    - uses: docker/setup-buildx-action@v3
+      if: ${{ matrix.platform == 'linux/amd64' }}
     - uses: actions/checkout@v4
       with:
         path: repo
