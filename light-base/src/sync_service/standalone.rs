@@ -153,6 +153,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
         enum WakeUpReason {
+            SyncProcess(all::ProcessOne<future::AbortHandle, (libp2p::PeerId, codec::Role), ()>),
             MustUpdateNetworkWithBestBlock,
             MustUpdateNetworkWithFinalizedBlock,
             MustSubscribeNetworkEvents,
@@ -214,26 +215,35 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 WakeUpReason::WarpSyncTakingLongTimeWarning
             })
             .or({
-                // `desired_requests()` returns, in decreasing order of priority, the requests
-                // that should be started in order for the syncing to proceed. The fact that
-                // multiple requests are returned could be used to filter out undesired one. We
-                // use this filtering to enforce a maximum of one ongoing request per source.
-                let desired_request = task
+                // TODO: eventually, process_one() shouldn't take ownership of the AllForks
+                let wake_up_reason = match task
                     .sync
-                    .as_ref()
+                    .take()
                     .unwrap_or_else(|| unreachable!())
-                    .desired_requests()
-                    .find(|(source_id, _, _)| {
-                        task.sync
-                            .as_ref()
-                            .unwrap_or_else(|| unreachable!())
-                            .source_num_ongoing_requests(*source_id)
-                            == 0
-                    })
-                    .map(|(source_id, _, request_detail)| (source_id, request_detail));
+                    .process_one()
+                {
+                    all::ProcessOne::AllSync(sync) => {
+                        // `desired_requests()` returns, in decreasing order of priority, the requests
+                        // that should be started in order for the syncing to proceed. The fact that
+                        // multiple requests are returned could be used to filter out undesired one. We
+                        // use this filtering to enforce a maximum of one ongoing request per source.
+                        let rq = sync
+                            .desired_requests()
+                            .find(|(source_id, _, _)| {
+                                sync.source_num_ongoing_requests(*source_id) == 0
+                            })
+                            .map(|(source_id, _, request_detail)| {
+                                WakeUpReason::StartRequest(source_id, request_detail)
+                            });
+                        task.sync = Some(sync);
+                        rq
+                    }
+                    process => Some(WakeUpReason::SyncProcess(process)),
+                };
+
                 async move {
-                    if let Some((source_id, request_detail)) = desired_request {
-                        WakeUpReason::StartRequest(source_id, request_detail)
+                    if let Some(wake_up_reason) = wake_up_reason {
+                        wake_up_reason
                     } else {
                         future::pending().await
                     }
@@ -254,6 +264,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         };
 
         match wake_up_reason {
+            WakeUpReason::SyncProcess(all::ProcessOne::AllSync(_)) => {
+                // Shouldn't be reachable.
+                unreachable!()
+            }
+
             WakeUpReason::NetworkEvent(network_service::Event::Connected {
                 peer_id,
                 role,
