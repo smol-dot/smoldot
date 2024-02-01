@@ -1178,11 +1178,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let block_request = task.network_service.clone().blocks_request(
                     peer_id,
                     network::codec::BlocksRequestConfig {
-                        start: if let Some(first_block_hash) = first_block_hash {
-                            network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
-                        } else {
-                            network::codec::BlocksRequestConfigStart::Number(first_block_height)
-                        },
+                        start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
                         desired_count: NonZeroU32::new(
                             u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                         )
