@@ -92,11 +92,11 @@ pub fn spawn_requests_handler(config: Config) {
             match receiver.next().await {
                 Some(Message::Request(request)) => match request.request() {
                     methods::MethodCall::rpc_methods {} => {
-                        request.respond(methods::Response::rpc_methods(methods::RpcMethods {
-                            methods: methods::MethodCall::method_names()
+                        request.respond(methods::Response::rpc_methods(methods::RpcMethods(
+                            methods::MethodCall::method_names()
                                 .map(|n| n.into())
-                                .collect(),
-                        }));
+                                .collect()
+                        )));
                     }
 
                     methods::MethodCall::chainSpec_v1_chainName {} => {
