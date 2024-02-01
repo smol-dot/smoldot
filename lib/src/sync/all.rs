@@ -647,7 +647,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 ..
                             } => DesiredRequest::BlocksRequest {
                                 first_block_height: block_number,
-                                first_block_hash: Some(block_hash),
+                                first_block_hash: block_hash,
                                 num_blocks: NonZeroU64::new(1).unwrap(),
                                 request_headers: false,
                                 request_bodies: true,
@@ -717,7 +717,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         let all_forks_request_id = match detail {
             RequestDetail::BlocksRequest {
                 first_block_height,
-                first_block_hash: Some(first_block_hash),
+                first_block_hash,
                 num_blocks,
                 request_headers: true,
                 request_bodies,
@@ -759,7 +759,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Some(inner_source_id),
                 RequestDetail::BlocksRequest {
                     first_block_height,
-                    first_block_hash: Some(first_block_hash),
+                    first_block_hash,
                     request_bodies: true,
                     ..
                 },
@@ -1409,8 +1409,8 @@ pub enum DesiredRequest {
     BlocksRequest {
         /// Height of the first block to request.
         first_block_height: u64,
-        /// Hash of the first block to request. `None` if not known.
-        first_block_hash: Option<[u8; 32]>,
+        /// Hash of the first block to request.
+        first_block_hash: [u8; 32],
         /// Number of blocks the request should return.
         ///
         /// Note that this is only an indication, and the source is free to give fewer blocks
@@ -1462,8 +1462,8 @@ pub enum RequestDetail {
     BlocksRequest {
         /// Height of the first block to request.
         first_block_height: u64,
-        /// Hash of the first block to request. `None` if not known.
-        first_block_hash: Option<[u8; 32]>,
+        /// Hash of the first block to request.
+        first_block_hash: [u8; 32],
         /// Number of blocks the request should return.
         ///
         /// Note that this is only an indication, and the source is free to give fewer blocks
@@ -2168,7 +2168,7 @@ fn all_forks_request_convert(
     download_body: bool,
 ) -> DesiredRequest {
     DesiredRequest::BlocksRequest {
-        first_block_hash: Some(rq_params.first_block_hash),
+        first_block_hash: rq_params.first_block_hash,
         first_block_height: rq_params.first_block_height,
         num_blocks: rq_params.num_blocks,
         request_bodies: download_body,

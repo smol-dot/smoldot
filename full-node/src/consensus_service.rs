@@ -959,15 +959,7 @@ impl SyncBackground {
                                     match (request_details, &self.authored_block) {
                                         (
                                             all::DesiredRequest::BlocksRequest {
-                                                first_block_hash: None,
-                                                first_block_height,
-                                                ..
-                                            },
-                                            Some((authored_height, _, _, _)),
-                                        ) if first_block_height == authored_height => true,
-                                        (
-                                            all::DesiredRequest::BlocksRequest {
-                                                first_block_hash: Some(first_block_hash),
+                                                first_block_hash,
                                                 first_block_height,
                                                 ..
                                             },
@@ -1526,11 +1518,7 @@ impl SyncBackground {
                         peer_id,
                         self.network_chain_id,
                         network::codec::BlocksRequestConfig {
-                            start: if let Some(first_block_hash) = first_block_hash {
-                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
-                            } else {
-                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
-                            },
+                            start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
                             desired_count: NonZeroU32::new(
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                             )
