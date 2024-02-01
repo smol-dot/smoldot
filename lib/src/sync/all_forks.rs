@@ -894,7 +894,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .chain
             .contains_non_finalized_block(&announced_header_hash)
         {
-            return BlockAnnounceOutcome::AlreadyInChain(AnnouncedBlockKnown {
+            return BlockAnnounceOutcome::AlreadyVerified(AnnouncedBlockKnown {
                 inner: self,
                 announced_header_hash,
                 announced_header_number,
@@ -924,7 +924,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 is_best,
             })
         } else {
-            BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
+            BlockAnnounceOutcome::AlreadyPending(AnnouncedBlockKnown {
                 inner: self,
                 announced_header_hash,
                 announced_header_number,
@@ -1511,10 +1511,10 @@ pub enum BlockAnnounceOutcome<'a, TBl, TRq, TSrc> {
 
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
-    AlreadyInChain(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
+    AlreadyVerified(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
 
     /// Announced block is already known by the state machine but hasn't been verified yet.
-    Known(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
+    AlreadyPending(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
 
     /// Announced block isn't in the state machine.
     Unknown(AnnouncedBlockUnknown<'a, TBl, TRq, TSrc>),

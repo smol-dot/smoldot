@@ -1078,14 +1078,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     marker: PhantomData,
                 })
             }
-            all_forks::BlockAnnounceOutcome::Known(inner) => {
-                BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
+            all_forks::BlockAnnounceOutcome::AlreadyPending(inner) => {
+                BlockAnnounceOutcome::AlreadyPending(AnnouncedBlockKnown {
                     inner,
                     marker: PhantomData,
                 })
             }
-            all_forks::BlockAnnounceOutcome::AlreadyInChain(inner) => {
-                BlockAnnounceOutcome::AlreadyInChain(AnnouncedBlockKnown {
+            all_forks::BlockAnnounceOutcome::AlreadyVerified(inner) => {
+                BlockAnnounceOutcome::AlreadyVerified(AnnouncedBlockKnown {
                     inner,
                     marker: PhantomData,
                 })
@@ -1598,10 +1598,10 @@ pub enum BlockAnnounceOutcome<'a, TRq, TSrc, TBl> {
 
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
-    AlreadyInChain(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
+    AlreadyVerified(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
 
     /// Announced block is already known by the state machine but hasn't been verified yet.
-    Known(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
+    AlreadyPending(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
 
     /// Announced block isn't in the state machine.
     Unknown(AnnouncedBlockUnknown<'a, TRq, TSrc, TBl>),
