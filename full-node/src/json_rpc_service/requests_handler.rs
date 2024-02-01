@@ -95,7 +95,7 @@ pub fn spawn_requests_handler(config: Config) {
                         request.respond(methods::Response::rpc_methods(methods::RpcMethods(
                             methods::MethodCall::method_names()
                                 .map(|n| n.into())
-                                .collect()
+                                .collect(),
                         )));
                     }
 

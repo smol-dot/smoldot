@@ -80,7 +80,7 @@ impl<TPlat: PlatformRef> Background<TPlat> {
         request.respond(methods::Response::rpc_methods(methods::RpcMethods(
             methods::MethodCall::method_names()
                 .map(|n| n.into())
-                .collect()
+                .collect(),
         )));
     }
 
