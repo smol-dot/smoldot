@@ -715,7 +715,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     task.sync
                         .as_mut()
                         .unwrap_or_else(|| unreachable!())
-                        .add_source((peer_id, role), best_block_number, best_block_hash),
+                        .prepare_add_source(best_block_number, best_block_hash)
+                        .add_source((peer_id, role), ()),
                 );
             }
 

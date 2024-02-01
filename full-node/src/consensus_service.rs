@@ -334,7 +334,9 @@ impl ConsensusService {
             .map_err(InitError::FinalizedRuntimeInit)?
         };
 
-        let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
+        let block_author_sync_source = sync
+            .prepare_add_source(best_block_number, best_block_hash)
+            .add_source(None, NonFinalizedBlock::NotVerified);
 
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
@@ -1392,14 +1394,16 @@ impl SyncBackground {
                             *is_disconnected = false;
                         }
                         hashbrown::hash_map::Entry::Vacant(entry) => {
-                            let id = self.sync.add_source(
-                                Some(NetworkSourceInfo {
-                                    peer_id: entry.key().clone(),
-                                    is_disconnected: false,
-                                }),
-                                best_block_number,
-                                best_block_hash,
-                            );
+                            let id = self
+                                .sync
+                                .prepare_add_source(best_block_number, best_block_hash)
+                                .add_source(
+                                    Some(NetworkSourceInfo {
+                                        peer_id: entry.key().clone(),
+                                        is_disconnected: false,
+                                    }),
+                                    NonFinalizedBlock::NotVerified,
+                                );
                             entry.insert(id);
                         }
                     }
