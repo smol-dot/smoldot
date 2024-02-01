@@ -715,7 +715,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     task.sync
                         .as_mut()
                         .unwrap_or_else(|| unreachable!())
-                        .add_source((peer_id, role), best_block_number, best_block_hash),
+                        .prepare_add_source(best_block_number, best_block_hash)
+                        .add_source((peer_id, role), ()),
                 );
             }
 
@@ -743,19 +744,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 let sync_source_id = *task.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
-                // TODO: improve the logging here, requires some modifications to block_announce()
-                log!(
-                    &task.platform,
-                    Debug,
-                    &task.log_target,
-                    "block-announce",
-                    sender = peer_id,
-                    hash = HashDisplay(&header::hash_from_scale_encoded_header(
-                        decoded.scale_encoded_header
-                    )),
-                    is_best = decoded.is_best,
-                );
-
                 match task
                     .sync
                     .as_mut()
@@ -765,7 +753,83 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         decoded.scale_encoded_header.to_owned(),
                         decoded.is_best,
                     ) {
-                    all::BlockAnnounceOutcome::InvalidHeader(_) => {
+                    all::BlockAnnounceOutcome::TooOld {
+                        announce_block_height,
+                        ..
+                    } => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                                decoded.scale_encoded_header
+                            )),
+                            height = announce_block_height,
+                            is_best = decoded.is_best,
+                            outcome = "older-than-finalized-block",
+                        );
+                    }
+                    all::BlockAnnounceOutcome::AlreadyVerified(known) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(known.hash()),
+                            height = known.height(),
+                            parent_hash = HashDisplay(known.parent_hash()),
+                            is_best = decoded.is_best,
+                            outcome = "already-verified",
+                        );
+                        known.update_source_and_block();
+                    }
+                    all::BlockAnnounceOutcome::AlreadyPending(known) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(known.hash()),
+                            height = known.height(),
+                            parent_hash = HashDisplay(known.parent_hash()),
+                            is_best = decoded.is_best,
+                            outcome = "already-pending",
+                        );
+                        known.update_source_and_block();
+                    }
+                    all::BlockAnnounceOutcome::Unknown(unknown) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(unknown.hash()),
+                            height = unknown.height(),
+                            parent_hash = HashDisplay(unknown.parent_hash()),
+                            is_best = decoded.is_best,
+                            outcome = "previously-unknown",
+                        );
+                        unknown.insert_and_update_source(());
+                    }
+                    all::BlockAnnounceOutcome::InvalidHeader(error) => {
+                        log!(
+                            &task.platform,
+                            Debug,
+                            &task.log_target,
+                            "block-announce",
+                            sender = peer_id,
+                            hash = HashDisplay(&header::hash_from_scale_encoded_header(
+                                decoded.scale_encoded_header
+                            )),
+                            is_best = decoded.is_best,
+                            outcome = "invalid-header",
+                            ?error,
+                        );
                         task.network_service
                             .ban_and_disconnect(
                                 peer_id,
@@ -774,7 +838,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    _ => {}
                 }
             }
 

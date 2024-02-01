@@ -334,7 +334,9 @@ impl ConsensusService {
             .map_err(InitError::FinalizedRuntimeInit)?
         };
 
-        let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
+        let block_author_sync_source = sync
+            .prepare_add_source(best_block_number, best_block_hash)
+            .add_source(None, NonFinalizedBlock::NotVerified);
 
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
@@ -1392,14 +1394,16 @@ impl SyncBackground {
                             *is_disconnected = false;
                         }
                         hashbrown::hash_map::Entry::Vacant(entry) => {
-                            let id = self.sync.add_source(
-                                Some(NetworkSourceInfo {
-                                    peer_id: entry.key().clone(),
-                                    is_disconnected: false,
-                                }),
-                                best_block_number,
-                                best_block_hash,
-                            );
+                            let id = self
+                                .sync
+                                .prepare_add_source(best_block_number, best_block_hash)
+                                .add_source(
+                                    Some(NetworkSourceInfo {
+                                        peer_id: entry.key().clone(),
+                                        is_disconnected: false,
+                                    }),
+                                    NonFinalizedBlock::NotVerified,
+                                );
                             entry.insert(id);
                         }
                     }
@@ -1435,12 +1439,14 @@ impl SyncBackground {
                     let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                     // TODO: log the outcome
                     match self.sync.block_announce(id, scale_encoded_header, is_best) {
-                        all::BlockAnnounceOutcome::HeaderVerify => {}
                         all::BlockAnnounceOutcome::TooOld { .. } => {}
-                        all::BlockAnnounceOutcome::AlreadyInChain => {}
-                        all::BlockAnnounceOutcome::NotFinalizedChain => {}
-                        all::BlockAnnounceOutcome::Discarded => {}
-                        all::BlockAnnounceOutcome::StoredForLater {} => {}
+                        all::BlockAnnounceOutcome::AlreadyVerified(known)
+                        | all::BlockAnnounceOutcome::AlreadyPending(known) => {
+                            known.update_source_and_block();
+                        }
+                        all::BlockAnnounceOutcome::Unknown(unknown) => {
+                            unknown.insert_and_update_source(NonFinalizedBlock::NotVerified)
+                        }
                         all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(), // TODO: ?!?! why unreachable? also, ban the peer
                     }
                 }
@@ -2475,19 +2481,14 @@ impl SyncBackground {
 
         // The next step is to import the block in `self.sync`. This is done by pretending that
         // the local node is a source of block similar to networking peers.
-        match self.sync.block_announce(
+        let all::BlockAnnounceOutcome::Unknown(block_insert) = self.sync.block_announce(
             self.block_author_sync_source,
             new_block_header.clone(),
             true, // Since the new block is a child of the current best block, it always becomes the new best.
-        ) {
-            all::BlockAnnounceOutcome::HeaderVerify
-            | all::BlockAnnounceOutcome::StoredForLater
-            | all::BlockAnnounceOutcome::Discarded => {}
-            all::BlockAnnounceOutcome::TooOld { .. }
-            | all::BlockAnnounceOutcome::AlreadyInChain
-            | all::BlockAnnounceOutcome::NotFinalizedChain
-            | all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
-        }
+        ) else {
+            unreachable!();
+        };
+        block_insert.insert_and_update_source(NonFinalizedBlock::NotVerified);
 
         debug_assert!(self.authored_block.is_none());
         self.authored_block = Some((

@@ -42,6 +42,7 @@ use crate::{
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
     iter,
+    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,
@@ -182,7 +183,7 @@ pub enum Status<'a, TSrc> {
 pub struct AllSync<TRq, TSrc, TBl> {
     warp_sync: Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
     ready_to_transition: Option<warp_sync::RuntimeInformation>,
-    // TODO: we store an `Option<TBl>` instead of `TBl` due to API issues; the all.rs doesn't let you insert user datas for pending blocks while the AllForksSync lets you; `None` is stored while a block is pending
+    // TODO: we store an `Option<TBl>` instead of `TBl` because we need to be able to extract block user datas when a warp sync is finished
     /// Always `Some`, except for temporary extractions.
     all_forks:
         Option<all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>>,
@@ -375,54 +376,57 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         })
     }
 
-    /// Adds a new source to the sync state machine.
+    /// Start the process of adding a new source to the sync state machine.
     ///
     /// Must be passed the best block number and hash of the source, as usually reported by the
     /// source itself.
     ///
-    /// Returns an identifier for this new source, plus a list of requests to start or cancel.
-    pub fn add_source(
+    /// This function call doesn't modify anything but returns an object that allows actually
+    /// inserting the source.
+    pub fn prepare_add_source(
         &mut self,
-        user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> SourceId {
-        let outer_source_id_entry = self.shared.sources.vacant_entry();
-        let outer_source_id = SourceId(outer_source_id_entry.key());
-
-        let warp_sync_source_id = if let Some(warp_sync) = &mut self.warp_sync {
-            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
-        } else {
-            None
-        };
-
-        let all_forks_source_id = {
-            let Some(all_forks) = &mut self.all_forks else {
-                unreachable!()
-            };
-
-            match all_forks.prepare_add_source(best_block_number, best_block_hash) {
-                all_forks::AddSource::BestBlockAlreadyVerified(b)
-                | all_forks::AddSource::BestBlockPendingVerification(b) => {
-                    b.add_source(AllForksSourceExtra { outer_source_id })
-                }
-                all_forks::AddSource::OldBestBlock(b) => {
-                    b.add_source(AllForksSourceExtra { outer_source_id })
-                }
-                all_forks::AddSource::UnknownBestBlock(b) => {
-                    b.add_source_and_insert_block(AllForksSourceExtra { outer_source_id }, None)
-                }
+    ) -> AddSource<TRq, TSrc, TBl> {
+        match self
+            .all_forks
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+            .prepare_add_source(best_block_number, best_block_hash)
+        {
+            all_forks::AddSource::BestBlockAlreadyVerified(all_forks) => {
+                AddSource::BestBlockAlreadyVerified(AddSourceKnown {
+                    all_forks,
+                    slab_insertion: self.shared.sources.vacant_entry(),
+                    warp_sync: &mut self.warp_sync,
+                    marker: PhantomData,
+                })
             }
-        };
-
-        outer_source_id_entry.insert(SourceMapping {
-            warp_sync: warp_sync_source_id,
-            all_forks: all_forks_source_id,
-            user_data,
-            num_requests: 0,
-        });
-
-        outer_source_id
+            all_forks::AddSource::BestBlockPendingVerification(all_forks) => {
+                AddSource::BestBlockPendingVerification(AddSourceKnown {
+                    all_forks,
+                    slab_insertion: self.shared.sources.vacant_entry(),
+                    warp_sync: &mut self.warp_sync,
+                    marker: PhantomData,
+                })
+            }
+            all_forks::AddSource::OldBestBlock(all_forks) => {
+                AddSource::OldBestBlock(AddSourceOldBlock {
+                    all_forks,
+                    slab_insertion: self.shared.sources.vacant_entry(),
+                    warp_sync: &mut self.warp_sync,
+                    marker: PhantomData,
+                })
+            }
+            all_forks::AddSource::UnknownBestBlock(all_forks) => {
+                AddSource::UnknownBestBlock(AddSourceUnknown {
+                    all_forks,
+                    slab_insertion: self.shared.sources.vacant_entry(),
+                    warp_sync: &mut self.warp_sync,
+                    marker: PhantomData,
+                })
+            }
+        }
     }
 
     /// Removes a source from the state machine. Returns the user data of this source, and all
@@ -497,7 +501,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Returns the current best block of the given source.
     ///
     /// This corresponds either the latest call to [`AllSync::block_announce`] where `is_best` was
-    /// `true`, or to the parameter passed to [`AllSync::add_source`].
+    /// `true`, or to the parameter passed to [`AllSync::prepare_add_source`].
     ///
     /// # Panic
     ///
@@ -946,7 +950,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }) = self.ready_to_transition.take()
         {
             let (Some(all_forks), Some(warp_sync)) =
-                (self.all_forks.as_ref(), self.warp_sync.as_mut())
+                (self.all_forks.as_mut(), self.warp_sync.as_mut())
             else {
                 unreachable!()
             };
@@ -965,23 +969,31 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             for warp_sync_source_id in warp_sync.sources() {
                 let outer_source_id = warp_sync[warp_sync_source_id].outer_source_id;
 
-                let (best_block_number, best_block_hash) =
+                let (best_block_number, &best_block_hash) =
                     all_forks.source_best_block(self.shared.sources[outer_source_id.0].all_forks);
 
-                let new_inner_source_id = match new_all_forks
-                    .prepare_add_source(best_block_number, *best_block_hash)
-                {
-                    all_forks::AddSource::BestBlockAlreadyVerified(b)
-                    | all_forks::AddSource::BestBlockPendingVerification(b) => {
-                        b.add_source(AllForksSourceExtra { outer_source_id })
-                    }
-                    all_forks::AddSource::OldBestBlock(b) => {
-                        b.add_source(AllForksSourceExtra { outer_source_id })
-                    }
-                    all_forks::AddSource::UnknownBestBlock(b) => {
-                        b.add_source_and_insert_block(AllForksSourceExtra { outer_source_id }, None)
-                    }
-                };
+                let new_inner_source_id =
+                    match new_all_forks.prepare_add_source(best_block_number, best_block_hash) {
+                        all_forks::AddSource::BestBlockAlreadyVerified(b)
+                        | all_forks::AddSource::BestBlockPendingVerification(b) => {
+                            b.add_source(AllForksSourceExtra { outer_source_id })
+                        }
+                        all_forks::AddSource::OldBestBlock(b) => {
+                            b.add_source(AllForksSourceExtra { outer_source_id })
+                        }
+                        all_forks::AddSource::UnknownBestBlock(b) => {
+                            // If the best block of the source is unknown to the new state machine,
+                            // it necessarily means that this block's user data hasn't been
+                            // extracted from the old state machine yet.
+                            let block_user_data = all_forks[(best_block_number, &best_block_hash)]
+                                .take()
+                                .unwrap_or_else(|| unreachable!());
+                            b.add_source_and_insert_block(
+                                AllForksSourceExtra { outer_source_id },
+                                Some(block_user_data),
+                            )
+                        }
+                    };
 
                 new_all_forks.update_source_finality_state(
                     new_inner_source_id,
@@ -1037,12 +1049,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Injects a block announcement made by a source into the state machine.
+    ///
+    /// > **Note**: This information is normally reported by the source itself. In the case of a
+    /// >           a networking peer, call this when the source sent a block announce.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
     pub fn block_announce(
         &mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome {
+    ) -> BlockAnnounceOutcome<TRq, TSrc, TBl> {
         let Some(&SourceMapping {
             all_forks: inner_source_id,
             ..
@@ -1063,14 +1083,23 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 announce_block_height,
                 finalized_block_height,
             },
-            all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
-                source_update.insert_and_update_source(None);
-                BlockAnnounceOutcome::StoredForLater // TODO: arbitrary
+            all_forks::BlockAnnounceOutcome::Unknown(inner) => {
+                BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
+                    inner,
+                    marker: PhantomData,
+                })
             }
-            all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
-            | all_forks::BlockAnnounceOutcome::Known(source_update) => {
-                source_update.update_source_and_block();
-                BlockAnnounceOutcome::StoredForLater // TODO: arbitrary
+            all_forks::BlockAnnounceOutcome::AlreadyPending(inner) => {
+                BlockAnnounceOutcome::AlreadyPending(AnnouncedBlockKnown {
+                    inner,
+                    marker: PhantomData,
+                })
+            }
+            all_forks::BlockAnnounceOutcome::AlreadyVerified(inner) => {
+                BlockAnnounceOutcome::AlreadyVerified(AnnouncedBlockKnown {
+                    inner,
+                    marker: PhantomData,
+                })
             }
             all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                 BlockAnnounceOutcome::InvalidHeader(error)
@@ -1159,6 +1188,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
+    // TODO: refactor this function so that the user can know the state of each block
     pub fn blocks_request_response(
         &mut self,
         request_id: RequestId,
@@ -1383,7 +1413,9 @@ impl<'a, TRq, TSrc, TBl> ops::Index<(u64, &'a [u8; 32])> for AllSync<TRq, TSrc, 
             unreachable!()
         };
 
-        all_forks[(block_height, block_hash)].as_ref().unwrap()
+        all_forks[(block_height, block_hash)]
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
     }
 }
 
@@ -1394,7 +1426,182 @@ impl<'a, TRq, TSrc, TBl> ops::IndexMut<(u64, &'a [u8; 32])> for AllSync<TRq, TSr
             unreachable!()
         };
 
-        all_forks[(block_height, block_hash)].as_mut().unwrap()
+        all_forks[(block_height, block_hash)]
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+    }
+}
+
+/// Outcome of calling [`AllSync::prepare_add_source`].
+#[must_use]
+pub enum AddSource<'a, TRq, TSrc, TBl> {
+    /// The best block of the source is older or equal to the local latest finalized block. This
+    /// block isn't tracked by the state machine.
+    OldBestBlock(AddSourceOldBlock<'a, TRq, TSrc, TBl>),
+
+    /// The best block of the source has already been verified by this state machine.
+    BestBlockAlreadyVerified(AddSourceKnown<'a, TRq, TSrc, TBl>),
+
+    /// The best block of the source is already known to this state machine but hasn't been
+    /// verified yet.
+    BestBlockPendingVerification(AddSourceKnown<'a, TRq, TSrc, TBl>),
+
+    /// The best block of the source isn't in this state machine yet and needs to be inserted.
+    UnknownBestBlock(AddSourceUnknown<'a, TRq, TSrc, TBl>),
+}
+
+impl<'a, TRq, TSrc, TBl> AddSource<'a, TRq, TSrc, TBl> {
+    /// Inserts the source, and the best block if it is unknown.
+    ///
+    /// The `best_block_user_data` is silently discarded if the block is already known or too old.
+    pub fn add_source(self, source_user_data: TSrc, best_block_user_data: TBl) -> SourceId {
+        match self {
+            AddSource::BestBlockAlreadyVerified(b) => b.add_source(source_user_data),
+            AddSource::BestBlockPendingVerification(b) => b.add_source(source_user_data),
+            AddSource::OldBestBlock(b) => b.add_source(source_user_data),
+            AddSource::UnknownBestBlock(b) => {
+                b.add_source_and_insert_block(source_user_data, best_block_user_data)
+            }
+        }
+    }
+}
+
+/// See [`AddSource`] and [`AllSync::prepare_add_source`].
+#[must_use]
+pub struct AddSourceOldBlock<'a, TRq, TSrc, TBl> {
+    slab_insertion: slab::VacantEntry<'a, SourceMapping<TSrc>>,
+    all_forks:
+        all_forks::AddSourceOldBlock<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
+    warp_sync: &'a mut Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
+    marker: PhantomData<TRq>,
+}
+
+impl<'a, TRq, TSrc, TBl> AddSourceOldBlock<'a, TRq, TSrc, TBl> {
+    /// Inserts a new source in the state machine.
+    ///
+    /// Returns the newly-allocated identifier for that source.
+    ///
+    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
+    /// retrieved using the `Index` trait implementation of the [`AllSync`].
+    pub fn add_source(self, source_user_data: TSrc) -> SourceId {
+        let outer_source_id = SourceId(self.slab_insertion.key());
+
+        let all_forks_source_id = self
+            .all_forks
+            .add_source(AllForksSourceExtra { outer_source_id });
+
+        let warp_sync_source_id = if let Some(warp_sync) = self.warp_sync {
+            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
+        } else {
+            None
+        };
+
+        self.slab_insertion.insert(SourceMapping {
+            warp_sync: warp_sync_source_id,
+            all_forks: all_forks_source_id,
+            user_data: source_user_data,
+            num_requests: 0,
+        });
+
+        outer_source_id
+    }
+}
+
+/// See [`AddSource`] and [`AllSync::prepare_add_source`].
+#[must_use]
+pub struct AddSourceKnown<'a, TRq, TSrc, TBl> {
+    slab_insertion: slab::VacantEntry<'a, SourceMapping<TSrc>>,
+    all_forks:
+        all_forks::AddSourceKnown<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
+    warp_sync: &'a mut Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
+    marker: PhantomData<TRq>,
+}
+
+impl<'a, TRq, TSrc, TBl> AddSourceKnown<'a, TRq, TSrc, TBl> {
+    /// Gives access to the user data of the block.
+    pub fn user_data_mut(&mut self) -> &mut TBl {
+        self.all_forks
+            .user_data_mut()
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+    }
+
+    /// Inserts a new source in the state machine.
+    ///
+    /// Returns the newly-allocated identifier for that source.
+    ///
+    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
+    /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
+    pub fn add_source(self, source_user_data: TSrc) -> SourceId {
+        let outer_source_id = SourceId(self.slab_insertion.key());
+
+        let all_forks_source_id = self
+            .all_forks
+            .add_source(AllForksSourceExtra { outer_source_id });
+
+        let warp_sync_source_id = if let Some(warp_sync) = self.warp_sync {
+            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
+        } else {
+            None
+        };
+
+        self.slab_insertion.insert(SourceMapping {
+            warp_sync: warp_sync_source_id,
+            all_forks: all_forks_source_id,
+            user_data: source_user_data,
+            num_requests: 0,
+        });
+
+        outer_source_id
+    }
+}
+
+/// See [`AddSource`] and [`AllSync::prepare_add_source`].
+#[must_use]
+pub struct AddSourceUnknown<'a, TRq, TSrc, TBl> {
+    slab_insertion: slab::VacantEntry<'a, SourceMapping<TSrc>>,
+    all_forks:
+        all_forks::AddSourceUnknown<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
+    warp_sync: &'a mut Option<warp_sync::WarpSync<WarpSyncSourceExtra, WarpSyncRequestExtra>>,
+    marker: PhantomData<TRq>,
+}
+
+impl<'a, TRq, TSrc, TBl> AddSourceUnknown<'a, TRq, TSrc, TBl> {
+    /// Inserts a new source in the state machine, plus the best block of that source.
+    ///
+    /// Returns the newly-allocated identifier for that source.
+    ///
+    /// The `source_user_data` parameter is opaque and decided entirely by the user. It can later
+    /// be retrieved using the `Index` trait implementation of the [`AllForksSync`].
+    ///
+    /// The `best_block_user_data` parameter is opaque and decided entirely by the user and is
+    /// associated with the best block of the newly-added source.
+    pub fn add_source_and_insert_block(
+        self,
+        source_user_data: TSrc,
+        best_block_user_data: TBl,
+    ) -> SourceId {
+        let outer_source_id = SourceId(self.slab_insertion.key());
+
+        let all_forks_source_id = self.all_forks.add_source_and_insert_block(
+            AllForksSourceExtra { outer_source_id },
+            Some(best_block_user_data),
+        );
+
+        let warp_sync_source_id = if let Some(warp_sync) = self.warp_sync {
+            Some(warp_sync.add_source(WarpSyncSourceExtra { outer_source_id }))
+        } else {
+            None
+        };
+
+        self.slab_insertion.insert(SourceMapping {
+            warp_sync: warp_sync_source_id,
+            all_forks: all_forks_source_id,
+            user_data: source_user_data,
+            num_requests: 0,
+        });
+
+        outer_source_id
     }
 }
 
@@ -1561,35 +1768,111 @@ pub struct Justification {
 }
 
 /// Outcome of calling [`AllSync::block_announce`].
-pub enum BlockAnnounceOutcome {
-    /// Header is ready to be verified. Calling [`AllSync::process_one`] might yield that block.
-    HeaderVerify,
-
+pub enum BlockAnnounceOutcome<'a, TRq, TSrc, TBl> {
     /// Announced block is too old to be part of the finalized chain.
     ///
     /// It is assumed that all sources will eventually agree on the same finalized chain. Blocks
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
+    ///
+    /// If the announced block was the source's best block, the state machine has been updated to
+    /// take this information into account.
     TooOld {
         /// Height of the announced block.
         announce_block_height: u64,
         /// Height of the currently finalized block.
         finalized_block_height: u64,
     },
+
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
-    AlreadyInChain,
-    /// Announced block is known to not be a descendant of the finalized block.
-    NotFinalizedChain,
-    /// Header cannot be verified now because its parent hasn't been verified yet. The block has
-    /// been stored for later. See [`Config::max_disjoint_headers`].
-    StoredForLater,
+    AlreadyVerified(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
+
+    /// Announced block is already known by the state machine but hasn't been verified yet.
+    AlreadyPending(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
+
+    /// Announced block isn't in the state machine.
+    Unknown(AnnouncedBlockUnknown<'a, TRq, TSrc, TBl>),
+
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
+}
 
-    /// Header cannot be verified now and has been silently discarded.
-    Discarded,
+/// See [`BlockAnnounceOutcome`] and [`AllSync::block_announce`].
+#[must_use]
+pub struct AnnouncedBlockKnown<'a, TRq, TSrc, TBl> {
+    inner:
+        all_forks::AnnouncedBlockKnown<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
+    marker: PhantomData<(TSrc, TRq)>,
+}
+
+impl<'a, TRq, TSrc, TBl> AnnouncedBlockKnown<'a, TRq, TSrc, TBl> {
+    /// Returns the parent hash of the announced block.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        self.inner.parent_hash()
+    }
+
+    /// Returns the height of the announced block.
+    pub fn height(&self) -> u64 {
+        self.inner.height()
+    }
+
+    /// Returns the hash of the announced block.
+    pub fn hash(&self) -> &[u8; 32] {
+        self.inner.hash()
+    }
+
+    /// Gives access to the user data of the block.
+    pub fn user_data_mut(&mut self) -> &mut TBl {
+        self.inner
+            .user_data_mut()
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+    }
+
+    /// Updates the state machine to keep track of the fact that this source knows this block.
+    /// If the announced block is the source's best block, also updates this information.
+    pub fn update_source_and_block(self) {
+        self.inner.update_source_and_block()
+    }
+}
+
+/// See [`BlockAnnounceOutcome`] and [`AllForksSync::block_announce`].
+#[must_use]
+pub struct AnnouncedBlockUnknown<'a, TRq, TSrc, TBl> {
+    inner: all_forks::AnnouncedBlockUnknown<
+        'a,
+        Option<TBl>,
+        AllForksRequestExtra,
+        AllForksSourceExtra,
+    >,
+    marker: PhantomData<(TSrc, TRq)>,
+}
+
+impl<'a, TRq, TSrc, TBl> AnnouncedBlockUnknown<'a, TRq, TSrc, TBl> {
+    /// Returns the parent hash of the announced block.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        self.inner.parent_hash()
+    }
+
+    /// Returns the height of the announced block.
+    pub fn height(&self) -> u64 {
+        self.inner.height()
+    }
+
+    /// Returns the hash of the announced block.
+    pub fn hash(&self) -> &[u8; 32] {
+        self.inner.hash()
+    }
+
+    /// Inserts the block in the state machine and keeps track of the fact that this source knows
+    /// this block.
+    ///
+    /// If the announced block is the source's best block, also updates this information.
+    pub fn insert_and_update_source(self, user_data: TBl) {
+        self.inner.insert_and_update_source(Some(user_data))
+    }
 }
 
 /// Response to a GrandPa warp sync request.
@@ -1840,7 +2123,9 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     /// Returns the user data of the parent of the block to be verified, or `None` if the parent
     /// is the finalized block.
     pub fn parent_user_data(&self) -> Option<&TBl> {
-        self.inner.parent_user_data().map(|ud| ud.as_ref().unwrap()) // TODO: don't unwrap
+        self.inner
+            .parent_user_data()
+            .map(|ud| ud.as_ref().unwrap_or_else(|| unreachable!()))
     }
 
     /// Returns the SCALE-encoded header of the block that was verified.
