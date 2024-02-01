@@ -722,7 +722,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 request_headers: true,
                 request_bodies,
                 request_justification: true,
-            } if request_bodies == self.shared.download_bodies => {
+            } if request_bodies || !self.shared.download_bodies => {
                 let Some(all_forks) = &mut self.all_forks else {
                     unreachable!()
                 };
