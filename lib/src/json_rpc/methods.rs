@@ -949,9 +949,7 @@ pub struct HeaderDigest {
 }
 
 #[derive(Debug, Clone)]
-pub struct RpcMethods {
-    pub methods: Vec<String>,
-}
+pub struct RpcMethods(pub Vec<String>);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
@@ -1109,15 +1107,7 @@ impl serde::Serialize for RpcMethods {
     where
         S: serde::Serializer,
     {
-        #[derive(serde::Serialize)]
-        struct SerdeRpcMethods<'a> {
-            methods: &'a [String],
-        }
-
-        SerdeRpcMethods {
-            methods: &self.methods,
-        }
-        .serialize(serializer)
+        self.0[..].serialize(serializer)
     }
 }
 

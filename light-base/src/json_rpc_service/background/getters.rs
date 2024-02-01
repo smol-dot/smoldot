@@ -77,11 +77,11 @@ impl<TPlat: PlatformRef> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::rpc_methods`].
     pub(super) async fn rpc_methods(self: &Arc<Self>, request: service::RequestProcess) {
-        request.respond(methods::Response::rpc_methods(methods::RpcMethods {
-            methods: methods::MethodCall::method_names()
+        request.respond(methods::Response::rpc_methods(methods::RpcMethods(
+            methods::MethodCall::method_names()
                 .map(|n| n.into())
-                .collect(),
-        }));
+                .collect()
+        )));
     }
 
     /// Handles a call to [`methods::MethodCall::sudo_unstable_version`].
