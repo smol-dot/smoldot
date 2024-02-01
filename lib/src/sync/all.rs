@@ -501,7 +501,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Returns the current best block of the given source.
     ///
     /// This corresponds either the latest call to [`AllSync::block_announce`] where `is_best` was
-    /// `true`, or to the parameter passed to [`AllSync::add_source`].
+    /// `true`, or to the parameter passed to [`AllSync::prepare_add_source`].
     ///
     /// # Panic
     ///
