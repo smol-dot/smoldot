@@ -1619,6 +1619,21 @@ pub struct AnnouncedBlockKnown<'a, TRq, TSrc, TBl> {
 }
 
 impl<'a, TRq, TSrc, TBl> AnnouncedBlockKnown<'a, TRq, TSrc, TBl> {
+    /// Returns the parent hash of the announced block.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        self.inner.parent_hash()
+    }
+
+    /// Returns the height of the announced block.
+    pub fn height(&self) -> u64 {
+        self.inner.height()
+    }
+
+    /// Returns the hash of the announced block.
+    pub fn hash(&self) -> &[u8; 32] {
+        self.inner.hash()
+    }
+
     /// Gives access to the user data of the block.
     pub fn user_data_mut(&mut self) -> &mut TBl {
         // TODO: /!\
@@ -1645,6 +1660,21 @@ pub struct AnnouncedBlockUnknown<'a, TRq, TSrc, TBl> {
 }
 
 impl<'a, TRq, TSrc, TBl> AnnouncedBlockUnknown<'a, TRq, TSrc, TBl> {
+    /// Returns the parent hash of the announced block.
+    pub fn parent_hash(&self) -> &[u8; 32] {
+        self.inner.parent_hash()
+    }
+
+    /// Returns the height of the announced block.
+    pub fn height(&self) -> u64 {
+        self.inner.height()
+    }
+
+    /// Returns the hash of the announced block.
+    pub fn hash(&self) -> &[u8; 32] {
+        self.inner.hash()
+    }
+
     /// Inserts the block in the state machine and keeps track of the fact that this source knows
     /// this block.
     ///
