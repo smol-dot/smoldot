@@ -2167,7 +2167,6 @@ async fn run_background<TPlat: PlatformRef>(
                 );
 
                 // Start the request.
-                // TODO: cancel request immediately if result_tx closes
                 background.progress_runtime_call_requests.push(Box::pin({
                     let call_proof_request_future =
                         background.network_service.clone().call_proof_request(
