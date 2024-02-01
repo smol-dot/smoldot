@@ -133,8 +133,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
         // Yield at every loop in order to provide better tasks granularity.
         futures_lite::future::yield_now().await;
 
-        // TODO: handle obsolete requests
-
         // Now waiting for some event to happen: a network event, a request from the frontend
         // of the sync service, or a request being finished.
         enum WakeUpReason {
@@ -146,6 +144,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
             ForegroundMessage(ToBackground),
             ForegroundClosed,
             StartRequest(all::SourceId, all::DesiredRequest),
+            ObsoleteRequest(all::RequestId),
             RequestFinished(all::RequestId, Result<RequestOutcome, future::Aborted>),
             WarpSyncTakingLongTimeWarning,
         }
@@ -211,6 +210,12 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         .find(|(source_id, _, _)| s.source_num_ongoing_requests(*source_id) == 0)
                     {
                         return WakeUpReason::StartRequest(source_id, request_detail);
+                    }
+
+                    // There might be requests that are no longer necessary for a reason or
+                    // another.
+                    if let Some(request_id) = s.obsolete_requests().next() {
+                        return WakeUpReason::ObsoleteRequest(request_id);
                     }
 
                     // TODO: eventually, process_one() shouldn't take ownership of the AllForks
@@ -1212,6 +1217,16 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     .await;
 
                 sync.remove_request(request_id);
+            }
+
+            WakeUpReason::ObsoleteRequest(request_id) => {
+                // We are no longer interested in the answer to that request.
+                let Some(sync) = &mut task.sync else {
+                    unreachable!()
+                };
+
+                let abort_handle = sync.remove_request(request_id);
+                abort_handle.abort();
             }
 
             WakeUpReason::StartRequest(
