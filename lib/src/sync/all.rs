@@ -1188,6 +1188,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
+    // TODO: refactor this function so that the user can know the state of each block
     pub fn blocks_request_response(
         &mut self,
         request_id: RequestId,
