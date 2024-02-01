@@ -42,6 +42,7 @@ use crate::{
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
     iter,
+    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,
@@ -1037,12 +1038,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Injects a block announcement made by a source into the state machine.
+    ///
+    /// > **Note**: This information is normally reported by the source itself. In the case of a
+    /// >           a networking peer, call this when the source sent a block announce.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
     pub fn block_announce(
         &mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome {
+    ) -> BlockAnnounceOutcome<TRq, TSrc, TBl> {
         let Some(&SourceMapping {
             all_forks: inner_source_id,
             ..
@@ -1063,14 +1072,23 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 announce_block_height,
                 finalized_block_height,
             },
-            all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
-                source_update.insert_and_update_source(None);
-                BlockAnnounceOutcome::StoredForLater // TODO: arbitrary
+            all_forks::BlockAnnounceOutcome::Unknown(inner) => {
+                BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
+                    inner,
+                    marker: PhantomData,
+                })
             }
-            all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
-            | all_forks::BlockAnnounceOutcome::Known(source_update) => {
-                source_update.update_source_and_block();
-                BlockAnnounceOutcome::StoredForLater // TODO: arbitrary
+            all_forks::BlockAnnounceOutcome::Known(inner) => {
+                BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
+                    inner,
+                    marker: PhantomData,
+                })
+            }
+            all_forks::BlockAnnounceOutcome::AlreadyInChain(inner) => {
+                BlockAnnounceOutcome::AlreadyInChain(AnnouncedBlockKnown {
+                    inner,
+                    marker: PhantomData,
+                })
             }
             all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                 BlockAnnounceOutcome::InvalidHeader(error)
@@ -1561,35 +1579,79 @@ pub struct Justification {
 }
 
 /// Outcome of calling [`AllSync::block_announce`].
-pub enum BlockAnnounceOutcome {
-    /// Header is ready to be verified. Calling [`AllSync::process_one`] might yield that block.
-    HeaderVerify,
-
+pub enum BlockAnnounceOutcome<'a, TRq, TSrc, TBl> {
     /// Announced block is too old to be part of the finalized chain.
     ///
     /// It is assumed that all sources will eventually agree on the same finalized chain. Blocks
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
+    ///
+    /// If the announced block was the source's best block, the state machine has been updated to
+    /// take this information into account.
     TooOld {
         /// Height of the announced block.
         announce_block_height: u64,
         /// Height of the currently finalized block.
         finalized_block_height: u64,
     },
+
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
-    AlreadyInChain,
-    /// Announced block is known to not be a descendant of the finalized block.
-    NotFinalizedChain,
-    /// Header cannot be verified now because its parent hasn't been verified yet. The block has
-    /// been stored for later. See [`Config::max_disjoint_headers`].
-    StoredForLater,
+    AlreadyInChain(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
+
+    /// Announced block is already known by the state machine but hasn't been verified yet.
+    Known(AnnouncedBlockKnown<'a, TRq, TSrc, TBl>),
+
+    /// Announced block isn't in the state machine.
+    Unknown(AnnouncedBlockUnknown<'a, TRq, TSrc, TBl>),
+
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
+}
 
-    /// Header cannot be verified now and has been silently discarded.
-    Discarded,
+/// See [`BlockAnnounceOutcome`] and [`AllSync::block_announce`].
+#[must_use]
+pub struct AnnouncedBlockKnown<'a, TRq, TSrc, TBl> {
+    inner:
+        all_forks::AnnouncedBlockKnown<'a, Option<TBl>, AllForksRequestExtra, AllForksSourceExtra>,
+    marker: PhantomData<(TSrc, TRq)>,
+}
+
+impl<'a, TRq, TSrc, TBl> AnnouncedBlockKnown<'a, TRq, TSrc, TBl> {
+    /// Gives access to the user data of the block.
+    pub fn user_data_mut(&mut self) -> &mut TBl {
+        // TODO: /!\
+        todo!() // self.inner.user_data_mut()
+    }
+
+    /// Updates the state machine to keep track of the fact that this source knows this block.
+    /// If the announced block is the source's best block, also updates this information.
+    pub fn update_source_and_block(self) {
+        self.inner.update_source_and_block()
+    }
+}
+
+/// See [`BlockAnnounceOutcome`] and [`AllForksSync::block_announce`].
+#[must_use]
+pub struct AnnouncedBlockUnknown<'a, TRq, TSrc, TBl> {
+    inner: all_forks::AnnouncedBlockUnknown<
+        'a,
+        Option<TBl>,
+        AllForksRequestExtra,
+        AllForksSourceExtra,
+    >,
+    marker: PhantomData<(TSrc, TRq)>,
+}
+
+impl<'a, TRq, TSrc, TBl> AnnouncedBlockUnknown<'a, TRq, TSrc, TBl> {
+    /// Inserts the block in the state machine and keeps track of the fact that this source knows
+    /// this block.
+    ///
+    /// If the announced block is the source's best block, also updates this information.
+    pub fn insert_and_update_source(self, user_data: TBl) {
+        self.inner.insert_and_update_source(Some(user_data))
+    }
 }
 
 /// Response to a GrandPa warp sync request.
