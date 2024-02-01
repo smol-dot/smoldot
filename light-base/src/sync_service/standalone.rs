@@ -765,6 +765,16 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                         decoded.scale_encoded_header.to_owned(),
                         decoded.is_best,
                     ) {
+                    all::BlockAnnounceOutcome::TooOld { .. } => {}
+                    all::BlockAnnounceOutcome::AlreadyVerified(known) => {
+                        known.update_source_and_block();
+                    }
+                    all::BlockAnnounceOutcome::AlreadyPending(known) => {
+                        known.update_source_and_block();
+                    }
+                    all::BlockAnnounceOutcome::Unknown(unknown) => {
+                        unknown.insert_and_update_source(());
+                    }
                     all::BlockAnnounceOutcome::InvalidHeader(_) => {
                         task.network_service
                             .ban_and_disconnect(
@@ -774,7 +784,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             )
                             .await;
                     }
-                    _ => {}
                 }
             }
 

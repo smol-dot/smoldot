@@ -1436,8 +1436,10 @@ impl SyncBackground {
                     // TODO: log the outcome
                     match self.sync.block_announce(id, scale_encoded_header, is_best) {
                         all::BlockAnnounceOutcome::TooOld { .. } => {}
-                        all::BlockAnnounceOutcome::AlreadyVerified(_)
-                        | all::BlockAnnounceOutcome::AlreadyPending(_) => {}
+                        all::BlockAnnounceOutcome::AlreadyVerified(known)
+                        | all::BlockAnnounceOutcome::AlreadyPending(known) => {
+                            known.update_source_and_block();
+                        }
                         all::BlockAnnounceOutcome::Unknown(unknown) => {
                             unknown.insert_and_update_source(NonFinalizedBlock::NotVerified)
                         }
