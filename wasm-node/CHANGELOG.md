@@ -5,6 +5,7 @@
 ### Fixed
 
 - The `rpc_methods` JSON-RPC function now properly returns an array of strings. ([#1647](https://github.com/smol-dot/smoldot/pull/1647))
+- The warp syncing process no longer repeats itself every 32 blocks, which was causing unnecessary bandwidth usage.
 
 ## 2.0.20 - 2024-01-30
 

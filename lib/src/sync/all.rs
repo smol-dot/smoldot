@@ -2214,7 +2214,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     /// A randomness seed must be provided and will be used during the verification. Note that the
     /// verification is nonetheless deterministic.
     pub fn perform(
-        self,
+        mut self,
         randomness_seed: [u8; 32],
     ) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
         let (all_forks, outcome) = match self.inner.perform(randomness_seed) {
@@ -2225,22 +2225,28 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                     pruned_blocks,
                     updates_best_block,
                 },
-            ) => (
-                sync,
-                // TODO: weird conversions
-                FinalityProofVerifyOutcome::NewFinalized {
-                    finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
-                        .into_iter()
-                        .map(|b| Block {
-                            header: b.scale_encoded_header,
-                            block_hash: b.block_hash,
-                            user_data: b.user_data.unwrap(),
-                        })
-                        .collect(),
-                    pruned_blocks: pruned_blocks.into_iter().map(|b| b.block_hash).collect(),
-                    updates_best_block,
-                },
-            ),
+            ) => {
+                if let Some(warp_sync) = &mut self.warp_sync {
+                    warp_sync.set_chain_information(sync.as_chain_information())
+                }
+
+                (
+                    sync,
+                    // TODO: weird conversions
+                    FinalityProofVerifyOutcome::NewFinalized {
+                        finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
+                            .into_iter()
+                            .map(|b| Block {
+                                header: b.scale_encoded_header,
+                                block_hash: b.block_hash,
+                                user_data: b.user_data.unwrap(),
+                            })
+                            .collect(),
+                        pruned_blocks: pruned_blocks.into_iter().map(|b| b.block_hash).collect(),
+                        updates_best_block,
+                    },
+                )
+            }
             (sync, all_forks::FinalityProofVerifyOutcome::AlreadyFinalized) => {
                 (sync, FinalityProofVerifyOutcome::AlreadyFinalized)
             }

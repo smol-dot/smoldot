@@ -553,6 +553,44 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         (&self.verified_chain_information).into()
     }
 
+    /// Modifies the chain information known to be valid.
+    pub fn set_chain_information(&mut self, chain_information: ValidChainInformationRef) {
+        // The implementation simply resets the state machine, apart from the fragment download
+        // and verification queue.
+        // TODO: what if the new chain doesn't support grandpa?
+        if self.warped_header_number <= chain_information.as_ref().finalized_block_header.number {
+            self.warped_header = chain_information
+                .as_ref()
+                .finalized_block_header
+                .scale_encoding_vec(self.block_number_bytes);
+            self.warped_header_hash = chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(self.block_number_bytes);
+            self.warped_header_state_root =
+                *chain_information.as_ref().finalized_block_header.state_root;
+            self.warped_header_extrinsics_root = *chain_information
+                .as_ref()
+                .finalized_block_header
+                .extrinsics_root;
+            self.warped_header_number = chain_information.as_ref().finalized_block_header.number;
+            self.warped_finality = chain_information.as_ref().finality.into();
+            self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
+
+            self.verified_chain_information = chain_information.into();
+            self.runtime_calls =
+                runtime_calls_default_value(self.verified_chain_information.as_ref().consensus);
+
+            self.runtime_download = RuntimeDownload::NotStarted {
+                hint_doesnt_match: false,
+            };
+
+            if !matches!(self.body_download, BodyDownload::NotNeeded) {
+                self.body_download = BodyDownload::NotStarted;
+            }
+        }
+    }
+
     /// Returns the current status of the warp syncing.
     pub fn status(&self) -> Status<TSrc> {
         match &self.runtime_download {
