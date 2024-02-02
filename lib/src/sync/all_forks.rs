@@ -451,18 +451,25 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }
 
     /// Returns the header of the finalized block.
-    pub fn finalized_block_header(&self) -> header::HeaderRef {
-        self.chain
-            .as_chain_information()
-            .as_ref()
-            .finalized_block_header
+    pub fn finalized_block_header(&self) -> &[u8] {
+        self.chain.finalized_block_header()
+    }
+
+    /// Returns the height of the finalized block.
+    pub fn finalized_block_number(&self) -> u64 {
+        self.chain.finalized_block_height()
+    }
+
+    /// Returns the hash of the finalized block.
+    pub fn finalized_block_hash(&self) -> &[u8; 32] {
+        self.chain.finalized_block_hash()
     }
 
     /// Returns the header of the best block.
     ///
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
-    pub fn best_block_header(&self) -> header::HeaderRef {
+    pub fn best_block_header(&self) -> &[u8] {
         self.chain.best_block_header()
     }
 
@@ -471,14 +478,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_number(&self) -> u64 {
-        self.chain.best_block_header().number
+        self.chain.best_block_height()
     }
 
     /// Returns the hash of the best block.
     ///
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
-    pub fn best_block_hash(&self) -> [u8; 32] {
+    pub fn best_block_hash(&self) -> &[u8; 32] {
         self.chain.best_block_hash()
     }
 
@@ -525,8 +532,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Panics if the block wasn't present in the data structure.
     ///
     pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
-        if let Some(block) = self.chain.non_finalized_block_by_hash(hash) {
-            return block.into_user_data();
+        if let Some(block) = self.chain.non_finalized_block_user_data_mut(hash) {
+            return block;
         }
 
         &mut self
@@ -546,7 +553,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> AddSource<TBl, TRq, TSrc> {
-        if best_block_number <= self.chain.finalized_block_header().number {
+        if best_block_number <= self.chain.finalized_block_height() {
             return AddSource::OldBestBlock(AddSourceOldBlock {
                 inner: self,
                 best_block_hash,
@@ -554,10 +561,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             });
         }
 
-        let best_block_already_verified = self
-            .chain
-            .non_finalized_block_by_hash(&best_block_hash)
-            .is_some();
+        let best_block_already_verified = self.chain.contains_non_finalized_block(&best_block_hash);
         let best_block_in_disjoints_list = self
             .inner
             .blocks
@@ -872,7 +876,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // assumed that this source is simply late compared to the local node, and that the block
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
-        if announced_header_number <= self.chain.finalized_block_header().number {
+        if announced_header_number <= self.chain.finalized_block_height() {
             // Even if the block is below the finalized block, we still need to set it as the
             // best block of this source, if anything for API consistency purposes.
             if is_best {
@@ -885,7 +889,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
             return BlockAnnounceOutcome::TooOld {
                 announce_block_height: announced_header_number,
-                finalized_block_height: self.chain.finalized_block_header().number,
+                finalized_block_height: self.chain.finalized_block_height(),
             };
         }
 
@@ -999,7 +1003,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // that the block that a justification targets has already been verified.
         // TODO: revisit that ^ as advancing finality should have priority over advancing the chain
         let block_to_verify = self.inner.blocks.unverified_leaves().find(|block| {
-            block.parent_block_hash == self.chain.finalized_block_hash()
+            block.parent_block_hash == *self.chain.finalized_block_hash()
                 || self
                     .chain
                     .contains_non_finalized_block(&block.parent_block_hash)
@@ -1148,7 +1152,7 @@ impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
         // assumed that this source is simply late compared to the local node, and that the block
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
-        if decoded_header.number <= self.inner.chain.finalized_block_header().number {
+        if decoded_header.number <= self.inner.chain.finalized_block_height() {
             return Err(AncestrySearchResponseError::TooOld);
         }
 
@@ -1186,8 +1190,8 @@ impl<'a, TBl, TRq, TSrc> FinishRequest<'a, TBl, TRq, TSrc> {
 
         // Block is not part of the finalized chain.
         // TODO: also give possibility to update user data
-        if decoded_header.number == self.inner.chain.finalized_block_header().number + 1
-            && *decoded_header.parent_hash != self.inner.chain.finalized_block_hash()
+        if decoded_header.number == self.inner.chain.finalized_block_height() + 1
+            && *decoded_header.parent_hash != *self.inner.chain.finalized_block_hash()
         {
             // TODO: remove_verify_failed
             // Block isn't part of the finalized chain.
@@ -1313,12 +1317,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
     /// Gives access to the user data of the block.
     pub fn user_data_mut(&mut self) -> &mut TBl {
         if self.is_verified {
-            self.inner
-                .inner
-                .chain
-                .non_finalized_block_by_hash(&self.inner.expected_next_hash)
-                .unwrap()
-                .into_user_data()
+            &mut self.inner.inner.chain[&self.inner.expected_next_hash]
         } else {
             &mut self
                 .inner
@@ -1352,12 +1351,7 @@ impl<'a, TBl, TRq, TSrc> AddBlockOccupied<'a, TBl, TRq, TSrc> {
 
         let former_user_data = if self.is_verified {
             mem::replace(
-                self.inner
-                    .inner
-                    .chain
-                    .non_finalized_block_by_hash(&self.inner.expected_next_hash)
-                    .unwrap()
-                    .into_user_data(),
+                &mut self.inner.inner.chain[&self.inner.expected_next_hash],
                 user_data,
             )
         } else {
@@ -1555,11 +1549,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     /// Gives access to the user data of the block.
     pub fn user_data_mut(&mut self) -> &mut TBl {
         if self.is_in_chain {
-            self.inner
-                .chain
-                .non_finalized_block_by_hash(&self.announced_header_hash)
-                .unwrap()
-                .into_user_data()
+            &mut self.inner.chain[&self.announced_header_hash]
         } else {
             &mut self
                 .inner
@@ -1619,8 +1609,8 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
 
             // Mark block as bad if it is not part of the finalized chain.
             // This might not have been known before, as the header might not have been known.
-            if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
-                && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
+            if self.announced_header_number == self.inner.chain.finalized_block_height() + 1
+                && self.announced_header_parent_hash != *self.inner.chain.finalized_block_hash()
             {
                 self.inner.inner.blocks.mark_unverified_block_as_bad(
                     self.announced_header_number,
@@ -1837,9 +1827,9 @@ impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
         if let Some(block_access) = self
             .inner
             .chain
-            .non_finalized_block_by_hash(&self.best_block_hash)
+            .non_finalized_block_user_data_mut(&self.best_block_hash)
         {
-            block_access.into_user_data()
+            block_access
         } else {
             &mut self
                 .inner
@@ -2116,19 +2106,14 @@ impl<TBl, TRq, TSrc> HeaderVerifySuccess<TBl, TRq, TSrc> {
     }
 
     /// Returns the SCALE-encoded header of the block that was verified.
-    // TODO: return &[u8] instead
-    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
-        if self.block_to_verify.parent_block_hash == self.parent.chain.finalized_block_hash() {
-            self.parent
-                .chain
-                .finalized_block_header()
-                .scale_encoding_vec(self.parent.chain.block_number_bytes())
+    pub fn parent_scale_encoded_header(&self) -> &[u8] {
+        if self.block_to_verify.parent_block_hash == *self.parent.chain.finalized_block_hash() {
+            self.parent.chain.finalized_block_header()
         } else {
             self.parent
                 .chain
                 .non_finalized_block_header(&self.block_to_verify.parent_block_hash)
                 .unwrap()
-                .to_owned()
         }
     }
 

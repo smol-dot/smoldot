@@ -287,7 +287,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns the header of the finalized block.
-    pub fn finalized_block_header(&self) -> header::HeaderRef {
+    pub fn finalized_block_header(&self) -> &[u8] {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -295,11 +295,29 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         all_forks.finalized_block_header()
     }
 
+    /// Returns the height of the finalized block.
+    pub fn finalized_block_number(&self) -> u64 {
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.finalized_block_number()
+    }
+
+    /// Returns the hash of the finalized block.
+    pub fn finalized_block_hash(&self) -> &[u8; 32] {
+        let Some(all_forks) = &self.all_forks else {
+            unreachable!()
+        };
+
+        all_forks.finalized_block_hash()
+    }
+
     /// Returns the header of the best block.
     ///
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
-    pub fn best_block_header(&self) -> header::HeaderRef {
+    pub fn best_block_header(&self) -> &[u8] {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -323,7 +341,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
-    pub fn best_block_hash(&self) -> [u8; 32] {
+    pub fn best_block_hash(&self) -> &[u8; 32] {
         let Some(all_forks) = &self.all_forks else {
             unreachable!()
         };
@@ -2134,7 +2152,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     }
 
     /// Returns the SCALE-encoded header of the parent of the block.
-    pub fn parent_scale_encoded_header(&self) -> Vec<u8> {
+    pub fn parent_scale_encoded_header(&self) -> &[u8] {
         self.inner.parent_scale_encoded_header()
     }
 

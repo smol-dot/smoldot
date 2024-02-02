@@ -334,34 +334,44 @@ impl<T> NonFinalizedTree<T> {
     }
 
     /// Returns the header of the latest finalized block.
-    pub fn finalized_block_header(&self) -> header::HeaderRef {
-        header::decode(&self.finalized_block_header, self.block_number_bytes).unwrap()
+    pub fn finalized_block_header(&self) -> &[u8] {
+        &self.finalized_block_header
     }
 
     /// Returns the hash of the latest finalized block.
-    pub fn finalized_block_hash(&self) -> [u8; 32] {
-        self.finalized_block_hash
+    pub fn finalized_block_hash(&self) -> &[u8; 32] {
+        &self.finalized_block_hash
+    }
+
+    /// Returns the height of the latest finalized block.
+    pub fn finalized_block_height(&self) -> u64 {
+        self.finalized_block_number
     }
 
     /// Returns the header of the best block.
-    pub fn best_block_header(&self) -> header::HeaderRef {
+    pub fn best_block_header(&self) -> &[u8] {
         if let Some((_, index)) = self.blocks_by_best_score.last_key_value() {
-            header::decode(
-                &self.blocks.get(*index).unwrap().header,
-                self.block_number_bytes,
-            )
-            .unwrap()
+            &self.blocks.get(*index).unwrap().header
         } else {
-            header::decode(&self.finalized_block_header, self.block_number_bytes).unwrap()
+            &self.finalized_block_header
         }
     }
 
     /// Returns the hash of the best block.
-    pub fn best_block_hash(&self) -> [u8; 32] {
+    pub fn best_block_hash(&self) -> &[u8; 32] {
         if let Some((_, index)) = self.blocks_by_best_score.last_key_value() {
-            self.blocks.get(*index).unwrap().hash
+            &self.blocks.get(*index).unwrap().hash
         } else {
-            self.finalized_block_hash
+            &self.finalized_block_hash
+        }
+    }
+
+    /// Returns the height of the best block.
+    pub fn best_block_height(&self) -> u64 {
+        if let Some((_, index)) = self.blocks_by_best_score.last_key_value() {
+            self.blocks.get(*index).unwrap().number
+        } else {
+            self.finalized_block_number
         }
     }
 
@@ -442,6 +452,15 @@ impl<T> NonFinalizedTree<T> {
         Some(&self.blocks.get(node_index).unwrap().user_data)
     }
 
+    /// Gives access to the user data of a block stored by the [`NonFinalizedTree`], identified
+    /// by its hash.
+    ///
+    /// Returns `None` if the block can't be found.
+    pub fn non_finalized_block_user_data_mut(&mut self, hash: &[u8; 32]) -> Option<&mut T> {
+        let node_index = *self.blocks_by_hash.get(hash)?;
+        Some(&mut self.blocks.get_mut(node_index).unwrap().user_data)
+    }
+
     /// Returns the SCALE-encoded header of a block stored by the [`NonFinalizedTree`], identified
     /// by its hash.
     ///
@@ -449,15 +468,6 @@ impl<T> NonFinalizedTree<T> {
     pub fn non_finalized_block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
         let node_index = *self.blocks_by_hash.get(hash)?;
         Some(&self.blocks.get(node_index).unwrap().header)
-    }
-
-    /// Gives access to a block stored by the [`NonFinalizedTree`], identified by its hash.
-    pub fn non_finalized_block_by_hash(&mut self, hash: &[u8; 32]) -> Option<BlockAccess<T>> {
-        let node_index = *self.blocks_by_hash.get(hash)?;
-        Some(BlockAccess {
-            tree: self,
-            node_index,
-        })
     }
 }
 
@@ -677,36 +687,4 @@ enum BlockFinality {
         /// If `Some`, the value must always be strictly superior to the attached block's number.
         scheduled_change: Option<(u64, Arc<[header::GrandpaAuthority]>)>,
     },
-}
-
-/// Access to a block's information and hierarchy.
-pub struct BlockAccess<'a, T> {
-    tree: &'a mut NonFinalizedTree<T>,
-    node_index: fork_tree::NodeIndex,
-}
-
-impl<'a, T> BlockAccess<'a, T> {
-    /// Access to the parent block's information and hierarchy. Returns an `Err` containing `self`
-    /// if the parent is the finalized block.
-    pub fn parent_block(self) -> Result<BlockAccess<'a, T>, BlockAccess<'a, T>> {
-        let parent = self.tree.blocks.node_to_root_path(self.node_index).nth(1);
-
-        let parent = match parent {
-            Some(p) => p,
-            None => return Err(self),
-        };
-
-        Ok(BlockAccess {
-            tree: self.tree,
-            node_index: parent,
-        })
-    }
-
-    pub fn into_user_data(self) -> &'a mut T {
-        &mut self.tree.blocks.get_mut(self.node_index).unwrap().user_data
-    }
-
-    pub fn user_data_mut(&mut self) -> &mut T {
-        &mut self.tree.blocks.get_mut(self.node_index).unwrap().user_data
-    }
 }
