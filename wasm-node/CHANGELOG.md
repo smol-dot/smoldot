@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### Fixed
-
-- The `rpc_methods` JSON-RPC function now properly returns an array of strings. ([#1647](https://github.com/smol-dot/smoldot/pull/1647))
-
 ## 2.0.20 - 2024-01-30
 
 ### Fixed
