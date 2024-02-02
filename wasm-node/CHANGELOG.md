@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Clarify the value of `isSyncing` returned by `system_health`. The value will be equal to `false` if no peer that smoldot is connected to is more than 10 blocks ahead, and that the highest block would runtime code has been downloaded is no more than 12 blocks ahead of the highest block of the local chain. ([#1658](https://github.com/smol-dot/smoldot/pull/1658))
+
 ### Fixed
 
 - The warp syncing process no longer repeats itself every 32 blocks, which was causing unnecessary bandwidth and CPU usage. ([#1656](https://github.com/smol-dot/smoldot/pull/1656))
