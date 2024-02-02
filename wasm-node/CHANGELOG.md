@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- The warp syncing process no longer repeats itself every 32 blocks, which was causing unnecessary bandwidth and CPU usage. ([#1656](https://github.com/smol-dot/smoldot/pull/1656))
+
 ## 2.0.20 - 2024-01-30
 
 ### Fixed
