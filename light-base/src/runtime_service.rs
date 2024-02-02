@@ -753,6 +753,9 @@ struct Block {
     /// that it makes sense to cache it.
     hash: [u8; 32],
 
+    /// Height of the block.
+    height: u64,
+
     /// Header of the block in question.
     /// Guaranteed to always be valid for the output best and finalized blocks. Otherwise,
     /// not guaranteed to be valid.
@@ -796,6 +799,7 @@ async fn run_background<TPlat: PlatformRef>(
                     hash: header::hash_from_scale_encoded_header(
                         &config.genesis_block_scale_encoded_header,
                     ),
+                    height: 0,
                     scale_encoded_header: config.genesis_block_scale_encoded_header,
                 },
                 None,
@@ -815,7 +819,6 @@ async fn run_background<TPlat: PlatformRef>(
             to_background: Box::pin(to_background.clone()),
             to_background_tx: to_background_tx.clone(),
             next_subscription_id: 0,
-            best_near_head_of_chain: config.sync_service.is_near_head_of_chain_heuristic().await,
             tree,
             runtimes: slab::Slab::with_capacity(2),
             pending_subscriptions: VecDeque::with_capacity(8),
@@ -1299,10 +1302,6 @@ async fn run_background<TPlat: PlatformRef>(
                 // Additionally, the situation where a subscription is killed but the finalized block
                 // didn't change should be extremely rare anyway.
                 {
-                    // TODO: restore
-                    /*guarded.best_near_head_of_chain =
-                    is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
-
                     background.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
 
                     // TODO: DRY below
@@ -1310,6 +1309,12 @@ async fn run_background<TPlat: PlatformRef>(
                         let finalized_block_hash = header::hash_from_scale_encoded_header(
                             &subscription.finalized_block_scale_encoded_header,
                         );
+                        let finalized_block_height = header::decode(
+                            &subscription.finalized_block_scale_encoded_header,
+                            background.sync_service.block_number_bytes(),
+                        )
+                        .unwrap()
+                        .number; // TODO: consider feeding the information from the sync service?
 
                         let storage_code_len = u64::try_from(
                             finalized_block_runtime
@@ -1366,6 +1371,7 @@ async fn run_background<TPlat: PlatformRef>(
                             pinned_blocks: BTreeMap::new(),
                             finalized_block: Block {
                                 hash: finalized_block_hash,
+                                height: finalized_block_height,
                                 scale_encoded_header: subscription
                                     .finalized_block_scale_encoded_header,
                             },
@@ -1399,6 +1405,12 @@ async fn run_background<TPlat: PlatformRef>(
                                             hash: header::hash_from_scale_encoded_header(
                                                 &block.scale_encoded_header,
                                             ),
+                                            height: header::decode(
+                                                &block.scale_encoded_header,
+                                                background.sync_service.block_number_bytes(),
+                                            )
+                                            .unwrap()
+                                            .number, // TODO: consider feeding the information from the sync service?
                                             scale_encoded_header: block.scale_encoded_header,
                                         },
                                         parent_index,
@@ -1423,6 +1435,12 @@ async fn run_background<TPlat: PlatformRef>(
                                         hash: header::hash_from_scale_encoded_header(
                                             &subscription.finalized_block_scale_encoded_header,
                                         ),
+                                        height: header::decode(
+                                            &subscription.finalized_block_scale_encoded_header,
+                                            background.sync_service.block_number_bytes(),
+                                        )
+                                        .unwrap()
+                                        .number, // TODO: consider feeding the information from the sync service?
                                         scale_encoded_header: subscription
                                             .finalized_block_scale_encoded_header,
                                     },
@@ -1449,6 +1467,12 @@ async fn run_background<TPlat: PlatformRef>(
                                             hash: header::hash_from_scale_encoded_header(
                                                 &block.scale_encoded_header,
                                             ),
+                                            height: header::decode(
+                                                &block.scale_encoded_header,
+                                                background.sync_service.block_number_bytes(),
+                                            )
+                                            .unwrap()
+                                            .number, // TODO: consider feeding the information from the sync service?
                                             scale_encoded_header: block.scale_encoded_header,
                                         },
                                         Some(parent_index),
@@ -1753,13 +1777,28 @@ async fn run_background<TPlat: PlatformRef>(
                     "foreground-is-near-head-of-chain-heuristic"
                 );
 
-                // The runtime service adds a delay between the moment a best block is reported by
-                // the sync service and the moment it is reported by the runtime service.
-                // Because of this, any "far from head of chain" to "near head of chain" transition
-                // must take that delay into account. The other way around ("near" to "far") is
-                // unaffected.
+                // If we aren't subscribed to the sync service yet, we notify that we are not
+                // near the head of the chain.
+                if !background.blocks_stream.is_none() {
+                    let _ = result_tx.send(false);
+                    continue;
+                }
 
-                // If the sync service is far from the head, the runtime service is also far.
+                // Check whether any runtime has been downloaded yet. If not, we notify that
+                // we're not near the head of the chain.
+                let Tree::FinalizedBlockRuntimeKnown {
+                    tree,
+                    finalized_block,
+                    ..
+                } = &background.tree
+                else {
+                    let _ = result_tx.send(false);
+                    continue;
+                };
+
+                // The runtime service head might be close to the sync service head, but if the
+                // sync service is far away from the head of the chain, then the runtime service
+                // is necessarily also far away.
                 if !background
                     .sync_service
                     .is_near_head_of_chain_heuristic()
@@ -1769,11 +1808,25 @@ async fn run_background<TPlat: PlatformRef>(
                     continue;
                 }
 
-                // If the sync service is near, report the result of
-                // `is_near_head_of_chain_heuristic()` when called at the latest best block that
-                // the runtime service reported through its API, to make sure that we don't report
-                // "near" while having reported only blocks that were far.
-                let _ = result_tx.send(background.best_near_head_of_chain);
+                // If the input best block (i.e. what the sync service feeds us) is equal to
+                // output finalized block (i.e. what the runtime service has downloaded), we are
+                // at the very head of the chain.
+                let Some(input_best) = tree.input_best_block_index() else {
+                    let _ = result_tx.send(true);
+                    continue;
+                };
+
+                // We consider ourselves as being at the head of the chain if the
+                // distance between the output tree best (i.e. whose runtime has
+                // been downloaded) and the input tree best (i.e. what the sync service
+                // feeds us) is smaller than a certain number of blocks.
+                // Note that the input best can have a smaller block height than the
+                // output, for example in case of reorg.
+                let is_near = tree[input_best].height.saturating_sub(
+                    tree.output_best_block_index()
+                        .map_or(finalized_block.height, |(idx, _)| tree[idx].height),
+                ) <= 12;
+                let _ = result_tx.send(is_near);
             }
 
             WakeUpReason::ToBackground(ToBackground::UnpinBlock {
@@ -2227,16 +2280,6 @@ async fn run_background<TPlat: PlatformRef>(
                     );
                 }
 
-                let near_head_of_chain = background
-                    .sync_service
-                    .is_near_head_of_chain_heuristic()
-                    .await;
-
-                // TODO: note that this code is never reached for parachains
-                if new_block.is_new_best {
-                    background.best_near_head_of_chain = near_head_of_chain;
-                }
-
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
                         tree,
@@ -2260,6 +2303,12 @@ async fn run_background<TPlat: PlatformRef>(
                                 hash: header::hash_from_scale_encoded_header(
                                     &new_block.scale_encoded_header,
                                 ),
+                                height: header::decode(
+                                    &new_block.scale_encoded_header,
+                                    background.sync_service.block_number_bytes(),
+                                )
+                                .unwrap()
+                                .number, // TODO: consider feeding the information from the sync service?
                                 scale_encoded_header: new_block.scale_encoded_header,
                             },
                             parent_index,
@@ -2279,6 +2328,12 @@ async fn run_background<TPlat: PlatformRef>(
                                 hash: header::hash_from_scale_encoded_header(
                                     &new_block.scale_encoded_header,
                                 ),
+                                height: header::decode(
+                                    &new_block.scale_encoded_header,
+                                    background.sync_service.block_number_bytes(),
+                                )
+                                .unwrap()
+                                .number, // TODO: consider feeding the information from the sync service?
                                 scale_encoded_header: new_block.scale_encoded_header,
                             },
                             Some(parent_index),
@@ -2352,13 +2407,6 @@ async fn run_background<TPlat: PlatformRef>(
                     block_hash = HashDisplay(&hash)
                 );
 
-                let near_head_of_chain = background
-                    .sync_service
-                    .is_near_head_of_chain_heuristic()
-                    .await;
-
-                background.best_near_head_of_chain = near_head_of_chain;
-
                 match &mut background.tree {
                     Tree::FinalizedBlockRuntimeKnown {
                         finalized_block,
@@ -2409,9 +2457,6 @@ async fn run_background<TPlat: PlatformRef>(
                 }
                 .format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash)))
                 .to_string();
-
-                // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
-                background.best_near_head_of_chain = true;
 
                 // Try to find an existing runtime identical to the one that has just been
                 // downloaded. This loop is `O(n)`, but given that we expect this list to very
@@ -2602,10 +2647,6 @@ struct Background<TPlat: PlatformRef> {
     /// To avoid race conditions, subscription IDs are never used, even if we switch back to
     /// [`Tree::FinalizedBlockRuntimeUnknown`].
     next_subscription_id: u64,
-
-    /// Return value of calling [`sync_service::SyncService::is_near_head_of_chain_heuristic`]
-    /// after the latest best block update.
-    best_near_head_of_chain: bool,
 
     /// List of runtimes referenced by the tree in [`Tree`] and by
     /// [`Tree::FinalizedBlockRuntimeKnown::pinned_blocks`].

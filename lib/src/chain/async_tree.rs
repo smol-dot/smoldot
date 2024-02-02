@@ -176,6 +176,10 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
     /// [`AsyncOpState::Finished`].
     input_finalized_index: Option<fork_tree::NodeIndex>,
 
+    /// Index within [`AsyncTree::non_finalized_blocks`] of the current "input" best block.
+    /// `None` if the input best block is the output finalized block.
+    input_best_block_index: Option<fork_tree::NodeIndex>,
+
     /// Incremented by one and stored within [`Block::input_best_block_weight`].
     input_best_block_next_weight: u32,
 
@@ -202,6 +206,7 @@ where
             output_finalized_async_user_data: config.finalized_async_user_data,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             input_finalized_index: None,
+            input_best_block_index: None,
             input_best_block_next_weight: 2,
             output_finalized_block_weight: 1, // `0` is reserved for blocks who are never best.
             next_async_op_id: AsyncOpId(0),
@@ -254,6 +259,7 @@ where
                 user_data: block.user_data,
             }),
             input_finalized_index: self.input_finalized_index,
+            input_best_block_index: self.input_best_block_index,
             input_best_block_next_weight: self.input_best_block_next_weight,
             output_finalized_block_weight: self.output_finalized_block_weight,
             next_async_op_id: self.next_async_op_id,
@@ -358,6 +364,14 @@ where
     ///
     pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
         self.non_finalized_blocks.children(node)
+    }
+
+    /// Returns the [`NodeIndex`] of the current "input" best block.
+    ///
+    /// Returns `None` if there is no best block. In terms of logic, this means that the best block
+    /// is the output finalized block, which is out of scope of this data structure.
+    pub fn input_best_block_index(&self) -> Option<NodeIndex> {
+        self.input_best_block_index
     }
 
     /// Returns the list of all non-finalized blocks that have been inserted, both input and
@@ -765,14 +779,18 @@ where
         };
 
         // Insert the new block.
-        self.non_finalized_blocks.insert(
+        let new_index = self.non_finalized_blocks.insert(
             parent_index,
             Block {
                 user_data: block,
                 async_op,
                 input_best_block_weight,
             },
-        )
+        );
+
+        self.input_best_block_index = Some(new_index);
+
+        new_index
     }
 
     /// Updates the state machine to take into account that the best block of the input has been
@@ -796,6 +814,8 @@ where
             (None, Some(_)) => true,
             (None, None) => true,
         });
+
+        self.input_best_block_index = new_best_block;
 
         // If necessary, update the weight of the block.
         match new_best_block
@@ -845,6 +865,7 @@ where
             .is_ancestor(node_to_finalize, new_best_block));
 
         self.input_finalized_index = Some(node_to_finalize);
+        self.input_best_block_index = Some(new_best_block);
 
         // If necessary, update the weight of the block.
         match &mut self
