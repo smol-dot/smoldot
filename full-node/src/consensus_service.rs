@@ -1002,7 +1002,7 @@ impl SyncBackground {
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
                                 let source_id = if block_number
-                                    <= self.sync.finalized_block_header().number
+                                    <= self.sync.finalized_block_number()
                                 {
                                     self.sync
                                         .sources()
@@ -1039,7 +1039,7 @@ impl SyncBackground {
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
                                 let source_id = if block_number
-                                    <= self.sync.finalized_block_header().number
+                                    <= self.sync.finalized_block_number()
                                 {
                                     self.sync
                                         .sources()
@@ -1097,15 +1097,14 @@ impl SyncBackground {
                                 // same finalized block, it is guaranteed that the missing item are
                                 // in the finalized block or above.
                                 debug_assert!(
-                                    missing_item.number
-                                        >= self.sync.finalized_block_header().number
+                                    missing_item.number >= self.sync.finalized_block_number()
                                 );
 
                                 // Choose which source to query. We have to use an `if` because
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
                                 let source_id = if missing_item.number
-                                    <= self.sync.finalized_block_header().number
+                                    <= self.sync.finalized_block_number()
                                 {
                                     let Some(source_id) = self
                                         .sync
@@ -1221,17 +1220,7 @@ impl SyncBackground {
                 }) => {
                     let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
-                    // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
-                    let finalized_block_scale_encoded_header = self
-                        .sync
-                        .finalized_block_header()
-                        .scale_encoding_vec(self.sync.block_number_bytes());
-                    let finalized_block_hash = header::hash_from_scale_encoded_header(
-                        &finalized_block_scale_encoded_header,
-                    );
-
                     let non_finalized_blocks_ancestry_order = {
-                        let best_hash = self.sync.best_block_hash();
                         let blocks_in = self
                             .sync
                             .non_finalized_blocks_ancestry_order()
@@ -1258,7 +1247,7 @@ impl SyncBackground {
                             blocks_out.push(BlockNotification {
                                 is_new_best: header::hash_from_scale_encoded_header(
                                     &scale_encoding,
-                                ) == best_hash,
+                                ) == *self.sync.best_block_hash(),
                                 block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
                                 scale_encoded_header: scale_encoding,
                                 runtime_update,
@@ -1271,8 +1260,11 @@ impl SyncBackground {
                     self.blocks_notifications.push(tx);
                     let _ = result_tx.send(SubscribeAll {
                         id: SubscriptionId(0), // TODO:
-                        finalized_block_hash,
-                        finalized_block_scale_encoded_header,
+                        finalized_block_hash: *self.sync.finalized_block_hash(),
+                        finalized_block_scale_encoded_header: self
+                            .sync
+                            .finalized_block_header()
+                            .to_owned(),
                         finalized_block_runtime: self.finalized_runtime.clone(),
                         non_finalized_blocks_ancestry_order,
                         new_blocks,
@@ -1292,13 +1284,10 @@ impl SyncBackground {
 
                 WakeUpReason::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
                     let _ = result_tx.send(SyncState {
-                        best_block_hash: self.sync.best_block_hash(),
+                        best_block_hash: *self.sync.best_block_hash(),
                         best_block_number: self.sync.best_block_number(),
-                        finalized_block_hash: self
-                            .sync
-                            .finalized_block_header()
-                            .hash(self.sync.block_number_bytes()),
-                        finalized_block_number: self.sync.finalized_block_header().number,
+                        finalized_block_hash: *self.sync.finalized_block_hash(),
+                        finalized_block_number: self.sync.finalized_block_number(),
                     });
                 }
                 WakeUpReason::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
@@ -1317,10 +1306,12 @@ impl SyncBackground {
                 }
 
                 WakeUpReason::NetworkLocalChainUpdate => {
-                    let best_hash = self.sync.best_block_hash();
-                    let best_number = self.sync.best_block_number();
                     self.network_service
-                        .set_local_best_block(self.network_chain_id, best_hash, best_number)
+                        .set_local_best_block(
+                            self.network_chain_id,
+                            *self.sync.best_block_hash(),
+                            self.sync.best_block_number(),
+                        )
                         .await;
                 }
 
@@ -1345,7 +1336,7 @@ impl SyncBackground {
                         all_sources
                     };
 
-                    let is_best = self.sync.best_block_hash() == hash;
+                    let is_best = *self.sync.best_block_hash() == hash;
 
                     for source_id in sources_to_announce_to {
                         let peer_id = match &self.sync[source_id] {
@@ -2202,7 +2193,7 @@ impl SyncBackground {
             LogLevel::Debug,
             format!(
                 "block-author-start; parent_hash={}; parent_number={}",
-                HashDisplay(&self.sync.best_block_hash()),
+                HashDisplay(self.sync.best_block_hash()),
                 parent_number,
             ),
         );
@@ -2236,12 +2227,12 @@ impl SyncBackground {
 
         // Actual block production now happening.
         let (new_block_header, new_block_body) = {
-            let parent_hash = self.sync.best_block_hash();
+            let parent_hash = *self.sync.best_block_hash();
             let parent_runtime_arc =
-                if self.sync.best_block_number() != self.sync.finalized_block_header().number {
+                if self.sync.best_block_number() != self.sync.finalized_block_number() {
                     let NonFinalizedBlock::Verified {
                         runtime: parent_runtime_arc,
-                    } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())]
+                    } = &self.sync[(self.sync.best_block_number(), self.sync.best_block_hash())]
                     else {
                         unreachable!()
                     };
@@ -2899,7 +2890,7 @@ impl SyncBackground {
                                 .map(|b| b.block_hash)
                                 .collect::<Vec<_>>(),
                             pruned_blocks_hashes: pruned_blocks.clone(),
-                            best_block_hash: self.sync.best_block_hash(),
+                            best_block_hash: *self.sync.best_block_hash(),
                         });
 
                         (self, true)

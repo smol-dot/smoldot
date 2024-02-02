@@ -326,15 +326,14 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 finalized_storage_code_merkle_value,
                 finalized_body: _,
             }) => {
-                let finalized_header = sync.finalized_block_header();
                 log!(
                     &task.platform,
                     Debug,
                     &task.log_target,
                     format!(
                         "GrandPa warp sync finished to #{} ({})",
-                        finalized_header.number,
-                        HashDisplay(&finalized_header.hash(sync.block_number_bytes()))
+                        sync.finalized_block_number(),
+                        HashDisplay(sync.finalized_block_hash())
                     )
                 );
 
@@ -626,10 +625,8 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                             task.known_finalized_runtime = None;
                         }
                         task.dispatch_all_subscribers(Notification::Finalized {
-                            hash: sync
-                                .finalized_block_header()
-                                .hash(sync.block_number_bytes()),
-                            best_block_hash: sync.best_block_hash(),
+                            hash: *sync.finalized_block_hash(),
+                            best_block_hash: *sync.best_block_hash(),
                         });
 
                         task.sync = Some(sync);
@@ -919,7 +916,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
 
                 let fut = task
                     .network_service
-                    .set_local_best_block(sync.best_block_hash(), sync.best_block_number());
+                    .set_local_best_block(*sync.best_block_hash(), sync.best_block_number());
                 fut.await;
 
                 task.network_up_to_date_best = true;
@@ -946,12 +943,11 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     };
 
                 if let Some(set_id) = grandpa_set_id {
-                    let commit_finalized_height = sync.finalized_block_header().number;
                     task.network_service
                         .set_local_grandpa_state(network::service::GrandpaState {
                             set_id,
                             round_number: 1, // TODO:
-                            commit_finalized_height,
+                            commit_finalized_height: sync.finalized_block_number(),
                         })
                         .await;
                 }
@@ -986,14 +982,13 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 task.all_notifications.push(tx);
 
                 let non_finalized_blocks_ancestry_order = {
-                    let best_hash = sync.best_block_hash();
                     sync.non_finalized_blocks_ancestry_order()
                         .map(|h| {
                             let scale_encoding = h.scale_encoding_vec(sync.block_number_bytes());
                             BlockNotification {
                                 is_new_best: header::hash_from_scale_encoded_header(
                                     &scale_encoding,
-                                ) == best_hash,
+                                ) == *sync.best_block_hash(),
                                 scale_encoded_header: scale_encoding,
                                 parent_hash: *h.parent_hash,
                             }
@@ -1002,9 +997,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 };
 
                 let _ = send_back.send(SubscribeAll {
-                    finalized_block_scale_encoded_header: sync
-                        .finalized_block_header()
-                        .scale_encoding_vec(sync.block_number_bytes()),
+                    finalized_block_scale_encoded_header: sync.finalized_block_header().to_owned(),
                     finalized_block_runtime: if runtime_interest {
                         task.known_finalized_runtime.take()
                     } else {
@@ -1026,8 +1019,7 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                     unreachable!()
                 };
 
-                let finalized_num = sync.finalized_block_header().number;
-                let outcome = if block_number <= finalized_num {
+                let outcome = if block_number <= sync.finalized_block_number() {
                     sync.sources()
                         .filter(|source_id| {
                             let source_best = sync.source_best_block(*source_id);
