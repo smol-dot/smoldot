@@ -119,7 +119,7 @@ jobs:
       # version to use in order to not invalidate the build cache every day. The exact version
       # is completely arbitrary.
     - run: rustup default nightly-2023-07-15
-    - uses: baptiste0928/cargo-install@v2  # This action ensures that the compilation is cached.
+    - uses: baptiste0928/cargo-install@v3  # This action ensures that the compilation is cached.
       with:
         crate: cargo-fuzz
         locked: false   # TODO: `cargo-fuzz` fails to compile with --locked because its Cargo.lock contains very old dependencies
@@ -192,7 +192,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: sudo apt-get update && sudo apt install -y libclang-dev  # Required by cargo-spellcheck
-    - uses: baptiste0928/cargo-install@v2  # This action ensures that the compilation is cached.
+    - uses: baptiste0928/cargo-install@v3  # This action ensures that the compilation is cached.
       with:
         crate: cargo-spellcheck
         version: 0.11.2
