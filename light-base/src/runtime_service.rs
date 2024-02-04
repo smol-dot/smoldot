@@ -839,7 +839,8 @@ async fn run_background<TPlat: PlatformRef>(
             TreeAdvanceFinalizedKnown(async_tree::OutputUpdate<Block, Arc<Runtime>>),
             TreeAdvanceFinalizedUnknown(async_tree::OutputUpdate<Block, Option<Arc<Runtime>>>),
             StartPendingSubscribeAll(ToBackgroundSubscribeAll<TPlat>),
-            Notification(Option<sync_service::Notification>),
+            Notification(sync_service::Notification),
+            SyncServiceSubscriptionReset,
             ToBackground(ToBackground<TPlat>),
             ForegroundClosed,
             RuntimeDownloadFinished(
@@ -862,6 +863,14 @@ async fn run_background<TPlat: PlatformRef>(
             let finalized_block_known =
                 matches!(background.tree, Tree::FinalizedBlockRuntimeKnown { .. });
             let num_runtime_downloads = background.runtime_downloads.len();
+            let any_subscription = match &background.tree {
+                Tree::FinalizedBlockRuntimeKnown {
+                    all_blocks_subscriptions,
+                    ..
+                } => !all_blocks_subscriptions.is_empty(),
+                Tree::FinalizedBlockRuntimeUnknown { .. } => false,
+            };
+            let any_pending_subscription = !background.pending_subscriptions.is_empty();
             async {
                 if finalized_block_known {
                     if let Some(pending_subscription) = background.pending_subscriptions.pop_front()
@@ -876,9 +885,20 @@ async fn run_background<TPlat: PlatformRef>(
             }
             .or(async {
                 if let Some(blocks_stream) = background.blocks_stream.as_mut() {
-                    WakeUpReason::Notification(blocks_stream.next().await)
-                } else {
+                    if !any_subscription && !any_pending_subscription {
+                        WakeUpReason::SyncServiceSubscriptionReset
+                    } else {
+                        blocks_stream.next().await.map_or(
+                            WakeUpReason::SyncServiceSubscriptionReset,
+                            WakeUpReason::Notification,
+                        )
+                    }
+                } else if any_pending_subscription {
+                    // Only start subscribing to the sync service if there is any pending
+                    // runtime service subscription.
                     WakeUpReason::MustSubscribe
+                } else {
+                    future::pending().await
                 }
             })
             .or(async {
@@ -1642,8 +1662,8 @@ async fn run_background<TPlat: PlatformRef>(
                 });
             }
 
-            WakeUpReason::Notification(None) => {
-                // The sync service has reset the subscription.
+            WakeUpReason::SyncServiceSubscriptionReset => {
+                // The sync service subscription has been or must be reset.
                 log!(
                     &background.platform,
                     Trace,
@@ -2245,7 +2265,7 @@ async fn run_background<TPlat: PlatformRef>(
                 }));
             }
 
-            WakeUpReason::Notification(Some(sync_service::Notification::Block(new_block))) => {
+            WakeUpReason::Notification(sync_service::Notification::Block(new_block)) => {
                 // Sync service has reported a new block.
 
                 let same_runtime_as_parent = same_runtime_as_parent(
@@ -2344,10 +2364,10 @@ async fn run_background<TPlat: PlatformRef>(
                 }
             }
 
-            WakeUpReason::Notification(Some(sync_service::Notification::Finalized {
+            WakeUpReason::Notification(sync_service::Notification::Finalized {
                 hash,
                 best_block_hash,
-            })) => {
+            }) => {
                 // Sync service has reported a finalized block.
 
                 log!(
@@ -2394,9 +2414,7 @@ async fn run_background<TPlat: PlatformRef>(
                 }
             }
 
-            WakeUpReason::Notification(Some(sync_service::Notification::BestBlockChanged {
-                hash,
-            })) => {
+            WakeUpReason::Notification(sync_service::Notification::BestBlockChanged { hash }) => {
                 // Sync service has reported a change in the best block.
 
                 log!(
