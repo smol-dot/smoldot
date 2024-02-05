@@ -79,7 +79,7 @@
 //! let async_op_id = match tree.next_necessary_async_op(&Instant::now()) {
 //!     async_tree::NextNecessaryAsyncOp::Ready(params) => {
 //!         assert_eq!(params.block_index, _my_block_index);
-//!         assert_eq!(*params.block_user_data, "my block");
+//!         assert_eq!(tree[params.block_index], "my block");
 //!         params.id
 //!     }
 //!     async_tree::NextNecessaryAsyncOp::NotReady { when: _ } => {
@@ -101,8 +101,6 @@
 //! match tree.try_advance_output() {
 //!     Some(async_tree::OutputUpdate::Block(block)) => {
 //!         assert_eq!(block.index, _my_block_index);
-//!         assert_eq!(*block.user_data, "my block");
-//!         assert_eq!(*block.async_op_user_data, "world");
 //!         assert!(block.is_new_best);
 //!     }
 //!     _ => unreachable!() // Unreachable in this example.
@@ -120,23 +118,20 @@ pub use fork_tree::NodeIndex;
 pub struct AsyncOpId(u64);
 
 #[derive(Debug)]
-pub enum NextNecessaryAsyncOp<'a, TNow, TBl> {
-    Ready(AsyncOpParams<'a, TBl>),
+pub enum NextNecessaryAsyncOp<TNow> {
+    Ready(AsyncOpParams),
     NotReady { when: Option<TNow> },
 }
 
 /// Information about an operation that must be started.
 #[derive(Debug)]
-pub struct AsyncOpParams<'a, TBl> {
+pub struct AsyncOpParams {
     /// Identifier to later provide when calling [`AsyncTree::async_op_finished`] or
     /// [`AsyncTree::async_op_failure`].
     pub id: AsyncOpId,
 
     /// Index of the block to perform the operation against.
     pub block_index: NodeIndex,
-
-    /// User data of the block to perform the operation against.
-    pub block_user_data: &'a TBl,
 }
 
 /// Configuration for [`AsyncTree::new`].
@@ -181,6 +176,10 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
     /// [`AsyncOpState::Finished`].
     input_finalized_index: Option<fork_tree::NodeIndex>,
 
+    /// Index within [`AsyncTree::non_finalized_blocks`] of the current "input" best block.
+    /// `None` if the input best block is the output finalized block.
+    input_best_block_index: Option<fork_tree::NodeIndex>,
+
     /// Incremented by one and stored within [`Block::input_best_block_weight`].
     input_best_block_next_weight: u32,
 
@@ -207,6 +206,7 @@ where
             output_finalized_async_user_data: config.finalized_async_user_data,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             input_finalized_index: None,
+            input_best_block_index: None,
             input_best_block_next_weight: 2,
             output_finalized_block_weight: 1, // `0` is reserved for blocks who are never best.
             next_async_op_id: AsyncOpId(0),
@@ -259,6 +259,7 @@ where
                 user_data: block.user_data,
             }),
             input_finalized_index: self.input_finalized_index,
+            input_best_block_index: self.input_best_block_index,
             input_best_block_next_weight: self.input_best_block_next_weight,
             output_finalized_block_weight: self.output_finalized_block_weight,
             next_async_op_id: self.next_async_op_id,
@@ -288,30 +289,6 @@ where
                 },
             )
         })
-    }
-
-    /// Returns the user data associated to the given block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`NodeIndex`] is invalid.
-    ///
-    pub fn block_user_data(&self, node_index: NodeIndex) -> &TBl {
-        &self.non_finalized_blocks.get(node_index).unwrap().user_data
-    }
-
-    /// Returns the user data associated to the given block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`NodeIndex`] is invalid.
-    ///
-    pub fn block_user_data_mut(&mut self, node_index: NodeIndex) -> &mut TBl {
-        &mut self
-            .non_finalized_blocks
-            .get_mut(node_index)
-            .unwrap()
-            .user_data
     }
 
     /// Returns the outcome of the asynchronous operation for the output finalized block.
@@ -387,6 +364,14 @@ where
     ///
     pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
         self.non_finalized_blocks.children(node)
+    }
+
+    /// Returns the [`NodeIndex`] of the current "input" best block.
+    ///
+    /// Returns `None` if there is no best block. In terms of logic, this means that the best block
+    /// is the output finalized block, which is out of scope of this data structure.
+    pub fn input_best_block_index(&self) -> Option<NodeIndex> {
+        self.input_best_block_index
     }
 
     /// Returns the list of all non-finalized blocks that have been inserted, both input and
@@ -575,7 +560,7 @@ where
     /// - The input best block.
     /// - Any other block.
     ///
-    pub fn next_necessary_async_op(&mut self, now: &TNow) -> NextNecessaryAsyncOp<TNow, TBl> {
+    pub fn next_necessary_async_op(&mut self, now: &TNow) -> NextNecessaryAsyncOp<TNow> {
         let mut when_not_ready = None;
 
         // Finalized block according to the blocks input.
@@ -585,11 +570,6 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                        block_user_data: &self
-                            .non_finalized_blocks
-                            .get(block_index)
-                            .unwrap()
-                            .user_data,
                     })
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
@@ -614,11 +594,6 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                        block_user_data: &self
-                            .non_finalized_blocks
-                            .get(block_index)
-                            .unwrap()
-                            .user_data,
                     })
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
@@ -644,11 +619,6 @@ where
                     return NextNecessaryAsyncOp::Ready(AsyncOpParams {
                         id: async_op_id,
                         block_index,
-                        block_user_data: &self
-                            .non_finalized_blocks
-                            .get(block_index)
-                            .unwrap()
-                            .user_data,
                     })
                 }
                 NextNecessaryAsyncOpInternal::NotReady { when } => {
@@ -809,14 +779,18 @@ where
         };
 
         // Insert the new block.
-        self.non_finalized_blocks.insert(
+        let new_index = self.non_finalized_blocks.insert(
             parent_index,
             Block {
                 user_data: block,
                 async_op,
                 input_best_block_weight,
             },
-        )
+        );
+
+        self.input_best_block_index = Some(new_index);
+
+        new_index
     }
 
     /// Updates the state machine to take into account that the best block of the input has been
@@ -840,6 +814,8 @@ where
             (None, Some(_)) => true,
             (None, None) => true,
         });
+
+        self.input_best_block_index = new_best_block;
 
         // If necessary, update the weight of the block.
         match new_best_block
@@ -889,6 +865,7 @@ where
             .is_ancestor(node_to_finalize, new_best_block));
 
         self.input_finalized_index = Some(node_to_finalize);
+        self.input_best_block_index = Some(new_best_block);
 
         // If necessary, update the weight of the block.
         match &mut self
@@ -918,6 +895,7 @@ where
     ///
     /// Returns `None` if the state machine doesn't have any update. This method should be called
     /// repeatedly until it returns `None`. Each call can perform an additional update.
+    // TODO: should cache the information about whether an update is ready, so that calling this method becomes cheap
     pub fn try_advance_output(&mut self) -> Option<OutputUpdate<TBl, TAsync>> {
         // Try to advance the output finalized block.
         // `input_finalized_index` is `Some` if the input finalized is not already equal to the
@@ -1044,7 +1022,6 @@ where
                 return Some(OutputUpdate::Finalized {
                     former_index: new_finalized,
                     user_data: pruned_finalized.user_data.user_data,
-                    async_op_user_data: &self.output_finalized_async_user_data,
                     former_finalized_async_op_user_data,
                     pruned_blocks,
                     best_block_index: self.output_best_block_index,
@@ -1105,16 +1082,6 @@ where
             // Report the new block.
             return Some(OutputUpdate::Block(OutputUpdateBlock {
                 index: node_index,
-                user_data: &self.non_finalized_blocks.get(node_index).unwrap().user_data,
-                async_op_user_data: match &self
-                    .non_finalized_blocks
-                    .get(node_index)
-                    .unwrap()
-                    .async_op
-                {
-                    AsyncOpState::Finished { user_data, .. } => user_data,
-                    _ => unreachable!(),
-                },
                 is_new_best,
             }));
         }
@@ -1176,6 +1143,24 @@ where
     }
 }
 
+impl<TNow, TBl, TAsync> ops::Index<NodeIndex> for AsyncTree<TNow, TBl, TAsync> {
+    type Output = TBl;
+
+    fn index(&self, node_index: NodeIndex) -> &Self::Output {
+        &self.non_finalized_blocks.get(node_index).unwrap().user_data
+    }
+}
+
+impl<TNow, TBl, TAsync> ops::IndexMut<NodeIndex> for AsyncTree<TNow, TBl, TAsync> {
+    fn index_mut(&mut self, node_index: NodeIndex) -> &mut Self::Output {
+        &mut self
+            .non_finalized_blocks
+            .get_mut(node_index)
+            .unwrap()
+            .user_data
+    }
+}
+
 /// See [`AsyncTree::input_output_iter_unordered`] and
 /// [`AsyncTree::input_output_iter_ancestry_order`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1200,7 +1185,7 @@ pub struct InputIterItem<'a, TBl, TAsync> {
 
 /// See [`AsyncTree::try_advance_output`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputUpdate<'a, TBl, TAsync> {
+pub enum OutputUpdate<TBl, TAsync> {
     /// A non-finalized block has been finalized in the output.
     ///
     /// This block is no longer part of the data structure.
@@ -1213,12 +1198,6 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
 
         /// User data associated to this block.
         user_data: TBl,
-
-        /// User data associated to the `async` operation of this block.
-        ///
-        /// This is the same value as is now returned by
-        /// [`AsyncTree::output_finalized_async_user_data`], and is provided here for convenience.
-        async_op_user_data: &'a TAsync,
 
         /// User data associated to the `async` operation of the previous finalized block.
         former_finalized_async_op_user_data: TAsync,
@@ -1236,7 +1215,7 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
     },
 
     /// A new block has been added to the list of output unfinalized blocks.
-    Block(OutputUpdateBlock<'a, TBl, TAsync>),
+    Block(OutputUpdateBlock),
 
     /// The output best block has been modified.
     BestBlockChanged {
@@ -1248,15 +1227,9 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
 
 /// See [`OutputUpdate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputUpdateBlock<'a, TBl, TAsync> {
+pub struct OutputUpdateBlock {
     /// Index of the node within the data structure.
     pub index: NodeIndex,
-
-    /// User data associated to this block.
-    pub user_data: &'a TBl,
-
-    /// User data associated to the `async` operation of this block.
-    pub async_op_user_data: &'a TAsync,
 
     /// True if this block is considered as the best block of the chain.
     pub is_new_best: bool,

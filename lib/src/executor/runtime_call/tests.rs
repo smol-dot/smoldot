@@ -25,7 +25,7 @@
 
 use core::{iter, ops};
 
-use super::{run, Config, RuntimeHostVm};
+use super::{run, Config, RuntimeCall};
 use crate::{executor::host, trie};
 use alloc::collections::BTreeMap;
 
@@ -74,7 +74,7 @@ fn execute_blocks() {
             host::HostVmPrototype::new(host::Config {
                 module: code,
                 heap_pages,
-                exec_hint: crate::executor::vm::ExecHint::Oneshot,
+                exec_hint: crate::executor::vm::ExecHint::ExecuteOnceWithNonDeterministicValidation,
                 allow_unresolved_imports: false,
             })
             .unwrap()
@@ -110,15 +110,13 @@ fn execute_blocks() {
 
         loop {
             match execution {
-                RuntimeHostVm::Finished(Ok(_)) => break, // Test successful!
-                RuntimeHostVm::Finished(Err(err)) => {
+                RuntimeCall::Finished(Ok(_)) => break, // Test successful!
+                RuntimeCall::Finished(Err(err)) => {
                     panic!("Error during test #{}: {:?}", test_num, err)
                 }
-                RuntimeHostVm::SignatureVerification(sig) => execution = sig.verify_and_resume(),
-                RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
-                    execution = req.resume_unknown()
-                }
-                RuntimeHostVm::StorageGet(get) => {
+                RuntimeCall::SignatureVerification(sig) => execution = sig.verify_and_resume(),
+                RuntimeCall::ClosestDescendantMerkleValue(req) => execution = req.resume_unknown(),
+                RuntimeCall::StorageGet(get) => {
                     let value = storage
                         .get(&(
                             get.child_trie().map(|c| c.as_ref().to_owned()),
@@ -127,7 +125,7 @@ fn execute_blocks() {
                         .map(|v| (iter::once(&v[..]), state_version));
                     execution = get.inject_value(value);
                 }
-                RuntimeHostVm::NextKey(req) => {
+                RuntimeCall::NextKey(req) => {
                     // Because `NextKey` might ask for branch nodes, and that we don't build the
                     // trie in its entirety, we have to use an algorithm that finds the branch
                     // nodes for us.
@@ -179,8 +177,8 @@ fn execute_blocks() {
 
                     execution = req.inject_key(next_key.map(|nk| nk.into_iter()));
                 }
-                RuntimeHostVm::LogEmit(log) => execution = log.resume(),
-                RuntimeHostVm::OffchainStorageSet(_) | RuntimeHostVm::Offchain(_) => {
+                RuntimeCall::LogEmit(log) => execution = log.resume(),
+                RuntimeCall::OffchainStorageSet(_) | RuntimeCall::Offchain(_) => {
                     unimplemented!()
                 }
             }

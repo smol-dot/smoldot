@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::log;
+
 use core::{
     future::Future,
     iter,
@@ -36,7 +38,7 @@ use smoldot::{
 use crate::{platform::PlatformRef, runtime_service, sync_service};
 
 /// Message that can be passed to the task started with [`start_task`].
-pub(super) enum Message<TPlat: PlatformRef> {
+pub(super) enum Message {
     /// JSON-RPC client has sent a subscription request.
     ///
     /// Only the legacy API subscription requests are supported. Any other will trigger a panic.
@@ -51,11 +53,11 @@ pub(super) enum Message<TPlat: PlatformRef> {
 
     /// The task must send back access to the runtime of the given block, or `None` if the block
     /// isn't available in the cache.
-    RecentBlockRuntimeAccess {
+    RecentBlockPinnedRuntime {
         /// Hash of the block to query.
         block_hash: [u8; 32],
         /// How to send back the result.
-        result_tx: oneshot::Sender<Option<runtime_service::RuntimeAccess<TPlat>>>,
+        result_tx: oneshot::Sender<Option<(runtime_service::PinnedRuntime, [u8; 32], u64)>>,
     },
 
     /// The task must send back the current best block hash.
@@ -136,7 +138,7 @@ pub(super) enum StateTrieRootHashError {
 /// JSON-RPC client starts.
 pub(super) fn start_task<TPlat: PlatformRef>(
     config: Config<TPlat>,
-) -> async_channel::Sender<Message<TPlat>> {
+) -> async_channel::Sender<Message> {
     let (requests_tx, requests_rx) = async_channel::bounded(8);
     let requests_rx = Box::pin(requests_rx);
 
@@ -215,9 +217,9 @@ struct Task<TPlat: PlatformRef> {
     best_block_report: Vec<oneshot::Sender<[u8; 32]>>,
 
     /// Sending side of [`Task::requests_rx`].
-    requests_tx: async_channel::WeakSender<Message<TPlat>>,
+    requests_tx: async_channel::WeakSender<Message>,
     /// How to receive messages from the API user.
-    requests_rx: Pin<Box<async_channel::Receiver<Message<TPlat>>>>,
+    requests_rx: Pin<Box<async_channel::Receiver<Message>>>,
 
     /// List of all active `chain_subscribeAllHeads` subscriptions, indexed by the subscription ID.
     // TODO: shrink_to_fit?
@@ -376,12 +378,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                     ) {
                         Ok(h) => h,
                         Err(error) => {
-                            log::warn!(
-                                target: &task.log_target,
-                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
-                                due to undecodable header. Hash: {}. Error: {}",
-                                HashDisplay(current_finalized_block),
-                                error,
+                            log!(
+                                &task.platform,
+                                Warn,
+                                &task.log_target,
+                                format!(
+                                    "`chain_subscribeFinalizedHeads` subscription has skipped \
+                                    block due to undecodable header. Hash: {}. Error: {}",
+                                    HashDisplay(current_finalized_block),
+                                    error,
+                                )
                             );
                             continue;
                         }
@@ -420,12 +426,16 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 ) {
                     Ok(h) => h,
                     Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeNewHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(current_best_block),
-                            error,
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(current_best_block),
+                                error
+                            )
                         );
                         continue;
                     }
@@ -525,12 +535,13 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                         let sync_service = task.sync_service.clone();
                         let requests_tx = task.requests_tx.clone();
                         async move {
-                            let result = sync_service
+                            let mut out = Vec::with_capacity(keys.len());
+                            let mut query = sync_service
                                 .clone()
                                 .storage_query(
                                     block_number,
-                                    &block_hash,
-                                    &state_trie_root,
+                                    block_hash,
+                                    state_trie_root,
                                     keys.into_iter()
                                         .map(|key| sync_service::StorageRequestItem {
                                             key,
@@ -540,17 +551,50 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                                     Duration::from_secs(12),
                                     NonZeroU32::new(2).unwrap(),
                                 )
+                                .advance()
                                 .await;
-                            if let Some(requests_tx) = requests_tx.upgrade() {
-                                let _ = requests_tx
-                                    .send(Message::StorageFetch { block_hash, result })
-                                    .await;
+                            loop {
+                                match query {
+                                    sync_service::StorageQueryProgress::Progress {
+                                        item,
+                                        query: next,
+                                        ..
+                                    } => {
+                                        out.push(item);
+                                        query = next.advance().await;
+                                    }
+                                    sync_service::StorageQueryProgress::Finished => {
+                                        if let Some(requests_tx) = requests_tx.upgrade() {
+                                            let _ = requests_tx
+                                                .send(Message::StorageFetch {
+                                                    block_hash,
+                                                    result: Ok(out),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                    sync_service::StorageQueryProgress::Error(error) => {
+                                        if let Some(requests_tx) = requests_tx.upgrade() {
+                                            let _ = requests_tx
+                                                .send(Message::StorageFetch {
+                                                    block_hash,
+                                                    result: Err(error),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                }
                             }
                         }
                     },
                 );
             }
         }
+
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
 
         enum WakeUpReason<'a, TPlat: PlatformRef> {
             SubscriptionNotification {
@@ -566,7 +610,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
             },
             SubscriptionDead,
             SubscriptionReady(runtime_service::SubscribeAll<TPlat>),
-            Message(Message<TPlat>),
+            Message(Message),
             ForegroundDead,
         }
 
@@ -685,14 +729,18 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 ) {
                     Ok(h) => h,
                     Err(error) => {
-                        log::warn!(
-                            target: &task.log_target,
-                            "`chain_subscribeAllHeads` subscription has skipped block due to \
-                            undecodable header. Hash: {}. Error: {}",
-                            HashDisplay(&header::hash_from_scale_encoded_header(
-                                &block.scale_encoded_header
-                            )),
-                            error,
+                        log!(
+                            &task.platform,
+                            Warn,
+                            &task.log_target,
+                            format!(
+                                "`chain_subscribeAllHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header
+                                )),
+                                error
+                            )
                         );
                         continue;
                     }
@@ -818,12 +866,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             ) {
                                 Ok(h) => h,
                                 Err(error) => {
-                                    log::warn!(
-                                        target: &task.log_target,
-                                        "`chain_subscribeNewHeads` subscription has skipped \
-                                        block due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(current_best_block),
-                                        error,
+                                    log!(
+                                        &task.platform,
+                                        Warn,
+                                        &task.log_target,
+                                        format!(
+                                            "`chain_subscribeNewHeads` subscription has \
+                                            skipped block due to undecodable header. Hash: {}. \
+                                            Error: {}",
+                                            HashDisplay(current_best_block),
+                                            error
+                                        )
                                     );
                                     continue;
                                 }
@@ -862,12 +915,17 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                             ) {
                                 Ok(h) => h,
                                 Err(error) => {
-                                    log::warn!(
-                                        target: &task.log_target,
-                                        "`chain_subscribeFinalizedHeads` subscription has skipped \
-                                        block due to undecodable header. Hash: {}. Error: {}",
-                                        HashDisplay(current_finalized_block),
-                                        error,
+                                    log!(
+                                        &task.platform,
+                                        Warn,
+                                        &task.log_target,
+                                        format!(
+                                            "`chain_subscribeFinalizedHeads` subscription \
+                                            has skipped block due to undecodable header. \
+                                            Hash: {}. Error: {}",
+                                            HashDisplay(current_finalized_block),
+                                            error,
+                                        )
                                     );
                                     continue;
                                 }
@@ -975,7 +1033,7 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 // TODO: shrink_to_fit?
             }
 
-            WakeUpReason::Message(Message::RecentBlockRuntimeAccess {
+            WakeUpReason::Message(Message::RecentBlockPinnedRuntime {
                 block_hash,
                 result_tx,
             }) => {
@@ -997,10 +1055,20 @@ async fn run<TPlat: PlatformRef>(mut task: Task<TPlat>) {
                 };
 
                 let access = if let Some(subscription_id) = subscription_id_with_block {
-                    task.runtime_service
-                        .pinned_block_runtime_access(subscription_id, block_hash)
+                    match task
+                        .runtime_service
+                        .pin_pinned_block_runtime(subscription_id, block_hash)
                         .await
-                        .ok()
+                    {
+                        Ok(r) => Some(r),
+                        Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                            debug_assert!(false);
+                            None
+                        }
+                        Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

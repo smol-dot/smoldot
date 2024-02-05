@@ -22,7 +22,7 @@ use core::str;
 
 pub enum AddressOrMultiStreamAddress<'a> {
     Address(Address<'a>),
-    MultiStreamAddress(MultiStreamAddress),
+    MultiStreamAddress(MultiStreamAddress<'a>),
 }
 
 impl<'a> From<&'a AddressOrMultiStreamAddress<'a>> for ConnectionType {
@@ -117,7 +117,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
-            let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data()) else {
+            let Ok(remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data_ref()) else {
                 return Err(Error::InvalidMultihashLength);
             };
             AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {
@@ -136,7 +136,7 @@ pub fn multiaddr_to_address(multiaddr: &Multiaddr) -> Result<AddressOrMultiStrea
             if multihash.hash_algorithm_code() != 0x12 {
                 return Err(Error::NonSha256Certhash);
             }
-            let Ok(&remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data()) else {
+            let Ok(remote_certificate_sha256) = <&[u8; 32]>::try_from(multihash.data_ref()) else {
                 return Err(Error::InvalidMultihashLength);
             };
             AddressOrMultiStreamAddress::MultiStreamAddress(MultiStreamAddress::WebRtc {

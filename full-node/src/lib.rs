@@ -270,6 +270,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     };
 
     // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
     let genesis_chain_information = chain_spec
         .to_chain_information()
         .map_err(StartError::InvalidGenesisInformation)?
@@ -284,6 +285,7 @@ pub async fn start(mut config: Config<'_>) -> Result<Client, StartError> {
     };
 
     // TODO: don't just throw away the runtime
+    // TODO: building the genesis chain information is pretty expensive and we throw away most of the information
     let relay_genesis_chain_information = match &relay_chain_spec {
         Some(r) => Some(
             r.to_chain_information()
@@ -853,7 +855,7 @@ async fn open_database(
                     genesis_storage.value(b":heappages"),
                 )
                 .unwrap(),
-                exec_hint: executor::vm::ExecHint::Oneshot,
+                exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
                 allow_unresolved_imports: true,
             })
             .unwrap()
@@ -994,7 +996,13 @@ async fn open_database(
             // The finalized block is the genesis block. As such, it has an empty body and
             // no justification.
             let database = empty
-                .initialize(genesis_chain_information, iter::empty(), None)
+                .initialize(
+                    &genesis_chain_information
+                        .finalized_block_header
+                        .scale_encoding_vec(chain_spec.block_number_bytes().into()),
+                    iter::empty(),
+                    None,
+                )
                 .unwrap();
             database
                 .insert_trie_nodes(genesis_storage_full_trie, state_version)

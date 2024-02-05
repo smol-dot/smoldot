@@ -19,7 +19,7 @@ use core::{iter, num::NonZeroU32};
 use futures_lite::FutureExt as _;
 
 fn main() {
-    // The `smoldot_light` library uses the `log` crate to emit logs.
+    // The `DefaultPlatform` that we use below uses the `log` crate to emit logs.
     // We need to register some kind of logs listener, in this example `env_logger`.
     // See also <https://docs.rs/log>.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

@@ -116,7 +116,7 @@ impl ChainSpec {
         let vm_prototype = executor::host::HostVmPrototype::new(executor::host::Config {
             module: &wasm_code,
             heap_pages,
-            exec_hint: executor::vm::ExecHint::Oneshot,
+            exec_hint: executor::vm::ExecHint::ValidateAndExecuteOnce,
             allow_unresolved_imports: true,
         })
         .map_err(FromGenesisStorageError::VmInitialization)?;

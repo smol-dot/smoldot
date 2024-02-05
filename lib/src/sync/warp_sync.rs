@@ -163,6 +163,11 @@ pub struct Config {
     /// finishes.
     /// Determines whether [`RuntimeInformation::finalized_body`] is `Some`.
     pub download_block_body: bool,
+
+    /// If `true`, all the storage proofs and call proofs necessary in order to compute the chain
+    /// information of the warp synced block will be downloaded. If `false`, the finality
+    /// information of the warp synced block is inferred from the warp sync fragments instead.
+    pub download_all_chain_information_storage_proofs: bool,
 }
 
 /// See [`Config::code_trie_node_hint`].
@@ -242,6 +247,8 @@ pub fn start_warp_sync<TSrc, TRq>(
         num_download_ahead_fragments: config.num_download_ahead_fragments,
         warp_sync_minimum_gap: config.warp_sync_minimum_gap,
         block_number_bytes: config.block_number_bytes,
+        download_all_chain_information_storage_proofs: config
+            .download_all_chain_information_storage_proofs,
         sources: slab::Slab::with_capacity(config.sources_capacity),
         sources_by_finalized_height: BTreeSet::new(),
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
@@ -279,22 +286,6 @@ impl SourceId {
     pub fn min_value() -> Self {
         SourceId(usize::min_value())
     }
-}
-
-/// A [`WarpSync`] that has been deconstructed.
-// TODO: consider removing this entirely
-pub struct Deconstructed<TSrc, TRq> {
-    /// The synced chain information.
-    pub chain_information: ValidChainInformation,
-
-    /// The list of sources that were added to the state machine, with their finalized block
-    /// height and user data.
-    /// The list is ordered by [`SourceId`].
-    // TODO: use a struct?
-    pub sources_ordered: Vec<(SourceId, u64, TSrc)>,
-
-    /// The list of requests that were added to the state machine.
-    pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
 }
 
 // TODO: consider removing this entirely
@@ -360,6 +351,8 @@ pub struct WarpSync<TSrc, TRq> {
     warp_sync_minimum_gap: usize,
     /// See [`Config::block_number_bytes`].
     block_number_bytes: usize,
+    /// See [`Config::download_all_chain_information_storage_proofs`].
+    download_all_chain_information_storage_proofs: bool,
     /// List of requests that have been added using [`WarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
     /// Subset of the entries as [`WarpSync::sources`] whose [`Source::finalized_block_height`]
@@ -560,6 +553,44 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         (&self.verified_chain_information).into()
     }
 
+    /// Modifies the chain information known to be valid.
+    pub fn set_chain_information(&mut self, chain_information: ValidChainInformationRef) {
+        // The implementation simply resets the state machine, apart from the fragment download
+        // and verification queue.
+        // TODO: what if the new chain doesn't support grandpa?
+        if self.warped_header_number <= chain_information.as_ref().finalized_block_header.number {
+            self.warped_header = chain_information
+                .as_ref()
+                .finalized_block_header
+                .scale_encoding_vec(self.block_number_bytes);
+            self.warped_header_hash = chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(self.block_number_bytes);
+            self.warped_header_state_root =
+                *chain_information.as_ref().finalized_block_header.state_root;
+            self.warped_header_extrinsics_root = *chain_information
+                .as_ref()
+                .finalized_block_header
+                .extrinsics_root;
+            self.warped_header_number = chain_information.as_ref().finalized_block_header.number;
+            self.warped_finality = chain_information.as_ref().finality.into();
+            self.warped_block_ty = WarpedBlockTy::AlreadyVerified;
+
+            self.verified_chain_information = chain_information.into();
+            self.runtime_calls =
+                runtime_calls_default_value(self.verified_chain_information.as_ref().consensus);
+
+            self.runtime_download = RuntimeDownload::NotStarted {
+                hint_doesnt_match: false,
+            };
+
+            if !matches!(self.body_download, BodyDownload::NotNeeded) {
+                self.body_download = BodyDownload::NotStarted;
+            }
+        }
+    }
+
     /// Returns the current status of the warp syncing.
     pub fn status(&self) -> Status<TSrc> {
         match &self.runtime_download {
@@ -588,26 +619,6 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
                 finalized_block_hash: self.warped_header_hash,
                 finalized_block_number: self.warped_header_number,
             },
-        }
-    }
-
-    pub fn deconstruct(mut self) -> Deconstructed<TSrc, TRq> {
-        Deconstructed {
-            chain_information: self.verified_chain_information,
-            sources_ordered: mem::take(&mut self.sources)
-                .into_iter()
-                .map(|(id, source)| {
-                    (
-                        SourceId(id),
-                        source.finalized_block_height,
-                        source.user_data,
-                    )
-                })
-                .collect(),
-            in_progress_requests: mem::take(&mut self.in_progress_requests)
-                .into_iter()
-                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
-                .collect(),
         }
     }
 
@@ -773,6 +784,18 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         debug_assert!(_inserted);
 
         *stored_height = finalized_block_height;
+    }
+
+    /// Gets the finalized block height of the given source.
+    ///
+    /// Equal to 0 if [`WarpSync::set_source_finality_state`] hasn't been called.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
+    pub fn source_finality_state(&self, source_id: SourceId) -> u64 {
+        self.sources[source_id.0].finalized_block_height
     }
 
     /// Returns a list of requests that should be started in order to drive the warp syncing
@@ -1102,8 +1125,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    // TODO: rename to `cancel_request` to convey the meaning that nothing negative will happen to the source
-    pub fn fail_request(&mut self, id: RequestId) -> TRq {
+    pub fn remove_request(&mut self, id: RequestId) -> TRq {
         if self.warp_sync_fragments_download == Some(id) {
             self.warp_sync_fragments_download = None;
         }
@@ -1148,7 +1170,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         self.in_progress_requests[request_id.0].0
     }
 
-    /// Injects a successful body download and removes the given request from the state machine.
+    /// Injects a body download and removes the given request from the state machine.
     /// Returns the user data that was associated to it.
     ///
     /// # Panic
@@ -1156,7 +1178,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a body download request.
     ///
-    pub fn body_download_success(&mut self, id: RequestId, body: Vec<Vec<u8>>) -> TRq {
+    pub fn body_download_response(&mut self, id: RequestId, body: Vec<Vec<u8>>) -> TRq {
         // Remove the request from the list, obtaining its user data.
         // If the request corresponds to the runtime parameters we're looking for, the function
         // continues below, otherwise we return early.
@@ -1195,7 +1217,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Injects a successful Merkle proof and removes the given request from the state machine.
+    /// Injects a Merkle proof and removes the given request from the state machine.
     /// Returns the user data that was associated to it.
     ///
     /// # Panic
@@ -1203,7 +1225,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a storage get request.
     ///
-    pub fn storage_get_success(&mut self, id: RequestId, merkle_proof: Vec<u8>) -> TRq {
+    pub fn storage_get_response(&mut self, id: RequestId, merkle_proof: Vec<u8>) -> TRq {
         // Remove the request from the list, obtaining its user data.
         // If the request corresponds to the runtime parameters we're looking for, the function
         // continues below, otherwise we return early.
@@ -1247,7 +1269,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// Injects a response and removes the given request from the state machine. Returns
     /// the user data that was associated to it.
     ///
     /// # Panic
@@ -1255,7 +1277,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] is invalid.
     /// Panics if the [`RequestId`] doesn't correspond to a runtime Merkle call proof request.
     ///
-    pub fn runtime_call_merkle_proof_success(
+    pub fn runtime_call_merkle_proof_response(
         &mut self,
         request_id: RequestId,
         response: Vec<u8>,
@@ -1285,7 +1307,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// Injects a response and removes the given request from the state machine. Returns
     /// the user data that was associated to it.
     ///
     /// If the header of the last fragment of the response is decodable, this function updates
@@ -1297,7 +1319,7 @@ impl<TSrc, TRq> WarpSync<TSrc, TRq> {
     /// Panics if the [`RequestId`] doesn't correspond to a warp sync request.
     ///
     // TODO: more zero cost API w.r.t. the fragments
-    pub fn warp_sync_request_success(
+    pub fn warp_sync_request_response(
         &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,
@@ -2047,7 +2069,11 @@ impl<TSrc, TRq> BuildRuntime<TSrc, TRq> {
             chain_information::build::Config {
                 finalized_block_header: chain_information::build::ConfigFinalizedBlockHeader::Any {
                     scale_encoded_header: self.inner.warped_header.clone(),
-                    known_finality: Some(self.inner.warped_finality.clone()),
+                    known_finality: if self.inner.download_all_chain_information_storage_proofs {
+                        None
+                    } else {
+                        Some(self.inner.warped_finality.clone())
+                    },
                 },
                 block_number_bytes: self.inner.block_number_bytes,
                 runtime,

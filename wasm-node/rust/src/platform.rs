@@ -25,13 +25,15 @@ use alloc::{
     borrow::{Cow, ToOwned as _},
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    format,
     string::{String, ToString as _},
     vec::Vec,
 };
 use async_lock::Mutex;
 use core::{
+    fmt::{self, Write as _},
     future, iter, mem, ops, pin, str,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
     task,
     time::Duration,
 };
@@ -42,8 +44,14 @@ pub static TOTAL_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// Total number of bytes that all the connections created through [`PlatformRef`] combined have
 /// sent.
 pub static TOTAL_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
+/// Total number of microseconds that all the tasks have spent executing. A `u64` will overflow
+/// after 584 542 years.
+pub static TOTAL_CPU_USAGE_US: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const PLATFORM_REF: PlatformRef = PlatformRef {};
+
+/// Log level above which log entries aren't emitted.
+pub static MAX_LOG_LEVEL: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct PlatformRef {}
@@ -126,10 +134,59 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
                         u32::try_from(this.name.as_bytes().len()).unwrap(),
                     )
                 }
+
+                let before_polling = unsafe { bindings::monotonic_clock_us() };
                 let out = this.future.poll(cx);
+                let poll_duration = Duration::from_micros(
+                    unsafe { bindings::monotonic_clock_us() } - before_polling,
+                );
+                TOTAL_CPU_USAGE_US.fetch_add(
+                    u64::try_from(poll_duration.as_micros()).unwrap_or(u64::max_value()),
+                    Ordering::Relaxed,
+                );
+
                 unsafe {
                     bindings::current_task_exit();
                 }
+
+                // Print a warning if polling the task takes a long time.
+                // It has been noticed that sometimes in Firefox polling a task takes a 16ms + a
+                // small amount. This most likely indicates that Firefox does something like
+                // freezing the JS/Wasm execution before resuming it at the next frame, thus adding
+                // 16ms to the execution time.
+                // For this reason, the threshold above which a task takes too long must be
+                // above 16ms no matter what.
+                if poll_duration.as_millis() >= 20 {
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Debug,
+                        "smoldot",
+                        "task-too-long-time",
+                        [
+                            ("name", this.name as &dyn fmt::Display),
+                            (
+                                "poll_duration_ms",
+                                &poll_duration.as_millis() as &dyn fmt::Display,
+                            ),
+                        ]
+                        .into_iter(),
+                    );
+                }
+                if poll_duration.as_millis() >= 150 {
+                    smoldot_light::platform::PlatformRef::log(
+                        &PLATFORM_REF,
+                        smoldot_light::platform::LogLevel::Warn,
+                        "smoldot",
+                        &format!(
+                            "The task named `{}` has occupied the CPU for an \
+                            unreasonable amount of time ({}ms).",
+                            this.name,
+                            poll_duration.as_millis(),
+                        ),
+                        iter::empty(),
+                    );
+                }
+
                 out
             }
         }
@@ -148,6 +205,63 @@ impl smoldot_light::platform::PlatformRef for PlatformRef {
 
         task.detach();
         runnable.schedule();
+    }
+
+    fn log<'a>(
+        &self,
+        log_level: smoldot_light::platform::LogLevel,
+        log_target: &'a str,
+        message: &'a str,
+        key_values: impl Iterator<Item = (&'a str, &'a dyn fmt::Display)>,
+    ) {
+        let log_level = match log_level {
+            smoldot_light::platform::LogLevel::Error => 1,
+            smoldot_light::platform::LogLevel::Warn => 2,
+            smoldot_light::platform::LogLevel::Info => 3,
+            smoldot_light::platform::LogLevel::Debug => 4,
+            smoldot_light::platform::LogLevel::Trace => 5,
+        };
+
+        if log_level > MAX_LOG_LEVEL.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut key_values = key_values.peekable();
+
+        if key_values.peek().is_none() {
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message.as_bytes().len()).unwrap(),
+                )
+            }
+        } else {
+            let mut message_build = String::with_capacity(128);
+            message_build.push_str(message);
+            let mut first = true;
+            for (key, value) in key_values {
+                if first {
+                    let _ = write!(message_build, "; ");
+                    first = false;
+                } else {
+                    let _ = write!(message_build, ", ");
+                }
+                let _ = write!(message_build, "{}={}", key, value);
+            }
+
+            unsafe {
+                bindings::log(
+                    log_level,
+                    u32::try_from(log_target.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(log_target.as_bytes().len()).unwrap(),
+                    u32::try_from(message_build.as_bytes().as_ptr() as usize).unwrap(),
+                    u32::try_from(message_build.as_bytes().len()).unwrap(),
+                )
+            }
+        }
     }
 
     fn client_name(&self) -> Cow<str> {

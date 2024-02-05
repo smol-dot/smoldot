@@ -39,9 +39,8 @@ use rand::seq::IteratorRandom;
 use smol::lock::Mutex;
 use smoldot::{
     author,
-    chain::chain_information,
     database::full_sqlite,
-    executor::{self, host, runtime_host},
+    executor::{self, host, runtime_call},
     header,
     identity::keystore,
     informant::HashDisplay,
@@ -313,6 +312,10 @@ impl ConsensusService {
                 NonZeroU32::new(2000).unwrap()
             },
             download_bodies: true,
+            // We ask for all the chain-information-related storage proofs and call proofs to be
+            // downloaded during the warp syncing in order to guarantee that the necessary
+            // information will be found in the database at the next reload.
+            download_all_chain_information_storage_proofs: true,
             code_trie_node_hint: None,
         });
 
@@ -325,13 +328,15 @@ impl ConsensusService {
             executor::host::HostVmPrototype::new(executor::host::Config {
                 module: finalized_code,
                 heap_pages,
-                exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                exec_hint: executor::vm::ExecHint::ValidateAndCompile, // TODO: probably should be decided by the optimisticsync
                 allow_unresolved_imports: false,
             })
             .map_err(InitError::FinalizedRuntimeInit)?
         };
 
-        let block_author_sync_source = sync.add_source(None, best_block_number, best_block_hash);
+        let block_author_sync_source = sync
+            .prepare_add_source(best_block_number, best_block_hash)
+            .add_source(None, NonFinalizedBlock::NotVerified);
 
         let (to_background_tx, to_background_rx) = mpsc::channel(4);
 
@@ -539,7 +544,7 @@ pub enum Notification {
         /// Changes to the storage that the block has performed.
         ///
         /// Note that this field is only available when a new block is available.
-        storage_changes: Arc<runtime_host::StorageChanges>,
+        storage_changes: Arc<runtime_call::StorageChanges>,
     },
 }
 
@@ -956,15 +961,7 @@ impl SyncBackground {
                                     match (request_details, &self.authored_block) {
                                         (
                                             all::DesiredRequest::BlocksRequest {
-                                                first_block_hash: None,
-                                                first_block_height,
-                                                ..
-                                            },
-                                            Some((authored_height, _, _, _)),
-                                        ) if first_block_height == authored_height => true,
-                                        (
-                                            all::DesiredRequest::BlocksRequest {
-                                                first_block_hash: Some(first_block_hash),
+                                                first_block_hash,
                                                 first_block_height,
                                                 ..
                                             },
@@ -1005,7 +1002,7 @@ impl SyncBackground {
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
                                 let source_id = if block_number
-                                    <= self.sync.finalized_block_header().number
+                                    <= self.sync.finalized_block_number()
                                 {
                                     self.sync
                                         .sources()
@@ -1042,7 +1039,7 @@ impl SyncBackground {
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
                                 let source_id = if block_number
-                                    <= self.sync.finalized_block_header().number
+                                    <= self.sync.finalized_block_number()
                                 {
                                     self.sync
                                         .sources()
@@ -1100,15 +1097,14 @@ impl SyncBackground {
                                 // same finalized block, it is guaranteed that the missing item are
                                 // in the finalized block or above.
                                 debug_assert!(
-                                    missing_item.number
-                                        >= self.sync.finalized_block_header().number
+                                    missing_item.number >= self.sync.finalized_block_number()
                                 );
 
                                 // Choose which source to query. We have to use an `if` because
                                 // `knows_non_finalized_block` panics if the parameter is inferior
                                 // or equal to the finalized block number.
                                 let source_id = if missing_item.number
-                                    <= self.sync.finalized_block_header().number
+                                    <= self.sync.finalized_block_number()
                                 {
                                     let Some(source_id) = self
                                         .sync
@@ -1224,17 +1220,7 @@ impl SyncBackground {
                 }) => {
                     let (tx, new_blocks) = async_channel::bounded(buffer_size.saturating_sub(1));
 
-                    // TODO: this code below is a bit hacky due to the API of AllSync not being super convenient
-                    let finalized_block_scale_encoded_header = self
-                        .sync
-                        .finalized_block_header()
-                        .scale_encoding_vec(self.sync.block_number_bytes());
-                    let finalized_block_hash = header::hash_from_scale_encoded_header(
-                        &finalized_block_scale_encoded_header,
-                    );
-
                     let non_finalized_blocks_ancestry_order = {
-                        let best_hash = self.sync.best_block_hash();
                         let blocks_in = self
                             .sync
                             .non_finalized_blocks_ancestry_order()
@@ -1261,7 +1247,7 @@ impl SyncBackground {
                             blocks_out.push(BlockNotification {
                                 is_new_best: header::hash_from_scale_encoded_header(
                                     &scale_encoding,
-                                ) == best_hash,
+                                ) == *self.sync.best_block_hash(),
                                 block_hash: header::hash_from_scale_encoded_header(&scale_encoding),
                                 scale_encoded_header: scale_encoding,
                                 runtime_update,
@@ -1274,8 +1260,11 @@ impl SyncBackground {
                     self.blocks_notifications.push(tx);
                     let _ = result_tx.send(SubscribeAll {
                         id: SubscriptionId(0), // TODO:
-                        finalized_block_hash,
-                        finalized_block_scale_encoded_header,
+                        finalized_block_hash: *self.sync.finalized_block_hash(),
+                        finalized_block_scale_encoded_header: self
+                            .sync
+                            .finalized_block_header()
+                            .to_owned(),
                         finalized_block_runtime: self.finalized_runtime.clone(),
                         non_finalized_blocks_ancestry_order,
                         new_blocks,
@@ -1295,13 +1284,10 @@ impl SyncBackground {
 
                 WakeUpReason::FrontendEvent(ToBackground::GetSyncState { result_tx }) => {
                     let _ = result_tx.send(SyncState {
-                        best_block_hash: self.sync.best_block_hash(),
+                        best_block_hash: *self.sync.best_block_hash(),
                         best_block_number: self.sync.best_block_number(),
-                        finalized_block_hash: self
-                            .sync
-                            .finalized_block_header()
-                            .hash(self.sync.block_number_bytes()),
-                        finalized_block_number: self.sync.finalized_block_header().number,
+                        finalized_block_hash: *self.sync.finalized_block_hash(),
+                        finalized_block_number: self.sync.finalized_block_number(),
                     });
                 }
                 WakeUpReason::FrontendEvent(ToBackground::Unpin { result_tx, .. }) => {
@@ -1320,10 +1306,12 @@ impl SyncBackground {
                 }
 
                 WakeUpReason::NetworkLocalChainUpdate => {
-                    let best_hash = self.sync.best_block_hash();
-                    let best_number = self.sync.best_block_number();
                     self.network_service
-                        .set_local_best_block(self.network_chain_id, best_hash, best_number)
+                        .set_local_best_block(
+                            self.network_chain_id,
+                            *self.sync.best_block_hash(),
+                            self.sync.best_block_number(),
+                        )
                         .await;
                 }
 
@@ -1348,7 +1336,7 @@ impl SyncBackground {
                         all_sources
                     };
 
-                    let is_best = self.sync.best_block_hash() == hash;
+                    let is_best = *self.sync.best_block_hash() == hash;
 
                     for source_id in sources_to_announce_to {
                         let peer_id = match &self.sync[source_id] {
@@ -1397,14 +1385,16 @@ impl SyncBackground {
                             *is_disconnected = false;
                         }
                         hashbrown::hash_map::Entry::Vacant(entry) => {
-                            let id = self.sync.add_source(
-                                Some(NetworkSourceInfo {
-                                    peer_id: entry.key().clone(),
-                                    is_disconnected: false,
-                                }),
-                                best_block_number,
-                                best_block_hash,
-                            );
+                            let id = self
+                                .sync
+                                .prepare_add_source(best_block_number, best_block_hash)
+                                .add_source(
+                                    Some(NetworkSourceInfo {
+                                        peer_id: entry.key().clone(),
+                                        is_disconnected: false,
+                                    }),
+                                    NonFinalizedBlock::NotVerified,
+                                );
                             entry.insert(id);
                         }
                     }
@@ -1440,12 +1430,14 @@ impl SyncBackground {
                     let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                     // TODO: log the outcome
                     match self.sync.block_announce(id, scale_encoded_header, is_best) {
-                        all::BlockAnnounceOutcome::HeaderVerify => {}
                         all::BlockAnnounceOutcome::TooOld { .. } => {}
-                        all::BlockAnnounceOutcome::AlreadyInChain => {}
-                        all::BlockAnnounceOutcome::NotFinalizedChain => {}
-                        all::BlockAnnounceOutcome::Discarded => {}
-                        all::BlockAnnounceOutcome::StoredForLater {} => {}
+                        all::BlockAnnounceOutcome::AlreadyVerified(known)
+                        | all::BlockAnnounceOutcome::AlreadyPending(known) => {
+                            known.update_source_and_block();
+                        }
+                        all::BlockAnnounceOutcome::Unknown(unknown) => {
+                            unknown.insert_and_update_source(NonFinalizedBlock::NotVerified)
+                        }
                         all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(), // TODO: ?!?! why unreachable? also, ban the peer
                     }
                 }
@@ -1484,12 +1476,12 @@ impl SyncBackground {
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(
                         request_id,
-                        Ok(iter::once(all::BlockRequestSuccessBlock {
+                        iter::once(all::BlockRequestSuccessBlock {
                             scale_encoded_header,
                             scale_encoded_extrinsics,
                             scale_encoded_justifications: Vec::new(),
                             user_data: NonFinalizedBlock::NotVerified,
-                        })),
+                        }),
                     );
                 }
 
@@ -1499,7 +1491,6 @@ impl SyncBackground {
                         all::DesiredRequest::BlocksRequest {
                             first_block_hash,
                             first_block_height,
-                            ascending,
                             num_blocks,
                             request_headers,
                             request_bodies,
@@ -1524,20 +1515,14 @@ impl SyncBackground {
                         peer_id,
                         self.network_chain_id,
                         network::codec::BlocksRequestConfig {
-                            start: if let Some(first_block_hash) = first_block_hash {
-                                network::codec::BlocksRequestConfigStart::Hash(first_block_hash)
-                            } else {
-                                network::codec::BlocksRequestConfigStart::Number(first_block_height)
-                            },
+                            start: network::codec::BlocksRequestConfigStart::Hash(first_block_hash),
                             desired_count: NonZeroU32::new(
                                 u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                             )
                             .unwrap(),
-                            direction: if ascending {
-                                network::codec::BlocksRequestDirection::Ascending
-                            } else {
-                                network::codec::BlocksRequestDirection::Descending
-                            },
+                            // The direction is hardcoded based on the documentation of the syncing
+                            // state machine.
+                            direction: network::codec::BlocksRequestDirection::Descending,
                             fields: network::codec::BlocksRequestFields {
                                 header: true, // TODO: always set to true due to unwrapping the header when the response comes
                                 body: request_bodies,
@@ -1551,7 +1536,6 @@ impl SyncBackground {
                         all::DesiredRequest::BlocksRequest {
                             first_block_hash,
                             first_block_height,
-                            ascending,
                             num_blocks,
                             request_headers,
                             request_bodies,
@@ -1769,7 +1753,7 @@ impl SyncBackground {
 
                     let _ = self.sync.blocks_request_response(
                         request_id,
-                        Ok(blocks
+                        blocks
                             .into_iter()
                             .map(|block| all::BlockRequestSuccessBlock {
                                 scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
@@ -1784,7 +1768,7 @@ impl SyncBackground {
                                     })
                                     .collect(),
                                 user_data: NonFinalizedBlock::NotVerified,
-                            })),
+                            }),
                     );
 
                     // If the source was actually disconnected and has no other request in
@@ -1832,9 +1816,7 @@ impl SyncBackground {
                         )
                         .await;
 
-                    let _ = self
-                        .sync
-                        .blocks_request_response(request_id, Err::<iter::Empty<_>, _>(()));
+                    let _ = self.sync.remove_request(request_id);
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -1879,7 +1861,7 @@ impl SyncBackground {
                             scale_encoded_justification: f.scale_encoded_justification.to_vec(),
                         })
                         .collect();
-                    let _ = self.sync.grandpa_warp_sync_response_ok(
+                    let _ = self.sync.grandpa_warp_sync_response(
                         request_id,
                         fragments,
                         decoded.is_finished,
@@ -1930,7 +1912,7 @@ impl SyncBackground {
                         )
                         .await;
 
-                    let _ = self.sync.grandpa_warp_sync_response_err(request_id);
+                    let _ = self.sync.remove_request(request_id);
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -2031,9 +2013,14 @@ impl SyncBackground {
                             .await;
                     }
 
-                    let _ = self
-                        .sync
-                        .storage_get_response(request_id, result.map(|r| r.decode().to_owned()));
+                    if let Ok(result) = result {
+                        // TODO: to_owned overhead
+                        let _ = self
+                            .sync
+                            .storage_get_response(request_id, result.decode().to_owned());
+                    } else {
+                        let _ = self.sync.remove_request(request_id);
+                    }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -2135,9 +2122,13 @@ impl SyncBackground {
                             .await;
                     }
 
-                    self.sync
-                        .call_proof_response(request_id, result.map(|r| r.decode().to_owned()));
-                    // TODO: need help from networking service to avoid this to_owned
+                    if let Ok(result) = result {
+                        self.sync
+                            .call_proof_response(request_id, result.decode().to_owned());
+                        // TODO: need help from networking service to avoid this to_owned
+                    } else {
+                        self.sync.remove_request(request_id);
+                    }
 
                     // If the source was actually disconnected and has no other request in
                     // progress, we clean it up.
@@ -2202,7 +2193,7 @@ impl SyncBackground {
             LogLevel::Debug,
             format!(
                 "block-author-start; parent_hash={}; parent_number={}",
-                HashDisplay(&self.sync.best_block_hash()),
+                HashDisplay(self.sync.best_block_hash()),
                 parent_number,
             ),
         );
@@ -2235,13 +2226,13 @@ impl SyncBackground {
         };
 
         // Actual block production now happening.
-        let (new_block_header, new_block_body, authoring_logs) = {
-            let parent_hash = self.sync.best_block_hash();
+        let (new_block_header, new_block_body) = {
+            let parent_hash = *self.sync.best_block_hash();
             let parent_runtime_arc =
-                if self.sync.best_block_number() != self.sync.finalized_block_header().number {
+                if self.sync.best_block_number() != self.sync.finalized_block_number() {
                     let NonFinalizedBlock::Verified {
                         runtime: parent_runtime_arc,
-                    } = &self.sync[(self.sync.best_block_number(), &self.sync.best_block_hash())]
+                    } = &self.sync[(self.sync.best_block_number(), self.sync.best_block_hash())]
                     else {
                         unreachable!()
                     };
@@ -2301,7 +2292,7 @@ impl SyncBackground {
                             }
                         };
 
-                        break (success.scale_encoded_header, success.body, success.logs);
+                        break (success.scale_encoded_header, success.body);
                     }
 
                     author::build::BuilderAuthoring::Error { error, .. } => {
@@ -2368,7 +2359,7 @@ impl SyncBackground {
                         block_authoring = req.inject_value(value.as_ref().map(|(val, vers)| {
                             (
                                 iter::once(&val[..]),
-                                runtime_host::TrieEntryVersion::try_from(*vers)
+                                runtime_call::TrieEntryVersion::try_from(*vers)
                                     .expect("corrupted database"),
                             )
                         }));
@@ -2442,14 +2433,14 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
+        // TODO: print logs
         let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
         self.log_callback.log(
             LogLevel::Info,
             format!(
-                "block-generated; hash={}; body_len={}; runtime_logs={:?}",
+                "block-generated; hash={}; body_len={}",
                 HashDisplay(&new_block_hash),
-                new_block_body.len(),
-                authoring_logs
+                new_block_body.len()
             ),
         );
         let _jaeger_span = self
@@ -2481,19 +2472,14 @@ impl SyncBackground {
 
         // The next step is to import the block in `self.sync`. This is done by pretending that
         // the local node is a source of block similar to networking peers.
-        match self.sync.block_announce(
+        let all::BlockAnnounceOutcome::Unknown(block_insert) = self.sync.block_announce(
             self.block_author_sync_source,
             new_block_header.clone(),
             true, // Since the new block is a child of the current best block, it always becomes the new best.
-        ) {
-            all::BlockAnnounceOutcome::HeaderVerify
-            | all::BlockAnnounceOutcome::StoredForLater
-            | all::BlockAnnounceOutcome::Discarded => {}
-            all::BlockAnnounceOutcome::TooOld { .. }
-            | all::BlockAnnounceOutcome::AlreadyInChain
-            | all::BlockAnnounceOutcome::NotFinalizedChain
-            | all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
-        }
+        ) else {
+            unreachable!();
+        };
+        block_insert.insert_and_update_source(NonFinalizedBlock::NotVerified);
 
         debug_assert!(self.authored_block.is_none());
         self.authored_block = Some((
@@ -2567,7 +2553,7 @@ impl SyncBackground {
             }
             all::ProcessOne::WarpSyncBuildRuntime(build_runtime) => {
                 let (new_sync, outcome) =
-                    build_runtime.build(all::ExecHint::CompileAheadOfTime, true);
+                    build_runtime.build(all::ExecHint::ValidateAndCompile, true);
                 self.sync = new_sync;
                 if let Err(err) = outcome {
                     self.log_callback.log(
@@ -2601,13 +2587,17 @@ impl SyncBackground {
                 self.blocks_notifications.clear();
 
                 self.finalized_runtime = Arc::new(finalized_block_runtime);
-                let chain_info: chain_information::ValidChainInformation =
-                    self.sync.as_chain_information().into();
+                let finalized_block_header = self
+                    .sync
+                    .as_chain_information()
+                    .as_ref()
+                    .finalized_block_header
+                    .scale_encoding_vec(self.sync.block_number_bytes());
                 self.database
                     .with_database(move |database| {
                         database
                             .reset(
-                                chain_info.as_ref(),
+                                &finalized_block_header,
                                 finalized_body.iter().map(|e| &e[..]),
                                 None,
                             )
@@ -2863,8 +2853,7 @@ impl SyncBackground {
                         let new_finalized_hash = finalized_blocks_newest_to_oldest
                             .first()
                             .unwrap()
-                            .header
-                            .hash(self.sync.block_number_bytes());
+                            .block_hash;
                         self.log_callback.log(
                             LogLevel::Debug,
                             format!(
@@ -2898,10 +2887,10 @@ impl SyncBackground {
                         self.pending_notification = Some(Notification::Finalized {
                             finalized_blocks_newest_to_oldest: finalized_blocks_newest_to_oldest
                                 .iter()
-                                .map(|b| b.header.hash(self.sync.block_number_bytes()))
+                                .map(|b| b.block_hash)
                                 .collect::<Vec<_>>(),
                             pruned_blocks_hashes: pruned_blocks.clone(),
-                            best_block_hash: self.sync.best_block_hash(),
+                            best_block_hash: *self.sync.best_block_hash(),
                         });
 
                         (self, true)
@@ -2943,14 +2932,22 @@ impl SyncBackground {
                         (self, true)
                     }
                     (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
-                        self.network_service
-                            .ban_and_disconnect(
-                                sender.clone(),
-                                self.network_chain_id,
-                                network_service::BanSeverity::High,
-                                "bad-warp-sync-fragment",
-                            )
-                            .await;
+                        // Errors of type `JustificationEngineMismatch` indicate that the chain
+                        // uses a finality engine that smoldot doesn't recognize. This is a benign
+                        // error that shouldn't lead to a ban.
+                        if !matches!(
+                            error,
+                            all::JustificationVerifyError::JustificationEngineMismatch
+                        ) {
+                            self.network_service
+                                .ban_and_disconnect(
+                                    sender.clone(),
+                                    self.network_chain_id,
+                                    network_service::BanSeverity::High,
+                                    "bad-warp-sync-fragment",
+                                )
+                                .await;
+                        }
                         self.log_callback.log(
                             LogLevel::Warn,
                             format!(
@@ -2982,8 +2979,8 @@ pub async fn execute_block_and_insert(
     let mut database_accesses_duration = Duration::new(0, 0);
     let mut runtime_build_duration = Duration::new(0, 0);
 
-    let mut storage_changes = runtime_host::StorageChanges::empty();
-    let mut state_trie_version = runtime_host::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
+    let mut storage_changes = runtime_call::StorageChanges::empty();
+    let mut state_trie_version = runtime_call::TrieEntryVersion::V0; // TODO: shouldn't have to be initialized
     for (call_function, call_parameter) in [
         (
             body_only::CHECK_INHERENTS_FUNCTION_NAME,
@@ -3013,204 +3010,66 @@ pub async fn execute_block_and_insert(
             }),
         ),
     ] {
-        let mut call = runtime_host::run(runtime_host::Config {
-            virtual_machine: parent_runtime,
-            function_to_call: call_function,
-            parameter: iter::once(&call_parameter),
-            storage_main_trie_changes: storage_changes.into_main_trie_diff(),
-            max_log_level: 0,
-            calculate_trie_changes: true,
-        })
-        .map_err(|(err, _)| ExecuteBlockVerificationFailureError::RuntimeStartError(err))?;
-
-        loop {
-            match call {
-                runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                    return Err(ExecuteBlockError::InvalidBlock(
-                        ExecuteBlockInvalidBlockError::RuntimeExecutionError(error.detail),
-                    ));
-                }
-                runtime_host::RuntimeHostVm::Finished(Ok(runtime_host::Success {
-                    virtual_machine,
-                    storage_changes: storage_changes_update,
-                    state_trie_version: state_trie_version_update,
-                    ..
-                })) => {
-                    // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
-                    let error = {
-                        let output = virtual_machine.value();
-                        if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
-                            body_only::check_check_inherents_output(output.as_ref())
-                                .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
-                                .err()
-                        } else {
-                            body_only::check_execute_block_output(output.as_ref())
-                                .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
-                                .err()
-                        }
-                    };
-                    if let Some(error) = error {
-                        return Err(ExecuteBlockError::InvalidBlock(error));
-                    }
-
-                    storage_changes = storage_changes_update;
-                    state_trie_version = state_trie_version_update;
-                    parent_runtime = virtual_machine.into_prototype();
-                    break;
+        match runtime_call(
+            database,
+            parent_block_hash,
+            parent_runtime,
+            call_function,
+            &call_parameter,
+            storage_changes,
+        )
+        .await
+        {
+            Ok(success) => {
+                // TODO: a bit crappy to compare function names, however I got insanely weird borrowck errors if putting a fn() in the for loop above
+                let error = if call_function == body_only::CHECK_INHERENTS_FUNCTION_NAME {
+                    body_only::check_check_inherents_output(&success.output)
+                        .map_err(ExecuteBlockInvalidBlockError::CheckInherentsOutputError)
+                        .err()
+                } else {
+                    body_only::check_execute_block_output(&success.output)
+                        .map_err(ExecuteBlockInvalidBlockError::ExecuteBlockOutputError)
+                        .err()
+                };
+                if let Some(error) = error {
+                    return Err(ExecuteBlockError::InvalidBlock(error));
                 }
 
-                runtime_host::RuntimeHostVm::StorageGet(req) => {
-                    let when_database_access_started = Instant::now();
-                    let parent_paths = req.child_trie().map(|child_trie| {
-                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
-                            .map(u8::from)
-                            .collect::<Vec<_>>()
-                    });
-                    let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
-                        .map(u8::from)
-                        .collect::<Vec<_>>();
-                    let parent_block_hash = *parent_block_hash;
-                    let value = database
-                        .with_database(move |db| {
-                            db.block_storage_get(
-                                &parent_block_hash,
-                                parent_paths.into_iter().map(|p| p.into_iter()),
-                                key.iter().copied(),
-                            )
-                        })
-                        .await;
-                    let value = match value {
-                        Ok(Some((ref val, vers))) => Some((
-                            iter::once(&val[..]),
-                            runtime_host::TrieEntryVersion::try_from(vers)
-                                .map_err(|_| ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion)?
-                        )),
-                        Ok(None) => None,
-                        Err(error) => {
-                            return Err(ExecuteBlockError::VerificationFailure(
-                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
-                                    error,
-                                    context:
-                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
-                                            function_name: call_function,
-                                            parameter: call_parameter,
-                                        },
-                                },
-                            ))
-                        }
-                    };
-
-                    database_accesses_duration += when_database_access_started.elapsed();
-                    call = req.inject_value(value);
-                }
-                runtime_host::RuntimeHostVm::ClosestDescendantMerkleValue(req) => {
-                    let when_database_access_started = Instant::now();
-
-                    let parent_paths = req.child_trie().map(|child_trie| {
-                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
-                            .map(u8::from)
-                            .collect::<Vec<_>>()
-                    });
-                    let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
-
-                    let parent_block_hash = *parent_block_hash;
-                    let merkle_value = database
-                        .with_database(move |db| {
-                            db.block_storage_closest_descendant_merkle_value(
-                                &parent_block_hash,
-                                parent_paths.into_iter().map(|p| p.into_iter()),
-                                key_nibbles.iter().copied(),
-                            )
-                        })
-                        .await;
-                    let merkle_value = match merkle_value {
-                        Ok(mv) => mv,
-                        Err(error) => {
-                            return Err(ExecuteBlockError::VerificationFailure(
-                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
-                                    error,
-                                    context:
-                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
-                                            function_name: call_function,
-                                            parameter: call_parameter,
-                                        },
-                                },
-                            ))
-                        }
-                    };
-
-                    database_accesses_duration += when_database_access_started.elapsed();
-                    call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
-                }
-                runtime_host::RuntimeHostVm::NextKey(req) => {
-                    let when_database_access_started = Instant::now();
-
-                    let parent_paths = req.child_trie().map(|child_trie| {
-                        trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
-                            .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
-                            .map(u8::from)
-                            .collect::<Vec<_>>()
-                    });
-                    let key_nibbles = req
-                        .key()
-                        .map(u8::from)
-                        .chain(if req.or_equal() { None } else { Some(0u8) })
-                        .collect::<Vec<_>>();
-                    let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
-
-                    let branch_nodes = req.branch_nodes();
-                    let parent_block_hash = *parent_block_hash;
-                    let next_key = database
-                        .with_database(move |db| {
-                            db.block_storage_next_key(
-                                &parent_block_hash,
-                                parent_paths.into_iter().map(|p| p.into_iter()),
-                                key_nibbles.iter().copied(),
-                                prefix_nibbles.iter().copied(),
-                                branch_nodes,
-                            )
-                        })
-                        .await;
-                    let next_key = match next_key {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return Err(ExecuteBlockError::VerificationFailure(
-                                ExecuteBlockVerificationFailureError::DatabaseParentAccess {
-                                    error,
-                                    context:
-                                        ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
-                                            function_name: call_function,
-                                            parameter: call_parameter,
-                                        },
-                                },
-                            ))
-                        }
-                    };
-
-                    database_accesses_duration += when_database_access_started.elapsed();
-                    call = req.inject_key(
-                        next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
-                    );
-                }
-                runtime_host::RuntimeHostVm::OffchainStorageSet(req) => {
-                    // Ignore offchain storage writes at the moment.
-                    call = req.resume();
-                }
-                runtime_host::RuntimeHostVm::LogEmit(req) => {
-                    // Logs are ignored.
-                    call = req.resume();
-                }
-                runtime_host::RuntimeHostVm::SignatureVerification(sig) => {
-                    call = sig.verify_and_resume();
-                }
-                runtime_host::RuntimeHostVm::Offchain(_) => {
-                    // Offchain storage calls are forbidden.
-                    return Err(ExecuteBlockError::VerificationFailure(
-                        ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
-                    ));
-                }
+                parent_runtime = success.runtime;
+                storage_changes = success.storage_changes;
+                state_trie_version = success.state_trie_version;
+                database_accesses_duration += success.database_accesses_duration;
+            }
+            Err(RuntimeCallError::RuntimeStartError(error)) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::RuntimeStartError(error),
+                ))
+            }
+            Err(RuntimeCallError::RuntimeExecutionError(error)) => {
+                return Err(ExecuteBlockError::InvalidBlock(
+                    ExecuteBlockInvalidBlockError::RuntimeExecutionError(error),
+                ))
+            }
+            Err(RuntimeCallError::DatabaseParentAccess(error)) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::DatabaseParentAccess {
+                        error,
+                        context: ExecuteBlockDatabaseAccessFailureContext::FunctionCall {
+                            function_name: call_function,
+                            parameter: call_parameter.to_owned(),
+                        },
+                    },
+                ))
+            }
+            Err(RuntimeCallError::ForbiddenHostFunction) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::ForbiddenHostFunction,
+                ))
+            }
+            Err(RuntimeCallError::DatabaseInvalidStateTrieVersion) => {
+                return Err(ExecuteBlockError::VerificationFailure(
+                    ExecuteBlockVerificationFailureError::DatabaseInvalidStateTrieVersion,
+                ))
             }
         }
     }
@@ -3296,7 +3155,7 @@ pub async fn execute_block_and_insert(
             let vm = host::HostVmPrototype::new(host::Config {
                 module: &new_code,
                 heap_pages: new_heap_pages,
-                exec_hint: executor::vm::ExecHint::CompileAheadOfTime,
+                exec_hint: executor::vm::ExecHint::ValidateAndCompile,
                 allow_unresolved_imports: false,
             })
             .map_err(ExecuteBlockInvalidBlockError::InvalidNewRuntime)?;
@@ -3324,7 +3183,7 @@ pub async fn execute_block_and_insert(
                     .trie_changes_iter_ordered()
                     .unwrap()
                     .filter_map(|(_child_trie, key, change)| {
-                        let runtime_host::TrieChange::InsertUpdate {
+                        let runtime_call::TrieChange::InsertUpdate {
                             new_merkle_value,
                             partial_key,
                             children_merkle_values,
@@ -3334,7 +3193,7 @@ pub async fn execute_block_and_insert(
                             return None;
                         };
 
-                        // TODO: this punches through abstraction layers; maybe add some code to runtime_host to indicate this?
+                        // TODO: this punches through abstraction layers; maybe add some code to runtime_call to indicate this?
                         let references_merkle_value = key
                             .iter()
                             .copied()
@@ -3349,16 +3208,16 @@ pub async fn execute_block_and_insert(
                                     .map(|v| From::from(&v[..]))
                             }),
                             storage_value: match new_storage_value {
-                                runtime_host::TrieChangeStorageValue::Modified {
+                                runtime_call::TrieChangeStorageValue::Modified {
                                     new_value: Some(value),
                                 } => full_sqlite::InsertTrieNodeStorageValue::Value {
                                     value: Cow::Borrowed(value),
                                     references_merkle_value,
                                 },
-                                runtime_host::TrieChangeStorageValue::Modified {
+                                runtime_call::TrieChangeStorageValue::Modified {
                                     new_value: None,
                                 } => full_sqlite::InsertTrieNodeStorageValue::NoValue,
-                                runtime_host::TrieChangeStorageValue::Unmodified => {
+                                runtime_call::TrieChangeStorageValue::Unmodified => {
                                     // TODO: overhead, and no child trie support
                                     if let Some((value_in_parent, _)) = database
                                         .block_storage_get(
@@ -3413,7 +3272,7 @@ pub struct ExecuteBlockSuccess {
     pub new_runtime: Option<host::HostVmPrototype>,
 
     /// Changes to the storage performed during the execution.
-    pub storage_changes: Arc<runtime_host::StorageChanges>,
+    pub storage_changes: Arc<runtime_call::StorageChanges>,
 
     /// Total time the database accesses combined took.
     pub database_accesses_duration: Duration,
@@ -3472,7 +3331,7 @@ pub enum ExecuteBlockDatabaseAccessFailureContext {
 #[derive(Debug, derive_more::Display)]
 pub enum ExecuteBlockInvalidBlockError {
     /// Error while executing the runtime.
-    RuntimeExecutionError(runtime_host::ErrorDetail),
+    RuntimeExecutionError(runtime_call::ErrorDetail),
     /// Error in the output of `BlockBuilder_check_inherents`.
     #[display(fmt = "Error in the output of BlockBuilder_check_inherents: {_0}")]
     CheckInherentsOutputError(body_only::InherentsOutputError),
@@ -3485,4 +3344,204 @@ pub enum ExecuteBlockInvalidBlockError {
     InvalidNewHeapPages(executor::InvalidHeapPagesError),
     /// Failed to compile the new runtime that the block upgrades to.
     InvalidNewRuntime(host::NewErr),
+}
+
+/// Perform a runtime call, using the database as the source for storage data.
+pub async fn runtime_call(
+    database: &database_thread::DatabaseThread,
+    storage_block_hash: &[u8; 32],
+    runtime: host::HostVmPrototype,
+    function_to_call: &str,
+    parameter: &[u8],
+    initial_storage_changes: runtime_call::StorageChanges,
+) -> Result<RuntimeCallSuccess, RuntimeCallError> {
+    let mut call = runtime_call::run(runtime_call::Config {
+        virtual_machine: runtime,
+        function_to_call,
+        parameter: iter::once(&parameter),
+        storage_main_trie_changes: initial_storage_changes.into_main_trie_diff(),
+        max_log_level: 0,
+        calculate_trie_changes: true,
+    })
+    .map_err(|(err, _)| RuntimeCallError::RuntimeStartError(err))?;
+
+    let mut database_accesses_duration = Duration::new(0, 0);
+
+    loop {
+        match call {
+            runtime_call::RuntimeCall::Finished(Err(error)) => {
+                return Err(RuntimeCallError::RuntimeExecutionError(error.detail));
+            }
+            runtime_call::RuntimeCall::Finished(Ok(runtime_call::Success {
+                virtual_machine,
+                storage_changes,
+                state_trie_version,
+                ..
+            })) => {
+                let output = virtual_machine.value().as_ref().to_owned();
+                return Ok(RuntimeCallSuccess {
+                    output,
+                    runtime: virtual_machine.into_prototype(),
+                    storage_changes,
+                    state_trie_version,
+                    database_accesses_duration,
+                });
+            }
+
+            runtime_call::RuntimeCall::StorageGet(req) => {
+                let when_database_access_started = Instant::now();
+                let parent_paths = req.child_trie().map(|child_trie| {
+                    trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                        .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                        .map(u8::from)
+                        .collect::<Vec<_>>()
+                });
+                let key = trie::bytes_to_nibbles(req.key().as_ref().iter().copied())
+                    .map(u8::from)
+                    .collect::<Vec<_>>();
+                let storage_block_hash = *storage_block_hash;
+                let value = database
+                    .with_database(move |db| {
+                        db.block_storage_get(
+                            &storage_block_hash,
+                            parent_paths.into_iter().map(|p| p.into_iter()),
+                            key.iter().copied(),
+                        )
+                    })
+                    .await;
+                let value = match value {
+                    Ok(Some((ref val, vers))) => Some((
+                        iter::once(&val[..]),
+                        runtime_call::TrieEntryVersion::try_from(vers)
+                            .map_err(|_| RuntimeCallError::DatabaseInvalidStateTrieVersion)?,
+                    )),
+                    Ok(None) => None,
+                    Err(error) => return Err(RuntimeCallError::DatabaseParentAccess(error)),
+                };
+
+                database_accesses_duration += when_database_access_started.elapsed();
+                call = req.inject_value(value);
+            }
+            runtime_call::RuntimeCall::ClosestDescendantMerkleValue(req) => {
+                let when_database_access_started = Instant::now();
+
+                let parent_paths = req.child_trie().map(|child_trie| {
+                    trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                        .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                        .map(u8::from)
+                        .collect::<Vec<_>>()
+                });
+                let key_nibbles = req.key().map(u8::from).collect::<Vec<_>>();
+
+                let storage_block_hash = *storage_block_hash;
+                let merkle_value = database
+                    .with_database(move |db| {
+                        db.block_storage_closest_descendant_merkle_value(
+                            &storage_block_hash,
+                            parent_paths.into_iter().map(|p| p.into_iter()),
+                            key_nibbles.iter().copied(),
+                        )
+                    })
+                    .await;
+                let merkle_value = match merkle_value {
+                    Ok(mv) => mv,
+                    Err(error) => return Err(RuntimeCallError::DatabaseParentAccess(error)),
+                };
+
+                database_accesses_duration += when_database_access_started.elapsed();
+                call = req.inject_merkle_value(merkle_value.as_ref().map(|v| &v[..]));
+            }
+            runtime_call::RuntimeCall::NextKey(req) => {
+                let when_database_access_started = Instant::now();
+
+                let parent_paths = req.child_trie().map(|child_trie| {
+                    trie::bytes_to_nibbles(b":child_storage:default:".iter().copied())
+                        .chain(trie::bytes_to_nibbles(child_trie.as_ref().iter().copied()))
+                        .map(u8::from)
+                        .collect::<Vec<_>>()
+                });
+                let key_nibbles = req
+                    .key()
+                    .map(u8::from)
+                    .chain(if req.or_equal() { None } else { Some(0u8) })
+                    .collect::<Vec<_>>();
+                let prefix_nibbles = req.prefix().map(u8::from).collect::<Vec<_>>();
+
+                let branch_nodes = req.branch_nodes();
+                let storage_block_hash = *storage_block_hash;
+                let next_key = database
+                    .with_database(move |db| {
+                        db.block_storage_next_key(
+                            &storage_block_hash,
+                            parent_paths.into_iter().map(|p| p.into_iter()),
+                            key_nibbles.iter().copied(),
+                            prefix_nibbles.iter().copied(),
+                            branch_nodes,
+                        )
+                    })
+                    .await;
+                let next_key = match next_key {
+                    Ok(k) => k,
+                    Err(error) => return Err(RuntimeCallError::DatabaseParentAccess(error)),
+                };
+
+                database_accesses_duration += when_database_access_started.elapsed();
+                call = req.inject_key(
+                    next_key.map(|k| k.into_iter().map(|b| trie::Nibble::try_from(b).unwrap())),
+                );
+            }
+            runtime_call::RuntimeCall::OffchainStorageSet(req) => {
+                // Ignore offchain storage writes at the moment.
+                call = req.resume();
+            }
+            runtime_call::RuntimeCall::LogEmit(req) => {
+                // Logs are ignored.
+                call = req.resume();
+            }
+            runtime_call::RuntimeCall::SignatureVerification(sig) => {
+                call = sig.verify_and_resume();
+            }
+            runtime_call::RuntimeCall::Offchain(_) => {
+                // Offchain storage calls are forbidden.
+                return Err(RuntimeCallError::ForbiddenHostFunction);
+            }
+        }
+    }
+}
+
+/// Returned by [`runtime_call()`] in case of success.
+#[derive(Debug)]
+pub struct RuntimeCallSuccess {
+    /// Output of the runtime call.
+    pub output: Vec<u8>,
+
+    /// Runtime that was provided as input to [`runtime_call()`].
+    pub runtime: host::HostVmPrototype,
+
+    /// Changes to the storage performed during the execution.
+    pub storage_changes: runtime_call::StorageChanges,
+
+    /// Version of the trie entries of the storage changes.
+    pub state_trie_version: runtime_call::TrieEntryVersion,
+
+    /// Total time the database accesses combined took.
+    pub database_accesses_duration: Duration,
+}
+
+/// Error returned by [`runtime_call()`].
+#[derive(Debug, derive_more::Display, derive_more::From)]
+pub enum RuntimeCallError {
+    /// Error starting the runtime execution.
+    #[display(fmt = "{_0}")]
+    RuntimeStartError(executor::host::StartErr),
+    /// Error while executing the runtime.
+    #[display(fmt = "{_0}")]
+    RuntimeExecutionError(runtime_call::ErrorDetail),
+    /// Error while accessing the parent block in the database.
+    #[display(fmt = "{_0}")]
+    DatabaseParentAccess(full_sqlite::StorageAccessError),
+    /// State trie version stored in database is invalid.
+    DatabaseInvalidStateTrieVersion,
+    /// Runtime has tried to call a forbidden host function.
+    ForbiddenHostFunction,
 }

@@ -2,9 +2,56 @@
 
 ## Unreleased
 
+### Changed
+
+- Clarify the value of `isSyncing` returned by `system_health`. The value will be equal to `false` if no peer that smoldot is connected to is more than 10 blocks ahead, and that the highest block would runtime code has been downloaded is no more than 12 blocks ahead of the highest block of the local chain. ([#1658](https://github.com/smol-dot/smoldot/pull/1658))
+
+### Fixed
+
+- The warp syncing process no longer repeats itself every 32 blocks, which was causing unnecessary bandwidth and CPU usage. ([#1656](https://github.com/smol-dot/smoldot/pull/1656))
+
+## 2.0.20 - 2024-01-30
+
+### Fixed
+
+- Fix "Justification targets block not in the chain" errors, leading to peers being erroneously banned. ([#1618](https://github.com/smol-dot/smoldot/pull/1618))
+- Revert wasmi version to v0.31 due to performance issues with the experimental v0.32. The WebAssembly runtime is no longer compiled lazily as was the same since smoldot v2.0.17. ([#1642](https://github.com/smol-dot/smoldot/pull/1624))
+- Fix blocks not being marked as bad when they are downloaded in an unusual order. ([#1631](https://github.com/smol-dot/smoldot/pull/1631))
+- Fix some Merkle proofs being considered as invalid due to nodes having an invalid format when they are in reality storage nodes. ([#1634](https://github.com/smol-dot/smoldot/pull/1634))
+
+## 2.0.19 - 2024-01-26
+
+### Fixed
+
+- Non-Grandpa justifications are now silently ignored, instead of leading to a ban of the peer that sent the justification. This makes smoldot work better on chains that use BEEFY. ([#1614](https://github.com/smol-dot/smoldot/pull/1614))
+
+## 2.0.18 - 2024-01-24
+
+### Changed
+
+- The `transaction_unstable_submitAndWatch` and `transaction_unstable_unwatch` JSON-RPC functions have been renamed to respectively `transactionWatch_unstable_submitAndWatch` and `transactionWatch_unstable_unwatch`, and the corresponding event has been renamed from `transaction_unstable_watchEvent` to `transactionWatch_unstable_watchEvent`, in accordance with the latest changes in the JSON-RPC API specification. ([#1604](https://github.com/smol-dot/smoldot/pull/1604))
+- The warp syncing and regular syncing algorithms now run in parallel, meaning that smoldot will now try to perform a warp sync against peers whose finalized block is (or pretends to be) far ahead from the local finalized block, while at the same time continuing to sync normally from other peers. Additionally, smoldot will no longer try to warp sync to peers whose finalized block is too close to the local finalized block, and will instead sync normally. ([#1591](https://github.com/smol-dot/smoldot/pull/1591))
+- The `system_health` JSON-RPC function now returns `isSyncing: true` if any of the peers smoldot is connected to is more than 10 blocks ahead of smoldot, and `false` in any other situation including having no peer. ([#1591](https://github.com/smol-dot/smoldot/pull/1591))
+- The `chainHead_unstable_storage` JSON-RPC function now yields results progressively as soon as they are received from the peer-to-peer networking, instead of buffering every item and yielding them all at once ([#1605](https://github.com/smol-dot/smoldot/pull/1605)).
+
+### Fixed
+
+- The syncing no longer gets stuck when connecting to a chain whose head is at the same block height as the checkpoint in the chain specification. ([#1591](https://github.com/smol-dot/smoldot/pull/1591))
+
+## 2.0.17 - 2024-01-17
+
+### Changed
+
+- The WebAssembly runtime is now compiled lazily, meaning that only the code that is executed is validated and translated. Thanks to this, compiling a runtime is now four times faster and the time to head of the chain is around 200ms faster. ([#1488](https://github.com/smol-dot/smoldot/pull/1488), [#1577](https://github.com/smol-dot/smoldot/pull/1577))
+- Most of the log messages emitted by smoldot have been modified in order to unify their syntax and be easier to parse programatically. ([#1560](https://github.com/smol-dot/smoldot/pull/1560))
+- Added support for the `ext_panic_handler_abort_on_panic_version_1` host function. ([#1573](https://github.com/smol-dot/smoldot/pull/1573))
+
 ### Fixed
 
 - Fix the nodes discovery process being slow for chains that are added long after the smoldot client has started. This was caused by the fact that the discovery was started at the same time for all chains, and that this discovery intentionally slows down over time. The discovery is now performed and slowed down for each chain individually. ([#1544](https://github.com/smol-dot/smoldot/pull/1544))
+- Fix panic when a JSON-RPC function call requires executing an old runtime that smoldot considers as invalid. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
+- Runtime calls no longer fail instantly when a peer sends back an invalid Merkle proof. Instead, the call proof is requested again from a different peer. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
+- The `chainHead_unstable_call` JSON-RPC function now produces a `operationInaccessible` event instead of an `operationError` event when peers send back bad or incomplete Merkle proofs. ([#1570](https://github.com/smol-dot/smoldot/pull/1570))
 
 ## 2.0.16 - 2023-12-29
 
