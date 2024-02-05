@@ -342,7 +342,6 @@ pub(super) async fn start_standalone_chain<TPlat: PlatformRef>(
                 task.warp_sync_taking_long_time_warning =
                     future::Either::Right(future::pending()).fuse();
 
-                debug_assert!(task.known_finalized_runtime.is_none());
                 task.known_finalized_runtime = Some(FinalizedBlockRuntime {
                     virtual_machine: finalized_block_runtime,
                     storage_code: finalized_storage_code,
