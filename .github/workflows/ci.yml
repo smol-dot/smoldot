@@ -109,26 +109,6 @@ jobs:
     - run: RUSTFLAGS=-Dwarnings cargo build --package smoldot --locked --no-default-features --target=thumbv7m-none-eabi
     - run: RUSTFLAGS=-Dwarnings cargo build --package smoldot-light --locked --no-default-features --target=thumbv7m-none-eabi
 
-  fuzzing-binaries-compile:
-    runs-on: ubuntu-latest
-    container:
-      image: rust:1.74
-    steps:
-    - uses: actions/checkout@v4
-      # Since build artifacts are specific to a nightly version, we pin the specific nightly
-      # version to use in order to not invalidate the build cache every day. The exact version
-      # is completely arbitrary.
-    - run: rustup default nightly-2023-07-15
-    - uses: baptiste0928/cargo-install@v3  # This action ensures that the compilation is cached.
-      with:
-        crate: cargo-fuzz
-        locked: false   # TODO: `cargo-fuzz` fails to compile with --locked because its Cargo.lock contains very old dependencies
-    - uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: |
-          ./fuzz
-    - run: cargo fuzz build --fuzz-dir ./fuzz
-
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
@@ -150,11 +130,6 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
-      - uses: actions-rs/cargo@v1
-        # The fuzzing targets are in a different package and thus need to be checked separately.
-        with:
-          command: fmt
-          args: --manifest-path ./fuzz/Cargo.toml --all -- --check
 
   # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
@@ -218,7 +193,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-no-std, fuzzing-binaries-compile, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-no-std, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
