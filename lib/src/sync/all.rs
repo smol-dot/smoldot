@@ -2182,7 +2182,7 @@ impl<TRq, TSrc, TBl> HeaderVerifySuccess<TRq, TSrc, TBl> {
     pub fn finish(self, user_data: TBl) -> AllSync<TRq, TSrc, TBl> {
         let height = self.height();
         let mut all_forks = self.inner.finish();
-        *all_forks.block_user_data_mut(height, &self.verified_block_hash) = Some(user_data);
+        all_forks[(height, &self.verified_block_hash)] = Some(user_data);
         AllSync {
             all_forks: Some(all_forks),
             warp_sync: self.warp_sync,
