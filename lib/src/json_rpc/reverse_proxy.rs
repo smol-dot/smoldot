@@ -94,6 +94,8 @@ use crate::json_rpc::methods;
 
 use super::parse;
 
+mod client_sanitizer;
+
 /// Configuration for a new [`ReverseProxy`].
 pub struct Config {
     /// Value to return when a call to the `system_name` JSON-RPC function is received.
@@ -1308,15 +1310,14 @@ impl<TClient, TServer> ReverseProxy<TClient, TServer> {
                 };
 
                 match request_info.ty {
-                    QueuedRequestTy::Subscription { ty, assigned_subscription_id } => {
-                        
-                    }
-                    QueuedRequestTy::Unsubscribe(_) => {
-
-                    }
-                    QueuedRequestTy::Regular { is_legacy_api_server_specific } => {
-
-                    }
+                    QueuedRequestTy::Subscription {
+                        ty,
+                        assigned_subscription_id,
+                    } => {}
+                    QueuedRequestTy::Unsubscribe(_) => {}
+                    QueuedRequestTy::Regular {
+                        is_legacy_api_server_specific,
+                    } => {}
                 }
 
                 // TODO: add subscription if this was a subscribe request
