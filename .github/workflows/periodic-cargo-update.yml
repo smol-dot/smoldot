@@ -17,8 +17,6 @@ jobs:
       working-directory: wasm-node/rust
     - run: cargo update
       working-directory: full-node
-    - run: cargo update
-      working-directory: fuzz
     - uses: peter-evans/create-pull-request@v5
       with:
         # We use a custom secret (rather than the default GITHUB_TOKEN) so that opening the pull

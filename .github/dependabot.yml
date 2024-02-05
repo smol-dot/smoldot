@@ -7,13 +7,6 @@ updates:
       interval: "daily"
     open-pull-requests-limit: 4
 
-  - package-ecosystem: cargo
-    directory: "/fuzz"
-    labels: []
-    schedule:
-      interval: "daily"
-    open-pull-requests-limit: 4
-
   - package-ecosystem: "npm"
     directory: "/wasm-node/javascript"
     labels: []
