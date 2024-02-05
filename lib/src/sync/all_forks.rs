@@ -507,42 +507,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.chain.iter_ancestry_order()
     }
 
-    /// Gives access to the user data stored for a block of the data structure.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the block wasn't present in the data structure.
-    ///
-    pub fn block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
-        if let Some(block) = self.chain.non_finalized_block_user_data(hash) {
-            return block;
-        }
-
-        &self
-            .inner
-            .blocks
-            .unverified_block_user_data(height, hash)
-            .user_data
-    }
-
-    /// Gives access to the user data stored for a block of the data structure.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the block wasn't present in the data structure.
-    ///
-    pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
-        if let Some(block) = self.chain.non_finalized_block_user_data_mut(hash) {
-            return block;
-        }
-
-        &mut self
-            .inner
-            .blocks
-            .unverified_block_user_data_mut(height, hash)
-            .user_data
-    }
-
     /// Starts the process of inserting a new source in the [`AllForksSync`].
     ///
     /// This function doesn't modify the state machine, but only looks at the current state of the
@@ -1059,14 +1023,30 @@ impl<'a, TBl, TRq, TSrc> ops::Index<(u64, &'a [u8; 32])> for AllForksSync<TBl, T
 
     #[track_caller]
     fn index(&self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &TBl {
-        self.block_user_data(block_height, block_hash)
+        if let Some(block) = self.chain.non_finalized_block_user_data(block_hash) {
+            return block;
+        }
+
+        &self
+            .inner
+            .blocks
+            .unverified_block_user_data(block_height, block_hash)
+            .user_data
     }
 }
 
 impl<'a, TBl, TRq, TSrc> ops::IndexMut<(u64, &'a [u8; 32])> for AllForksSync<TBl, TRq, TSrc> {
     #[track_caller]
     fn index_mut(&mut self, (block_height, block_hash): (u64, &'a [u8; 32])) -> &mut TBl {
-        self.block_user_data_mut(block_height, block_hash)
+        if let Some(block) = self.chain.non_finalized_block_user_data_mut(block_hash) {
+            return block;
+        }
+
+        &mut self
+            .inner
+            .blocks
+            .unverified_block_user_data_mut(block_height, block_hash)
+            .user_data
     }
 }
 
