@@ -101,7 +101,7 @@ wasmtime = { version = "17.0.0", default-features = false, features = ["async", 
 criterion = "0.5.1"
 futures-executor = { version = "0.3.28", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
-tempfile = "3.7.1"
+tempfile = "3.10.0"
 wat = "1.0.85"
 
 [package.metadata.docs.rs]
