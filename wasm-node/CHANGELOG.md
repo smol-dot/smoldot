@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Update back to wasmi v0.32. The wasmi version was downgraded to v0.31 in smoldot v2.0.20 due to performance issues. These performance issues turned out to be simply caused by `debug-assertions = true`.
 - Clarify the value of `isSyncing` returned by `system_health`. The value will be equal to `false` if no peer that smoldot is connected to is more than 10 blocks ahead, and that the highest block would runtime code has been downloaded is no more than 12 blocks ahead of the highest block of the local chain. ([#1658](https://github.com/smol-dot/smoldot/pull/1658))
 
 ### Fixed
