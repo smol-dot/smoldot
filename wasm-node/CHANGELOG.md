@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.0.21 - 2024-02-06
+
 ### Changed
 
 - Update back to wasmi v0.32. The wasmi version was downgraded to v0.31 in smoldot v2.0.20 due to performance issues. These performance issues turned out to be simply caused by `debug-assertions = true`. ([#1667](https://github.com/smol-dot/smoldot/pull/1667))
