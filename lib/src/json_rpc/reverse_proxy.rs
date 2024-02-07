@@ -94,6 +94,9 @@ use crate::json_rpc::methods;
 
 use super::parse;
 
+pub mod clients_multiplexer;
+pub mod servers_multiplexer;
+
 mod client_sanitizer;
 
 /// Configuration for a new [`ReverseProxy`].
