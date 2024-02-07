@@ -30,18 +30,28 @@
 //! subscription ID that the client observes are assigned by the [`ServersMultiplexer`].
 //! Requests IDs are left untouched.
 //!
-//! If a server is removed or blacklisted, for each legacy JSON-RPC API subscription that this
-//! server was handling, a dummy subscription request is sent to a different server and the
-//! notifications sent by this other server are transparently redirected to the client as if they
-//! were coming from the original server.
+//! When a server is removed or blacklisted, for each legacy JSON-RPC API subscription that this
+//! server was handling (apart from `author_submitAndWatchExtrinsic`), a dummy subscription request
+//! is sent to a different server and the notifications sent by this other server are
+//! transparently redirected to the client as if they were coming from the original server.
 //! This might lead to some confusing situations, such as the latest finalized block going back
 //! to an earlier block, but because the legacy JSON-RPC API doesn't provide any way to handle
 //! this situation in a clean way, this is the last bad way to handle it.
+//!
+//! When a server is removed or blacklisted, each active `chainHead_unstable_follow` subscription
+//! generates a `stop` event, and each active `author_submitAndWatchExtrinsic` and
+//! `transactionWatch_unstable_submitAndWatch` subscription generates a `dropped` event.
+//!
+//! JSON-RPC requests for `chainHead_unstable_follow` and `transaction_unstable_broadcast` are
+//! sent to a randomly-chosen server. If this server returns `null`, indicating that it has reached
+//! its limits, the request is sent to a different randomly-chosen server instead. After 3 failed
+//! attempts, `null` is returned to the client.
+// TODO: document transaction_broadcast when server is removed
 // TODO: more doc
 
-use alloc::collections::{btree_map, BTreeMap};
+use alloc::collections::{btree_map, BTreeMap, VecDeque};
 
-use crate::json_rpc::methods;
+use crate::json_rpc::{methods, parse};
 
 /// Configuration for a new [`ServersMultiplexer`].
 pub struct Config {
@@ -66,6 +76,16 @@ pub struct ServersMultiplexer<T> {
     /// List of all servers. Indices serve as [`ServerId`].
     servers: slab::Slab<Server<TServer>>,
 
+    /// Queues of requests waiting to be sent to a server.
+    ///
+    /// Indexed by `None` if the request doesn't have to target any specific server, or by `Some`
+    /// if the request must target a specific server.
+    ///
+    /// The `VecDeque`s must never be empty. If a queue is emptied, the item must be removed from
+    /// the `BTreeMap` altogether.
+    // TODO: call shrink to fit from time to time?
+    queued_requests: BTreeMap<Option<ServerId>, VecDeque<QueuedRequest>>,
+
     /// List of all requests that have been extracted with
     /// [`ReverseProxy::next_proxied_json_rpc_request`] and are being processed by a server.
     ///
@@ -80,19 +100,31 @@ pub struct ServersMultiplexer<T> {
     // TODO: call shrink to fit from time to time?
     responses_queue: VecDeque<QueuedResponse>,
 
-    /// List of all subscriptions that are currently active according to servers.
+    /// List of all subscriptions that are currently active.
+    ///
+    /// Keys are subscription IDs from the client's perspective, and values are the server that is
+    /// handling this subscription.
     ///
     /// Entries are inserted when a server successfully accepts a subscription request, and removed
     /// when a server sends back a confirmation of unsubscription, or a `stop` or `dropped` event
     /// or similar. In other words, entries are removed only once we don't expect any new
     /// notification coming from the server.
-    active_subscriptions: BTreeMap<(ServerId, String), String>,
+    active_subscriptions: hashbrown::HashMap<String, ServerId, fnv::FnvBuildHasher>,
+
+    /// Same entries as [`ServersMultiplexer::active_subscriptions`], but indexed by server.
+    ///
+    /// Keys are the server and subscription ID from the server's perspective, and values are
+    /// the subscription ID from the client's perspective.
+    active_subscriptions_by_server: BTreeMap<(ServerId, String), String>,
 
     /// See [`Config::system_name`]
     system_name: Cow<'static, str>,
 
     /// See [`Config::system_version`]
     system_version: Cow<'static, str>,
+
+    /// Source of randomness used for various purposes.
+    randomness: ChaCha20Rng,
 }
 
 struct Server<TServer> {
@@ -116,10 +148,14 @@ impl<T> ServersMultiplexer<T> {
     pub fn new(config: Config) -> Self {
         ServersMultiplexer {
             servers: slab::Slab::new(), // TODO: capacity
+            queued_requests: BTreeMap::new(),
+            responses_queue: VecDeque::new(), // TODO: capacity
             requests_in_progress: BTreeMap::new(),
             active_subscriptions: todo!(),
+            active_subscriptions_by_server: BTreeMap::new(),
             system_name: config.system_name,
             system_version: config.system_version,
+            randomness: ChaCha20Rng::from_seed(config.randomness_seed),
         }
     }
 
@@ -157,13 +193,13 @@ impl<T> ServersMultiplexer<T> {
             return;
         }
 
-        // Extract from `active_subscriptions` the subscriptions that were handled by that server.
+        // Extract from `active_subscriptions_by_server` the subscriptions that were handled by that server.
         let subscriptions_to_cancel_or_reopen = {
             let mut server_and_after = self
-                .active_subscriptions
+                .active_subscriptions_by_server
                 .split_off(&(server_id, String::new()));
             let mut after = server_and_after.split_off(&(ServerId(server_id.0 + 1), String::new()));
-            self.active_subscriptions.append(&mut after);
+            self.active_subscriptions_by_server.append(&mut after);
             server_and_after
         };
 
@@ -191,7 +227,7 @@ impl<T> ServersMultiplexer<T> {
                         .to_json_request_object_parameters(None),
                     );
                     let _was_removed = self
-                        .active_subscriptions_by_client
+                        .active_subscriptions_by_server_by_client
                         .remove(client_subscription_id);
                     debug_assert!(_was_removed.is_some());
                 }
@@ -211,7 +247,7 @@ impl<T> ServersMultiplexer<T> {
                         .to_json_request_object_parameters(None),
                     );
                     let _was_removed = self
-                        .active_subscriptions_by_client
+                        .active_subscriptions_by_server_by_client
                         .remove(client_subscription_id);
                     debug_assert!(_was_removed.is_some());
                 }
@@ -224,7 +260,7 @@ impl<T> ServersMultiplexer<T> {
                         .to_json_request_object_parameters(None),
                     );
                     let _was_removed = self
-                        .active_subscriptions_by_client
+                        .active_subscriptions_by_server_by_client
                         .remove(client_subscription_id);
                     debug_assert!(_was_removed.is_some());
                 }
@@ -314,7 +350,7 @@ impl<T> ServersMultiplexer<T> {
                 | SubscriptionTyWithParams::ChainSubscribeNewHeads
                 | SubscriptionTyWithParams::StateSubscribeRuntimeVersion
                 | SubscriptionTyWithParams::StateSubscribeStorage { .. } => {
-                    self.active_subscriptions_by_client
+                    self.active_subscriptions_by_server_by_client
                         .get_mut(&(client_id, client_subscription_id.clone()))
                         .unwrap()
                         .1 = None;
@@ -326,32 +362,14 @@ impl<T> ServersMultiplexer<T> {
                 | SubscriptionTyWithParams::ChainHeadFollow => {}
             }
         }
-
-        // Unassign clients that were assigned to that server.
-        let legacy_api_assigned_clients = {
-            let mut server_and_after = self
-                .legacy_api_server_assignments
-                .split_off(&(server_id, ClientId(usize::MIN)));
-            let mut after =
-                server_and_after.split_off(&(ServerId(server_id.0 + 1), ClientId(usize::MIN)));
-            self.legacy_api_server_assignments.append(&mut after);
-            server_and_after
-        };
-        for (_, legacy_api_assigned_client) in legacy_api_assigned_clients {
-            debug_assert_eq!(
-                self.clients[legacy_api_assigned_client.0].legacy_api_assigned_server,
-                Some(server_id)
-            );
-            self.clients[legacy_api_assigned_client.0].legacy_api_assigned_server = None;
-        }
     }
 
     /// Adds a request to the queue of requests waiting to be picked up by a server.
-    pub fn insert_json_rpc_request(&mut self, request: &str) -> InsertRequest {
+    pub fn insert_json_rpc_request(&mut self, request: String) -> InsertRequest {
         // Determine the request information, or answer the request directly if possible.
-        let queued_request = match methods::parse_jsonrpc_client_to_server(request) {
+        match methods::parse_jsonrpc_client_to_server(&request) {
             Ok((request_id_json, method)) => {
-                let ty = match method {
+                let assigned_server = match method {
                     // Answer the request directly if possible.
                     methods::MethodCall::system_name {} => {
                         self.responses_queue.push_back(QueuedResponse {
@@ -388,81 +406,63 @@ impl<T> ServersMultiplexer<T> {
                         return InsertRequest::ImmediateAnswer;
                     }
 
-                    // Subscription functions.
-                    methods::MethodCall::state_subscribeRuntimeVersion {}
-                    | methods::MethodCall::state_subscribeStorage { .. }
-                    | methods::MethodCall::chain_subscribeAllHeads {}
-                    | methods::MethodCall::chain_subscribeFinalizedHeads {}
-                    | methods::MethodCall::chain_subscribeNewHeads {} => {
-                        QueuedRequestTy::Subscription {
-                            ty: match method {
-                                methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                                    SubscriptionTyWithParams::StateSubscribeRuntimeVersion
-                                }
-                                methods::MethodCall::state_subscribeStorage { list } => {
-                                    SubscriptionTyWithParams::StateSubscribeStorage { keys: list }
-                                }
-                                methods::MethodCall::chain_subscribeAllHeads {} => {
-                                    SubscriptionTyWithParams::ChainSubscribeAllHeads
-                                }
-                                methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                                    SubscriptionTyWithParams::ChainSubscribeFinalizedHeads
-                                }
-                                methods::MethodCall::chain_subscribeNewHeads {} => {
-                                    SubscriptionTyWithParams::ChainSubscribeNewHeads
-                                }
-                                _ => unreachable!(),
-                            },
-                            assigned_subscription_id: None,
-                        }
-                    }
-                    methods::MethodCall::chainHead_unstable_follow { .. } => {
-                        if self.num_chainhead_follow_subscriptions
-                            >= self.max_chainhead_follow_subscriptions
-                        {
-                            self.responses_queue.push_back(QueuedResponse {
-                                response: parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::ApplicationDefined(
-                                        -32800,
-                                        "Too many active `chainHead_follow` subscriptions",
-                                    ),
-                                    None,
-                                ),
-                            });
-                            return InsertRequest::ImmediateAnswer;
-                        }
-
-                        self.num_chainhead_follow_subscriptions += 1;
-                        QueuedRequestTy::Subscription {
-                            ty: SubscriptionTyWithParams::ChainHeadFollow,
-                            assigned_subscription_id: None,
-                        }
-                    }
-                    methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-                    | methods::MethodCall::transaction_unstable_submitAndWatch { .. } => {
-                        QueuedRequestTy::Subscription {
-                            ty: match method {
-                                methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
-                                    SubscriptionTyWithParams::ChainHeadFollow
-                                }
-                                methods::MethodCall::transaction_unstable_submitAndWatch {
-                                    ..
-                                } => SubscriptionTyWithParams::TransactionSubmitAndWatch,
-                                _ => unreachable!(),
-                            },
-                            assigned_subscription_id: None,
-                        }
-                    }
-
                     // Unsubscription functions.
                     methods::MethodCall::chain_unsubscribeAllHeads { subscription }
                     | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
                     | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
-                    | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                        todo!()
+                    | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
+                    | methods::MethodCall::state_unsubscribeStorage { subscription }
+                    | methods::MethodCall::transaction_unstable_unwatch { subscription }
+                    | methods::MethodCall::network_unstable_unsubscribeEvents { subscription } => {
+                        if let Some(server_id) =
+                            self.active_subscriptions.get(&*follow_subscription)
+                        {
+                            Some(server_id)
+                        } else {
+                            // Subscription doesn't exist, or doesn't exist anymore.
+                            // Immediately return a response to the client.
+                            self.responses_queue.push_back(QueuedResponse {
+                                response: match method {
+                                    methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
+                                        methods::Response::chain_unsubscribeAllHeads(false)
+                                            .to_json_response(request_id_json)
+                                    }
+                                    methods::MethodCall::chain_unsubscribeFinalizedHeads {
+                                        ..
+                                    } => methods::Response::chain_unsubscribeFinalizedHeads(false)
+                                        .to_json_response(request_id_json),
+                                    methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
+                                        methods::Response::chain_unsubscribeNewHeads(false)
+                                            .to_json_response(request_id_json)
+                                    }
+                                    methods::MethodCall::state_unsubscribeRuntimeVersion {
+                                        ..
+                                    } => methods::Response::state_unsubscribeRuntimeVersion(false)
+                                        .to_json_response(request_id_json),
+                                    methods::MethodCall::state_unsubscribeStorage { .. } => {
+                                        methods::Response::state_unsubscribeStorage(false)
+                                            .to_json_response(request_id_json)
+                                    }
+                                    methods::MethodCall::transaction_unstable_unwatch {
+                                        ..
+                                    } => parse::build_error_response(
+                                        request_id_json,
+                                        parse::ErrorResponse::InvalidParams,
+                                        None,
+                                    ),
+                                    methods::MethodCall::network_unstable_unsubscribeEvents {
+                                        ..
+                                    } => parse::build_error_response(
+                                        request_id_json,
+                                        parse::ErrorResponse::InvalidParams,
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                },
+                            });
+                            return InsertRequest::ImmediateAnswer;
+                        }
                     }
-                    methods::MethodCall::state_unsubscribeStorage { subscription } => todo!(),
 
                     // Legacy JSON-RPC API functions.
                     methods::MethodCall::account_nextIndex { .. }
@@ -512,72 +512,112 @@ impl<T> ServersMultiplexer<T> {
                     | methods::MethodCall::system_nodeRoles { .. }
                     | methods::MethodCall::system_peers { .. }
                     | methods::MethodCall::system_properties { .. }
-                    | methods::MethodCall::system_removeReservedPeer { .. } => {
-                        QueuedRequestTy::Regular {
-                            is_legacy_api_server_specific: true,
-                        }
-                    }
+                    | methods::MethodCall::system_removeReservedPeer { .. }
+                    | methods::MethodCall::state_subscribeRuntimeVersion {}
+                    | methods::MethodCall::state_subscribeStorage { .. }
+                    | methods::MethodCall::chain_subscribeAllHeads {}
+                    | methods::MethodCall::chain_subscribeFinalizedHeads {}
+                    | methods::MethodCall::chain_subscribeNewHeads {}
+                    | methods::MethodCall::author_submitAndWatchExtrinsic { .. } => None,
 
                     // New JSON-RPC API.
-                    methods::MethodCall::chainSpec_v1_chainName {}
+                    methods::MethodCall::chainHead_unstable_follow { .. }
+                    | methods::MethodCall::transaction_unstable_submitAndWatch { .. }
+                    | methods::MethodCall::network_unstable_subscribeEvents {}
+                    | methods::MethodCall::chainSpec_v1_chainName {}
                     | methods::MethodCall::chainSpec_v1_genesisHash {}
                     | methods::MethodCall::chainSpec_v1_properties {}
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
-                        QueuedRequestTy::Regular {
-                            is_legacy_api_server_specific: false,
-                        }
-                    }
+                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => None,
 
                     // ChainHead functions.
                     methods::MethodCall::chainHead_unstable_body {
                         follow_subscription,
-                        hash,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_call {
+                        ..
+                    }
+                    | methods::MethodCall::chainHead_unstable_call {
                         follow_subscription,
-                        hash,
-                        function,
-                        call_parameters,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_header {
+                        ..
+                    }
+                    | methods::MethodCall::chainHead_unstable_header {
                         follow_subscription,
-                        hash,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_stopOperation {
+                        ..
+                    }
+                    | methods::MethodCall::chainHead_unstable_stopOperation {
                         follow_subscription,
-                        operation_id,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_storage {
+                        ..
+                    }
+                    | methods::MethodCall::chainHead_unstable_storage {
                         follow_subscription,
-                        hash,
-                        items,
-                        child_trie,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_continue {
+                        ..
+                    }
+                    | methods::MethodCall::chainHead_unstable_continue {
                         follow_subscription,
-                        operation_id,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_unfollow {
+                        ..
+                    }
+                    | methods::MethodCall::chainHead_unstable_unfollow {
                         follow_subscription,
-                    } => todo!(),
-                    methods::MethodCall::chainHead_unstable_unpin {
+                    }
+                    | methods::MethodCall::chainHead_unstable_unpin {
                         follow_subscription,
-                        hash_or_hashes,
-                    } => todo!(),
-
-                    methods::MethodCall::transaction_unstable_unwatch { subscription } => todo!(),
-                    methods::MethodCall::network_unstable_subscribeEvents {} => todo!(),
-                    methods::MethodCall::network_unstable_unsubscribeEvents { subscription } => {
-                        todo!()
+                        ..
+                    } => {
+                        if let Some(server_id) =
+                            self.active_subscriptions.get(&*follow_subscription)
+                        {
+                            Some(server_id)
+                        } else {
+                            // Subscription doesn't exist, or doesn't exist anymore.
+                            // Immediately return a response to the client.
+                            self.responses_queue.push_back(QueuedResponse {
+                                response: match method {
+                                    methods::MethodCall::chainHead_unstable_body { .. } => {
+                                        methods::Response::chainHead_unstable_body(
+                                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                                        )
+                                    }
+                                    methods::MethodCall::chainHead_unstable_call { .. } => {
+                                        methods::Response::chainHead_unstable_call(
+                                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                                        )
+                                    }
+                                    methods::MethodCall::chainHead_unstable_header { .. } => {
+                                        methods::Response::chainHead_unstable_header(None)
+                                    }
+                                    methods::MethodCall::chainHead_unstable_stopOperation {
+                                        ..
+                                    } => methods::Response::chainHead_unstable_stopOperation(()),
+                                    methods::MethodCall::chainHead_unstable_storage { .. } => {
+                                        methods::Response::chainHead_unstable_storage(
+                                            methods::ChainHeadStorageReturn::LimitReached {},
+                                        )
+                                    }
+                                    methods::MethodCall::chainHead_unstable_continue { .. } => {
+                                        methods::Response::chainHead_unstable_continue(())
+                                    }
+                                    methods::MethodCall::chainHead_unstable_unfollow { .. } => {
+                                        methods::Response::chainHead_unstable_unfollow(())
+                                    }
+                                    methods::MethodCall::chainHead_unstable_unpin { .. } => {
+                                        methods::Response::chainHead_unstable_unpin(())
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                .to_json_response(request_id_json),
+                            });
+                            return InsertRequest::ImmediateAnswer;
+                        }
                     }
                 };
 
-                // TODO: to_owned?
-                QueuedRequest {
-                    id_json: request_id_json.to_owned(),
-                    method: method.name().to_owned(),
-                    parameters_json: Some(method.params_to_json_object()),
-                    ty,
+                // Insert the request in the queue.
+                self.queued_requests
+                    .entry(assigned_server)
+                    .or_insert(VecDeque::new())
+                    .push_back(request);
+                if let Some(assigned_server) = assigned_server {
+                    InsertRequest::ServerWakeUp(assigned_server)
+                } else {
+                    InsertRequest::AnyServerWakeUp
                 }
             }
 
@@ -585,7 +625,7 @@ impl<T> ServersMultiplexer<T> {
                 // Failed to parse the JSON-RPC request.
                 self.responses_queue
                     .push_back(parse::build_parse_error_response());
-                return InsertRequest::ImmediateAnswer;
+                InsertRequest::ImmediateAnswer
             }
 
             Err(methods::ParseClientToServerError::Method { request_id, error }) => {
@@ -602,18 +642,16 @@ impl<T> ServersMultiplexer<T> {
                     parse::ErrorResponse::MethodNotFound,
                     None,
                 ));
-                return InsertRequest::ImmediateAnswer;
+                InsertRequest::ImmediateAnswer
             }
 
             Err(methods::ParseClientToServerError::UnknownNotification(function)) => {
                 // JSON-RPC function not recognized, and the call is a notification.
                 // According to the JSON-RPC specification, the server must not send any response
                 // to notifications, even in case of an error.
-                return InsertRequest::Discarded;
+                InsertRequest::Discarded
             }
-        };
-
-        todo!()
+        }
     }
 
     /// Returns the next JSON-RPC response or notification to send to the client.
@@ -654,157 +692,59 @@ impl<T> ServersMultiplexer<T> {
 
         // There are two types of requests: requests that aren't attributed to any server, and
         // requests that are attributed to a specific server.
-
-        loop {
-            // Extract a request from that client.
-            let queued_request = if pick_from_server_specific {
-                // Pick a request from the server-agnostic queue of that client.
-                let Some(requests_queue) = self
-                    .client_requests_queued
-                    .get_mut(&(client_with_request, ServerTarget::Specific(server_id)))
-                else {
-                    // A panic here indicates a bug in the code.
-                    unreachable!()
-                };
-
-                let Some(request) = requests_queue.pop_front() else {
-                    // A panic here indicates a bug in the code.
-                    unreachable!()
-                };
-
-                // We need to update caches if this was the last request in queue.
-                if requests_queue.is_empty() {
-                    self.client_requests_queued
-                        .remove(&(client_with_request, ServerTarget::Specific(server_id)));
-                    self.clients_with_request_queued
-                        .remove(&(Some(server_id), client_with_request));
+        // In order to guarantee some fairness, we pick from either list randomly.
+        let queued_request = {
+            // Choose which queue to pick from.
+            let pick_from_specific_queue = {
+                let num_non_specific = self.queued_requests.get(&None).map_or(0, |l| l.len());
+                let num_specific = (self
+                .queued_requests
+                .get(&Some(server_id))
+                .map_or(0, |l| l.len())
+                + (self.servers.len() - 1))  // `servers.len()` is necessarily non-zero, as a `ServerId` is provided as input.
+                / self.servers.len();
+                if num_non_specific == 0 && num_specific == 0 {
+                    // No request available.
+                    // The code below would panic if we continued.
+                    return None;
                 }
 
-                request
-            } else {
-                /// Pick a request from the server-specific queue of that client.
-                /// We currently always prefer the `LegacyApiUnassigned` requests queue over the
-                /// `ServerAgnostic` requests queue, for no specific reason except avoiding
-                /// making the implementation too complex.
-                let (queue, is_legacy_api_unassigned) = if let Some(queue) = self
-                    .client_requests_queued
-                    .get_mut(&(client_with_request, ServerTarget::LegacyApiUnassigned))
-                {
-                    (queue, true)
-                } else if let Some(queue) = self
-                    .client_requests_queued
-                    .get_mut(&(client_with_request, ServerTarget::ServerAgnostic))
-                {
-                    (queue, false)
-                } else {
-                    // A panic here indicates a bug in the code.
-                    unreachable!()
-                };
+                let rand = rand::distributions::Distribution::sample(
+                    &rand::distributions::Uniform::new(0, num_non_specific + num_specific),
+                    &mut self.randomness,
+                );
 
-                // Extract the request.
-                let Some(request) = queue.pop_front() else {
-                    // As documented, queues must always be non-empty, otherwise they should have
-                    // been removed altogether.
-                    unreachable!()
-                };
-
-                // If the request is a legacy API server-specific request, assign the client to
-                // the server.
-                if is_legacy_api_unassigned {
-                    debug_assert!(self.clients[client_with_request.0]
-                        .legacy_api_assigned_server
-                        .is_none());
-                    self.clients[client_with_request.0].legacy_api_assigned_server =
-                        Some(server_id);
-                    let _was_inserted = self
-                        .legacy_api_server_assignments
-                        .insert((server_id, client_with_request));
-                    debug_assert!(_was_inserted);
-                }
-
-                // Update the local state, either by removing the queue if it is empty, or, now
-                // that the client is assigned a server, by merging it with the server-specific
-                // queue.
-                if queue.is_empty() {
-                    self.client_requests_queued.remove(&(
-                        client_with_request,
-                        if is_legacy_api_unassigned {
-                            ServerTarget::LegacyApiUnassigned
-                        } else {
-                            ServerTarget::ServerAgnostic
-                        },
-                    ));
-                    if !self.client_requests_queued.contains_key(&(
-                        client_with_request,
-                        if is_legacy_api_unassigned {
-                            ServerTarget::ServerAgnostic
-                        } else {
-                            ServerTarget::LegacyApiUnassigned
-                        },
-                    )) {
-                        self.clients_with_request_queued
-                            .remove(&(client_with_request, None));
-                    }
-                } else if is_legacy_api_unassigned {
-                    // Queue is non-empty, and client was assigned to that server.
-                    // We need to move around the queue of unassigned legacy API requests so that
-                    // it targets the server.
-                    let queue = mem::take(queue);
-                    debug_assert!(!queue.is_empty());
-                    self.client_requests_queued
-                        .entry((client_with_request, ServerTarget::Specific(server_id)))
-                        .or_insert_with(|| VecDeque::new())
-                        .extend(queue);
-                    self.clients_with_request_queued
-                        .insert((Some(server_id), client_with_request));
-                    self.client_requests_queued
-                        .remove(&(client_with_request, ServerTarget::LegacyApiUnassigned));
-                    if !self
-                        .client_requests_queued
-                        .contains_key(&(client_with_request, ServerTarget::ServerAgnostic))
-                    {
-                        let _was_removed = self
-                            .clients_with_request_queued
-                            .remove(&(None, client_with_request));
-                        debug_assert!(_was_removed);
-                    }
-                }
-
-                request
+                rand >= num_non_specific
             };
 
-            // At this point, we have extracted a request from the queue.
-
-            // The next step is to generate a new request ID and rewrite the request in order to
-            // change the request ID.
-            let new_request_id = hex::encode({
-                let mut bytes = [0; 48];
-                self.randomness.fill_bytes(&mut bytes);
-                bytes
-            });
-            let request_with_adjusted_id = parse::build_request(&parse::Request {
-                id_json: Some(&new_request_id),
-                method: &queued_request.method,
-                params_json: queued_request.parameters_json.as_deref(),
-            });
-
-            // Update `self` to track that the server is processing this request.
-            let _previous_value = self.requests_in_progress.insert(
-                (server_id, new_request_id),
-                (client_with_request, queued_request),
-            );
-            debug_assert!(_previous_value.is_none());
-
-            // Success.
-            break Some((
-                request_with_adjusted_id,
-                if self.clients[client_with_request.0].user_data.is_some() {
-                    Some(client_with_request)
-                } else {
+            // Extract the request from the queue.
+            let btree_map::Entry::Occupied(entry) =
+                self.queued_requests.entry(&if pick_from_specific_queue {
                     None
-                },
-            ));
-        }
+                } else {
+                    Some(server_id)
+                })
+            else {
+                unreachable!()
+            };
+            let request = entry
+                .get_mut()
+                .pop_front()
+                .unwrap_or_else(|| unreachable!());
+            if entry.get().is_empty() {
+                entry.remove();
+            }
+            request
+        };
+
+        // Update `self` to track that the server is processing this request.
+        let _previous_value = self
+            .requests_in_progress
+            .insert((server_id, new_request_id), queued_request);
+        debug_assert!(_previous_value.is_none());
+
+        // Success.
+        Some(queued_request)
     }
 
     /// Inserts a response or notification sent by a server.
@@ -820,7 +760,7 @@ impl<T> ServersMultiplexer<T> {
     pub fn insert_proxied_json_rpc_response(
         &mut self,
         server_id: ServerId,
-        response: &str,
+        response: &str, // TODO: owned String?
     ) -> InsertProxiedJsonRpcResponse {
         match parse::parse_response(response) {
             Ok(parse::Response::ParseError { .. })
@@ -881,17 +821,21 @@ impl<T> ServersMultiplexer<T> {
                 error_message,
                 error_data_json,
             }) => {
-                // TODO: if this was a "fake subscription" request, re-queue it
+                // Find in our local state the request being answered.
+                // TODO: to_owned overhead
+                let Some(request_info) = self
+                    .requests_in_progress
+                    .remove(&(server_id, id_json.to_owned()))
+                else {
+                    // Server has answered a non-existing request. Blacklist it.
+                    self.blacklist_server(server_id);
+                    return InsertProxiedJsonRpcResponse::Blacklisted("");
+                    // TODO: ^
+                };
 
-                // JSON-RPC server has returned an error for this JSON-RPC call.
-                // TODO: translate ID
-                parse::build_error_response(
-                    id_json,
-                    parse::ErrorResponse::ApplicationDefined(error_code, error_message),
-                    error_data_json,
-                );
-                // TODO: ?!
-                todo!()
+                // TODO: discard if this is a response to a fake re-subscription request
+                self.responses_queue.push_back(response.to_owned());
+                InsertProxiedJsonRpcResponse::Ok
             }
 
             Err(response_parse_error) => {
@@ -900,12 +844,9 @@ impl<T> ServersMultiplexer<T> {
                 match methods::parse_notification(response) {
                     Ok(mut notification) => {
                         // This is a subscription notification.
-                        // Because clients are removed only after they have finished
-                        // unsubscribing, it is guaranteed that the client is still in the
-                        // list.
                         // TODO: overhead of into_owned
                         let btree_map::Entry::Occupied(subscription_entry) = self
-                            .active_subscriptions
+                            .active_subscriptions_by_server
                             .entry((server_id, notification.subscription().clone().into_owned()))
                         else {
                             // The subscription ID isn't recognized. This indicates something very
