@@ -51,7 +51,7 @@
 
 use alloc::{
     borrow::Cow,
-    collections::{btree_map, BTreeMap, VecDeque},
+    collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
 };
 use core::{mem, ops};
 use rand_chacha::{
@@ -135,12 +135,27 @@ pub struct ServersMultiplexer<T> {
     /// the subscription ID from the client's perspective.
     active_subscriptions_by_server: BTreeMap<(ServerId, String), String>,
 
+    /// List of subscriptions that the client thinks are alive but that aren't active on
+    /// any server.
+    ///
+    /// Keys are the subscription ID from the point of view of the client.
     // TODO: call shrink to fit from time to time?
-    zombie_subscriptions_queue: VecDeque<ZombieSubscription>,
+    zombie_subscriptions: hashbrown::HashMap<String, ZombieSubscription, SipHasherBuild>,
 
+    /// Subset of the items of [`ServersMultiplexer::zombie_subscriptions`] for which a
+    /// re-subscription is waiting to be sent to a server.
+    ///
+    /// Keys are the subscription ID from the point of view of the client.
     // TODO: call shrink to fit from time to time?
-    zombie_subscriptions_resub_requests:
-        hashbrown::HashMap<String, ZombieSubscription, fnv::FnvBuildHasher>,
+    zombie_subscriptions_pending: BTreeSet<String>,
+
+    /// Subset of the items of [`ServersMultiplexer::zombie_subscriptions`] for which a
+    /// re-subscription has been sent to a server.
+    ///
+    /// Keys are the request ID of the re-subscription request, and values are the subscription
+    /// ID from the point of view of the client.
+    // TODO: call shrink to fit from time to time?
+    zombie_subscriptions_by_resubscribe_id: BTreeMap<(ServerId, String), String>,
 
     /// See [`Config::system_name`]
     system_name: Cow<'static, str>,
@@ -157,6 +172,10 @@ struct Request {
     method_name: String,
 
     /// JSON-encoded parameters of the request. `None` if no parameters were provided.
+    ///
+    /// If the request targets a specific subscription (i.e. contains a subscription ID in its
+    /// parameters), the parameters have been adjusted to target the subscription ID from the
+    /// server's point of view.
     method_params_json: Option<String>,
 
     /// Number of times this request has previously been sent to a server, and the server has
@@ -185,15 +204,14 @@ struct ActiveSubscription {
 }
 
 struct ZombieSubscription {
-    /// Subscription ID according to the client.
-    client_subscription_id: String,
-
     /// Name of the method that has performed the subscription.
     method_name: String,
 
     /// JSON-encoded parameters to the method that performed the subscription. `None` if no
     /// parameters were provided.
     method_params_json: Option<String>,
+
+    resubscribe_request_id: Option<String>,
 
     /// If `Some`, the client has sent an unsubscribe request for this subscription but that
     /// hasn't been answered yet. Immediately after the subscription has been re-subscribed,
@@ -222,11 +240,16 @@ impl<T> ServersMultiplexer<T> {
                 }),
             ),
             active_subscriptions_by_server: BTreeMap::new(),
-            zombie_subscriptions_queue: VecDeque::new(),
-            zombie_subscriptions_resub_requests: hashbrown::HashMap::with_capacity_and_hasher(
-                0,
-                Default::default(),
+            zombie_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                0, // TODO:
+                SipHasherBuild::new({
+                    let mut seed = [0; 16];
+                    randomness.fill_bytes(&mut seed);
+                    seed
+                }),
             ),
+            zombie_subscriptions_pending: BTreeSet::new(),
+            zombie_subscriptions_by_resubscribe_id: BTreeMap::new(),
             system_name: config.system_name,
             system_version: config.system_version,
             randomness,
@@ -267,7 +290,28 @@ impl<T> ServersMultiplexer<T> {
             return;
         }
 
-        // Extract from `active_subscriptions_by_server` the subscriptions that were handled by that server.
+        // Extract from `zombie_subscriptions_by_resubscribe_id` the re-subscription requests
+        // that were handled by that server.
+        let zombie_resubscriptions = {
+            let mut server_and_after = self
+                .zombie_subscriptions_by_resubscribe_id
+                .split_off(&(server_id, String::new()));
+            let mut after = server_and_after.split_off(&(ServerId(server_id.0 + 1), String::new()));
+            self.zombie_subscriptions_by_resubscribe_id
+                .append(&mut after);
+            server_and_after
+        };
+
+        // Re-queue the zombie resubscriptions.
+        for (_, zombie_subscription_id) in zombie_resubscriptions {
+            let _was_inserted = self
+                .zombie_subscriptions_pending
+                .insert(zombie_subscription_id);
+            debug_assert!(_was_inserted);
+        }
+
+        // Extract from `active_subscriptions_by_server` the subscriptions that were handled
+        // by that server.
         let mut subscriptions_to_cancel_or_reopen = {
             let mut server_and_after = self
                 .active_subscriptions_by_server
@@ -369,18 +413,20 @@ impl<T> ServersMultiplexer<T> {
 
             let requests_queued = requests_queued
                 .into_iter()
-                .flat_map(|(_, requests)| requests.into_iter());
-            let requests_dispatched = requests_in_progress.into_iter().map(|(_, rq)| rq);
+                .flat_map(|(_, requests)| requests.into_iter().map(|(id, rq)| (id, rq, false)));
+            let requests_dispatched = requests_in_progress
+                .into_iter()
+                .map(|((_, rq_id), rq)| (rq_id, rq, true));
             requests_dispatched.chain(requests_queued)
         };
 
-        for request_info in requests_to_cancel {
-            // Parse the request again. The request is guaranteed to parse succesfully, otherwise
-            // it wouldn't have been queued.
-            // TODO: could be optimized by storing the ID on the side during the first parsing?
-            let Ok((request_id_json, method)) =
-                methods::parse_jsonrpc_client_to_server(&request_info.request_json)
-            else {
+        for (request_id_json, request_info, already_dispatched) in requests_to_cancel {
+            // Parse again the method. This is guaranteed to succeed, as otherwise the request
+            // wouldn't have been inserted into the local state in the first place.
+            let Ok(method) = methods::parse_jsonrpc_client_to_server_method_name_and_parameters(
+                &request_info.method_name,
+                request_info.method_params_json.as_deref(),
+            ) else {
                 unreachable!()
             };
 
@@ -390,27 +436,8 @@ impl<T> ServersMultiplexer<T> {
                 // been generated above.
                 methods::MethodCall::chain_unsubscribeAllHeads { subscription }
                 | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
-                | methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                    let subscription_exists = subscriptions_to_cancel_or_reopen
-                        .remove(&(server_id, subscription))
-                        .is_some();
-                    self.responses_queue.push_back(match method {
-                        methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
-                            methods::Response::chain_unsubscribeAllHeads(subscription_exists)
-                                .to_json_response(request_id_json)
-                        }
-                        methods::MethodCall::chain_unsubscribeFinalizedHeads { .. } => {
-                            methods::Response::chain_unsubscribeFinalizedHeads(subscription_exists)
-                                .to_json_response(request_id_json)
-                        }
-                        methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
-                            methods::Response::chain_unsubscribeNewHeads(subscription_exists)
-                                .to_json_response(request_id_json)
-                        }
-                        _ => unreachable!(),
-                    });
-                }
-                methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
+                | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
+                | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                 | methods::MethodCall::state_unsubscribeStorage { subscription }
                 | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
                 | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
@@ -449,6 +476,453 @@ impl<T> ServersMultiplexer<T> {
                         .remove(&(server_id, subscription.into_owned()))
                         .is_some();
                     self.responses_queue.push_back(match method {
+                        methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
+                            methods::Response::chain_unsubscribeAllHeads(subscription_exists)
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chain_unsubscribeFinalizedHeads { .. } => {
+                            methods::Response::chain_unsubscribeFinalizedHeads(subscription_exists)
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
+                            methods::Response::chain_unsubscribeNewHeads(subscription_exists)
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::state_unsubscribeRuntimeVersion { .. } => {
+                            methods::Response::state_unsubscribeRuntimeVersion(subscription_exists)
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::state_unsubscribeStorage { .. } => {
+                            methods::Response::state_unsubscribeStorage(subscription_exists)
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                            parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::InvalidParams,
+                                None,
+                            )
+                        }
+                        methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
+                            parse::build_error_response(
+                                &request_id_json,
+                                parse::ErrorResponse::InvalidParams,
+                                None,
+                            )
+                        }
+                        methods::MethodCall::chainHead_unstable_body { .. } => {
+                            methods::Response::chainHead_unstable_body(
+                                methods::ChainHeadBodyCallReturn::LimitReached {},
+                            )
+                            .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_call { .. } => {
+                            methods::Response::chainHead_unstable_call(
+                                methods::ChainHeadBodyCallReturn::LimitReached {},
+                            )
+                            .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_header { .. } => {
+                            methods::Response::chainHead_unstable_header(None)
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
+                            methods::Response::chainHead_unstable_stopOperation(())
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_storage { .. } => {
+                            methods::Response::chainHead_unstable_storage(
+                                methods::ChainHeadStorageReturn::LimitReached {},
+                            )
+                            .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_continue { .. } => {
+                            methods::Response::chainHead_unstable_continue(())
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_unfollow { .. } => {
+                            methods::Response::chainHead_unstable_unfollow(())
+                                .to_json_response(&request_id_json)
+                        }
+                        methods::MethodCall::chainHead_unstable_unpin { .. } => {
+                            methods::Response::chainHead_unstable_unpin(())
+                                .to_json_response(&request_id_json)
+                        }
+                        _ => unreachable!(),
+                    });
+                }
+
+                // Any other request is added back to the head of the queue.
+                _ => {
+                    debug_assert!(already_dispatched);
+                    self.queued_requests
+                        .entry(None)
+                        .or_insert_with(VecDeque::new)
+                        .push_front((request_id_json, request_info));
+                }
+            }
+        }
+
+        // Process a second time the subscriptions to cancel. The list of subscriptions has been
+        // adjusted by the unsubscribe requests processed above, which is why this is done
+        // separately at the end.
+        // This time, we reopen legacy JSON-RPC API subscriptions by inserting them into a
+        // "zombie subscriptions" list.
+        for ((_, server_subscription_id), client_subscription_id) in
+            subscriptions_to_cancel_or_reopen
+        {
+            let Some((_, active_subscription)) =
+                self.active_subscriptions.remove(&client_subscription_id)
+            else {
+                // We might have already removed the subscription earlier.
+                continue;
+            };
+
+            self.zombie_subscriptions.insert(
+                client_subscription_id.clone(),
+                ZombieSubscription {
+                    method_name: active_subscription.method_name,
+                    method_params_json: active_subscription.method_params_json,
+                    resubscribe_request_id: None,
+                    unsubscribe_request_id: None,
+                },
+            );
+
+            self.zombie_subscriptions_pending
+                .insert(client_subscription_id);
+        }
+    }
+
+    /// Adds a request to the queue of requests waiting to be picked up by a server.
+    pub fn insert_json_rpc_request(&mut self, request: String) -> InsertRequest {
+        // Parse the request, making sure that it is valid JSON-RPC.
+        let request = match parse::parse_request(&request) {
+            Ok(rq) => rq,
+            Err(_) => {
+                // Failed to parse the JSON-RPC request.
+                self.responses_queue
+                    .push_back(parse::build_parse_error_response());
+                return InsertRequest::ImmediateAnswer;
+            }
+        };
+
+        // Extract the request ID.
+        let Some(request_id_json) = request.id_json else {
+            // The call is a notification. No notification is supported.
+            // According to the JSON-RPC specification, the server must not send any response
+            // to notifications, even in case of an error.
+            return InsertRequest::Discarded;
+        };
+
+        // Now parse the method name and parameters.
+        let Ok(method) = methods::parse_jsonrpc_client_to_server_method_name_and_parameters(
+            request.method,
+            request.params_json,
+        ) else {
+            // JSON-RPC function not recognized.
+
+            // Requests with an unknown method must not be blindly sent to a server, as it is
+            // not possible for the reverse proxy to guarantee that the logic of the request
+            // is respected.
+            // For example, if the request is a subscription request, the reverse proxy
+            // wouldn't be capable of understanding which client to redirect the notifications
+            // to.
+            self.responses_queue.push_back(parse::build_error_response(
+                request_id_json,
+                parse::ErrorResponse::MethodNotFound,
+                None,
+            ));
+            return InsertRequest::ImmediateAnswer;
+        };
+
+        // Try to answer the request directly. If not possible, determine which server the request
+        // must target, and potentially adjust its parameters.
+        let (rewritten_parameters, assigned_server) = match method {
+            // Answer the request directly if possible.
+            methods::MethodCall::system_name {} => {
+                self.responses_queue.push_back(
+                    methods::Response::system_name(Cow::Borrowed(&*self.system_name))
+                        .to_json_response(request_id_json),
+                );
+                return InsertRequest::ImmediateAnswer;
+            }
+            methods::MethodCall::system_version {} => {
+                self.responses_queue.push_back(
+                    methods::Response::system_version(Cow::Borrowed(&*self.system_version))
+                        .to_json_response(request_id_json),
+                );
+                return InsertRequest::ImmediateAnswer;
+            }
+            methods::MethodCall::sudo_unstable_version {} => {
+                self.responses_queue.push_back(
+                    methods::Response::sudo_unstable_version(Cow::Owned(format!(
+                        "{} {}",
+                        self.system_name, self.system_version
+                    )))
+                    .to_json_response(request_id_json),
+                );
+                return InsertRequest::ImmediateAnswer;
+            }
+            methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
+                self.responses_queue.push_back(
+                    methods::Response::sudo_unstable_p2pDiscover(())
+                        .to_json_response(request_id_json),
+                );
+                return InsertRequest::ImmediateAnswer;
+            }
+
+            // Unsubscription functions or functions that target a specific subscription.
+            methods::MethodCall::chain_unsubscribeAllHeads { subscription }
+            | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
+            | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
+            | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
+            | methods::MethodCall::state_unsubscribeStorage { subscription }
+            | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
+            | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
+            | methods::MethodCall::chainHead_unstable_body {
+                follow_subscription: subscription,
+                ..
+            }
+            | methods::MethodCall::chainHead_unstable_call {
+                follow_subscription: subscription,
+                ..
+            }
+            | methods::MethodCall::chainHead_unstable_header {
+                follow_subscription: subscription,
+                ..
+            }
+            | methods::MethodCall::chainHead_unstable_stopOperation {
+                follow_subscription: subscription,
+                ..
+            }
+            | methods::MethodCall::chainHead_unstable_storage {
+                follow_subscription: subscription,
+                ..
+            }
+            | methods::MethodCall::chainHead_unstable_continue {
+                follow_subscription: subscription,
+                ..
+            }
+            | methods::MethodCall::chainHead_unstable_unfollow {
+                follow_subscription: subscription,
+            }
+            | methods::MethodCall::chainHead_unstable_unpin {
+                follow_subscription: subscription,
+                ..
+            } => {
+                // TODO: must check whether the subscription type matches the expected one
+                if let Some(&(server_id, subscription_info)) =
+                    self.active_subscriptions.get(&*subscription)
+                {
+                    // The subscription exists and is active.
+                    // Pass the unsubscription request to the server.
+                    // We have to adjust the parameters of the request so that the subscription
+                    // ID becomes the one from the point of view of the server.
+                    let parameters_rewrite = match method {
+                        methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
+                            methods::MethodCall::chain_unsubscribeAllHeads {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chain_unsubscribeFinalizedHeads { .. } => {
+                            methods::MethodCall::chain_unsubscribeFinalizedHeads {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
+                            methods::MethodCall::chain_unsubscribeNewHeads {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::state_unsubscribeRuntimeVersion { .. } => {
+                            methods::MethodCall::state_unsubscribeRuntimeVersion {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::state_unsubscribeStorage { .. } => {
+                            methods::MethodCall::state_unsubscribeStorage {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                            methods::MethodCall::transactionWatch_unstable_unwatch {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
+                            methods::MethodCall::sudo_network_unstable_unwatch {
+                                subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chainHead_unstable_body { hash, .. } => {
+                            methods::MethodCall::chainHead_unstable_body {
+                                follow_subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                                hash,
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chainHead_unstable_call {
+                            hash,
+                            function,
+                            call_parameters,
+                            ..
+                        } => methods::MethodCall::chainHead_unstable_call {
+                            follow_subscription: Cow::Borrowed(
+                                &subscription_info.server_subscription_id,
+                            ),
+                            hash,
+                            function,
+                            call_parameters,
+                        }
+                        .params_to_json_object(),
+                        methods::MethodCall::chainHead_unstable_header { hash, .. } => {
+                            methods::MethodCall::chainHead_unstable_header {
+                                follow_subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                                hash,
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chainHead_unstable_stopOperation {
+                            operation_id,
+                            ..
+                        } => methods::MethodCall::chainHead_unstable_stopOperation {
+                            follow_subscription: Cow::Borrowed(
+                                &subscription_info.server_subscription_id,
+                            ),
+                            operation_id,
+                        }
+                        .params_to_json_object(),
+                        methods::MethodCall::chainHead_unstable_storage {
+                            hash,
+                            items,
+                            child_trie,
+                            ..
+                        } => methods::MethodCall::chainHead_unstable_storage {
+                            follow_subscription: Cow::Borrowed(
+                                &subscription_info.server_subscription_id,
+                            ),
+                            hash,
+                            items,
+                            child_trie,
+                        }
+                        .params_to_json_object(),
+                        methods::MethodCall::chainHead_unstable_continue {
+                            operation_id, ..
+                        } => methods::MethodCall::chainHead_unstable_continue {
+                            follow_subscription: Cow::Borrowed(
+                                &subscription_info.server_subscription_id,
+                            ),
+                            operation_id,
+                        }
+                        .params_to_json_object(),
+                        methods::MethodCall::chainHead_unstable_unfollow { .. } => {
+                            methods::MethodCall::chainHead_unstable_unfollow {
+                                follow_subscription: Cow::Borrowed(
+                                    &subscription_info.server_subscription_id,
+                                ),
+                            }
+                            .params_to_json_object()
+                        }
+                        methods::MethodCall::chainHead_unstable_unpin {
+                            hash_or_hashes, ..
+                        } => methods::MethodCall::chainHead_unstable_unpin {
+                            follow_subscription: Cow::Borrowed(
+                                &subscription_info.server_subscription_id,
+                            ),
+                            hash_or_hashes,
+                        }
+                        .params_to_json_object(),
+                        _ => unreachable!(),
+                    };
+
+                    (Some(parameters_rewrite), Some(server_id))
+                } else {
+                    // The subscription isn't active on any server. It might exist in a special
+                    // state.
+                    let subscription_exists =
+                        if let hashbrown::hash_map::EntryRef::Occupied(mut zombie_subscription) =
+                            self.zombie_subscriptions.entry_ref(&*subscription)
+                        {
+                            // The subscription is a so-called "zombie subscription". It exists
+                            // from the point of view of the client, but isn't active on any
+                            // server.
+                            if let Some(resubscribe_request_id) =
+                                zombie_subscription.get().resubscribe_request_id
+                            {
+                                // We have sent a re-subscription request to one of the servers.
+                                if zombie_subscription
+                                    .get_mut()
+                                    .unsubscribe_request_id
+                                    .is_none()
+                                {
+                                    // Update the state of the zombie subscription so that we
+                                    // immediately unsubscribe as soon as the re-subscription
+                                    // happens.
+                                    zombie_subscription.get_mut().unsubscribe_request_id =
+                                        Some(request_id_json.to_owned());
+                                    return InsertRequest::LocalStateUpdate;
+                                } else {
+                                    // The client has already unsubscribed from this subscription,
+                                    // but we haven't sent an answer yet, and is now trying to
+                                    // unsubscribe a second time. Consider that the subscription
+                                    // doesn't exist for this second time.
+                                    // TODO: the second unsubscribe response will come before the first unsubscribe, is that a problem?
+                                    false
+                                }
+                            } else {
+                                // We haven't sent any re-subscription request to any of the
+                                // servers yet. The local state can be entirely cleaned up.
+                                zombie_subscription.remove();
+                                let _was_in =
+                                    self.zombie_subscriptions_pending.remove(&*subscription);
+                                debug_assert!(_was_in);
+                                true
+                            }
+                        } else {
+                            // Subscription isn't a "zombie subscription". It doesn't exist, or
+                            // doesn't exist anymore.
+                            false
+                        };
+
+                    // Immediately send back a response to the client.
+                    self.responses_queue.push_back(match method {
+                        methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
+                            methods::Response::chain_unsubscribeAllHeads(subscription_exists)
+                                .to_json_response(request_id_json)
+                        }
+                        methods::MethodCall::chain_unsubscribeFinalizedHeads { .. } => {
+                            methods::Response::chain_unsubscribeFinalizedHeads(subscription_exists)
+                                .to_json_response(request_id_json)
+                        }
+                        methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
+                            methods::Response::chain_unsubscribeNewHeads(subscription_exists)
+                                .to_json_response(request_id_json)
+                        }
                         methods::MethodCall::state_unsubscribeRuntimeVersion { .. } => {
                             methods::Response::state_unsubscribeRuntimeVersion(subscription_exists)
                                 .to_json_response(request_id_json)
@@ -511,330 +985,94 @@ impl<T> ServersMultiplexer<T> {
                         }
                         _ => unreachable!(),
                     });
-                }
-
-                // Any other request is added back to the head of the queue.
-                _ => {
-                    self.queued_requests
-                        .entry(None)
-                        .or_insert_with(VecDeque::new)
-                        .push_front(request_info);
-                }
-            }
-        }
-
-        // Process a second time the subscriptions to cancel, this time reopening legacy JSON-RPC
-        // API subscriptions by adding to the head of the JSON-RPC client requests queue a fake
-        // subscription request.
-        // This is done at the end, in order to avoid reopening subscriptions for which an
-        // unsubscribe request was in queue.
-        for ((_, server_subscription_id), client_subscription_id) in
-            subscriptions_to_cancel_or_reopen
-        {
-            let Some((_, active_subscription)) =
-                self.active_subscriptions.remove(&client_subscription_id)
-            else {
-                // We might have already removed the subscription earlier.
-                continue;
-            };
-
-            self.zombie_subscriptions_queue
-                .push_back(ZombieSubscription {
-                    client_subscription_id,
-                    method_name: active_subscription.method_name,
-                    method_params_json: active_subscription.method_params_json,
-                    unsubscribe_request_id: None,
-                });
-        }
-    }
-
-    /// Adds a request to the queue of requests waiting to be picked up by a server.
-    pub fn insert_json_rpc_request(&mut self, request: String) -> InsertRequest {
-        // Determine the request information, or answer the request directly if possible.
-        match methods::parse_jsonrpc_client_to_server(&request) {
-            Ok((request_id_json, method)) => {
-                let (rewritten_request, assigned_server) = match method {
-                    // Answer the request directly if possible.
-                    methods::MethodCall::system_name {} => {
-                        self.responses_queue.push_back(
-                            methods::Response::system_name(Cow::Borrowed(&*self.system_name))
-                                .to_json_response(request_id_json),
-                        );
-                        return InsertRequest::ImmediateAnswer;
-                    }
-                    methods::MethodCall::system_version {} => {
-                        self.responses_queue.push_back(
-                            methods::Response::system_version(Cow::Borrowed(&*self.system_version))
-                                .to_json_response(request_id_json),
-                        );
-                        return InsertRequest::ImmediateAnswer;
-                    }
-                    methods::MethodCall::sudo_unstable_version {} => {
-                        self.responses_queue.push_back(
-                            methods::Response::sudo_unstable_version(Cow::Owned(format!(
-                                "{} {}",
-                                self.system_name, self.system_version
-                            )))
-                            .to_json_response(request_id_json),
-                        );
-                        return InsertRequest::ImmediateAnswer;
-                    }
-                    methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
-                        self.responses_queue.push_back(
-                            methods::Response::sudo_unstable_p2pDiscover(())
-                                .to_json_response(request_id_json),
-                        );
-                        return InsertRequest::ImmediateAnswer;
-                    }
-
-                    // Unsubscription functions or functions that target a specific subscription.
-                    methods::MethodCall::chain_unsubscribeAllHeads { subscription }
-                    | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
-                    | methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                        // TODO: check against zombie subscriptions
-                        if let Some(&server_id) = self.active_subscriptions.get(&*subscription) {
-                            // TODO: must rewrite request
-                            Some(server_id)
-                        } else {
-                            // Subscription doesn't exist, or doesn't exist anymore.
-                            // Immediately return a response to the client.
-                            self.responses_queue.push_back(match method {
-                                methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
-                                    methods::Response::chain_unsubscribeAllHeads(false)
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chain_unsubscribeFinalizedHeads { .. } => {
-                                    methods::Response::chain_unsubscribeFinalizedHeads(false)
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
-                                    methods::Response::chain_unsubscribeNewHeads(false)
-                                        .to_json_response(request_id_json)
-                                }
-                                _ => unreachable!(),
-                            });
-                            return InsertRequest::ImmediateAnswer;
-                        }
-                    }
-                    methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
-                    | methods::MethodCall::state_unsubscribeStorage { subscription }
-                    | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-                    | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
-                    | methods::MethodCall::chainHead_unstable_body {
-                        follow_subscription: subscription,
-                        ..
-                    }
-                    | methods::MethodCall::chainHead_unstable_call {
-                        follow_subscription: subscription,
-                        ..
-                    }
-                    | methods::MethodCall::chainHead_unstable_header {
-                        follow_subscription: subscription,
-                        ..
-                    }
-                    | methods::MethodCall::chainHead_unstable_stopOperation {
-                        follow_subscription: subscription,
-                        ..
-                    }
-                    | methods::MethodCall::chainHead_unstable_storage {
-                        follow_subscription: subscription,
-                        ..
-                    }
-                    | methods::MethodCall::chainHead_unstable_continue {
-                        follow_subscription: subscription,
-                        ..
-                    }
-                    | methods::MethodCall::chainHead_unstable_unfollow {
-                        follow_subscription: subscription,
-                    }
-                    | methods::MethodCall::chainHead_unstable_unpin {
-                        follow_subscription: subscription,
-                        ..
-                    } => {
-                        // TODO: check against zombie subscriptions
-                        if let Some(&server_id) = self.active_subscriptions.get(&*subscription) {
-                            // TODO: must rewrite request
-                            Some(server_id)
-                        } else {
-                            // Subscription doesn't exist, or doesn't exist anymore.
-                            // Immediately return a response to the client.
-                            self.responses_queue.push_back(match method {
-                                methods::MethodCall::state_unsubscribeRuntimeVersion { .. } => {
-                                    methods::Response::state_unsubscribeRuntimeVersion(false)
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::state_unsubscribeStorage { .. } => {
-                                    methods::Response::state_unsubscribeStorage(false)
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::transactionWatch_unstable_unwatch {
-                                    ..
-                                } => parse::build_error_response(
-                                    request_id_json,
-                                    parse::ErrorResponse::InvalidParams,
-                                    None,
-                                ),
-                                methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
-                                    parse::build_error_response(
-                                        request_id_json,
-                                        parse::ErrorResponse::InvalidParams,
-                                        None,
-                                    )
-                                }
-                                methods::MethodCall::chainHead_unstable_body { .. } => {
-                                    methods::Response::chainHead_unstable_body(
-                                        methods::ChainHeadBodyCallReturn::LimitReached {},
-                                    )
-                                    .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chainHead_unstable_call { .. } => {
-                                    methods::Response::chainHead_unstable_call(
-                                        methods::ChainHeadBodyCallReturn::LimitReached {},
-                                    )
-                                    .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chainHead_unstable_header { .. } => {
-                                    methods::Response::chainHead_unstable_header(None)
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chainHead_unstable_stopOperation {
-                                    ..
-                                } => methods::Response::chainHead_unstable_stopOperation(())
-                                    .to_json_response(request_id_json),
-                                methods::MethodCall::chainHead_unstable_storage { .. } => {
-                                    methods::Response::chainHead_unstable_storage(
-                                        methods::ChainHeadStorageReturn::LimitReached {},
-                                    )
-                                    .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chainHead_unstable_continue { .. } => {
-                                    methods::Response::chainHead_unstable_continue(())
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chainHead_unstable_unfollow { .. } => {
-                                    methods::Response::chainHead_unstable_unfollow(())
-                                        .to_json_response(request_id_json)
-                                }
-                                methods::MethodCall::chainHead_unstable_unpin { .. } => {
-                                    methods::Response::chainHead_unstable_unpin(())
-                                        .to_json_response(request_id_json)
-                                }
-                                _ => unreachable!(),
-                            });
-                            return InsertRequest::ImmediateAnswer;
-                        }
-                    }
-
-                    // Other JSON-RPC API functions.
-                    // Functions are listed individually so that if a function is added, this
-                    // code needs to be tweaked and added to the right category.
-                    methods::MethodCall::account_nextIndex { .. }
-                    | methods::MethodCall::author_hasKey { .. }
-                    | methods::MethodCall::author_hasSessionKeys { .. }
-                    | methods::MethodCall::author_insertKey { .. }
-                    | methods::MethodCall::author_pendingExtrinsics { .. }
-                    | methods::MethodCall::author_removeExtrinsic { .. }
-                    | methods::MethodCall::author_rotateKeys { .. }
-                    | methods::MethodCall::author_submitExtrinsic { .. }
-                    | methods::MethodCall::author_unwatchExtrinsic { .. }
-                    | methods::MethodCall::babe_epochAuthorship { .. }
-                    | methods::MethodCall::chain_getBlock { .. }
-                    | methods::MethodCall::chain_getBlockHash { .. }
-                    | methods::MethodCall::chain_getFinalizedHead { .. }
-                    | methods::MethodCall::chain_getHeader { .. }
-                    | methods::MethodCall::childstate_getKeys { .. }
-                    | methods::MethodCall::childstate_getStorage { .. }
-                    | methods::MethodCall::childstate_getStorageHash { .. }
-                    | methods::MethodCall::childstate_getStorageSize { .. }
-                    | methods::MethodCall::grandpa_roundState { .. }
-                    | methods::MethodCall::offchain_localStorageGet { .. }
-                    | methods::MethodCall::offchain_localStorageSet { .. }
-                    | methods::MethodCall::payment_queryInfo { .. }
-                    | methods::MethodCall::rpc_methods { .. }
-                    | methods::MethodCall::state_call { .. }
-                    | methods::MethodCall::state_getKeys { .. }
-                    | methods::MethodCall::state_getKeysPaged { .. }
-                    | methods::MethodCall::state_getMetadata { .. }
-                    | methods::MethodCall::state_getPairs { .. }
-                    | methods::MethodCall::state_getReadProof { .. }
-                    | methods::MethodCall::state_getRuntimeVersion { .. }
-                    | methods::MethodCall::state_getStorage { .. }
-                    | methods::MethodCall::state_getStorageHash { .. }
-                    | methods::MethodCall::state_getStorageSize { .. }
-                    | methods::MethodCall::state_queryStorage { .. }
-                    | methods::MethodCall::state_queryStorageAt { .. }
-                    | methods::MethodCall::system_accountNextIndex { .. }
-                    | methods::MethodCall::system_addReservedPeer { .. }
-                    | methods::MethodCall::system_chain { .. }
-                    | methods::MethodCall::system_chainType { .. }
-                    | methods::MethodCall::system_dryRun { .. }
-                    | methods::MethodCall::system_health { .. }
-                    | methods::MethodCall::system_localListenAddresses { .. }
-                    | methods::MethodCall::system_localPeerId { .. }
-                    | methods::MethodCall::system_networkState { .. }
-                    | methods::MethodCall::system_nodeRoles { .. }
-                    | methods::MethodCall::system_peers { .. }
-                    | methods::MethodCall::system_properties { .. }
-                    | methods::MethodCall::system_removeReservedPeer { .. }
-                    | methods::MethodCall::state_subscribeRuntimeVersion {}
-                    | methods::MethodCall::state_subscribeStorage { .. }
-                    | methods::MethodCall::chain_subscribeAllHeads {}
-                    | methods::MethodCall::chain_subscribeFinalizedHeads {}
-                    | methods::MethodCall::chain_subscribeNewHeads {}
-                    | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
-                    | methods::MethodCall::chainHead_unstable_follow { .. }
-                    | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
-                    | methods::MethodCall::sudo_network_unstable_watch {}
-                    | methods::MethodCall::chainSpec_v1_chainName {}
-                    | methods::MethodCall::chainSpec_v1_genesisHash {}
-                    | methods::MethodCall::chainSpec_v1_properties {}
-                    | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
-                        (request, None)
-                    }
-                };
-
-                // Insert the request in the queue.
-                self.queued_requests
-                    .entry(assigned_server)
-                    .or_insert(VecDeque::new())
-                    .push_back(request);
-                if let Some(assigned_server) = assigned_server {
-                    InsertRequest::ServerWakeUp(assigned_server)
-                } else {
-                    InsertRequest::AnyServerWakeUp
+                    return InsertRequest::ImmediateAnswer;
                 }
             }
 
-            Err(methods::ParseClientToServerError::JsonRpcParse(_error)) => {
-                // Failed to parse the JSON-RPC request.
-                self.responses_queue
-                    .push_back(parse::build_parse_error_response());
-                InsertRequest::ImmediateAnswer
+            // Other JSON-RPC API functions.
+            // Functions are listed individually so that if a function is added, this
+            // code needs to be tweaked and added to the right category.
+            methods::MethodCall::account_nextIndex { .. }
+            | methods::MethodCall::author_hasKey { .. }
+            | methods::MethodCall::author_hasSessionKeys { .. }
+            | methods::MethodCall::author_insertKey { .. }
+            | methods::MethodCall::author_pendingExtrinsics { .. }
+            | methods::MethodCall::author_removeExtrinsic { .. }
+            | methods::MethodCall::author_rotateKeys { .. }
+            | methods::MethodCall::author_submitExtrinsic { .. }
+            | methods::MethodCall::author_unwatchExtrinsic { .. }
+            | methods::MethodCall::babe_epochAuthorship { .. }
+            | methods::MethodCall::chain_getBlock { .. }
+            | methods::MethodCall::chain_getBlockHash { .. }
+            | methods::MethodCall::chain_getFinalizedHead { .. }
+            | methods::MethodCall::chain_getHeader { .. }
+            | methods::MethodCall::childstate_getKeys { .. }
+            | methods::MethodCall::childstate_getStorage { .. }
+            | methods::MethodCall::childstate_getStorageHash { .. }
+            | methods::MethodCall::childstate_getStorageSize { .. }
+            | methods::MethodCall::grandpa_roundState { .. }
+            | methods::MethodCall::offchain_localStorageGet { .. }
+            | methods::MethodCall::offchain_localStorageSet { .. }
+            | methods::MethodCall::payment_queryInfo { .. }
+            | methods::MethodCall::rpc_methods { .. }
+            | methods::MethodCall::state_call { .. }
+            | methods::MethodCall::state_getKeys { .. }
+            | methods::MethodCall::state_getKeysPaged { .. }
+            | methods::MethodCall::state_getMetadata { .. }
+            | methods::MethodCall::state_getPairs { .. }
+            | methods::MethodCall::state_getReadProof { .. }
+            | methods::MethodCall::state_getRuntimeVersion { .. }
+            | methods::MethodCall::state_getStorage { .. }
+            | methods::MethodCall::state_getStorageHash { .. }
+            | methods::MethodCall::state_getStorageSize { .. }
+            | methods::MethodCall::state_queryStorage { .. }
+            | methods::MethodCall::state_queryStorageAt { .. }
+            | methods::MethodCall::system_accountNextIndex { .. }
+            | methods::MethodCall::system_addReservedPeer { .. }
+            | methods::MethodCall::system_chain { .. }
+            | methods::MethodCall::system_chainType { .. }
+            | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_health { .. }
+            | methods::MethodCall::system_localListenAddresses { .. }
+            | methods::MethodCall::system_localPeerId { .. }
+            | methods::MethodCall::system_networkState { .. }
+            | methods::MethodCall::system_nodeRoles { .. }
+            | methods::MethodCall::system_peers { .. }
+            | methods::MethodCall::system_properties { .. }
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::state_subscribeRuntimeVersion {}
+            | methods::MethodCall::state_subscribeStorage { .. }
+            | methods::MethodCall::chain_subscribeAllHeads {}
+            | methods::MethodCall::chain_subscribeFinalizedHeads {}
+            | methods::MethodCall::chain_subscribeNewHeads {}
+            | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
+            | methods::MethodCall::chainHead_unstable_follow { .. }
+            | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
+            | methods::MethodCall::sudo_network_unstable_watch {}
+            | methods::MethodCall::chainSpec_v1_chainName {}
+            | methods::MethodCall::chainSpec_v1_genesisHash {}
+            | methods::MethodCall::chainSpec_v1_properties {}
+            | methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
+                (request.params_json.map(|p| p.to_owned()), None)
             }
+        };
 
-            Err(methods::ParseClientToServerError::Method { request_id, error }) => {
-                // JSON-RPC function not recognized.
-
-                // Requests with an unknown method must not be blindly sent to a server, as it is
-                // not possible for the reverse proxy to guarantee that the logic of the request
-                // is respected.
-                // For example, if the request is a subscription request, the reverse proxy
-                // wouldn't be capable of understanding which client to redirect the notifications
-                // to.
-                self.responses_queue.push_back(parse::build_error_response(
-                    request_id,
-                    parse::ErrorResponse::MethodNotFound,
-                    None,
-                ));
-                InsertRequest::ImmediateAnswer
-            }
-
-            Err(methods::ParseClientToServerError::UnknownNotification(function)) => {
-                // JSON-RPC function not recognized, and the call is a notification.
-                // According to the JSON-RPC specification, the server must not send any response
-                // to notifications, even in case of an error.
-                InsertRequest::Discarded
-            }
+        // Everything went well. Insert the request in the queue.
+        self.queued_requests
+            .entry(assigned_server)
+            .or_insert(VecDeque::new())
+            .push_back((
+                request_id_json.to_owned(),
+                Request {
+                    method_name: request.method.to_owned(),
+                    method_params_json: rewritten_parameters,
+                    previous_failed_attempts: 0,
+                },
+            ));
+        if let Some(assigned_server) = assigned_server {
+            InsertRequest::ServerWakeUp(assigned_server)
+        } else {
+            InsertRequest::AnyServerWakeUp
         }
     }
 
@@ -877,7 +1115,12 @@ impl<T> ServersMultiplexer<T> {
         // server got blacklisted or removed in the past.
         // If that happens, send a dummy subscription request in order to re-open that
         // subscription.
-        if let Some(zombie_subscription) = self.zombie_subscriptions_queue.pop_front() {
+        if let Some(zombie_subscription_id) = self.zombie_subscriptions_pending.pop_first() {
+            let Some(zombie_subscription) = self.zombie_subscriptions.get(&zombie_subscription_id)
+            else {
+                unreachable!()
+            };
+
             let subscribe_request_id_json = serde_json::to_string(&{
                 let mut subscription_id = [0u8; 32];
                 self.randomness.fill_bytes(&mut subscription_id);
@@ -891,9 +1134,10 @@ impl<T> ServersMultiplexer<T> {
                 params_json: zombie_subscription.method_params_json.as_deref(),
             });
 
-            let _prev_value = self
-                .zombie_subscriptions_resub_requests
-                .insert(subscribe_request_id_json, zombie_subscription);
+            let _prev_value = self.zombie_subscriptions_by_resubscribe_id.insert(
+                (server_id, subscribe_request_id_json),
+                zombie_subscription_id,
+            );
             debug_assert!(_prev_value.is_none());
 
             return Some(resub_request_json);
@@ -1066,8 +1310,8 @@ impl<T> ServersMultiplexer<T> {
                 let (method_name, method_params_json, unsubscribe_request_id) = match (
                     self.requests_in_progress
                         .remove(&(server_id, request_id_json.to_owned())), // TODO: to_owned overhead
-                    self.zombie_subscriptions_resub_requests
-                        .remove(request_id_json),
+                    self.zombie_subscriptions_by_resubscribe_id
+                        .remove(&(server_id, request_id_json.to_owned())), // TODO: to_owned overhead
                 ) {
                     (Some(rq), _zombie) => {
                         debug_assert!(_zombie.is_none());
@@ -1110,6 +1354,7 @@ impl<T> ServersMultiplexer<T> {
                     _ => {}
                 }
 
+                // TODO: what if error and zombie request
                 match (request_method, parse_result) {
                     // If the function is a subscription, we update our local state.
                     (
@@ -1189,50 +1434,26 @@ impl<T> ServersMultiplexer<T> {
                     (
                         methods::MethodCall::chain_unsubscribeAllHeads { subscription }
                         | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
-                        | methods::MethodCall::chain_unsubscribeNewHeads { subscription },
-                        _,
-                    ) => {
-                        let (_, server_subscription_id) =
-                            self.active_subscriptions.remove(&subscription);
-                    }
-                    (
-                        methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
+                        | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
+                        | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                         | methods::MethodCall::state_unsubscribeStorage { subscription }
                         | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
                         | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
-                        | methods::MethodCall::chainHead_unstable_body {
-                            follow_subscription: subscription,
-                            ..
-                        }
-                        | methods::MethodCall::chainHead_unstable_call {
-                            follow_subscription: subscription,
-                            ..
-                        }
-                        | methods::MethodCall::chainHead_unstable_header {
-                            follow_subscription: subscription,
-                            ..
-                        }
-                        | methods::MethodCall::chainHead_unstable_stopOperation {
-                            follow_subscription: subscription,
-                            ..
-                        }
-                        | methods::MethodCall::chainHead_unstable_storage {
-                            follow_subscription: subscription,
-                            ..
-                        }
-                        | methods::MethodCall::chainHead_unstable_continue {
-                            follow_subscription: subscription,
-                            ..
-                        }
                         | methods::MethodCall::chainHead_unstable_unfollow {
                             follow_subscription: subscription,
-                        }
-                        | methods::MethodCall::chainHead_unstable_unpin {
-                            follow_subscription: subscription,
-                            ..
                         },
                         _,
-                    ) => {}
+                    ) => {
+                        // The request that has been extracted has had its parameters adjusted
+                        // so that the subscription ID is the server-side ID.
+                        if let Some(client_subscription_id) = self
+                            .active_subscriptions_by_server
+                            .remove(&(server_id, subscription.into_owned()))
+                        {
+                            let _was_in = self.active_subscriptions.remove(&client_subscription_id);
+                            debug_assert!(_was_in.is_some());
+                        }
+                    }
 
                     _ => {}
                 }
@@ -1267,13 +1488,18 @@ pub enum InsertRequest {
     /// This happens for example if the JSON-RPC client sends a notification.
     Discarded,
 
+    /// The request has been updated to take the request into account. No request needs to be
+    /// sent to any server.
+    LocalStateUpdate,
+
     /// The request has been immediately answered or discarded and doesn't need any
     /// further processing.
     /// [`ServersMultiplexer::next_json_rpc_response`] should be called in order to pull the response.
     ImmediateAnswer,
 
     /// The request can be processed by any server.
-    /// [`ServersMultiplexer::next_proxied_json_rpc_request`] should be called with any [`ServerId`].
+    /// [`ServersMultiplexer::next_proxied_json_rpc_request`] should be called with
+    /// any [`ServerId`].
     AnyServerWakeUp,
 
     /// The request must be processed specifically by the indicated server.

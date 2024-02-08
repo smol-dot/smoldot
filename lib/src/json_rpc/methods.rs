@@ -432,9 +432,9 @@ define_methods! {
     chain_subscribeAllHeads() -> Cow<'a, str>,
     chain_subscribeFinalizedHeads() -> Cow<'a, str> [chain_subscribeFinalisedHeads],
     chain_subscribeNewHeads() -> Cow<'a, str> [subscribe_newHead, chain_subscribeNewHead],
-    chain_unsubscribeAllHeads(subscription: String) -> bool,
-    chain_unsubscribeFinalizedHeads(subscription: String) -> bool [chain_unsubscribeFinalisedHeads],
-    chain_unsubscribeNewHeads(subscription: String) -> bool [unsubscribe_newHead, chain_unsubscribeNewHead],
+    chain_unsubscribeAllHeads(subscription: Cow<'a, str>) -> bool,
+    chain_unsubscribeFinalizedHeads(subscription: Cow<'a, str>) -> bool [chain_unsubscribeFinalisedHeads],
+    chain_unsubscribeNewHeads(subscription: Cow<'a, str>) -> bool [unsubscribe_newHead, chain_unsubscribeNewHead],
     childstate_getKeys() -> (), // TODO:
     childstate_getStorage() -> (), // TODO:
     childstate_getStorageHash() -> (), // TODO:
@@ -568,8 +568,10 @@ impl<'a> ServerToClient<'a> {
             ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
             ServerToClient::state_storage { subscription, .. } => subscription,
             ServerToClient::chainHead_unstable_followEvent { subscription, .. } => subscription,
-            ServerToClient::transaction_unstable_watchEvent { subscription, .. } => subscription,
-            ServerToClient::network_unstable_event { subscription, .. } => subscription,
+            ServerToClient::transactionWatch_unstable_watchEvent { subscription, .. } => {
+                subscription
+            }
+            ServerToClient::sudo_networkState_event { subscription, .. } => subscription,
         }
     }
 
@@ -583,8 +585,10 @@ impl<'a> ServerToClient<'a> {
             ServerToClient::state_runtimeVersion { subscription, .. } => subscription,
             ServerToClient::state_storage { subscription, .. } => subscription,
             ServerToClient::chainHead_unstable_followEvent { subscription, .. } => subscription,
-            ServerToClient::transaction_unstable_watchEvent { subscription, .. } => subscription,
-            ServerToClient::network_unstable_event { subscription, .. } => subscription,
+            ServerToClient::transactionWatch_unstable_watchEvent { subscription, .. } => {
+                subscription
+            }
+            ServerToClient::sudo_networkState_event { subscription, .. } => subscription,
         };
 
         *sub = new_value;
