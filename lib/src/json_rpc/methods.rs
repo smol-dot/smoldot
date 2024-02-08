@@ -59,6 +59,24 @@ pub fn parse_jsonrpc_client_to_server(
     Ok((request_id, call))
 }
 
+/// Parses a JSON call (usually sent from a JSON-RPC client and received by a JSON-RPC server)
+/// from the method name and parameters.
+///
+/// The parameters are encoded in JSON. For example, `parameters_json` might be `["hello"]`.
+pub fn parse_jsonrpc_client_to_server_method_name_and_parameters<'a>(
+    name: &'a str,
+    parameters_json: Option<&'a str>,
+) -> Result<MethodCall<'a>, MethodError<'a>> {
+    MethodCall::from_defs(name, parameters_json)
+}
+
+pub fn parse_jsonrpc_response<'a>(
+    request_method_name: &'_ str,
+    response_json: &'a str,
+) -> Result<Response<'a>, ()> {
+    Response::parse_from_request_method(request_method_name, response_json)
+}
+
 /// Error produced by [`parse_jsonrpc_client_to_server`].
 #[derive(Debug, derive_more::Display)]
 pub enum ParseClientToServerError<'a> {
@@ -364,6 +382,17 @@ macro_rules! define_methods {
                             parse::build_success_response(id_json, &result_json)
                         },
                     )*
+                }
+            }
+
+            fn parse_from_request_method(request_method_name: &str, response_json: &str) -> Result<Self, ()> {
+                match request_method_name {
+                    $(
+                        stringify!($name) => {
+                            Ok($rp_name::$name(serde_json::from_str(response_json).unwrap()))
+                        }
+                    )*
+                    _ => Err(())
                 }
             }
         }
@@ -1069,7 +1098,7 @@ pub struct SystemHealth {
     pub should_have_peers: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SystemPeer {
     #[serde(rename = "peerId")]
     pub peer_id: String, // Example: "12D3KooWHEQXbvCzLYvc87obHV6HY4rruHz8BJ9Lw1Gg2csVfR6Z"
@@ -1080,7 +1109,7 @@ pub struct SystemPeer {
     pub best_number: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SystemPeerRole {
     #[serde(rename = "AUTHORITY")]
     Authority,
