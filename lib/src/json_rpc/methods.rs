@@ -1188,6 +1188,23 @@ impl serde::Serialize for RpcMethods {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for RpcMethods {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct SerdeRpcMethods {
+            methods: Vec<String>,
+        }
+
+        let serde_methods = <SerdeRpcMethods as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(RpcMethods {
+            methods: serde_methods.methods,
+        })
+    }
+}
+
 impl serde::Serialize for Block {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1220,6 +1237,32 @@ impl serde::Serialize for Block {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Block {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct SerdeBlock {
+            block: SerdeBlockInner,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SerdeBlockInner {
+            extrinsics: Vec<HexString>,
+            header: Header,
+            justifications: Option<Vec<Vec<Vec<u8>>>>,
+        }
+
+        let serde_block = <SerdeBlock as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Block {
+            extrinsics: serde_block.block.extrinsics,
+            header: serde_block.block.header,
+            justifications: todo!(), // TODO:
+        })
+    }
+}
+
 impl serde::Serialize for RuntimeDispatchInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1244,6 +1287,16 @@ impl serde::Serialize for RuntimeDispatchInfo {
             partial_fee: self.partial_fee.to_string(),
         }
         .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RuntimeDispatchInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // TODO:
+        todo!()
     }
 }
 

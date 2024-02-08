@@ -330,9 +330,7 @@ impl<T> ServersMultiplexer<T> {
         // receive the `stop` event of the `chainHead_unstable_follow` subscription before
         // receiving the error response to the `chainHead_unstable_header` request.
         // While this ordering is in no way a requirement, it is more polite to do so.
-        for ((_, server_subscription_id), client_subscription_id) in
-            &subscriptions_to_cancel_or_reopen
-        {
+        for (_, client_subscription_id) in &subscriptions_to_cancel_or_reopen {
             let hashbrown::hash_map::EntryRef::Occupied(active_subscriptions_entry) =
                 self.active_subscriptions.entry_ref(client_subscription_id)
             else {
@@ -430,7 +428,7 @@ impl<T> ServersMultiplexer<T> {
                 unreachable!()
             };
 
-            match method {
+            match &method {
                 // Unsubscription requests are immediately processed, and any request targetting a
                 // `chainHead_follow` subscription is answered immediately, as a `stop` event has
                 // been generated above.
@@ -473,7 +471,7 @@ impl<T> ServersMultiplexer<T> {
                     ..
                 } => {
                     let subscription_exists = subscriptions_to_cancel_or_reopen
-                        .remove(&(server_id, subscription.into_owned()))
+                        .remove(&(server_id, subscription.clone().into_owned()))
                         .is_some();
                     self.responses_queue.push_back(match method {
                         methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
@@ -568,9 +566,7 @@ impl<T> ServersMultiplexer<T> {
         // separately at the end.
         // This time, we reopen legacy JSON-RPC API subscriptions by inserting them into a
         // "zombie subscriptions" list.
-        for ((_, server_subscription_id), client_subscription_id) in
-            subscriptions_to_cancel_or_reopen
-        {
+        for (_, client_subscription_id) in subscriptions_to_cancel_or_reopen {
             let Some((_, active_subscription)) =
                 self.active_subscriptions.remove(&client_subscription_id)
             else {
@@ -637,7 +633,7 @@ impl<T> ServersMultiplexer<T> {
 
         // Try to answer the request directly. If not possible, determine which server the request
         // must target, and potentially adjust its parameters.
-        let (rewritten_parameters, assigned_server) = match method {
+        let (rewritten_parameters, assigned_server) = match &method {
             // Answer the request directly if possible.
             methods::MethodCall::system_name {} => {
                 self.responses_queue.push_back(
@@ -711,8 +707,8 @@ impl<T> ServersMultiplexer<T> {
                 ..
             } => {
                 // TODO: must check whether the subscription type matches the expected one
-                if let Some(&(server_id, subscription_info)) =
-                    self.active_subscriptions.get(&*subscription)
+                if let Some(&(server_id, ref subscription_info)) =
+                    self.active_subscriptions.get(&**subscription)
                 {
                     // The subscription exists and is active.
                     // Pass the unsubscription request to the server.
@@ -866,14 +862,12 @@ impl<T> ServersMultiplexer<T> {
                     // state.
                     let subscription_exists =
                         if let hashbrown::hash_map::EntryRef::Occupied(mut zombie_subscription) =
-                            self.zombie_subscriptions.entry_ref(&*subscription)
+                            self.zombie_subscriptions.entry_ref(&**subscription)
                         {
                             // The subscription is a so-called "zombie subscription". It exists
                             // from the point of view of the client, but isn't active on any
                             // server.
-                            if let Some(resubscribe_request_id) =
-                                zombie_subscription.get().resubscribe_request_id
-                            {
+                            if zombie_subscription.get().resubscribe_request_id.is_some() {
                                 // We have sent a re-subscription request to one of the servers.
                                 if zombie_subscription
                                     .get_mut()
@@ -899,7 +893,7 @@ impl<T> ServersMultiplexer<T> {
                                 // servers yet. The local state can be entirely cleaned up.
                                 zombie_subscription.remove();
                                 let _was_in =
-                                    self.zombie_subscriptions_pending.remove(&*subscription);
+                                    self.zombie_subscriptions_pending.remove(&**subscription);
                                 debug_assert!(_was_in);
                                 true
                             }
@@ -1277,7 +1271,7 @@ impl<T> ServersMultiplexer<T> {
                         InsertProxiedJsonRpcResponse::Queued
                     }
 
-                    Err(notification_parse_error) => {
+                    Err(_) => {
                         // Failed to parse the message from the JSON-RPC server.
                         self.blacklist_server(server_id);
                         InsertProxiedJsonRpcResponse::Blacklisted("")
@@ -1289,10 +1283,7 @@ impl<T> ServersMultiplexer<T> {
             Ok(parse_result) => {
                 // Grab the ID of the request that is being answered.
                 let request_id_json = match parse_result {
-                    parse::Response::Success {
-                        id_json,
-                        result_json,
-                    } => id_json,
+                    parse::Response::Success { id_json, .. } => id_json,
                     parse::Response::Error { id_json, .. } => id_json,
                     parse::Response::ParseError { .. } => {
                         // JSON-RPC server indicates that it has failed to parse a JSON-RPC
@@ -1308,10 +1299,10 @@ impl<T> ServersMultiplexer<T> {
 
                 // Find the answered request in the local state.
                 // We don't immediately remove the request, as it might have to stay there.
-                let requests_in_progress_entry = self
+                let mut requests_in_progress_entry = self
                     .requests_in_progress
                     .entry((server_id, request_id_json.to_owned())); // TODO: to_owned overhead
-                let zombie_subscriptions_entry = self
+                let mut zombie_subscriptions_entry = self
                     .zombie_subscriptions_by_resubscribe_id
                     .entry((server_id, request_id_json.to_owned())); // TODO: to_owned overhead
 
@@ -1321,7 +1312,10 @@ impl<T> ServersMultiplexer<T> {
                     method_params_json,
                     unsubscribe_request_id,
                     previous_failed_attempts,
-                ) = match (&requests_in_progress_entry, &zombie_subscriptions_entry) {
+                ) = match (
+                    &mut requests_in_progress_entry,
+                    &mut zombie_subscriptions_entry,
+                ) {
                     (btree_map::Entry::Occupied(rq), _zombie) => {
                         debug_assert!(matches!(_zombie, btree_map::Entry::Vacant(_)));
                         let rq = rq.get_mut();
@@ -1364,7 +1358,7 @@ impl<T> ServersMultiplexer<T> {
                 };
 
                 match (
-                    request_method,
+                    &request_method,
                     previous_failed_attempts.map_or(false, |n| *n >= 2),
                 ) {
                     // Some functions return `null` if the server has reached its limit, in which
@@ -1376,7 +1370,7 @@ impl<T> ServersMultiplexer<T> {
                 }
 
                 // TODO: what if error and zombie request
-                match (request_method, parse_result) {
+                match (&request_method, parse_result) {
                     // If the function is a subscription, we update our local state.
                     (
                         methods::MethodCall::chainHead_unstable_follow { .. }
@@ -1420,10 +1414,10 @@ impl<T> ServersMultiplexer<T> {
 
                         match self
                             .active_subscriptions_by_server
-                            .entry((server_id, subscription_id.into_owned()))
+                            .entry((server_id, subscription_id.clone().into_owned()))
                         {
                             btree_map::Entry::Vacant(entry) => {
-                                entry.insert(rellocated_subscription_id);
+                                entry.insert(rellocated_subscription_id.clone());
                             }
                             btree_map::Entry::Occupied(_) => {
                                 // The server has assigned a subscription ID that it has
@@ -1436,17 +1430,21 @@ impl<T> ServersMultiplexer<T> {
                         }
 
                         let _prev_value = self.active_subscriptions.insert(
-                            rellocated_subscription_id.clone(),
+                            rellocated_subscription_id,
                             (
                                 server_id,
                                 ActiveSubscription {
                                     method_name: method_name.clone(),
                                     method_params_json: method_params_json.clone(),
-                                    server_subscription_id: subscription_id.clone().into_owned(),
+                                    server_subscription_id: subscription_id.into_owned(),
                                 },
                             ),
                         );
                         debug_assert!(_prev_value.is_none());
+
+                        if let Some(unsubscribe_request_id) = unsubscribe_request_id {
+                            // TODO: finish
+                        }
                     }
 
                     // If the function is an unsubscription, we update our local state.
@@ -1468,7 +1466,8 @@ impl<T> ServersMultiplexer<T> {
                         // so that the subscription ID is the server-side ID.
                         if let Some(client_subscription_id) = self
                             .active_subscriptions_by_server
-                            .remove(&(server_id, subscription.into_owned()))
+                            .remove(&(server_id, subscription.clone().into_owned()))
+                        // TODO: overhead ^
                         {
                             let _was_in = self.active_subscriptions.remove(&client_subscription_id);
                             debug_assert!(_was_in.is_some());
