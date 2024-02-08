@@ -49,6 +49,8 @@
 // TODO: document transaction_broadcast when server is removed
 // TODO: more doc
 
+// TODO: what about rpc_methods? should we not query servers for the methods they support or something?
+
 use alloc::{
     borrow::Cow,
     collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
@@ -218,8 +220,6 @@ struct ZombieSubscription {
     /// a unsubscribe request must be sent to the server.
     unsubscribe_request_id: Option<String>,
 }
-
-// TODO: what about rpc_methods? should we not query servers for the methods they support or something?
 
 impl<T> ServersMultiplexer<T> {
     /// Creates a new multiplexer with an empty list of servers.
@@ -1306,23 +1306,44 @@ impl<T> ServersMultiplexer<T> {
 
                 // TODO: detect internal server errors and blacklist the server
 
-                // Extract the answered request from the local state.
-                let (method_name, method_params_json, unsubscribe_request_id) = match (
-                    self.requests_in_progress
-                        .remove(&(server_id, request_id_json.to_owned())), // TODO: to_owned overhead
-                    self.zombie_subscriptions_by_resubscribe_id
-                        .remove(&(server_id, request_id_json.to_owned())), // TODO: to_owned overhead
-                ) {
-                    (Some(rq), _zombie) => {
-                        debug_assert!(_zombie.is_none());
-                        (rq.method_name, rq.method_params_json, None)
+                // Find the answered request in the local state.
+                // We don't immediately remove the request, as it might have to stay there.
+                let requests_in_progress_entry = self
+                    .requests_in_progress
+                    .entry((server_id, request_id_json.to_owned())); // TODO: to_owned overhead
+                let zombie_subscriptions_entry = self
+                    .zombie_subscriptions_by_resubscribe_id
+                    .entry((server_id, request_id_json.to_owned())); // TODO: to_owned overhead
+
+                // Extract information about the request.
+                let (
+                    method_name,
+                    method_params_json,
+                    unsubscribe_request_id,
+                    previous_failed_attempts,
+                ) = match (&requests_in_progress_entry, &zombie_subscriptions_entry) {
+                    (btree_map::Entry::Occupied(rq), _zombie) => {
+                        debug_assert!(matches!(_zombie, btree_map::Entry::Vacant(_)));
+                        let rq = rq.get_mut();
+                        (
+                            &rq.method_name,
+                            &rq.method_params_json,
+                            None,
+                            Some(&mut rq.previous_failed_attempts),
+                        )
                     }
-                    (None, Some(zombie)) => (
-                        zombie.method_name,
-                        zombie.method_params_json,
-                        zombie.unsubscribe_request_id,
-                    ),
-                    (None, None) => {
+                    (btree_map::Entry::Vacant(_), btree_map::Entry::Occupied(zombie)) => {
+                        let Some(subscription) = self.zombie_subscriptions.get(zombie.get()) else {
+                            unreachable!()
+                        };
+                        (
+                            &subscription.method_name,
+                            &subscription.method_params_json,
+                            subscription.unsubscribe_request_id.as_ref(),
+                            None,
+                        )
+                    }
+                    (btree_map::Entry::Vacant(_), btree_map::Entry::Vacant(_)) => {
                         // Server has answered a non-existing request. Blacklist it.
                         self.blacklist_server(server_id);
                         return InsertProxiedJsonRpcResponse::Blacklisted("");
@@ -1344,7 +1365,7 @@ impl<T> ServersMultiplexer<T> {
 
                 match (
                     request_method,
-                    answered_request.previous_failed_attempts >= 2,
+                    previous_failed_attempts.map_or(false, |n| *n >= 2),
                 ) {
                     // Some functions return `null` if the server has reached its limit, in which
                     // case we silently discard the response and try a different server instead.
@@ -1408,7 +1429,6 @@ impl<T> ServersMultiplexer<T> {
                                 // The server has assigned a subscription ID that it has
                                 // already assigned in the past. This indicates something
                                 // very wrong with the server.
-                                // TODO: must reinsert the subscription request or something, or avoid removing it before reaching this point
                                 self.blacklist_server(server_id);
                                 return InsertProxiedJsonRpcResponse::Blacklisted("");
                                 // TODO:
@@ -1420,8 +1440,8 @@ impl<T> ServersMultiplexer<T> {
                             (
                                 server_id,
                                 ActiveSubscription {
-                                    method_name,
-                                    method_params_json,
+                                    method_name: method_name.clone(),
+                                    method_params_json: method_params_json.clone(),
                                     server_subscription_id: subscription_id.clone().into_owned(),
                                 },
                             ),
@@ -1459,6 +1479,12 @@ impl<T> ServersMultiplexer<T> {
                 }
 
                 // Success.
+                if let btree_map::Entry::Occupied(entry) = requests_in_progress_entry {
+                    entry.remove();
+                }
+                if let btree_map::Entry::Occupied(entry) = zombie_subscriptions_entry {
+                    entry.remove();
+                }
                 self.responses_queue.push_back(response);
                 InsertProxiedJsonRpcResponse::Queued
             }
