@@ -68,6 +68,9 @@ use crate::{
 
 /// Configuration for a new [`ServersMultiplexer`].
 pub struct Config {
+    /// Number of entries to pre-allocate for the list of servers.
+    pub servers_capacity: usize,
+
     /// Value to return when a call to the `system_name` JSON-RPC function is received.
     pub system_name: Cow<'static, str>,
 
@@ -227,7 +230,7 @@ impl<T> ServersMultiplexer<T> {
         let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
 
         ServersMultiplexer {
-            servers: slab::Slab::new(), // TODO: capacity
+            servers: slab::Slab::with_capacity(config.servers_capacity),
             queued_requests: BTreeMap::new(),
             responses_queue: VecDeque::new(), // TODO: capacity
             requests_in_progress: BTreeMap::new(),
@@ -1215,7 +1218,7 @@ impl<T> ServersMultiplexer<T> {
     pub fn insert_proxied_json_rpc_response(
         &mut self,
         server_id: ServerId,
-        response: String,
+        mut response: String,
     ) -> InsertProxiedJsonRpcResponse {
         match parse::parse_response(&response) {
             Err(_) => {
@@ -1327,13 +1330,14 @@ impl<T> ServersMultiplexer<T> {
                         )
                     }
                     (btree_map::Entry::Vacant(_), btree_map::Entry::Occupied(zombie)) => {
-                        let Some(subscription) = self.zombie_subscriptions.get(zombie.get()) else {
+                        let Some(subscription) = self.zombie_subscriptions.get_mut(zombie.get())
+                        else {
                             unreachable!()
                         };
                         (
                             &subscription.method_name,
                             &subscription.method_params_json,
-                            subscription.unsubscribe_request_id.as_ref(),
+                            Some(&mut subscription.unsubscribe_request_id),
                             None,
                         )
                     }
@@ -1406,12 +1410,15 @@ impl<T> ServersMultiplexer<T> {
                             }
                         };
 
+                        // Because multiple servers might assign the same subscription ID, we
+                        // assign a new separate subscription ID to send back to the client.
                         let rellocated_subscription_id = {
                             let mut subscription_id = [0u8; 32];
                             self.randomness.fill_bytes(&mut subscription_id);
                             bs58::encode(subscription_id).into_string()
                         };
 
+                        // Update the list of active subscriptions stored in `self`.
                         match self
                             .active_subscriptions_by_server
                             .entry((server_id, subscription_id.clone().into_owned()))
@@ -1428,23 +1435,134 @@ impl<T> ServersMultiplexer<T> {
                                 // TODO:
                             }
                         }
-
                         let _prev_value = self.active_subscriptions.insert(
-                            rellocated_subscription_id,
+                            rellocated_subscription_id.clone(),
                             (
                                 server_id,
                                 ActiveSubscription {
                                     method_name: method_name.clone(),
                                     method_params_json: method_params_json.clone(),
-                                    server_subscription_id: subscription_id.into_owned(),
+                                    server_subscription_id: subscription_id.clone().into_owned(),
                                 },
                             ),
                         );
                         debug_assert!(_prev_value.is_none());
 
-                        if let Some(unsubscribe_request_id) = unsubscribe_request_id {
-                            // TODO: finish
+                        // If this subscription was a zombie subscription (i.e. a subscription
+                        // that the client thinks is active but wasn't actually active on any
+                        // server), it is possible that the client sent a request to unsubscribe
+                        // while the server was still responding to the subscription request.
+                        // When that happens, the client's unsubscription request is silently
+                        // ignored, and we now re-queue it.
+                        // TODO: notify through return type  that there's a request for the server to pick up?
+                        if let Some(unsubscribe_request_id) =
+                            unsubscribe_request_id.and_then(|rq_id| rq_id.take())
+                        {
+                            let unsub_request = match request_method {
+                                methods::MethodCall::chainHead_unstable_follow { .. } => {
+                                    methods::MethodCall::chainHead_unstable_unfollow {
+                                        follow_subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                methods::MethodCall::chain_subscribeAllHeads {} => {
+                                    methods::MethodCall::chain_unsubscribeAllHeads {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                                    methods::MethodCall::chain_unsubscribeFinalizedHeads {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                methods::MethodCall::chain_subscribeNewHeads {} => {
+                                    methods::MethodCall::chain_unsubscribeNewHeads {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                                    methods::MethodCall::state_unsubscribeRuntimeVersion {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                methods::MethodCall::state_subscribeStorage { .. } => {
+                                    methods::MethodCall::state_unsubscribeStorage {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                methods::MethodCall::transactionWatch_unstable_submitAndWatch {
+                                    ..
+                                } => methods::MethodCall::transactionWatch_unstable_unwatch {
+                                    subscription: Cow::Borrowed(&*subscription_id),
+                                },
+                                methods::MethodCall::sudo_network_unstable_watch {} => {
+                                    methods::MethodCall::sudo_network_unstable_unwatch {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
+                                _ => unreachable!(),
+                            };
+
+                            self.queued_requests
+                                .entry(Some(server_id))
+                                .or_insert(VecDeque::new())
+                                .push_back((
+                                    unsubscribe_request_id,
+                                    Request {
+                                        method_name: unsub_request.name().to_owned(),
+                                        method_params_json: Some(
+                                            unsub_request.params_to_json_object(),
+                                        ),
+                                        previous_failed_attempts: 0,
+                                    },
+                                ));
                         }
+
+                        // The response to the client needs to be adjusted for the fact that
+                        // we modify the subscription ID.
+                        response = match request_method {
+                            methods::MethodCall::chainHead_unstable_follow { .. } => {
+                                methods::Response::chainHead_unstable_follow(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            methods::MethodCall::chain_subscribeAllHeads {} => {
+                                methods::Response::chain_subscribeAllHeads(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                                methods::Response::chain_subscribeFinalizedHeads(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            methods::MethodCall::chain_subscribeNewHeads {} => {
+                                methods::Response::chain_subscribeNewHeads(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                                methods::Response::state_subscribeRuntimeVersion(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            methods::MethodCall::state_subscribeStorage { .. } => {
+                                methods::Response::state_subscribeStorage(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            methods::MethodCall::transactionWatch_unstable_submitAndWatch {
+                                ..
+                            } => methods::Response::transactionWatch_unstable_submitAndWatch(
+                                Cow::Borrowed(&rellocated_subscription_id),
+                            ),
+                            methods::MethodCall::sudo_network_unstable_watch {} => {
+                                methods::Response::sudo_network_unstable_watch(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
+                            _ => unreachable!(),
+                        }
+                        .to_json_response(request_id_json);
                     }
 
                     // If the function is an unsubscription, we update our local state.
