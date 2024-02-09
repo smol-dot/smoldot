@@ -71,6 +71,12 @@ pub struct Config {
     /// Number of entries to pre-allocate for the list of servers.
     pub servers_capacity: usize,
 
+    /// Number of entries to pre-allocate for the list of requests queued or in progress.
+    pub requests_capacity: usize,
+
+    /// Number of entries to pre-allocate for the list of active subscriptions.
+    pub subscriptions_capacity: usize,
+
     /// Value to return when a call to the `system_name` JSON-RPC function is received.
     pub system_name: Cow<'static, str>,
 
@@ -101,7 +107,6 @@ pub struct ServersMultiplexer<T> {
     ///
     /// The `VecDeque`s must never be empty. If a queue is emptied, the item must be removed from
     /// the `BTreeMap` altogether.
-    // TODO: call shrink to fit from time to time?
     queued_requests: BTreeMap<Option<ServerId>, VecDeque<(String, Request)>>,
 
     /// List of all requests that have been extracted with
@@ -115,7 +120,6 @@ pub struct ServersMultiplexer<T> {
     requests_in_progress: BTreeMap<(ServerId, String), Request>,
 
     /// Queue of responses waiting to be sent to the client.
-    // TODO: call shrink to fit from time to time?
     responses_queue: VecDeque<String>,
 
     /// List of all subscriptions that are currently active.
@@ -130,7 +134,6 @@ pub struct ServersMultiplexer<T> {
     ///
     /// This collection does **not** include subscriptions that the client thinks are active but
     /// that aren't active on any server, which can happen after a server is removed.
-    // TODO: call shrink to fit from time to time?
     active_subscriptions:
         hashbrown::HashMap<String, (ServerId, ActiveSubscription), SipHasherBuild>,
 
@@ -144,14 +147,12 @@ pub struct ServersMultiplexer<T> {
     /// any server.
     ///
     /// Keys are the subscription ID from the point of view of the client.
-    // TODO: call shrink to fit from time to time?
     zombie_subscriptions: hashbrown::HashMap<String, ZombieSubscription, SipHasherBuild>,
 
     /// Subset of the items of [`ServersMultiplexer::zombie_subscriptions`] for which a
     /// re-subscription is waiting to be sent to a server.
     ///
     /// Keys are the subscription ID from the point of view of the client.
-    // TODO: call shrink to fit from time to time?
     zombie_subscriptions_pending: BTreeSet<String>,
 
     /// Subset of the items of [`ServersMultiplexer::zombie_subscriptions`] for which a
@@ -159,7 +160,6 @@ pub struct ServersMultiplexer<T> {
     ///
     /// Keys are the request ID of the re-subscription request, and values are the subscription
     /// ID from the point of view of the client.
-    // TODO: call shrink to fit from time to time?
     zombie_subscriptions_by_resubscribe_id: BTreeMap<(ServerId, String), String>,
 
     /// See [`Config::system_name`]
@@ -232,10 +232,10 @@ impl<T> ServersMultiplexer<T> {
         ServersMultiplexer {
             servers: slab::Slab::with_capacity(config.servers_capacity),
             queued_requests: BTreeMap::new(),
-            responses_queue: VecDeque::new(), // TODO: capacity
+            responses_queue: VecDeque::with_capacity(config.requests_capacity),
             requests_in_progress: BTreeMap::new(),
             active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO:
+                config.subscriptions_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
@@ -244,7 +244,7 @@ impl<T> ServersMultiplexer<T> {
             ),
             active_subscriptions_by_server: BTreeMap::new(),
             zombie_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO:
+                config.subscriptions_capacity,
                 SipHasherBuild::new({
                     let mut seed = [0; 16];
                     randomness.fill_bytes(&mut seed);
@@ -257,6 +257,25 @@ impl<T> ServersMultiplexer<T> {
             system_version: config.system_version,
             randomness,
         }
+    }
+
+    /// Shrinks the list of servers to the given capacity. Has no effect if the capacity is
+    /// smaller than the requested one.
+    pub fn shrink_servers_to(&mut self, _min_capacity: usize) {
+        self.servers.shrink_to_fit() // TODO: implement Slab::shrink_to?
+    }
+
+    /// Shrinks the list of active requests to the given capacity. Has no effect if the capacity
+    /// is smaller than the requested one.
+    pub fn shrink_requests_to(&mut self, min_capacity: usize) {
+        self.responses_queue.shrink_to(min_capacity);
+    }
+
+    /// Shrinks the list of active subscriptions to the given capacity. Has no effect if the
+    /// capacity is smaller than the requested one.
+    pub fn shrink_subscriptions_to(&mut self, min_capacity: usize) {
+        self.active_subscriptions.shrink_to(min_capacity);
+        self.zombie_subscriptions.shrink_to(min_capacity);
     }
 
     /// Adds a new server to the collection.
@@ -1235,8 +1254,9 @@ impl<T> ServersMultiplexer<T> {
                             // The subscription ID isn't recognized. This indicates something very
                             // wrong with the server. We handle this by blacklisting the server.
                             self.blacklist_server(server_id);
-                            return InsertProxiedJsonRpcResponse::Blacklisted("");
-                            // TODO: ^
+                            return InsertProxiedJsonRpcResponse::Blacklisted(
+                                BlacklistReason::InvalidSubscriptionId,
+                            );
                         };
 
                         // Rewrite the subscription ID in the notification in order to match what
@@ -1277,8 +1297,7 @@ impl<T> ServersMultiplexer<T> {
                     Err(_) => {
                         // Failed to parse the message from the JSON-RPC server.
                         self.blacklist_server(server_id);
-                        InsertProxiedJsonRpcResponse::Blacklisted("")
-                        // TODO: ^
+                        InsertProxiedJsonRpcResponse::Blacklisted(BlacklistReason::ParseFailure)
                     }
                 }
             }
@@ -1294,7 +1313,9 @@ impl<T> ServersMultiplexer<T> {
                         // indicates that something is very wrong with the server.
                         // The server is blacklisted.
                         self.blacklist_server(server_id);
-                        return InsertProxiedJsonRpcResponse::Blacklisted(""); // TODO:
+                        return InsertProxiedJsonRpcResponse::Blacklisted(
+                            BlacklistReason::ParseErrorResponse,
+                        );
                     }
                 };
 
@@ -1344,8 +1365,9 @@ impl<T> ServersMultiplexer<T> {
                     (btree_map::Entry::Vacant(_), btree_map::Entry::Vacant(_)) => {
                         // Server has answered a non-existing request. Blacklist it.
                         self.blacklist_server(server_id);
-                        return InsertProxiedJsonRpcResponse::Blacklisted("");
-                        // TODO: ^
+                        return InsertProxiedJsonRpcResponse::Blacklisted(
+                            BlacklistReason::InvalidRequestId,
+                        );
                     }
                 };
 
@@ -1431,8 +1453,9 @@ impl<T> ServersMultiplexer<T> {
                                 // already assigned in the past. This indicates something
                                 // very wrong with the server.
                                 self.blacklist_server(server_id);
-                                return InsertProxiedJsonRpcResponse::Blacklisted("");
-                                // TODO:
+                                return InsertProxiedJsonRpcResponse::Blacklisted(
+                                    BlacklistReason::DuplicateSubscriptionId,
+                                );
                             }
                         }
                         let _prev_value = self.active_subscriptions.insert(
@@ -1652,13 +1675,30 @@ pub enum InsertRequest {
 }
 
 /// Outcome of a call to [`ServersMultiplexer::insert_proxied_json_rpc_response`].
-// TODO: clean up, document, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertProxiedJsonRpcResponse {
     /// The response or notification has been queued and can now be retrieved
     /// using [`ServersMultiplexer::next_json_rpc_response`].
     Queued,
-    /// The response or notification has been silently discarded.
-    Discarded,
-    Blacklisted(&'static str),
+    /// The server is misbehaving in some way.
+    Blacklisted(BlacklistReason),
+}
+
+/// See [`InsertProxiedJsonRpcResponse::Blacklisted`].
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+
+pub enum BlacklistReason {
+    /// Failed to parse the server's response or notification.
+    ParseFailure,
+    /// The response sent by the server doesn't correspond to any known request.
+    InvalidRequestId,
+    /// The notification sent by the server doesn't correspond to any known subscription.
+    InvalidSubscriptionId,
+    /// Server has sent a "parse error" response indicating that it has failed to parse our of
+    /// our requests.
+    ParseErrorResponse,
+    /// Server has allocated a subscription ID that was already allocated against a different
+    /// subscription.
+    DuplicateSubscriptionId,
 }
