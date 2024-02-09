@@ -55,7 +55,7 @@ use alloc::{
     borrow::Cow,
     collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
 };
-use core::{mem, ops};
+use core::{fmt, mem, ops};
 use rand_chacha::{
     rand_core::{RngCore as _, SeedableRng as _},
     ChaCha20Rng,
@@ -93,7 +93,6 @@ pub struct Config {
 pub struct ServerId(usize);
 
 /// See [the module-level documentation](..).
-// TODO: Debug impl
 pub struct ServersMultiplexer<T> {
     /// List of all servers. Indices serve as [`ServerId`].
     servers: slab::Slab<Server<T>>,
@@ -382,7 +381,7 @@ impl<T> ServersMultiplexer<T> {
                                 // has broadcasted the transaction. Since `false` offers
                                 // guarantees but `true` doesn't, we opt to always send
                                 // back `true`.
-                                // TODO: change the RPC spec to handle this more properly?
+                                // TODO: https://github.com/paritytech/json-rpc-interface-spec/issues/132
                                 broadcasted: true,
                                 error: "Proxied server gone".into(),
                             },
@@ -1589,7 +1588,13 @@ impl<T> ServersMultiplexer<T> {
                     }
 
                     // If the function is an unsubscription, we update our local state.
-                    // TODO: what to do if server errors when unsubscribing?
+                    // It is possible that the server has sent back an error or indicating that
+                    // the subscription was invalid. Because there is not much that can be done
+                    // to handle that situation properly, we don't actually put much effort into
+                    // detecting that case. In the best case scenario, the server has for some
+                    // reason lost this subscription in the past and everything is fine. In the
+                    // worst case scenario, the server will continue sending notifications which
+                    // the multiplexer will ignore when they arrive.
                     (
                         methods::MethodCall::chain_unsubscribeAllHeads { subscription }
                         | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
@@ -1613,6 +1618,37 @@ impl<T> ServersMultiplexer<T> {
                             let _was_in = self.active_subscriptions.remove(&client_subscription_id);
                             debug_assert!(_was_in.is_some());
                         }
+
+                        // The response to the client is adjusted to always be a successful
+                        // unsubscription.
+                        response = match request_method {
+                            methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
+                                methods::Response::chain_unsubscribeAllHeads(true)
+                            }
+                            methods::MethodCall::chain_unsubscribeFinalizedHeads { .. } => {
+                                methods::Response::chain_unsubscribeFinalizedHeads(true)
+                            }
+                            methods::MethodCall::chain_unsubscribeNewHeads { .. } => {
+                                methods::Response::chain_unsubscribeNewHeads(true)
+                            }
+                            methods::MethodCall::state_unsubscribeRuntimeVersion { .. } => {
+                                methods::Response::state_unsubscribeRuntimeVersion(true)
+                            }
+                            methods::MethodCall::state_unsubscribeStorage { .. } => {
+                                methods::Response::state_unsubscribeStorage(true)
+                            }
+                            methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                                methods::Response::transactionWatch_unstable_unwatch(())
+                            }
+                            methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
+                                methods::Response::sudo_network_unstable_unwatch(())
+                            }
+                            methods::MethodCall::chainHead_unstable_unfollow { .. } => {
+                                methods::Response::chainHead_unstable_unfollow(())
+                            }
+                            _ => unreachable!(),
+                        }
+                        .to_json_response(request_id_json);
                     }
 
                     _ => {}
@@ -1629,6 +1665,69 @@ impl<T> ServersMultiplexer<T> {
                 InsertProxiedJsonRpcResponse::Queued
             }
         }
+    }
+}
+
+impl<T> fmt::Debug for ServersMultiplexer<T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Servers<'a, T>(&'a ServersMultiplexer<T>);
+        impl<'a, T: fmt::Debug> fmt::Debug for Servers<'a, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(
+                        self.0
+                            .servers
+                            .iter()
+                            .map(|(index, server)| (ServerId(index), &server.user_data)),
+                    )
+                    .finish()
+            }
+        }
+
+        struct Requests<'a, T>(&'a ServersMultiplexer<T>);
+        impl<'a, T: fmt::Debug> fmt::Debug for Requests<'a, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(
+                        self.0
+                            .requests_in_progress
+                            .iter()
+                            .map(|((_, rq_id), _)| rq_id)
+                            .chain(
+                                self.0
+                                    .queued_requests
+                                    .values()
+                                    .flat_map(|list| list.iter())
+                                    .map(|(rq_id, _)| rq_id),
+                            ),
+                    )
+                    .finish()
+            }
+        }
+
+        struct Subscriptions<'a, T>(&'a ServersMultiplexer<T>);
+        impl<'a, T: fmt::Debug> fmt::Debug for Subscriptions<'a, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(
+                        self.0
+                            .active_subscriptions
+                            .iter()
+                            .map(|(sub_id, _)| sub_id)
+                            .chain(self.0.zombie_subscriptions.keys()),
+                    )
+                    .finish()
+            }
+        }
+
+        f.debug_struct("ServersMultiplexer")
+            .field("servers", &Servers(self))
+            .field("requests", &Requests(self))
+            .field("subscriptions", &Subscriptions(self))
+            .finish()
     }
 }
 
