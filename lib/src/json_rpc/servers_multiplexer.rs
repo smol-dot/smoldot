@@ -459,7 +459,6 @@ impl<T> ServersMultiplexer<T> {
                 | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                 | methods::MethodCall::state_unsubscribeStorage { subscription }
                 | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-                | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
                 | methods::MethodCall::chainHead_unstable_body {
                     follow_subscription: subscription,
                     ..
@@ -516,13 +515,6 @@ impl<T> ServersMultiplexer<T> {
                                 .to_json_response(&request_id_json)
                         }
                         methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
-                            parse::build_error_response(
-                                &request_id_json,
-                                parse::ErrorResponse::InvalidParams,
-                                None,
-                            )
-                        }
-                        methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
                             parse::build_error_response(
                                 &request_id_json,
                                 parse::ErrorResponse::InvalidParams,
@@ -688,14 +680,34 @@ impl<T> ServersMultiplexer<T> {
                 return InsertRequest::ImmediateAnswer;
             }
 
+            // Some requests are forbidden.
+            methods::MethodCall::sudo_network_unstable_watch {}
+            | methods::MethodCall::sudo_network_unstable_unwatch { .. }
+            | methods::MethodCall::author_removeExtrinsic { .. }
+            | methods::MethodCall::author_rotateKeys { .. }
+            | methods::MethodCall::system_addReservedPeer { .. }
+            | methods::MethodCall::system_localListenAddresses { .. }
+            | methods::MethodCall::system_localPeerId { .. }
+            | methods::MethodCall::system_networkState { .. }
+            | methods::MethodCall::system_nodeRoles { .. }
+            | methods::MethodCall::system_peers { .. }
+            | methods::MethodCall::system_removeReservedPeer { .. } => {
+                self.responses_queue.push_back(parse::build_error_response(
+                    request_id_json,
+                    parse::ErrorResponse::MethodNotFound,
+                    None,
+                ));
+                return InsertRequest::ImmediateAnswer;
+            }
+
             // Unsubscription functions or functions that target a specific subscription.
             methods::MethodCall::chain_unsubscribeAllHeads { subscription }
             | methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription }
             | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
             | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
             | methods::MethodCall::state_unsubscribeStorage { subscription }
+            | methods::MethodCall::author_unwatchExtrinsic { subscription }
             | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-            | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
             | methods::MethodCall::chainHead_unstable_body {
                 follow_subscription: subscription,
                 ..
@@ -776,16 +788,16 @@ impl<T> ServersMultiplexer<T> {
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
-                            methods::MethodCall::transactionWatch_unstable_unwatch {
+                        methods::MethodCall::author_unwatchExtrinsic { .. } => {
+                            methods::MethodCall::author_unwatchExtrinsic {
                                 subscription: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
                             }
                             .params_to_json_object()
                         }
-                        methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
-                            methods::MethodCall::sudo_network_unstable_unwatch {
+                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                            methods::MethodCall::transactionWatch_unstable_unwatch {
                                 subscription: Cow::Borrowed(
                                     &subscription_info.server_subscription_id,
                                 ),
@@ -946,14 +958,14 @@ impl<T> ServersMultiplexer<T> {
                             methods::Response::state_unsubscribeStorage(subscription_exists)
                                 .to_json_response(request_id_json)
                         }
-                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
+                        methods::MethodCall::author_unwatchExtrinsic { .. } => {
                             parse::build_error_response(
                                 request_id_json,
                                 parse::ErrorResponse::InvalidParams,
                                 None,
                             )
                         }
-                        methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
+                        methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
                             parse::build_error_response(
                                 request_id_json,
                                 parse::ErrorResponse::InvalidParams,
@@ -1012,8 +1024,6 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::author_hasSessionKeys { .. }
             | methods::MethodCall::author_insertKey { .. }
             | methods::MethodCall::author_pendingExtrinsics { .. }
-            | methods::MethodCall::author_removeExtrinsic { .. }
-            | methods::MethodCall::author_rotateKeys { .. }
             | methods::MethodCall::author_submitExtrinsic { .. }
             | methods::MethodCall::author_unwatchExtrinsic { .. }
             | methods::MethodCall::babe_epochAuthorship { .. }
@@ -1043,18 +1053,11 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::state_queryStorage { .. }
             | methods::MethodCall::state_queryStorageAt { .. }
             | methods::MethodCall::system_accountNextIndex { .. }
-            | methods::MethodCall::system_addReservedPeer { .. }
             | methods::MethodCall::system_chain { .. }
             | methods::MethodCall::system_chainType { .. }
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_health { .. }
-            | methods::MethodCall::system_localListenAddresses { .. }
-            | methods::MethodCall::system_localPeerId { .. }
-            | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_nodeRoles { .. }
-            | methods::MethodCall::system_peers { .. }
             | methods::MethodCall::system_properties { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }
             | methods::MethodCall::state_subscribeRuntimeVersion {}
             | methods::MethodCall::state_subscribeStorage { .. }
             | methods::MethodCall::chain_subscribeAllHeads {}
@@ -1063,7 +1066,6 @@ impl<T> ServersMultiplexer<T> {
             | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
             | methods::MethodCall::chainHead_unstable_follow { .. }
             | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
-            | methods::MethodCall::sudo_network_unstable_watch {}
             | methods::MethodCall::chainSpec_v1_chainName {}
             | methods::MethodCall::chainSpec_v1_genesisHash {}
             | methods::MethodCall::chainSpec_v1_properties {}
@@ -1404,8 +1406,8 @@ impl<T> ServersMultiplexer<T> {
                         | methods::MethodCall::chain_subscribeNewHeads {}
                         | methods::MethodCall::state_subscribeRuntimeVersion {}
                         | methods::MethodCall::state_subscribeStorage { .. }
-                        | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. }
-                        | methods::MethodCall::sudo_network_unstable_watch {},
+                        | methods::MethodCall::author_submitAndWatchExtrinsic { .. }
+                        | methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. },
                         parse::Response::Success { result_json, .. },
                     ) => {
                         let subscription_id = match methods::parse_jsonrpc_response(
@@ -1419,10 +1421,10 @@ impl<T> ServersMultiplexer<T> {
                                 | methods::Response::chain_subscribeNewHeads(subscription_id)
                                 | methods::Response::state_subscribeRuntimeVersion(subscription_id)
                                 | methods::Response::state_subscribeStorage(subscription_id)
+                                | methods::Response::author_submitAndWatchExtrinsic(subscription_id)
                                 | methods::Response::transactionWatch_unstable_submitAndWatch(
                                     subscription_id,
-                                )
-                                | methods::Response::sudo_network_unstable_watch(subscription_id),
+                                ),
                             ) => subscription_id,
                             Ok(_) => unreachable!(),
                             Err(_) => {
@@ -1511,16 +1513,16 @@ impl<T> ServersMultiplexer<T> {
                                         subscription: Cow::Borrowed(&*subscription_id),
                                     }
                                 }
+                                methods::MethodCall::author_unwatchExtrinsic { .. } => {
+                                    methods::MethodCall::author_unwatchExtrinsic {
+                                        subscription: Cow::Borrowed(&*subscription_id),
+                                    }
+                                }
                                 methods::MethodCall::transactionWatch_unstable_submitAndWatch {
                                     ..
                                 } => methods::MethodCall::transactionWatch_unstable_unwatch {
                                     subscription: Cow::Borrowed(&*subscription_id),
                                 },
-                                methods::MethodCall::sudo_network_unstable_watch {} => {
-                                    methods::MethodCall::sudo_network_unstable_unwatch {
-                                        subscription: Cow::Borrowed(&*subscription_id),
-                                    }
-                                }
                                 _ => unreachable!(),
                             };
 
@@ -1572,16 +1574,16 @@ impl<T> ServersMultiplexer<T> {
                                     &rellocated_subscription_id,
                                 ))
                             }
+                            methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
+                                methods::Response::author_submitAndWatchExtrinsic(Cow::Borrowed(
+                                    &rellocated_subscription_id,
+                                ))
+                            }
                             methods::MethodCall::transactionWatch_unstable_submitAndWatch {
                                 ..
                             } => methods::Response::transactionWatch_unstable_submitAndWatch(
                                 Cow::Borrowed(&rellocated_subscription_id),
                             ),
-                            methods::MethodCall::sudo_network_unstable_watch {} => {
-                                methods::Response::sudo_network_unstable_watch(Cow::Borrowed(
-                                    &rellocated_subscription_id,
-                                ))
-                            }
                             _ => unreachable!(),
                         }
                         .to_json_response(request_id_json);
@@ -1601,8 +1603,8 @@ impl<T> ServersMultiplexer<T> {
                         | methods::MethodCall::chain_unsubscribeNewHeads { subscription }
                         | methods::MethodCall::state_unsubscribeRuntimeVersion { subscription }
                         | methods::MethodCall::state_unsubscribeStorage { subscription }
+                        | methods::MethodCall::author_unwatchExtrinsic { subscription }
                         | methods::MethodCall::transactionWatch_unstable_unwatch { subscription }
-                        | methods::MethodCall::sudo_network_unstable_unwatch { subscription }
                         | methods::MethodCall::chainHead_unstable_unfollow {
                             follow_subscription: subscription,
                         },
@@ -1637,11 +1639,11 @@ impl<T> ServersMultiplexer<T> {
                             methods::MethodCall::state_unsubscribeStorage { .. } => {
                                 methods::Response::state_unsubscribeStorage(true)
                             }
+                            methods::MethodCall::author_unwatchExtrinsic { .. } => {
+                                methods::Response::author_unwatchExtrinsic(true)
+                            }
                             methods::MethodCall::transactionWatch_unstable_unwatch { .. } => {
                                 methods::Response::transactionWatch_unstable_unwatch(())
-                            }
-                            methods::MethodCall::sudo_network_unstable_unwatch { .. } => {
-                                methods::Response::sudo_network_unstable_unwatch(())
                             }
                             methods::MethodCall::chainHead_unstable_unfollow { .. } => {
                                 methods::Response::chainHead_unstable_unfollow(())
