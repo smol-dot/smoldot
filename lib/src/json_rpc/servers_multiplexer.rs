@@ -54,6 +54,7 @@
 use alloc::{
     borrow::Cow,
     collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
 };
 use core::{fmt, mem, ops};
 use rand_chacha::{
@@ -93,6 +94,7 @@ pub struct Config {
 pub struct ServerId(usize);
 
 /// See [the module-level documentation](..).
+// TODO: can we replace String with Arc<str> in some of these fields?
 pub struct ServersMultiplexer<T> {
     /// List of all servers. Indices serve as [`ServerId`].
     servers: slab::Slab<Server<T>>,
@@ -134,32 +136,32 @@ pub struct ServersMultiplexer<T> {
     /// This collection does **not** include subscriptions that the client thinks are active but
     /// that aren't active on any server, which can happen after a server is removed.
     active_subscriptions:
-        hashbrown::HashMap<String, (ServerId, ActiveSubscription), SipHasherBuild>,
+        hashbrown::HashMap<Arc<str>, (ServerId, ActiveSubscription), SipHasherBuild>,
 
     /// Same entries as [`ServersMultiplexer::active_subscriptions`], but indexed by server.
     ///
     /// Keys are the server and subscription ID from the server's perspective, and values are
     /// the subscription ID from the client's perspective.
-    active_subscriptions_by_server: BTreeMap<(ServerId, String), String>,
+    active_subscriptions_by_server: BTreeMap<(ServerId, Arc<str>), Arc<str>>,
 
     /// List of subscriptions that the client thinks are alive but that aren't active on
     /// any server.
     ///
     /// Keys are the subscription ID from the point of view of the client.
-    zombie_subscriptions: hashbrown::HashMap<String, ZombieSubscription, SipHasherBuild>,
+    zombie_subscriptions: hashbrown::HashMap<Arc<str>, ZombieSubscription, SipHasherBuild>,
 
     /// Subset of the items of [`ServersMultiplexer::zombie_subscriptions`] for which a
     /// re-subscription is waiting to be sent to a server.
     ///
     /// Keys are the subscription ID from the point of view of the client.
-    zombie_subscriptions_pending: BTreeSet<String>,
+    zombie_subscriptions_pending: BTreeSet<Arc<str>>,
 
     /// Subset of the items of [`ServersMultiplexer::zombie_subscriptions`] for which a
     /// re-subscription has been sent to a server.
     ///
     /// Keys are the request ID of the re-subscription request, and values are the subscription
     /// ID from the point of view of the client.
-    zombie_subscriptions_by_resubscribe_id: BTreeMap<(ServerId, String), String>,
+    zombie_subscriptions_by_resubscribe_id: BTreeMap<(ServerId, String), Arc<str>>,
 
     /// See [`Config::system_name`]
     system_name: Cow<'static, str>,
@@ -197,7 +199,7 @@ struct Server<T> {
 
 struct ActiveSubscription {
     /// Subscription ID according to the server.
-    server_subscription_id: String,
+    server_subscription_id: Arc<str>,
 
     /// Name of the method that has performed the subscription.
     method_name: String,
@@ -336,8 +338,8 @@ impl<T> ServersMultiplexer<T> {
         let mut subscriptions_to_cancel_or_reopen = {
             let mut server_and_after = self
                 .active_subscriptions_by_server
-                .split_off(&(server_id, String::new()));
-            let mut after = server_and_after.split_off(&(ServerId(server_id.0 + 1), String::new()));
+                .split_off(&(server_id, Arc::from("")));
+            let mut after = server_and_after.split_off(&(ServerId(server_id.0 + 1), Arc::from("")));
             self.active_subscriptions_by_server.append(&mut after);
             server_and_after
         };
@@ -365,7 +367,7 @@ impl<T> ServersMultiplexer<T> {
                 "author_submitAndWatchExtrinsic" => {
                     self.responses_queue.push_back(
                         methods::ServerToClient::author_extrinsicUpdate {
-                            subscription: client_subscription_id.into(),
+                            subscription: Cow::Borrowed(&*client_subscription_id),
                             result: methods::TransactionStatus::Dropped,
                         }
                         .to_json_request_object_parameters(None),
@@ -375,7 +377,7 @@ impl<T> ServersMultiplexer<T> {
                 "transactionWatch_unstable_submitAndWatch" => {
                     self.responses_queue.push_back(
                         methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                            subscription: client_subscription_id.into(),
+                            subscription: Cow::Borrowed(&*client_subscription_id),
                             result: methods::TransactionWatchEvent::Dropped {
                                 // Unfortunately, there is no way of knowing whether the server
                                 // has broadcasted the transaction. Since `false` offers
@@ -393,7 +395,7 @@ impl<T> ServersMultiplexer<T> {
                 "chainHead_unstable_follow" => {
                     self.responses_queue.push_back(
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: client_subscription_id.into(),
+                            subscription: Cow::Borrowed(&*client_subscription_id),
                             result: methods::FollowEvent::Stop {},
                         }
                         .to_json_request_object_parameters(None),
@@ -491,7 +493,7 @@ impl<T> ServersMultiplexer<T> {
                     ..
                 } => {
                     let subscription_exists = subscriptions_to_cancel_or_reopen
-                        .remove(&(server_id, subscription.clone().into_owned()))
+                        .remove(&(server_id, Arc::from(&**subscription)))
                         .is_some();
                     self.responses_queue.push_back(match method {
                         methods::MethodCall::chain_unsubscribeAllHeads { .. } => {
@@ -1250,7 +1252,7 @@ impl<T> ServersMultiplexer<T> {
                         // TODO: overhead of into_owned
                         let btree_map::Entry::Occupied(subscription_entry) = self
                             .active_subscriptions_by_server
-                            .entry((server_id, notification.subscription().clone().into_owned()))
+                            .entry((server_id, Arc::from(&**notification.subscription())))
                         else {
                             // The subscription ID isn't recognized. This indicates something very
                             // wrong with the server. We handle this by blacklisting the server.
@@ -1433,18 +1435,21 @@ impl<T> ServersMultiplexer<T> {
                             }
                         };
 
+                        // Turn the subscription into an `Arc<str>`.
+                        let subscription_id: Arc<str> = Arc::from(subscription_id);
+
                         // Because multiple servers might assign the same subscription ID, we
                         // assign a new separate subscription ID to send back to the client.
                         let rellocated_subscription_id = {
                             let mut subscription_id = [0u8; 32];
                             self.randomness.fill_bytes(&mut subscription_id);
-                            bs58::encode(subscription_id).into_string()
+                            Arc::<str>::from(bs58::encode(subscription_id).into_string())
                         };
 
                         // Update the list of active subscriptions stored in `self`.
                         match self
                             .active_subscriptions_by_server
-                            .entry((server_id, subscription_id.clone().into_owned()))
+                            .entry((server_id, subscription_id.clone()))
                         {
                             btree_map::Entry::Vacant(entry) => {
                                 entry.insert(rellocated_subscription_id.clone());
@@ -1466,7 +1471,7 @@ impl<T> ServersMultiplexer<T> {
                                 ActiveSubscription {
                                     method_name: method_name.clone(),
                                     method_params_json: method_params_json.clone(),
-                                    server_subscription_id: subscription_id.clone().into_owned(),
+                                    server_subscription_id: subscription_id,
                                 },
                             ),
                         );
@@ -1614,7 +1619,7 @@ impl<T> ServersMultiplexer<T> {
                         // so that the subscription ID is the server-side ID.
                         if let Some(client_subscription_id) = self
                             .active_subscriptions_by_server
-                            .remove(&(server_id, subscription.clone().into_owned()))
+                            .remove(&(server_id, Arc::from(&**subscription)))
                         // TODO: overhead ^
                         {
                             let _was_in = self.active_subscriptions.remove(&client_subscription_id);
