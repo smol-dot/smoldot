@@ -94,10 +94,6 @@ use crate::json_rpc::methods;
 
 use super::parse;
 
-pub mod clients_multiplexer;
-
-mod client_sanitizer;
-
 /// Configuration for a new [`ReverseProxy`].
 pub struct Config {
     /// Value to return when a call to the `system_name` JSON-RPC function is received.
