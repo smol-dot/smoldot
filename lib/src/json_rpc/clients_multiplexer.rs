@@ -44,6 +44,7 @@
 use core::cmp;
 
 use alloc::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
@@ -57,6 +58,8 @@ use crate::{
     json_rpc::{methods, parse},
     util::SipHasherBuild,
 };
+
+mod responses_queue;
 
 /// Identifier of a client within the [`ClientsMultiplexer`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -85,6 +88,7 @@ pub struct ClientLimits {
 }
 
 /// See [the module-level documentation](..).
+// TODO: Debug impl
 pub struct ClientsMultiplexer<T> {
     /// List of all clients, including clients that have been removed by the API user.
     clients: slab::Slab<Client<T>>,
@@ -96,7 +100,10 @@ pub struct ClientsMultiplexer<T> {
     /// List of subscriptions indexed by id.
     ///
     /// The same subscription ID can be used for multiple clients at the same time.
-    subscriptions_by_server_id: BTreeSet<(Arc<str>, ClientId)>,
+    subscriptions_by_server_id: BTreeMap<(Arc<str>, ClientId), Subscription>,
+
+    /// List of subscriptions indexed by client.
+    subscriptions_by_client: BTreeSet<(ClientId, Arc<str>)>,
 
     /// Source of randomness used for various purposes.
     randomness: ChaCha20Rng,
@@ -113,22 +120,9 @@ struct Client<T> {
     requests_in_progress:
         hashbrown::HashMap<String, smallvec::SmallVec<[InProgressRequest; 1]>, SipHasherBuild>,
 
-    /// All the entries of the queue. `None` if the slot is not allocated for an entry.
-    ///
-    /// The [`JsonRpcClientSanitizer`] is basically a double-ended queue: items are pushed to the
-    /// end and popped from the front. Unfortunately, because we need to store indices of specific
-    /// entries, we can't use a `VecDeque` and instead have to re-implement a double-ended queue
-    /// manually.
-    responses_container: Vec<Option<ResponseEntry>>,
-
-    /// Index within [`JsonRpcClientSanitizer::responses_container`] where the first entry is
-    /// located.
-    responses_first_item: usize,
-
-    /// Index within [`JsonRpcClientSanitizer::responses_container`] where the last entry is
-    /// located. If it is equal to [`JsonRpcClientSanitizer::responses_first_item`], then the
-    /// queue is empty.
-    responses_last_item: usize,
+    /// Queue of server-to-client responses and notifications.
+    // TODO: occasionally shrink to fit?
+    responses_queue: responses_queue::ResponsesQueue<ResponseEntry>,
 
     /// Limits enforced on the client.
     limits: ClientLimits,
@@ -141,14 +135,10 @@ struct ResponseEntry {
     /// Stringified version of the response or notification.
     as_string: String,
 
-    /// Entry within [`JsonRpcClientSanitizer::responses_container`] of the next item of
-    /// the queue.
-    next_item_index: Option<usize>,
-
     /// If this entry is a notification to a subscription, contains the identifier of this
     /// subscription.
     // TODO: is String maybe too expensive to clone?
-    subscription_notification: Option<String>,
+    subscription_notification: Option<Arc<str>>,
 }
 
 struct InProgressRequest {
@@ -162,8 +152,20 @@ struct Subscription {
 }
 
 enum SubscriptionTy {
+    AllHeads {
+        latest_update_queue_index: Option<responses_queue::EntryIndex>,
+    },
+    FinalizedHeads {
+        latest_update_queue_index: Option<responses_queue::EntryIndex>,
+    },
+    NewHeads {
+        latest_update_queue_index: Option<responses_queue::EntryIndex>,
+    },
     RuntimeVersion {
-        latest_update_queue_index: Option<usize>,
+        latest_update_queue_index: Option<responses_queue::EntryIndex>,
+    },
+    Storage {
+        latest_update_queue_index: Option<responses_queue::EntryIndex>,
     },
 }
 
@@ -177,7 +179,8 @@ impl<T> ClientsMultiplexer<T> {
                 todo!(),
                 Default::default(),
             ),
-            subscriptions_by_server_id: BTreeSet::new(),
+            subscriptions_by_server_id: BTreeMap::new(),
+            subscriptions_by_client: BTreeSet::new(),
             randomness,
         }
     }
@@ -191,19 +194,13 @@ impl<T> ClientsMultiplexer<T> {
                 32,
                 limits.max_unanswered_parallel_requests,
             )),
-            requests_in_progress: (),
-            active_subscriptions: (),
-            responses_container: {
-                let mut container = Vec::with_capacity(limits.max_unanswered_parallel_requests);
-                for _ in 0..limits.max_unanswered_parallel_requests {
-                    container.push(None);
-                }
-                container
-            },
-            responses_first_item: 0,
-            responses_last_item: 0,
+            responses_queue: responses_queue::ResponsesQueue::with_capacity(cmp::min(
+                32,
+                limits.max_unanswered_parallel_requests,
+            )),
             limits,
             user_data: Some(user_data),
+            ..todo!()
         }))
     }
 
@@ -233,9 +230,33 @@ impl<T> ClientsMultiplexer<T> {
         // Clear the queue of unprocessed requests, as we don't need them anymore.
         client.requests_queue.clear();
 
+        // Extract the list of subscriptions from `subscriptions_by_client`.
+        let subscriptions = {
+            let mut client_and_after = self
+                .subscriptions_by_client
+                .split_off(&(client_id, Arc::from("")));
+            self.subscriptions_by_client.append(
+                &mut client_and_after.split_off(&(ClientId(client_id.0 + 1), Arc::from(""))),
+            );
+            client_and_after
+        };
+
         // For each active subscription this client has, add to the queue of unprocessed
         // requests one dummy unsubscribe request.
         // TODO: do this ^
+        for (_, subscription_id) in subscriptions {
+            let Some(subscription) = self
+                .subscriptions_by_server_id
+                .remove(&(subscription_id.clone(), client_id))
+            else {
+                unreachable!()
+            };
+
+            // TODO: only unsubscribe if sub isn't used by anything else
+            client.requests_queue.push_back(match () {
+                _ => unreachable!(),
+            });
+        }
 
         user_data
     }
@@ -311,7 +332,11 @@ impl<T> ClientsMultiplexer<T> {
 
         // Try to parse the request.
         let Ok(request) = parse::parse_request(&request) else {
-            todo!()
+            client.responses_queue.push_back(ResponseEntry {
+                as_string: parse::build_parse_error_response(),
+                subscription_notification: None,
+            });
+            return Ok(PushClientToServer::ImmediateAnswer);
         };
 
         // Get the request ID.
@@ -323,23 +348,39 @@ impl<T> ClientsMultiplexer<T> {
             return Ok(PushClientToServer::Discarded);
         };
 
+        // Try parse the request name and parameters.
+        let Ok(method) = methods::parse_jsonrpc_client_to_server_method_name_and_parameters(
+            request.method,
+            request.params_json,
+        ) else {
+            client.responses_queue.push_back(ResponseEntry {
+                as_string: parse::build_error_response(
+                    request_id_json,
+                    parse::ErrorResponse::MethodNotFound,
+                    None,
+                ),
+                subscription_notification: None,
+            });
+            return Ok(PushClientToServer::ImmediateAnswer);
+        };
+
+        // TODO: for subscriptions, re-use existing subscription if any
+        // TODO: check limit to number of subscriptions
+
         // Adjust the request ID to put the numerical value of the `ClientId` in front.
         // This not only ensures that clients can't have overlapping request IDs, but will also
         // be used in order to determine to which client a response to a request belongs to.
         let new_request_id = serde_json::to_string(&format!("{}-{request_id_json}", client_id.0))
             .unwrap_or_else(|_| unreachable!());
 
-        // TODO: check limit to number of subscriptions
-
+        // Now insert the request in queue.
         debug_assert_ne!(
             self.clients_with_requests.contains(&client_id),
             client.requests_queue.is_empty()
         );
-
         if client.requests_queue.is_empty() {
             let _was_inserted = self.clients_with_requests.insert(client_id);
         }
-
         client
             .requests_queue
             .push_back(parse::build_request(&parse::Request {
@@ -348,6 +389,7 @@ impl<T> ClientsMultiplexer<T> {
                 params_json: request.params_json,
             }));
 
+        // Success.
         Ok(PushClientToServer::Queued)
     }
 
@@ -384,107 +426,183 @@ impl<T> ClientsMultiplexer<T> {
 
     /// Adds a JSON-RPC response or notification coming from the server.
     ///
-    /// Notifications that do not match any known active subscription are ignored.
-    pub fn push_server_to_client(&mut self, response: &str) {}
+    /// Responses that fail to parse or do not match any known request ID, and notifications that
+    /// do not match any known active subscription are ignored.
+    pub fn push_server_to_client(&mut self, response: &str) {
+        // TODO: take by String? ^
+        match parse::parse_response(response) {
+            Ok(response) => {
+                // The response is a response to a request.
 
-    /// Adds a JSON-RPC notification to the back of the server-to-client queue.
-    ///
-    /// Notifications that do not match any known active subscription are ignored.
-    pub fn push_server_to_client_notification(&mut self, notification: methods::ServerToClient) {
-        // Find the subscription this notification corresponds to.
-        let Some(subscription) = self.active_subscriptions.get_mut(match notification {
-            methods::ServerToClient::author_extrinsicUpdate(subscription, _) => subscription,
-            methods::ServerToClient::chain_finalizedHead(subscription, _) => subscription,
-            methods::ServerToClient::chain_newHead(subscription, _) => subscription,
-            methods::ServerToClient::chain_allHead(subscription, _) => subscription,
-            methods::ServerToClient::state_runtimeVersion(subscription, _) => subscription,
-            methods::ServerToClient::state_storage(subscription, _) => subscription,
-            methods::ServerToClient::chainHead_unstable_followEvent(subscription, _) => {
-                subscription
-            }
-            methods::ServerToClient::transactionWatch_unstable_watchEvent(subscription, _) => {
-                subscription
-            }
-            methods::ServerToClient::sudo_networkState_event(subscription, _) => subscription,
-        }) else {
-            // Silently ignore notification that doesn't match any active subscription.
-            return;
-        };
+                // Request ID as sent by the server.
+                let server_request_id = match response {
+                    parse::Response::Success { id_json, .. } => id_json,
+                    parse::Response::Error { id_json, .. } => id_json,
+                    parse::Response::ParseError { .. } => return,
+                };
 
-        match (notification, &mut subscription.ty) {
-            (methods::ServerToClient::author_extrinsicUpdate(_, event), _) => {}
-            (methods::ServerToClient::chain_finalizedHead(_, event), _) => {}
-            (methods::ServerToClient::chain_newHead(_, event), _) => {}
-            (methods::ServerToClient::chain_allHead(_, event), _) => {}
-            (
-                methods::ServerToClient::state_runtimeVersion(_, event),
-                SubscriptionTy::RuntimeVersion {
-                    latest_update_queue_index: Some(latest_update_queue_index),
-                },
-            ) => {
-                // Update the existing entry in queue.
-                self.responses_container[latest_update_queue_index] = Some(notification);
-                return;
+                // Extract the client ID and request ID from the client's perspective.
+                // Return and silently discard the response if there is a parsing error.
+                let (client_id, client_request_id) = {
+                    let Ok(as_string) = serde_json::from_str::<Cow<str>>(server_request_id) else {
+                        return;
+                    };
+                    let Some((id, rq_id)) = as_string.split_once('-') else {
+                        return;
+                    };
+                    let Ok(id) = id.parse::<usize>() else { return };
+                    if !self.clients.contains(id) {
+                        return;
+                    }
+                    if serde_json::from_str::<serde_json::Value>(&rq_id).is_err() {
+                        return;
+                    }
+                    (ClientId(id), rq_id.to_owned())
+                };
+
+                // TODO: must do things in case of subscription or unsubscription
+
+                // Insert the response in queue, adjusting the request ID.
+                self.clients[client_id.0]
+                    .responses_queue
+                    .push_back(ResponseEntry {
+                        subscription_notification: None,
+                        as_string: match response {
+                            parse::Response::Success { result_json, .. } => {
+                                parse::build_success_response(&client_request_id, result_json)
+                            }
+                            parse::Response::Error {
+                                error_code,
+                                error_message,
+                                error_data_json,
+                                ..
+                            } => parse::build_error_response(
+                                &client_request_id,
+                                todo!(),
+                                error_data_json,
+                            ),
+                            parse::Response::ParseError { .. } => unreachable!(),
+                        },
+                    });
             }
-            (
-                methods::ServerToClient::state_runtimeVersion(_, event),
-                SubscriptionTy::RuntimeVersion {
-                    latest_update_queue_index: latest_update_queue_index @ None,
-                },
-            ) => {}
-            (methods::ServerToClient::state_storage(_, event), _) => {}
-            (methods::ServerToClient::chainHead_unstable_followEvent(_, event), _) => {}
-            (methods::ServerToClient::transactionWatch_unstable_watchEvent(_, event), _) => {}
-            (methods::ServerToClient::sudo_networkState_event(_, event), _) => {}
-            _ => {
-                // Subscription type doesn't match notification. Silently ignore notification.
-                return;
+
+            Err(_) => {
+                // Try to parse the response as a subscription notification.
+                let Ok(notification) = methods::parse_notification(response) else {
+                    return;
+                };
+
+                let subscription_id: Arc<str> = Arc::from(&**notification.subscription());
+
+                for (&(_, client_id), subscription) in self.subscriptions_by_server_id.range_mut(
+                    (subscription_id.clone(), ClientId(usize::MIN))
+                        ..=(subscription_id.clone(), ClientId(usize::MAX)),
+                ) {
+                    let mut client = &mut self.clients[client_id.0];
+
+                    match (&mut subscription.ty, &notification) {
+                        // For some subscriptions, we overwrite any existing notification in the
+                        // queue.
+                        (
+                            SubscriptionTy::FinalizedHeads {
+                                latest_update_queue_index: Some(latest_update_queue_index),
+                            },
+                            methods::ServerToClient::chain_finalizedHead { .. },
+                        )
+                        | (
+                            SubscriptionTy::NewHeads {
+                                latest_update_queue_index: Some(latest_update_queue_index),
+                            },
+                            methods::ServerToClient::chain_newHead { .. },
+                        )
+                        | (
+                            SubscriptionTy::RuntimeVersion {
+                                latest_update_queue_index: Some(latest_update_queue_index),
+                            },
+                            methods::ServerToClient::state_runtimeVersion { .. },
+                        ) => {
+                            // Update the existing entry in queue.
+                            let entry = &mut client.responses_queue[*latest_update_queue_index];
+                            debug_assert_eq!(
+                                entry.subscription_notification,
+                                Some(subscription_id.clone())
+                            );
+                            entry.as_string = response.to_owned();
+                            return;
+                        }
+
+                        // For some subscriptions, we push a notification if the queue is small
+                        // enough. If the queue reaches a certain size, we overwrite the
+                        // latest entry.
+                        // The logic of the notifications makes it fundamentally wrong to
+                        // overwrite notifications, however this is considered a defect in the
+                        // logic of legacy JSON-RPC functions.
+                        (
+                            SubscriptionTy::AllHeads {
+                                latest_update_queue_index: Some(latest_update_queue_index),
+                            },
+                            methods::ServerToClient::chain_allHead { .. },
+                        )
+                        | (
+                            SubscriptionTy::Storage {
+                                latest_update_queue_index: Some(latest_update_queue_index),
+                            },
+                            methods::ServerToClient::state_storage { .. },
+                        ) => {
+                            // TODO: do properly; what's the criteria for adding and for overwriting?
+                            // Update the existing entry in queue.
+                            let entry = &mut client.responses_queue[*latest_update_queue_index];
+                            debug_assert_eq!(
+                                entry.subscription_notification,
+                                Some(subscription_id.clone())
+                            );
+                            entry.as_string = response.to_owned();
+                            return;
+                        }
+
+                        // If there isn't any notification in the queue, insert one.
+                        (
+                            SubscriptionTy::AllHeads {
+                                latest_update_queue_index: ref mut latest_update_queue_index @ None,
+                            },
+                            methods::ServerToClient::chain_allHead { .. },
+                        )
+                        | (
+                            SubscriptionTy::FinalizedHeads {
+                                latest_update_queue_index: ref mut latest_update_queue_index @ None,
+                            },
+                            methods::ServerToClient::chain_finalizedHead { .. },
+                        )
+                        | (
+                            SubscriptionTy::NewHeads {
+                                latest_update_queue_index: ref mut latest_update_queue_index @ None,
+                            },
+                            methods::ServerToClient::chain_newHead { .. },
+                        )
+                        | (
+                            SubscriptionTy::RuntimeVersion {
+                                latest_update_queue_index: ref mut latest_update_queue_index @ None,
+                            },
+                            methods::ServerToClient::state_runtimeVersion { .. },
+                        )
+                        | (
+                            SubscriptionTy::Storage {
+                                latest_update_queue_index: ref mut latest_update_queue_index @ None,
+                            },
+                            methods::ServerToClient::state_storage { .. },
+                        ) => {
+                            *latest_update_queue_index =
+                                Some(client.responses_queue.push_back(ResponseEntry {
+                                    as_string: response.to_owned(),
+                                    subscription_notification: Some(subscription_id.clone()),
+                                }));
+                        }
+
+                        _ => {} // TODO: no
+                    }
+                }
             }
         }
-    }
-
-    /// Adds a JSON-RPC response to the back of the server-to-client queue.
-    ///
-    /// The response is silently ignored if it can't be parsed or doesn't correspond to any
-    /// request.
-    pub fn push_server_to_client_response(&mut self, response: Response, request_id_json: &str) {
-        // Remove the entry from `requests_in_progress`.
-        let in_progress_request: InProgressRequest =
-            match self.requests_in_progress.entry_ref(request_id_json) {
-                hashbrown::hash_map::EntryRef::Occupied(entry) => {
-                    let Some(in_progress_request) = entry.get_mut().pop() else {
-                        unreachable!()
-                    };
-                    if entry.get().is_empty() {
-                        entry.remove();
-                    }
-                    in_progress_request
-                }
-                hashbrown::hash_map::EntryRef::Vacant(_) => {
-                    // Silently ignore the response.
-                    return;
-                }
-            };
-
-        match (response, in_progress_request.unsubscribe) {
-            (Response::state_subscribeRuntimeVersion(subscription_id), None) => {
-                let _ = self.active_subscriptions.insert(
-                    subscription_id,
-                    Subscription {
-                        ty: SubscriptionTy::RuntimeVersion {
-                            latest_update_queue_index: None,
-                        },
-                    },
-                );
-            }
-            (Response::state_unsubscribeRuntimeVersion(true), Some(suscription_id)) => {
-                self.active_subscriptions.remove(&subscription_id);
-            }
-            // TODO: others
-            _ => {}
-        };
-
-        let response_string = response.to_json_response(request_id_json);
     }
 
     /// Pops an entry in the queue of server-to-client responses or notifications of the given
@@ -506,19 +624,44 @@ impl<T> ClientsMultiplexer<T> {
             panic!()
         };
 
-        if client.responses_first_item == client.responses_last_item {
+        let Some((entry_index, entry)) = client.responses_queue.pop_front() else {
             return None;
-        }
-
-        let Some(entry) = client.responses_container[client.responses_first_item].take() else {
-            unreachable!()
         };
 
-        client.responses_first_item =
-            (client.responses_first_item + 1) % client.responses_container.len();
+        // Update the local state regarding the position of subscriptions notifications within the
+        // queue.
+        if let Some(subscription_id) = entry.subscription_notification {
+            let Some(subscription_info) = self
+                .subscriptions_by_server_id
+                .get_mut(&(subscription_id, client_id))
+            else {
+                unreachable!()
+            };
 
-        // TODO: update subscriptions
+            match &mut subscription_info.ty {
+                SubscriptionTy::AllHeads {
+                    latest_update_queue_index,
+                }
+                | SubscriptionTy::NewHeads {
+                    latest_update_queue_index,
+                }
+                | SubscriptionTy::FinalizedHeads {
+                    latest_update_queue_index,
+                }
+                | SubscriptionTy::RuntimeVersion {
+                    latest_update_queue_index,
+                }
+                | SubscriptionTy::Storage {
+                    latest_update_queue_index,
+                } => {
+                    if *latest_update_queue_index == Some(entry_index) {
+                        *latest_update_queue_index = None;
+                    }
+                }
+            }
+        }
 
+        // Success.
         Some(entry.as_string)
     }
 }
@@ -531,8 +674,7 @@ pub enum PushClientToServer {
     /// This happens for example if the JSON-RPC client sends a notification.
     Discarded,
 
-    /// The request has been immediately answered or discarded and doesn't need any
-    /// further processing.
+    /// The request has been immediately answered and doesn't need any further processing.
     /// [`ClientsMultiplexer::pop_server_to_client`] should be called in order to pull the
     /// response and send it to the client.
     ImmediateAnswer,

@@ -1246,63 +1246,59 @@ impl<T> ServersMultiplexer<T> {
             Err(_) => {
                 // If the message couldn't be parsed as a response, attempt to parse it as a
                 // notification.
-                match methods::parse_notification(&response) {
-                    Ok(mut notification) => {
-                        // This is a subscription notification.
-                        // TODO: overhead of into_owned
-                        let btree_map::Entry::Occupied(subscription_entry) = self
-                            .active_subscriptions_by_server
-                            .entry((server_id, Arc::from(&**notification.subscription())))
-                        else {
-                            // The subscription ID isn't recognized. This indicates something very
-                            // wrong with the server. We handle this by blacklisting the server.
-                            self.blacklist_server(server_id);
-                            return InsertProxiedJsonRpcResponse::Blacklisted(
-                                BlacklistReason::InvalidSubscriptionId,
-                            );
-                        };
+                let Ok(mut notification) = methods::parse_notification(&response) else {
+                    // Failed to parse the message from the JSON-RPC server.
+                    self.blacklist_server(server_id);
+                    return InsertProxiedJsonRpcResponse::Blacklisted(
+                        BlacklistReason::ParseFailure,
+                    );
+                };
 
-                        // Rewrite the subscription ID in the notification in order to match what
-                        // the client expects.
-                        notification.set_subscription(Cow::Borrowed(&subscription_entry.get()));
-                        let rewritten_notification =
-                            notification.to_json_request_object_parameters(None);
+                // This is a subscription notification.
+                // TODO: overhead of into_owned
+                let btree_map::Entry::Occupied(subscription_entry) = self
+                    .active_subscriptions_by_server
+                    .entry((server_id, Arc::from(&**notification.subscription())))
+                else {
+                    // The subscription ID isn't recognized. This indicates something very
+                    // wrong with the server. We handle this by blacklisting the server.
+                    self.blacklist_server(server_id);
+                    return InsertProxiedJsonRpcResponse::Blacklisted(
+                        BlacklistReason::InvalidSubscriptionId,
+                    );
+                };
 
-                        // Remove the subscription if the notification indicates that the
-                        // subscription is finished.
-                        if matches!(
-                            notification,
-                            methods::ServerToClient::author_extrinsicUpdate {
-                                result: methods::TransactionStatus::Dropped,
-                                ..
-                            } | methods::ServerToClient::transactionWatch_unstable_watchEvent {
-                                result: methods::TransactionWatchEvent::Error { .. }
-                                    | methods::TransactionWatchEvent::Finalized { .. }
-                                    | methods::TransactionWatchEvent::Invalid { .. }
-                                    | methods::TransactionWatchEvent::Dropped { .. },
-                                ..
-                            } | methods::ServerToClient::chainHead_unstable_followEvent {
-                                result: methods::FollowEvent::Stop {},
-                                ..
-                            }
-                        ) {
-                            let _was_in =
-                                self.active_subscriptions.remove(subscription_entry.get());
-                            debug_assert!(_was_in.is_some());
-                            subscription_entry.remove();
-                        }
+                // Rewrite the subscription ID in the notification in order to match what
+                // the client expects.
+                notification.set_subscription(Cow::Borrowed(&subscription_entry.get()));
+                let rewritten_notification = notification.to_json_request_object_parameters(None);
 
-                        // Success.
-                        self.responses_queue.push_back(rewritten_notification);
-                        InsertProxiedJsonRpcResponse::Queued
+                // Remove the subscription if the notification indicates that the
+                // subscription is finished.
+                if matches!(
+                    notification,
+                    methods::ServerToClient::author_extrinsicUpdate {
+                        result: methods::TransactionStatus::Dropped,
+                        ..
+                    } | methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                        result: methods::TransactionWatchEvent::Error { .. }
+                            | methods::TransactionWatchEvent::Finalized { .. }
+                            | methods::TransactionWatchEvent::Invalid { .. }
+                            | methods::TransactionWatchEvent::Dropped { .. },
+                        ..
+                    } | methods::ServerToClient::chainHead_unstable_followEvent {
+                        result: methods::FollowEvent::Stop {},
+                        ..
                     }
-
-                    Err(_) => {
-                        // Failed to parse the message from the JSON-RPC server.
-                        self.blacklist_server(server_id);
-                        InsertProxiedJsonRpcResponse::Blacklisted(BlacklistReason::ParseFailure)
-                    }
+                ) {
+                    let _was_in = self.active_subscriptions.remove(subscription_entry.get());
+                    debug_assert!(_was_in.is_some());
+                    subscription_entry.remove();
                 }
+
+                // Success.
+                self.responses_queue.push_back(rewritten_notification);
+                InsertProxiedJsonRpcResponse::Queued
             }
 
             Ok(parse_result) => {
@@ -1471,7 +1467,7 @@ impl<T> ServersMultiplexer<T> {
                                 ActiveSubscription {
                                     method_name: method_name.clone(),
                                     method_params_json: method_params_json.clone(),
-                                    server_subscription_id: subscription_id,
+                                    server_subscription_id: subscription_id.clone(),
                                 },
                             ),
                         );
