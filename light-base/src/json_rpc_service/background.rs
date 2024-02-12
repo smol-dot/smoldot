@@ -359,8 +359,57 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::chain_getBlock { .. } => {
                         self.chain_get_block(request).await;
                     }
-                    methods::MethodCall::chain_getBlockHash { .. } => {
-                        self.chain_get_block_hash(request).await;
+
+                    methods::MethodCall::chain_getBlockHash { height } => {
+                        // TODO: maybe store values in cache?
+                        match height {
+                            Some(0) => {
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::chain_getBlockHash(
+                                            methods::HashHexString(self.genesis_block_hash),
+                                        )
+                                        .to_json_response(request_id_json),
+                                    )
+                                    .await;
+                            }
+                            None => {
+                                // TODO: no
+                                let best_block = {
+                                    let (tx, rx) = oneshot::channel();
+                                    self.to_legacy
+                                        .lock()
+                                        .await
+                                        .send(legacy_state_sub::Message::CurrentBestBlockHash {
+                                            result_tx: tx,
+                                        })
+                                        .await
+                                        .unwrap();
+                                    rx.await.unwrap()
+                                };
+
+                                let _ = me
+                                    .responses_tx
+                                    .send(
+                                        methods::Response::chain_getBlockHash(
+                                            methods::HashHexString(best_block),
+                                        )
+                                        .to_json_response(request_id_json),
+                                    )
+                                    .await;
+                            }
+                            Some(_) => {
+                                // While the block could be found in `known_blocks`, there is
+                                // no guarantee that blocks in `known_blocks` are canonical, and
+                                // we have no choice but to return null.
+                                // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
+                                let _ = me
+                                    .responses_tx
+                                    .send(parse::build_success_response(request_id_json, "null"))
+                                    .await;
+                            }
+                        }
                     }
 
                     methods::MethodCall::chain_getFinalizedHead {} => {
