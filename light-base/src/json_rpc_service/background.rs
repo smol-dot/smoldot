@@ -270,6 +270,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             )
                             .await;
                     }
+
                     methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
                         self.submit_and_watch_transaction(request).await
                     }
@@ -280,9 +281,27 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::chain_getBlockHash { .. } => {
                         self.chain_get_block_hash(request).await;
                     }
+
                     methods::MethodCall::chain_getFinalizedHead {} => {
-                        self.chain_get_finalized_head(request).await;
+                        // TODO: do differently
+                        let finalized_hash = header::hash_from_scale_encoded_header(
+                            me.runtime_service
+                                .subscribe_all(16, NonZeroUsize::new(24).unwrap())
+                                .await
+                                .finalized_block_scale_encoded_header,
+                        );
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chain_getFinalizedHead(methods::HashHexString(
+                                    finalized_hash,
+                                ))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::chain_getHeader { .. } => {
                         self.chain_get_header(request).await;
                     }
@@ -360,9 +379,21 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::payment_queryInfo { .. } => {
                         self.payment_query_info(request).await;
                     }
+
                     methods::MethodCall::rpc_methods {} => {
-                        self.rpc_methods(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::rpc_methods(methods::RpcMethods {
+                                    methods: methods::MethodCall::method_names()
+                                        .map(|n| n.into())
+                                        .collect(),
+                                })
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::state_call { .. } => {
                         self.state_call(request).await;
                     }
@@ -387,32 +418,136 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::system_accountNextIndex { .. } => {
                         self.account_next_index(request).await;
                     }
+
                     methods::MethodCall::system_chain {} => {
-                        self.system_chain(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_chain((&self.chain_name).into())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_chainType {} => {
-                        self.system_chain_type(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_chainType((&self.chain_ty).into())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_health {} => {
-                        self.system_health(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_health(methods::SystemHealth {
+                                    // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
+                                    // is finished and that the block notifications report blocks that are
+                                    // believed to be near the head of the chain.
+                                    is_syncing: !self
+                                        .runtime_service
+                                        .is_near_head_of_chain_heuristic()
+                                        .await,
+                                    peers: u64::try_from(
+                                        self.sync_service.syncing_peers().await.len(),
+                                    )
+                                    .unwrap_or(u64::max_value()),
+                                    should_have_peers: self.chain_is_live,
+                                })
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_localListenAddresses {} => {
-                        self.system_local_listen_addresses(request).await;
+                        // Light client never listens on any address.
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_localListenAddresses(Vec::new())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_name {} => {
-                        self.system_name(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_name((&self.system_name).into())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_nodeRoles {} => {
-                        self.system_node_roles(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_nodeRoles(Cow::Borrowed(&[
+                                    methods::NodeRole::Light,
+                                ]))
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_peers {} => {
-                        self.system_peers(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_peers(
+                                    self.sync_service
+                                        .syncing_peers()
+                                        .await
+                                        .map(|(peer_id, role, best_number, best_hash)| {
+                                            methods::SystemPeer {
+                                                peer_id: peer_id.to_string(),
+                                                roles: match role {
+                                                    codec::Role::Authority => {
+                                                        methods::SystemPeerRole::Authority
+                                                    }
+                                                    codec::Role::Full => {
+                                                        methods::SystemPeerRole::Full
+                                                    }
+                                                    codec::Role::Light => {
+                                                        methods::SystemPeerRole::Light
+                                                    }
+                                                },
+                                                best_hash: methods::HashHexString(best_hash),
+                                                best_number,
+                                            }
+                                        })
+                                        .collect(),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_properties {} => {
-                        self.system_properties(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_properties(
+                                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::system_version {} => {
-                        self.system_version(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::system_version((&self.system_version).into())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chainHead_unstable_body { .. } => {
@@ -439,9 +574,29 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::chainHead_unstable_unpin { .. } => {
                         self.chain_head_unstable_unpin(request).await;
                     }
+
                     methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
-                        self.chain_head_unstable_finalized_database(request).await;
+                        let response = crate::database::encode_database(
+                            &me.network_service,
+                            &me.sync_service,
+                            &me.runtime_service,
+                            &me.genesis_block_hash,
+                            usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
+                                .unwrap_or(usize::max_value()),
+                        )
+                        .await;
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_finalizedDatabase(
+                                    response.into(),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::chainSpec_v1_chainName {} => {
                         let _ = me
                             .responses_tx
@@ -453,16 +608,89 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chainSpec_v1_genesisHash {} => {
-                        self.chain_spec_unstable_genesis_hash(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainSpec_v1_genesisHash(
+                                    methods::HashHexString(self.genesis_block_hash),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
+
                     methods::MethodCall::chainSpec_v1_properties {} => {
-                        self.chain_spec_unstable_properties(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainSpec_v1_properties(
+                                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
-                    methods::MethodCall::sudo_unstable_p2pDiscover { .. } => {
-                        self.sudo_unstable_p2p_discover(request).await;
+
+                    methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
+                        match multiaddr.parse::<multiaddr::Multiaddr>() {
+                            Ok(mut addr)
+                                if matches!(
+                                    addr.iter().last(),
+                                    Some(multiaddr::Protocol::P2p(_))
+                                ) =>
+                            {
+                                let peer_id_bytes = match addr.iter().last() {
+                                    Some(multiaddr::Protocol::P2p(peer_id)) => {
+                                        peer_id.into_bytes().to_owned()
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                addr.pop();
+
+                                match PeerId::from_bytes(peer_id_bytes) {
+                                    Ok(peer_id) => {
+                                        self.network_service
+                                            .discover(
+                                                iter::once((peer_id, iter::once(addr))),
+                                                false,
+                                            )
+                                            .await;
+                                        let _ = me
+                                            .responses_tx
+                                            .send(
+                                                methods::Response::sudo_unstable_p2pDiscover(())
+                                                    .to_json_response(request_id_json),
+                                            )
+                                            .await;
+                                    }
+                                    Err(_) => request.fail_with_attached_json(
+                                        json_rpc::parse::ErrorResponse::InvalidParams,
+                                        &serde_json::to_string("multiaddr doesn't end with /p2p")
+                                            .unwrap(),
+                                    ),
+                                }
+                            }
+                            Ok(_) => request.fail_with_attached_json(
+                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
+                            ),
+                            Err(err) => request.fail_with_attached_json(
+                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                &serde_json::to_string(&err.to_string()).unwrap(),
+                            ),
+                        }
                     }
+
                     methods::MethodCall::sudo_unstable_version {} => {
-                        self.sudo_unstable_version(request).await;
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::sudo_unstable_version(
+                                    format!("{} {}", self.system_name, self.system_version).into(),
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
@@ -542,7 +770,9 @@ impl<TPlat: PlatformRef> Background<TPlat> {
                         self.network_service
                             .discover(iter::once((peer_id, iter::once(addr))), false)
                             .await;
-                        request.respond(methods::Response::sudo_unstable_p2pDiscover(()));
+                        let _ = me
+                            .responses_tx
+                            .send(methods::Response::sudo_unstable_p2pDiscover(()));
                     }
                     Err(_) => request.fail_with_attached_json(
                         json_rpc::parse::ErrorResponse::InvalidParams,
