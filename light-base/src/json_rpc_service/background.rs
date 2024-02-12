@@ -49,7 +49,6 @@ use smoldot::{
     libp2p::{multiaddr, PeerId},
 };
 
-mod chain_head;
 mod legacy_state_sub;
 mod state_chain;
 
@@ -116,10 +115,16 @@ struct Background<TPlat: PlatformRef> {
     // TODO: shrink_to_fit?
     /// List of all active `state_subscribeRuntimeVersion` subscriptions, indexed by the
     /// subscription ID.
+    // TODO: shrink_to_fit?
     runtime_version_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
     /// List of all active `author_submitAndWatchExtrinsic` and
     /// `transactionWatch_unstable_submitAndWatch` subscriptions, indexed by the subscription ID.
+    // TODO: shrink_to_fit?
     transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
+    /// State of each `chainHead_follow` subscription indexed by its ID.
+    // TODO: shrink_to_fit?
+    chain_head_follow_subscriptions:
+        hashbrown::HashMap<String, ChainHeadFollow, fnv::FnvBuildHasher>,
 
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
@@ -136,16 +141,39 @@ struct Background<TPlat: PlatformRef> {
     /// If `true`, we have already printed a warning about usage of the legacy JSON-RPC API. This
     /// flag prevents printing this message multiple times.
     printed_legacy_json_rpc_warning: atomic::AtomicBool,
+}
 
-    /// For each `chainHead_follow` subscription ID, a channel to the task dedicated to processing
-    /// this subscription.
-    chain_head_follow_tasks: Mutex<
-        hashbrown::HashMap<
-            String,
-            service::DeliverSender<service::RequestProcess>,
-            fnv::FnvBuildHasher,
-        >,
-    >,
+struct ChainHeadFollow<TPlat: PlatformRef> {
+    /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
+    non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
+
+    /// For each pinned block hash, the SCALE-encoded header of the block.
+    pinned_blocks_headers: hashbrown::HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+
+    /// List of body/call/storage operations currently in progress. Keys are operation IDs.
+    operations_in_progress: hashbrown::HashMap<String, Operation, fnv::FnvBuildHasher>,
+
+    available_operation_slots: u32,
+}
+
+struct OperationEvent {
+    operation_id: String,
+    notification: methods::FollowEvent<'static>,
+    is_done: bool,
+}
+
+struct Operation {
+    occupied_slots: u32,
+    interrupt: event_listener::Event,
+}
+
+enum Subscription<TPlat: PlatformRef> {
+    WithRuntime {
+        notifications: runtime_service::Subscription<TPlat>,
+        subscription_id: runtime_service::SubscriptionId,
+    },
+    // TODO: better typing?
+    WithoutRuntime(pin::Pin<Box<async_channel::Receiver<sync_service::Notification>>>),
 }
 
 enum Event {
@@ -234,6 +262,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
             2,
             Default::default(),
         ),
+        chain_head_follow_subscriptions: hashbrown::HashMap::with_hasher(Default::default()),
         responses_tx: async_channel::bounded(64).0, // TODO: /!\ do properly
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
@@ -245,7 +274,6 @@ pub(super) async fn run<TPlat: PlatformRef>(
         )),
         genesis_block_hash: config.genesis_block_hash,
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
-        chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
         platform: config.platform,
     };
 
@@ -768,29 +796,763 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::chainHead_unstable_body { .. } => {
-                        self.chain_head_unstable_body(request).await;
+                    methods::MethodCall::chainHead_unstable_body {
+                        follow_subscription,
+                        hash,
+                    } => {
+                        let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .get_mut(&*follow_subscription)
+                        else {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::chainHead_unstable_body(
+                                        methods::ChainHeadStorageReturn::LimitReached {},
+                                    )
+                                    .to_json_response(request_id_json),
+                                )
+                                .await;
+                            continue;
+                        };
+
+                        // Determine whether the requested block hash is valid, and if yes its
+                        // number and extrinsics trie root. The extrinsics trie root is used to
+                        // verify whether the body we download is correct.
+                        let (block_number, extrinsics_root) = {
+                            if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
+                                let decoded =
+                                    header::decode(header, me.sync_service.block_number_bytes())
+                                        .unwrap(); // TODO: unwrap?
+                                (decoded.number, *decoded.extrinsics_root)
+                            } else {
+                                // Block isn't pinned. Request is invalid.
+                                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                                continue;
+                            }
+                        };
+
+                        // Check whether there is an operation slot available.
+                        self.available_operation_slots =
+                            match self.available_operation_slots.checked_sub(1) {
+                                Some(s) => s,
+                                None => {
+                                    request.respond(methods::Response::chainHead_unstable_body(
+                                        methods::ChainHeadBodyCallReturn::LimitReached {},
+                                    ));
+                                    continue;
+                                }
+                            };
+
+                        let interrupt = event_listener::Event::new();
+                        let mut on_interrupt = interrupt.listen();
+
+                        let _was_in = subscriptions.operations_in_progress.insert(
+                            operation_id.clone(),
+                            Operation {
+                                occupied_slots: 1,
+                                interrupt,
+                            },
+                        );
+                        debug_assert!(_was_in.is_none());
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_body(
+                                    methods::ChainHeadBodyCallReturn::Started {
+                                        operation_id: (&operation_id).into(),
+                                    },
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
+
+                        // Finish the operation asynchronously.
+                        me.events.push_back({
+                            let sync_service = me.sync_service.clone();
+                            async move {
+                                let future = sync_service.clone().block_query(
+                                    block_number,
+                                    hash.0,
+                                    codec::BlocksRequestFields {
+                                        header: false,
+                                        body: true,
+                                        justifications: false,
+                                    },
+                                    3,
+                                    Duration::from_secs(20),
+                                    NonZeroU32::new(2).unwrap(),
+                                );
+
+                                // Drive the future, but cancel execution if the JSON-RPC client
+                                // unsubscribes.
+                                let outcome =
+                                    match future.map(Some).or(on_interrupt.map(|()| None)).await {
+                                        Some(v) => v,
+                                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
+                                    };
+
+                                // We must check whether the body is present in the response
+                                // and valid.
+                                // TODO: should try the request again with a different peer instead of failing immediately
+                                let body = match outcome {
+                                    Ok(outcome) => {
+                                        if let Some(body) = outcome.body {
+                                            if header::extrinsics_root(&body) == extrinsics_root {
+                                                Ok(body)
+                                            } else {
+                                                Err(())
+                                            }
+                                        } else {
+                                            Err(())
+                                        }
+                                    }
+                                    Err(err) => Err(err),
+                                };
+
+                                // Send back the response.
+                                match body {
+                                    Ok(body) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification:
+                                                    methods::FollowEvent::OperationBodyDone {
+                                                        operation_id: operation_id.clone().into(),
+                                                        value: body
+                                                            .into_iter()
+                                                            .map(methods::HexString)
+                                                            .collect(),
+                                                    },
+                                            })
+                                            .await;
+                                    }
+                                    Err(()) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification:
+                                                    methods::FollowEvent::OperationInaccessible {
+                                                        operation_id: operation_id.clone().into(),
+                                                    },
+                                            })
+                                            .await;
+                                    }
+                                }
+                            }
+                        });
                     }
+
                     methods::MethodCall::chainHead_unstable_call { .. } => {
-                        self.chain_head_call(request).await;
+                        let (hash, function_to_call, call_parameters) = {
+                            let methods::MethodCall::chainHead_unstable_call {
+                                hash,
+                                function,
+                                call_parameters,
+                                ..
+                            } = request.request()
+                            else {
+                                unreachable!()
+                            };
+                
+                            (hash, function.into_owned(), call_parameters.0)
+                        };
+                
+                        // Check whether there is an operation slot available.
+                        self.available_operation_slots = match self.available_operation_slots.checked_sub(1) {
+                            Some(s) => s,
+                            None => {
+                                request.respond(methods::Response::chainHead_unstable_call(
+                                    methods::ChainHeadBodyCallReturn::LimitReached {},
+                                ));
+                                return;
+                            }
+                        };
+                
+                        // Determine whether the requested block hash is valid and create a future of the call.
+                        // This is done immediately is order to guarantee that the block is still pinned.
+                        let (pinned_runtime, block_state_trie_root_hash, block_number) = match self.subscription {
+                            Subscription::WithRuntime {
+                                subscription_id, ..
+                            } => {
+                                if !self.pinned_blocks_headers.contains_key(&hash.0) {
+                                    // Block isn't pinned. Request is invalid.
+                                    request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                                    return;
+                                }
+                
+                                match self
+                                    .runtime_service
+                                    .pin_pinned_block_runtime(subscription_id, hash.0)
+                                    .await
+                                {
+                                    Ok(r) => r,
+                                    Err(runtime_service::PinPinnedBlockRuntimeError::BlockNotPinned) => {
+                                        unreachable!()
+                                    }
+                                    Err(runtime_service::PinPinnedBlockRuntimeError::ObsoleteSubscription) => {
+                                        // The runtime service subscription is dead.
+                                        request.respond(methods::Response::chainHead_unstable_call(
+                                            methods::ChainHeadBodyCallReturn::LimitReached {},
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                            Subscription::WithoutRuntime(_) => {
+                                // It is invalid to call this function for a "without runtime" subscription.
+                                request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                                return;
+                            }
+                        };
+                
+                        let operation_id = self.next_operation_id.to_string();
+                        self.next_operation_id += 1;
+                        let to_main_task = self.to_main_task.clone();
+                
+                        let interrupt = event_listener::Event::new();
+                        let on_interrupt = interrupt.listen();
+                        let runtime_service = self.runtime_service.clone();
+                
+                        let _was_in = self.operations_in_progress.insert(
+                            operation_id.clone(),
+                            Operation {
+                                occupied_slots: 1,
+                                interrupt,
+                            },
+                        );
+                        debug_assert!(_was_in.is_none());
+                
+                        request.respond(methods::Response::chainHead_unstable_call(
+                            methods::ChainHeadBodyCallReturn::Started {
+                                operation_id: (&operation_id).into(),
+                            },
+                        ));
+                
+                        // Finish the call asynchronously.
+                        self.platform.spawn_task(
+                            format!("{}-chain-head-call", self.log_target).into(),
+                            async move {
+                                // Perform the execution, but cancel if the JSON-RPC client unsubscribes.
+                                let runtime_call_result = {
+                                    let runtime_call = runtime_service.runtime_call(
+                                        pinned_runtime,
+                                        hash.0,
+                                        block_number,
+                                        block_state_trie_root_hash,
+                                        function_to_call,
+                                        None,
+                                        call_parameters,
+                                        3,
+                                        Duration::from_secs(20),
+                                        NonZeroU32::new(2).unwrap(),
+                                    );
+                
+                                    match runtime_call.map(Some).or(on_interrupt.map(|()| None)).await {
+                                        Some(v) => v,
+                                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
+                                    }
+                                };
+                
+                                match runtime_call_result {
+                                    Ok(success) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationCallDone {
+                                                    operation_id: operation_id.clone().into(),
+                                                    output: methods::HexString(success.output),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                    Err(runtime_service::RuntimeCallError::InvalidRuntime(error)) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationError {
+                                                    operation_id: operation_id.clone().into(),
+                                                    error: error.to_string().into(),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                    Err(runtime_service::RuntimeCallError::ApiVersionRequirementUnfulfilled) => {
+                                        // We pass `None` for the API requirement, thus this error can never
+                                        // happen.
+                                        unreachable!()
+                                    }
+                                    Err(runtime_service::RuntimeCallError::Crash) => {
+                                        // TODO: is this the appropriate error?
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationInaccessible {
+                                                    operation_id: operation_id.clone().into(),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                    Err(runtime_service::RuntimeCallError::Execution(
+                                        runtime_service::RuntimeCallExecutionError::ForbiddenHostFunction,
+                                    )) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationError {
+                                                    operation_id: operation_id.clone().into(),
+                                                    error: "Runtime has called an offchain host function"
+                                                        .to_string()
+                                                        .into(),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                    Err(runtime_service::RuntimeCallError::Execution(
+                                        runtime_service::RuntimeCallExecutionError::Start(error),
+                                    )) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationError {
+                                                    operation_id: operation_id.clone().into(),
+                                                    error: error.to_string().into(),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                    Err(runtime_service::RuntimeCallError::Execution(
+                                        runtime_service::RuntimeCallExecutionError::Execution(error),
+                                    )) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationError {
+                                                    operation_id: operation_id.clone().into(),
+                                                    error: error.to_string().into(),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                    Err(runtime_service::RuntimeCallError::Inaccessible(_)) => {
+                                        let _ = to_main_task
+                                            .send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationInaccessible {
+                                                    operation_id: operation_id.clone().into(),
+                                                },
+                                            })
+                                            .await;
+                                    }
+                                }
+                            },
+                        );
                     }
+
                     methods::MethodCall::chainHead_unstable_continue { .. } => {
-                        self.chain_head_continue(request).await;
+                        // TODO: not implemented properly
+                        request.respond(methods::Response::chainHead_unstable_continue(()));
                     }
-                    methods::MethodCall::chainHead_unstable_storage { .. } => {
-                        self.chain_head_storage(request).await;
+
+                    methods::MethodCall::chainHead_unstable_storage {
+                        follow_subscription,
+                        hash,
+                        items,
+                        child_trie,
+                    } => {
+                        let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .get_mut(&*follow_subscription)
+                        else {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::chainHead_unstable_storage(
+                                        methods::ChainHeadStorageReturn::LimitReached {},
+                                    )
+                                    .to_json_response(request_id_json),
+                                )
+                                .await;
+                            continue;
+                        };
+
+                        // Obtain the header of the requested block.
+                        let Some(block_scale_encoded_header) =
+                            subscription.pinned_blocks_headers.get(&hash.0).cloned()
+                        else {
+                            // Block isn't pinned. Request is invalid.
+                            request.fail(json_rpc::parse::ErrorResponse::InvalidParams);
+                            continue;
+                        };
+
+                        if child_trie.is_some() {
+                            // TODO: implement this
+                            request.fail(json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Child key storage queries not supported yet",
+                            ));
+                            log!(
+                                &self.platform,
+                                Warn,
+                                &self.log_target,
+                                "chainHead_unstable_storage has been called with a non-null childTrie. \
+                                This isn't supported by smoldot yet."
+                            );
+                            continue;
+                        }
+
+                        let interrupt = event_listener::Event::new();
+                        let mut on_interrupt = interrupt.listen();
+
+                        me.events.push_back({
+                            let sync_service = me.sync_service.clone();
+                            async move {
+                                let decoded_header = match header::decode(
+                                    &block_scale_encoded_header,
+                                    sync_service.block_number_bytes(),
+                                ) {
+                                    Ok(h) => h,
+                                    Err(err) => {
+                                        // Header can't be decoded. Generate a single `error` event and
+                                        // return.
+                                        let _ = to_main_task.send(OperationEvent {
+                                            operation_id: operation_id.clone(),
+                                            is_done: true,
+                                            notification: methods::FollowEvent::OperationError {
+                                                operation_id: operation_id.clone().into(),
+                                                error: err.to_string().into(),
+                                            }
+                                        })
+                                        .await;
+                                        return;
+                                    }
+                                };
+            
+                                let mut next_step = sync_service.clone().storage_query(
+                                    decoded_header.number,
+                                    hash.0,
+                                    *decoded_header.state_root,
+                                    items
+                                        .into_iter()
+                                        .map(|item| sync_service::StorageRequestItem {
+                                            key: item.key.0,
+                                            ty: match item.ty {
+                                                methods::ChainHeadStorageType::Value => {
+                                                    sync_service::StorageRequestItemTy::Value
+                                                }
+                                                methods::ChainHeadStorageType::Hash => {
+                                                    sync_service::StorageRequestItemTy::Hash
+                                                }
+                                                methods::ChainHeadStorageType::ClosestDescendantMerkleValue => {
+                                                    sync_service::StorageRequestItemTy::ClosestDescendantMerkleValue
+                                                }
+                                                methods::ChainHeadStorageType::DescendantsValues => {
+                                                    sync_service::StorageRequestItemTy::DescendantsValues
+                                                }
+                                                methods::ChainHeadStorageType::DescendantsHashes => {
+                                                    sync_service::StorageRequestItemTy::DescendantsHashes
+                                                }
+                                            },
+                                        }),
+                                    3,
+                                    Duration::from_secs(20),
+                                    NonZeroU32::new(2).unwrap(),
+                                ).advance();
+            
+                                loop {
+                                    // Drive the future, but cancel execution if the JSON-RPC client
+                                    // unsubscribes.
+                                    let outcome = match next_step
+                                        .map(Some)
+                                        .or((&mut on_interrupt).map(|()| None))
+                                        .await
+                                    {
+                                        Some(v) => v,
+                                        None => return, // JSON-RPC client has unsubscribed in the meanwhile.
+                                    };
+            
+                                    match outcome {
+                                        sync_service::StorageQueryProgress::Progress { request_index, item, mut query } => {
+                                            let mut items_chunk = Vec::with_capacity(16);
+            
+                                            for (_, item) in iter::once((request_index, item)).chain(iter::from_fn(|| query.try_advance())) {
+                                                // Perform some API conversion.
+                                                let item = match item {
+                                                    sync_service::StorageResultItem::Value { key, value: Some(value) } => {
+                                                        Some(methods::ChainHeadStorageResponseItem {
+                                                            key: methods::HexString(key),
+                                                            value: Some(methods::HexString(value)),
+                                                            hash: None,
+                                                            closest_descendant_merkle_value: None,
+                                                        })
+                                                    }
+                                                    sync_service::StorageResultItem::Value { value: None, .. } => {
+                                                        None
+                                                    }
+                                                    sync_service::StorageResultItem::Hash { key, hash: Some(hash) } => {
+                                                        Some(methods::ChainHeadStorageResponseItem {
+                                                            key: methods::HexString(key),
+                                                            value: None,
+                                                            hash: Some(methods::HexString(hash.to_vec())),
+                                                            closest_descendant_merkle_value: None,
+                                                        })
+                                                    }
+                                                    sync_service::StorageResultItem::Hash { hash: None, .. } => {
+                                                        None
+                                                    }
+                                                    sync_service::StorageResultItem::DescendantValue { key, value, .. } => {
+                                                        Some(methods::ChainHeadStorageResponseItem {
+                                                            key: methods::HexString(key),
+                                                            value: Some(methods::HexString(value)),
+                                                            hash: None,
+                                                            closest_descendant_merkle_value: None,
+                                                        })
+                                                    }
+                                                    sync_service::StorageResultItem::DescendantHash { key, hash, .. } => {
+                                                        Some(methods::ChainHeadStorageResponseItem {
+                                                            key: methods::HexString(key),
+                                                            value: None,
+                                                            hash: Some(methods::HexString(hash.to_vec())),
+                                                            closest_descendant_merkle_value: None,
+                                                        })
+                                                    }
+                                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { requested_key, closest_descendant_merkle_value: Some(merkle_value), .. } => {
+                                                        Some(methods::ChainHeadStorageResponseItem {
+                                                            key: methods::HexString(requested_key),
+                                                            value: None,
+                                                            hash: None,
+                                                            closest_descendant_merkle_value: Some(methods::HexString(merkle_value)),
+                                                        })
+                                                    }
+                                                    sync_service::StorageResultItem::ClosestDescendantMerkleValue { closest_descendant_merkle_value: None, .. } => {
+                                                        None
+                                                    }
+                                                };
+            
+                                                if let Some(item) = item {
+                                                    items_chunk.push(item);
+                                                }
+                                            }
+            
+                                            if !items_chunk.is_empty() {
+                                                let _ = to_main_task.send(OperationEvent {
+                                                    operation_id: operation_id.clone(),
+                                                    is_done: false,
+                                                    notification: methods::FollowEvent::OperationStorageItems {
+                                                        operation_id: operation_id.clone().into(),
+                                                        items: items_chunk
+                                                    }
+                                                }).await;
+                                            }
+            
+                                            // TODO: generate a waitingForContinue here and wait for user to continue
+            
+                                            next_step = query.advance();
+                                        }
+                                        sync_service::StorageQueryProgress::Finished => {
+                                            let _ = to_main_task.send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationStorageDone {
+                                                    operation_id: operation_id.clone().into(),
+                                                }
+                                            }).await;
+                                            break;
+                                        }
+                                        sync_service::StorageQueryProgress::Error(_) => {
+                                            let _ = to_main_task.send(OperationEvent {
+                                                operation_id: operation_id.clone(),
+                                                is_done: true,
+                                                notification: methods::FollowEvent::OperationInaccessible {
+                                                    operation_id: operation_id.clone().into(),
+                                                }
+                                            }).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } 
+                        });
                     }
-                    methods::MethodCall::chainHead_unstable_stopOperation { .. } => {
-                        self.chain_head_stop_operation(request).await;
+
+                    methods::MethodCall::chainHead_unstable_stopOperation {
+                        follow_subscription,
+                        operation_id,
+                    } => {
+                        if let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .get_mut(&*follow_subscription)
+                        {
+                            if let Some(operation) =
+                                subscription.operations_in_progress.remove(&*operation_id)
+                            {
+                                operation.interrupt.notify(usize::max_value());
+                                subscription.available_operation_slots += operation.occupied_slots;
+                            }
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_stopOperation(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
-                    methods::MethodCall::chainHead_unstable_follow { .. } => {
-                        self.chain_head_follow(request).await;
+
+                    methods::MethodCall::chainHead_unstable_follow { with_runtime } => {
+                        // Check that the number of existing subscriptions is below the limit.
+                        // TODO: configurable limit
+                        if me.chain_head_follow_subscriptions.len() >= 2 {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(request_id_json, -32800, None))
+                                .await;
+                            continue;
+                        }
+
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
+
+                        let _was_inserted = me.chain_head_follow_subscriptions.insert(
+                            subscription_id,
+                            ChainHeadFollow {
+                                non_finalized_blocks: todo!(),
+                                pinned_blocks_headers: todo!(),
+                                operations_in_progress:
+                                    hashbrown::HashMap::with_capacity_and_hasher(
+                                        32,
+                                        Default::default(),
+                                    ),
+                                available_operation_slots: 32, // TODO: make configurable? adjust dynamically?
+                            },
+                        );
+                        debug_assert!(_was_inserted);
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_follow(subscription_id)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
-                    methods::MethodCall::chainHead_unstable_header { .. } => {
-                        self.chain_head_unstable_header(request).await;
+
+                    methods::MethodCall::chainHead_unstable_header {
+                        follow_subscription,
+                        hash,
+                    } => {
+                        let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .get_mut(&*follow_subscription)
+                        else {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::chainHead_unstable_header(None)
+                                        .to_json_response(request_id_json),
+                                )
+                                .await;
+                            continue;
+                        };
+
+                        let Some(block) = self.pinned_blocks_headers.get(&hash.0) else {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::ApplicationDefined(
+                                        -32801,
+                                        "unknown or unpinned block",
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        };
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_header(Some(block.clone()))
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
-                    methods::MethodCall::chainHead_unstable_unpin { .. } => {
-                        self.chain_head_unstable_unpin(request).await;
+
+                    methods::MethodCall::chainHead_unstable_unpin {
+                        follow_subscription,
+                        hash_or_hashes,
+                    } => {
+                        let Some(subscription) = me
+                            .chain_head_follow_subscriptions
+                            .get_mut(&*follow_subscription)
+                        else {
+                            let _ = me
+                                .responses_tx
+                                .send(
+                                    methods::Response::chainHead_unstable_unpin(())
+                                        .to_json_response(request_id_json),
+                                )
+                                .await;
+                            continue;
+                        };
+
+                        let all_hashes = match &hash_or_hashes {
+                            methods::HashHexStringSingleOrArray::Single(hash) => {
+                                either::Left(iter::once(&hash.0))
+                            }
+                            methods::HashHexStringSingleOrArray::Array(hashes) => {
+                                either::Right(hashes.iter().map(|h| &h.0))
+                            }
+                        };
+
+                        // TODO: what if duplicate hashes
+                        if !all_hashes
+                            .clone()
+                            .all(|hash| subscription.pinned_blocks_headers.contains_key(hash))
+                        {
+                            let _ = me
+                                .responses_tx
+                                .send(parse::build_error_response(
+                                    request_id_json,
+                                    parse::ErrorResponse::InvalidParams,
+                                    None,
+                                ))
+                                .await;
+                            continue;
+                        }
+
+                        for hash in all_hashes {
+                            subscription.pinned_blocks_headers.remove(hash);
+                            if let Subscription::WithRuntime {
+                                subscription_id, ..
+                            } = subscription.subscription
+                            {
+                                me.runtime_service.unpin_block(subscription_id, *hash).await;
+                            }
+                        }
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::chainHead_unstable_unpin(())
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chainHead_unstable_finalizedDatabase { .. } => {
