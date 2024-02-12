@@ -39,6 +39,11 @@ use core::{
     time::Duration,
 };
 use futures_channel::oneshot;
+use futures_util::{future, stream};
+use rand_chacha::{
+    rand_core::{RngCore as _, SeedableRng as _},
+    ChaCha20Rng,
+};
 use smoldot::{
     json_rpc::{self, methods, parse, service},
     libp2p::{multiaddr, PeerId},
@@ -71,6 +76,9 @@ struct Background<TPlat: PlatformRef> {
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
 
+    /// Randomness used for various purposes, such as generating subscription IDs.
+    randomness: ChaCha20,
+
     /// See [`StartConfig::network_service`].
     network_service: Arc<network_service::NetworkServiceChain<TPlat>>,
 
@@ -80,6 +88,8 @@ struct Background<TPlat: PlatformRef> {
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+
+    events: stream::FuturesUnordered<Pin<Box<dyn Future<Output = Event> + Send>>>,
 
     /// Channel where to send responses and notifications.
     responses_tx: async_channel::Sender<String>,
@@ -109,6 +119,9 @@ struct Background<TPlat: PlatformRef> {
     /// List of all active `state_subscribeRuntimeVersion` subscriptions, indexed by the
     /// subscription ID.
     runtime_version_subscriptions: hashbrown::HashSet<String, fnv::FnvBuildHasher>,
+    /// List of all active `author_submitAndWatchExtrinsic` and
+    /// `transactionWatch_unstable_submitAndWatch` subscriptions, indexed by the subscription ID.
+    transactions_subscriptions: hashbrown::HashMap<String, TransactionWatch, fnv::FnvBuildHasher>,
 
     /// When `state_getKeysPaged` is called and the response is truncated, the response is
     /// inserted in this cache. The API user is likely to call `state_getKeysPaged` again with
@@ -137,6 +150,27 @@ struct Background<TPlat: PlatformRef> {
     >,
 }
 
+enum Event {
+    TransactionEvent {
+        suscription_id: String,
+        event: transactions_service::TransactionStatus,
+        watcher: Pin<Box<transactions_service::TransactionWatcher>>,
+    },
+}
+
+struct TransactionWatch {
+    included_block: Option<[u8; 32]>,
+    num_broadcasted_peers: usize,
+    ty: TransactionWatchTy,
+}
+
+enum TransactionWatchTy {
+    /// `author_submitAndWatchExtrinsic`.
+    Legacy,
+    /// `transactionWatch_unstable_submitAndWatch`.
+    NewApi,
+}
+
 /// See [`Background::state_get_keys_paged_cache`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GetKeysPagedCacheKey {
@@ -159,6 +193,9 @@ pub(super) async fn run<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
     });
 
+    // TODO: inline?
+    let mut randomness = ChaCha20Rng::from_seed(todo!());
+
     let me = Background {
         log_target,
         chain_name: config.chain_spec.name().to_owned(),
@@ -167,25 +204,31 @@ pub(super) async fn run<TPlat: PlatformRef>(
         chain_properties_json: config.chain_spec.properties().to_owned(),
         system_name: config.system_name.clone(),
         system_version: config.system_version.clone(),
+        randomness,
         network_service: config.network_service.clone(),
         sync_service: config.sync_service.clone(),
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
+        events: stream::FuturesUnordered::new(),
         to_legacy: Mutex::new(to_legacy_tx),
         runtime_service_subscription: None,
-        all_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+        all_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
             Default::default(),
         ),
-        new_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+        new_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
             Default::default(),
         ),
-        finalized_heads_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+        finalized_heads_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
             2,
             Default::default(),
         ),
-        runtime_version_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+        runtime_version_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+            2,
+            Default::default(),
+        ),
+        transactions_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
             2,
             Default::default(),
         ),
@@ -210,6 +253,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
 
         enum WakeUpReason {
             IncomingJsonRpcRequest(String),
+            Event(Event),
         }
 
         let wake_up_reason: WakeUpReason = { todo!() };
@@ -271,8 +315,45 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
-                    methods::MethodCall::author_submitAndWatchExtrinsic { .. } => {
-                        self.submit_and_watch_transaction(request).await
+                    methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
+
+                        let mut transaction_updates = Box::pin(
+                            me.transactions_service
+                                .submit_and_watch_transaction(transaction.0, 16)
+                                .await,
+                        );
+
+                        let _prev_value = me.transactions_subscriptions.insert(
+                            subscription_id.clone(),
+                            TransactionWatch {
+                                included_block: None,
+                                num_broadcasted_peers: 0,
+                                ty: TransactionWatchTy::Legacy,
+                            },
+                        );
+                        debug_assert!(_prev_value.is_none());
+
+                        me.events.push(Box::pin(async move {
+                            let status = transaction_updates.next().await;
+                            Event::TransactionEvent {
+                                suscription_id,
+                                event: status,
+                                watcher: transaction_updates,
+                            }
+                        }));
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_submitAndWatchExtrinsic(subscription_id)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     methods::MethodCall::chain_getBlock { .. } => {
@@ -307,7 +388,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_subscribeAllHeads {} => {
-                        let subscription_id: String = todo!();
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
 
                         // TODO: check max subscriptions
 
@@ -318,7 +403,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                        let subscription_id: String = todo!();
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
 
                         // TODO: check max subscriptions
 
@@ -330,8 +419,11 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_subscribeNewHeads {} => {
-                        let subscription_id: String = todo!();
-
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
                         // TODO: check max subscriptions
 
                         let _was_inserted = me.new_heads_subscriptions.insert(subscription_id);
@@ -694,7 +786,46 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::transactionWatch_unstable_submitAndWatch { .. } => {
-                        self.submit_and_watch_transaction(request).await
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
+
+                        let mut transaction_updates = Box::pin(
+                            me.transactions_service
+                                .submit_and_watch_transaction(transaction.0, 16)
+                                .await,
+                        );
+
+                        let _prev_value = me.transactions_subscriptions.insert(
+                            subscription_id.clone(),
+                            TransactionWatch {
+                                included_block: None,
+                                num_broadcasted_peers: 0,
+                                ty: TransactionWatchTy::NewApi,
+                            },
+                        );
+                        debug_assert!(_prev_value.is_none());
+
+                        me.events.push(Box::pin(async move {
+                            let status = transaction_updates.next().await;
+                            Event::TransactionEvent {
+                                suscription_id,
+                                event: status,
+                                watcher: transaction_updates,
+                            }
+                        }));
+
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::transactionWatch_unstable_submitAndWatch(
+                                    subscription_id,
+                                )
+                                .to_json_response(request_id_json),
+                            )
+                            .await;
                     }
 
                     _method @ (methods::MethodCall::account_nextIndex { .. }
@@ -746,51 +877,364 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     _ => todo!(),
                 }
             }
+
+            WakeUpReason::Event(Event::TransactionEvent {
+                suscription_id,
+                event,
+                watcher,
+            }) => {
+                let Some(transaction_watch) =
+                    me.transactions_subscriptions.get_me(&subscription_id)
+                else {
+                    // JSON-RPC client has unsubscribed from this transaction and is no longer
+                    // interested in events.
+                    continue;
+                };
+
+                match (status_update, transaction_watch.ty) {
+                    (
+                        transactions_service::TransactionStatus::Broadcast(peers),
+                        TransactionWatchTy::Legacy,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::author_extrinsicUpdate {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionStatus::Broadcast(
+                                        peers.into_iter().map(|peer| peer.to_base58()).collect(),
+                                    ),
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Broadcast(peers),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        transaction_watch.num_broadcasted_peers += peers.len();
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Broadcasted {
+                                        num_peers: u32::try_from(
+                                            transaction_watch.num_broadcasted_peers,
+                                        )
+                                        .unwrap_or(u32::max_value()),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+
+                    (
+                        transactions_service::TransactionStatus::Validated,
+                        TransactionWatchTy::Legacy,
+                    ) => {
+                        // Nothing to do.
+                    }
+                    (
+                        transactions_service::TransactionStatus::Validated,
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Validated {},
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+
+                    (
+                        transactions_service::TransactionStatus::IncludedBlockUpdate {
+                            block_hash: Some((block_hash, _)),
+                        },
+                        TransactionWatchTy::Legacy,
+                    ) => {
+                        transaction_watch.included_block = Some(block_hash);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::author_extrinsicUpdate {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionStatus::InBlock(
+                                        methods::HashHexString(block_hash),
+                                    ),
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::IncludedBlockUpdate {
+                            block_hash: None,
+                        },
+                        TransactionWatchTy::Legacy,
+                    ) => {
+                        if let Some(block_hash) = transaction_watch.included_block.take() {
+                            subscription
+                                .send_notification(
+                                    methods::ServerToClient::author_extrinsicUpdate {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::TransactionStatus::Retracted(
+                                            methods::HashHexString(block_hash),
+                                        ),
+                                    }
+                                    .to_json_request_object_parameters(None),
+                                )
+                                .await;
+                        }
+                    }
+                    (
+                        transactions_service::TransactionStatus::IncludedBlockUpdate {
+                            block_hash: Some((block_hash, index)),
+                        },
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        transaction_watch.included_block = Some(block_hash);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result:
+                                        methods::TransactionWatchEvent::BestChainBlockIncluded {
+                                            block: Some(methods::TransactionWatchEventBlock {
+                                                hash: methods::HashHexString(block_hash),
+                                                index,
+                                            }),
+                                        },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::IncludedBlockUpdate {
+                            block_hash: None,
+                        },
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result:
+                                        methods::TransactionWatchEvent::BestChainBlockIncluded {
+                                            block: None,
+                                        },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::GapInChain,
+                        ),
+                        TransactionWatchTy::Legacy,
+                    )
+                    | (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::MaxPendingTransactionsReached,
+                        ),
+                        TransactionWatchTy::Legacy,
+                    )
+                    | (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::Invalid(_),
+                        ),
+                        TransactionWatchTy::Legacy,
+                    )
+                    | (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::ValidateError(_),
+                        ),
+                        TransactionWatchTy::Legacy,
+                    )
+                    | (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::Crashed,
+                        ),
+                        TransactionWatchTy::Legacy,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::author_extrinsicUpdate {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionStatus::Dropped,
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::GapInChain,
+                        ),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Dropped {
+                                        error: "gap in chain of blocks".into(),
+                                        broadcasted: transaction_watch.num_broadcasted_peers != 0,
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::MaxPendingTransactionsReached,
+                        ),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Dropped {
+                                        error: "transactions pool full".into(),
+                                        broadcasted: transaction_watch.num_broadcasted_peers != 0,
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::Invalid(error),
+                        ),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Invalid {
+                                        error: error.to_string().into(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::ValidateError(error),
+                        ),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Error {
+                                        error: error.to_string().into(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::Crashed,
+                        ),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Error {
+                                        error: "transactions service has crashed".into(),
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::Finalized { block_hash, .. },
+                        ),
+                        TransactionWatchTy::Legacy,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::author_extrinsicUpdate {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionStatus::Finalized(
+                                        methods::HashHexString(block_hash),
+                                    ),
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                    (
+                        transactions_service::TransactionStatus::Dropped(
+                            transactions_service::DropReason::Finalized { block_hash, index },
+                        ),
+                        TransactionWatchTy::NewApi,
+                    ) => {
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::ServerToClient::transactionWatch_unstable_watchEvent {
+                                    subscription: (&subscription_id).into(),
+                                    result: methods::TransactionWatchEvent::Finalized {
+                                        block: methods::TransactionWatchEventBlock {
+                                            hash: methods::HashHexString(block_hash),
+                                            index,
+                                        },
+                                    },
+                                }
+                                .to_json_request_object_parameters(None),
+                            )
+                            .await;
+                    }
+                }
+
+                // Add back an item to the events stream.
+                me.events.push(Box::pin(async move {
+                    let status = watcher.next().await;
+                    Event::TransactionEvent {
+                        suscription_id,
+                        event: status,
+                        watcher,
+                    }
+                }));
+            }
         }
     }
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
-    /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
-    async fn sudo_unstable_p2p_discover(self: &Arc<Self>, request: service::RequestProcess) {
-        let methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } = request.request() else {
-            unreachable!()
-        };
-
-        match multiaddr.parse::<multiaddr::Multiaddr>() {
-            Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::Protocol::P2p(_))) => {
-                let peer_id_bytes = match addr.iter().last() {
-                    Some(multiaddr::Protocol::P2p(peer_id)) => peer_id.into_bytes().to_owned(),
-                    _ => unreachable!(),
-                };
-                addr.pop();
-
-                match PeerId::from_bytes(peer_id_bytes) {
-                    Ok(peer_id) => {
-                        self.network_service
-                            .discover(iter::once((peer_id, iter::once(addr))), false)
-                            .await;
-                        let _ = me
-                            .responses_tx
-                            .send(methods::Response::sudo_unstable_p2pDiscover(()));
-                    }
-                    Err(_) => request.fail_with_attached_json(
-                        json_rpc::parse::ErrorResponse::InvalidParams,
-                        &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
-                    ),
-                }
-            }
-            Ok(_) => request.fail_with_attached_json(
-                json_rpc::parse::ErrorResponse::InvalidParams,
-                &serde_json::to_string("multiaddr doesn't end with /p2p").unwrap(),
-            ),
-            Err(err) => request.fail_with_attached_json(
-                json_rpc::parse::ErrorResponse::InvalidParams,
-                &serde_json::to_string(&err.to_string()).unwrap(),
-            ),
-        }
-    }
-
     async fn storage_query(
         &self,
         keys: impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone,
