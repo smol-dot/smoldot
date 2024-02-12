@@ -81,6 +81,9 @@ struct Background<TPlat: PlatformRef> {
     /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
+    /// Channel where to send responses and notifications.
+    responses_tx: async_channel::Sender<String>,
+
     /// Channel where to send requests that concern the legacy JSON-RPC API that are handled by
     /// a dedicated task.
     to_legacy: Mutex<async_channel::Sender<legacy_state_sub::Message>>,
@@ -121,7 +124,7 @@ struct GetKeysPagedCacheKey {
     prefix: Vec<u8>,
 }
 
-pub(super) fn start<TPlat: PlatformRef>(
+pub(super) async fn run<TPlat: PlatformRef>(
     log_target: String,
     config: StartConfig<'_, TPlat>,
     mut requests_processing_task: service::ClientMainTask,
@@ -134,7 +137,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
     });
 
-    let me = Arc::new(Background {
+    let me = Background {
         log_target,
         chain_name: config.chain_spec.name().to_owned(),
         chain_ty: config.chain_spec.chain_type().to_owned(),
@@ -147,6 +150,7 @@ pub(super) fn start<TPlat: PlatformRef>(
         runtime_service: config.runtime_service.clone(),
         transactions_service: config.transactions_service.clone(),
         to_legacy: Mutex::new(to_legacy_tx),
+        responses_tx: async_channel::bounded(64).0, // TODO: /!\ do properly
         state_get_keys_paged_cache: Mutex::new(lru::LruCache::with_hasher(
             NonZeroUsize::new(2).unwrap(),
             util::SipHasherBuild::new({
@@ -159,76 +163,92 @@ pub(super) fn start<TPlat: PlatformRef>(
         printed_legacy_json_rpc_warning: atomic::AtomicBool::new(false),
         chain_head_follow_tasks: Mutex::new(hashbrown::HashMap::with_hasher(Default::default())),
         platform: config.platform,
-    });
+    };
 
-    me.platform
-        .clone()
-        .spawn_task(format!("{}-main-task", me.log_target).into(), {
-            let me = me.clone();
-            async move {
-                loop {
-                    // Yield at every loop in order to provide better tasks granularity.
-                    futures_lite::future::yield_now().await;
+    loop {
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
 
-                    match requests_processing_task.run_until_event().await {
-                        service::Event::HandleRequest {
-                            task,
-                            request_process,
-                        } => {
-                            requests_processing_task = task;
-                            me.handle_request(request_process).await;
-                        }
-                        service::Event::HandleSubscriptionStart {
-                            task,
-                            subscription_start,
-                        } => {
-                            requests_processing_task = task;
-                            match subscription_start.request() {
-                                methods::MethodCall::chain_subscribeAllHeads {}
-                                | methods::MethodCall::chain_subscribeNewHeads {}
-                                | methods::MethodCall::chain_subscribeFinalizedHeads {}
-                                | methods::MethodCall::state_subscribeRuntimeVersion {}
-                                | methods::MethodCall::state_subscribeStorage { .. } => {
-                                    me.to_legacy
-                                        .lock()
-                                        .await
-                                        .send(legacy_state_sub::Message::SubscriptionStart(
-                                            subscription_start,
-                                        ))
-                                        .await
-                                        .unwrap();
-                                }
-                                _ => {
-                                    me.handle_subscription_start(subscription_start).await;
-                                }
-                            }
-                        }
-                        service::Event::SubscriptionDestroyed {
-                            task,
-                            subscription_id,
-                        } => {
-                            requests_processing_task = task;
-                            let _ = me
-                                .chain_head_follow_tasks
-                                .lock()
-                                .await
-                                .remove(&subscription_id);
-                            me.to_legacy
-                                .lock()
-                                .await
-                                .send(legacy_state_sub::Message::SubscriptionDestroyed {
-                                    subscription_id,
-                                })
-                                .await
-                                .unwrap();
-                        }
-                        service::Event::SerializedRequestsIoClosed => {
-                            break;
-                        }
+        enum WakeUpReason {
+            IncomingJsonRpcRequest(String),
+        }
+
+        let wake_up_reason: WakeUpReason = { todo!() };
+
+        match wake_up_reason {
+            WakeUpReason::IncomingJsonRpcRequest(request_json) => {
+                let Ok((request_id, request_parsed)) =
+                    methods::parse_jsonrpc_client_to_server(&request_json)
+                else {
+                    todo!()
+                };
+
+                match request_parsed {
+                    _ => todo!(),
+                }
+            }
+        }
+    }
+
+    loop {
+        // Yield at every loop in order to provide better tasks granularity.
+        futures_lite::future::yield_now().await;
+
+        match requests_processing_task.run_until_event().await {
+            service::Event::HandleRequest {
+                task,
+                request_process,
+            } => {
+                requests_processing_task = task;
+                me.handle_request(request_process).await;
+            }
+            service::Event::HandleSubscriptionStart {
+                task,
+                subscription_start,
+            } => {
+                requests_processing_task = task;
+                match subscription_start.request() {
+                    methods::MethodCall::chain_subscribeAllHeads {}
+                    | methods::MethodCall::chain_subscribeNewHeads {}
+                    | methods::MethodCall::chain_subscribeFinalizedHeads {}
+                    | methods::MethodCall::state_subscribeRuntimeVersion {}
+                    | methods::MethodCall::state_subscribeStorage { .. } => {
+                        me.to_legacy
+                            .lock()
+                            .await
+                            .send(legacy_state_sub::Message::SubscriptionStart(
+                                subscription_start,
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    _ => {
+                        me.handle_subscription_start(subscription_start).await;
                     }
                 }
             }
-        });
+            service::Event::SubscriptionDestroyed {
+                task,
+                subscription_id,
+            } => {
+                requests_processing_task = task;
+                let _ = me
+                    .chain_head_follow_tasks
+                    .lock()
+                    .await
+                    .remove(&subscription_id);
+                me.to_legacy
+                    .lock()
+                    .await
+                    .send(legacy_state_sub::Message::SubscriptionDestroyed { subscription_id })
+                    .await
+                    .unwrap();
+            }
+            service::Event::SerializedRequestsIoClosed => {
+                break;
+            }
+        }
+    }
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
