@@ -161,12 +161,6 @@ pub(super) fn start<TPlat: PlatformRef>(
         platform: config.platform,
     });
 
-    let (tx, rx) = async_channel::bounded(
-        usize::try_from(max_parallel_requests.get()).unwrap_or(usize::max_value()),
-    );
-
-    // Spawn a task that is dedicated to receiving the raw JSON-RPC requests, decode them, and
-    // send them to the request processing tasks.
     me.platform
         .clone()
         .spawn_task(format!("{}-main-task", me.log_target).into(), {
@@ -182,7 +176,7 @@ pub(super) fn start<TPlat: PlatformRef>(
                             request_process,
                         } => {
                             requests_processing_task = task;
-                            tx.send(either::Left(request_process)).await.unwrap();
+                            me.handle_request(request_process).await;
                         }
                         service::Event::HandleSubscriptionStart {
                             task,
@@ -204,7 +198,9 @@ pub(super) fn start<TPlat: PlatformRef>(
                                         .await
                                         .unwrap();
                                 }
-                                _ => tx.send(either::Right(subscription_start)).await.unwrap(),
+                                _ => {
+                                    me.handle_subscription_start(subscription_start).await;
+                                }
                             }
                         }
                         service::Event::SubscriptionDestroyed {
@@ -233,33 +229,6 @@ pub(super) fn start<TPlat: PlatformRef>(
                 }
             }
         });
-
-    // Spawn tasks dedicated to effectively process the JSON-RPC requests.
-    for task_num in 0..max_parallel_requests.get() {
-        me.platform.clone().spawn_task(
-            format!("{}-requests-{}", me.log_target, task_num).into(),
-            {
-                let me = me.clone();
-                let rx = rx.clone();
-                async move {
-                    loop {
-                        // Yield at every loop in order to provide better tasks granularity.
-                        futures_lite::future::yield_now().await;
-
-                        match rx.recv().await {
-                            Ok(either::Left(request_process)) => {
-                                me.handle_request(request_process).await;
-                            }
-                            Ok(either::Right(subscription_start)) => {
-                                me.handle_subscription_start(subscription_start).await;
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-            },
-        );
-    }
 }
 
 impl<TPlat: PlatformRef> Background<TPlat> {
