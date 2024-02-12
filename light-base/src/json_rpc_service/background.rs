@@ -156,6 +156,10 @@ enum Event {
         event: transactions_service::TransactionStatus,
         watcher: Pin<Box<transactions_service::TransactionWatcher>>,
     },
+    ChainGetBlockResult {
+        request_id_json: String,
+        result: Result<codec::BlockData, ()>,
+    },
 }
 
 struct TransactionWatch {
@@ -357,7 +361,82 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     }
 
                     methods::MethodCall::chain_getBlock { .. } => {
-                        self.chain_get_block(request).await;
+                        // `hash` equal to `None` means "the current best block".
+                        let hash = match hash {
+                            Some(h) => h.0,
+                            None => {
+                                let (tx, rx) = oneshot::channel();
+                                self.to_legacy
+                                    .lock()
+                                    .await
+                                    .send(legacy_state_sub::Message::CurrentBestBlockHash {
+                                        result_tx: tx,
+                                    })
+                                    .await
+                                    .unwrap();
+                                rx.await.unwrap()
+                            }
+                        };
+
+                        // Try to determine the block number by looking for the block in cache.
+                        // The request can be fulfilled no matter whether the block number is known or not, but
+                        // knowing it will lead to a better selection of peers, and thus increase the chances of
+                        // the requests succeeding.
+                        let block_number = {
+                            let (tx, rx) = oneshot::channel();
+                            self.to_legacy
+                                .lock()
+                                .await
+                                .send(legacy_state_sub::Message::BlockNumber {
+                                    block_hash: hash,
+                                    result_tx: tx,
+                                })
+                                .await
+                                .unwrap();
+                            rx.await.unwrap()
+                        };
+
+                        // Block bodies and headers aren't stored locally. Ask the network.
+                        me.events.push({
+                            let sync_service = me.sync_service.clone();
+                            let request_id_json = request_id_json.to_owned();
+                            Box::pin(async move {
+                                let mut result = if let Some(block_number) = block_number {
+                                    sync_service
+                                        .block_query(
+                                            block_number,
+                                            hash,
+                                            codec::BlocksRequestFields {
+                                                header: true,
+                                                body: true,
+                                                justifications: false,
+                                            },
+                                            3,
+                                            Duration::from_secs(8),
+                                            NonZeroU32::new(1).unwrap(),
+                                        )
+                                        .await
+                                } else {
+                                    sync_service
+                                        .block_query_unknown_number(
+                                            hash,
+                                            codec::BlocksRequestFields {
+                                                header: true,
+                                                body: true,
+                                                justifications: false,
+                                            },
+                                            3,
+                                            Duration::from_secs(8),
+                                            NonZeroU32::new(1).unwrap(),
+                                        )
+                                        .await
+                                };
+                                Event::ChainGetBlockResult {
+                                    request_id_json,
+                                    result,
+                                }
+                            })
+                        });
                     }
 
                     methods::MethodCall::chain_getBlockHash { height } => {
@@ -1278,6 +1357,58 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         watcher,
                     }
                 }));
+            }
+
+            WakeUpReason::Event(Event::ChainGetBlockResult {
+                request_id_json,
+                result,
+            }) => {
+                // Check whether the header and body are present and valid.
+                // TODO: try the request again with a different peerin case the response is invalid, instead of returning null
+                if let Ok(block) = &result {
+                    if let (Some(header), Some(body)) = (&block.header, &block.body) {
+                        if header::hash_from_scale_encoded_header(header) == hash {
+                            if let Ok(decoded) =
+                                header::decode(header, self.sync_service.block_number_bytes())
+                            {
+                                if header::extrinsics_root(body) != *decoded.extrinsics_root {
+                                    result = Err(());
+                                }
+                            } else {
+                                // Note that if the header is undecodable it doesn't necessarily mean
+                                // that the header and/or body is bad, but given that we have no way to
+                                // check this we return an error.
+                                result = Err(());
+                            }
+                        } else {
+                            result = Err(());
+                        }
+                    } else {
+                        result = Err(());
+                    }
+                }
+
+                // Return the response.
+                if let Ok(block) = result {
+                    request.respond(methods::Response::chain_getBlock(methods::Block {
+                        extrinsics: block
+                            .body
+                            .unwrap()
+                            .into_iter()
+                            .map(methods::HexString)
+                            .collect(),
+                        header: methods::Header::from_scale_encoded_header(
+                            &block.header.unwrap(),
+                            self.sync_service.block_number_bytes(),
+                        )
+                        .unwrap(),
+                        // There's no way to verify the correctness of the justifications, consequently
+                        // we always return an empty list.
+                        justifications: None,
+                    }))
+                } else {
+                    request.respond_null()
+                }
             }
         }
     }
