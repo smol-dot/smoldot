@@ -262,12 +262,15 @@ impl ServicePrototype {
     /// Consumes this prototype and starts the service through [`PlatformRef::spawn_task`].
     pub fn start<TPlat: PlatformRef>(self, config: StartConfig<'_, TPlat>) {
         let platform = config.platform.clone();
-        platform.spawn_task(todo!(), background::run(
-            self.log_target.clone(),
-            config,
-            self.requests_processing_task,
-            self.max_parallel_requests,
-        ));
+        platform.spawn_task(
+            todo!(),
+            background::run(
+                self.log_target.clone(),
+                config,
+                self.requests_processing_task,
+                self.max_parallel_requests,
+            ),
+        );
     }
 }
 
