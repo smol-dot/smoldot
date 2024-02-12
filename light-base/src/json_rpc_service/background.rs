@@ -386,6 +386,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                             .await;
                     }
 
+                    methods::MethodCall::author_unwatchExtrinsic { subscription } => {
+                        let exists = me.transactions_subscriptions.get(&subscription).map_or(false, |sub| matches!(sub.ty, TransactionWatchTy::Legacy));
+                        if exists {
+                            me.transactions_subscriptions.remove(&subscription);
+                        }
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::author_unwatchExtrinsic(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
                     methods::MethodCall::chain_getBlock { .. } => {
                         // `hash` equal to `None` means "the current best block".
                         let hash = match hash {
@@ -586,8 +600,7 @@ pub(super) async fn run<TPlat: PlatformRef>(
                         todo!() // TODO: send current finalized block
                     }
 
-                    methods::MethodCall::state_subscribeRuntimeVersion {}
-                    | methods::MethodCall::state_subscribeStorage { .. } => todo!(),
+                    methods::MethodCall::state_subscribeStorage { .. } => todo!(),
 
                     methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
                         let exists = me.all_heads_subscriptions.remove(&subscription);
@@ -661,6 +674,32 @@ pub(super) async fn run<TPlat: PlatformRef>(
                     methods::MethodCall::state_getRuntimeVersion { .. } => {
                         self.state_get_runtime_version(request).await;
                     }
+
+                    methods::MethodCall::state_subscribeRuntimeVersion {} => {
+                        let subscription_id = {
+                            let mut subscription_id = [0u8; 32];
+                            me.randomness.fill_bytes(&mut subscription_id);
+                            bs58::encode(subscription_id).into_string()
+                        };
+                        // TODO: check max subscriptions
+
+                        let _was_inserted = me.runtime_version_subscriptions.insert(subscription_id);
+                        debug_assert!(_was_inserted);
+
+                        todo!() // TODO: send current runtime state
+                    }
+
+                    methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
+                        let exists = me.runtime_version_subscriptions.remove(&subscription);
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::state_unsubscribeRuntimeVersion(exists)
+                                    .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
                     methods::MethodCall::system_accountNextIndex { .. } => {
                         self.account_next_index(request).await;
                     }
@@ -1712,6 +1751,20 @@ pub(super) async fn run<TPlat: PlatformRef>(
                                     subscription_id,
                                 )
                                 .to_json_response(request_id_json),
+                            )
+                            .await;
+                    }
+
+                    methods::MethodCall::transactionWatch_unstable_unwatch { subscription } => {
+                        let exists = me.transactions_subscriptions.get(&subscription).map_or(false, |sub| matches!(sub.ty, TransactionWatchTy::NewApi));
+                        if exists {
+                            me.transactions_subscriptions.remove(&subscription);
+                        }
+                        let _ = me
+                            .responses_tx
+                            .send(
+                                methods::Response::transactionWatch_unstable_unwatch(())
+                                    .to_json_response(request_id_json),
                             )
                             .await;
                     }
